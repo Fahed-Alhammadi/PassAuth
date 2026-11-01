@@ -54,6 +54,7 @@ import kotlinx.coroutines.withContext
 fun ExportScreen(ctx: UiCtx) {
     val context = LocalContext.current
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
+    val lock = (LocalContext.current.applicationContext as io.passauth.app.PassAuthApp).graph.lock
     val count = vault?.entries?.size ?: 0
     var format by rememberSaveable { mutableStateOf(ExportFormat.Encrypted) }
     var exportPassword by remember { mutableStateOf("") }
@@ -107,6 +108,7 @@ fun ExportScreen(ctx: UiCtx) {
                 val pw = exportPassword
                 pending = withContext(Dispatchers.Default) { VaultExport.build(f, items, pw.takeIf { f.encrypted }) }
                 val name = VaultExport.fileName(f, LocalDate.now())
+                lock.expectSystemScreen()
                 if (f == ExportFormat.Csv) saveCsv.launch(name) else saveJson.launch(name)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e

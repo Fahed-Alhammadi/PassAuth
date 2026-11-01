@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Link, Navigate, useNavigate } from "react-router";
+import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, PasswordInput } from "../components/ui";
 import { errorMessage, usePublicConfig } from "../lib/api";
@@ -15,6 +15,9 @@ export function LoginPage() {
   const config = usePublicConfig();
   const { status } = useVault();
   const nav = useNavigate();
+  // Go back to the page that sent us here (e.g. a link to /settings/two-step), only within the app.
+  const from = (useLocation().state as { from?: string } | null)?.from;
+  const next = from && from.startsWith("/") && !from.startsWith("//") && from !== "/login" ? from : "/vault";
   const [email, setEmail] = useState(lastEmail());
   const [password, setPassword] = useState("");
   const [secretKey, setSecretKey] = useState("");
@@ -27,7 +30,7 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  if (status === "unlocked") return <Navigate to="/vault" replace />;
+  if (status === "unlocked") return <Navigate to={next} replace />;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -36,7 +39,7 @@ export function LoginPage() {
     try {
       const sk = secretKey.trim() || rememberedSecretKey(email);
       const r = await login(email, password, sk);
-      if (r.done) nav("/vault", { replace: true });
+      if (r.done) nav(next, { replace: true });
       else {
         setTwoFactor({ token: r.twoFactorToken, providers: r.providers });
         setProvider(r.providers[0]);
@@ -61,7 +64,7 @@ export function LoginPage() {
     setError(null);
     try {
       await verifyTwoFactor(twoFactor.token, provider, code, remember);
-      nav("/vault", { replace: true });
+      nav(next, { replace: true });
     } catch (err) {
       setError(errorMessage(err));
     } finally {

@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 class LockManager(private val repo: VaultRepository, private val scope: CoroutineScope) : DefaultLifecycleObserver {
     private var lastActivity = SystemClock.elapsedRealtime()
     private var timer: Job? = null
+    private var systemScreenUntil = 0L
 
     /** Call on user interaction. */
     fun touch() {
@@ -23,11 +24,30 @@ class LockManager(private val repo: VaultRepository, private val scope: Coroutin
         schedule()
     }
 
+    /**
+     * The app is about to open a system screen it comes back from (e.g. the file
+     * picker for an export), so leaving the screen shouldn't trigger "Immediately".
+     * If the user doesn't come back within two minutes, the vault locks anyway.
+     */
+    fun expectSystemScreen() {
+        systemScreenUntil = SystemClock.elapsedRealtime() + SYSTEM_SCREEN_GRACE_MS
+    }
+
     override fun onStart(owner: LifecycleOwner) {
+        systemScreenUntil = 0L
         if (expired()) fire() else schedule()
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        val grace = systemScreenUntil - SystemClock.elapsedRealtime()
+        if (grace > 0) {
+            timer?.cancel()
+            timer = scope.launch {
+                delay(grace)
+                fire()
+            }
+            return
+        }
         if (repo.state.value.settings.vaultTimeout == VaultTimeout.Immediately) fire() else schedule()
     }
 
@@ -46,6 +66,10 @@ class LockManager(private val repo: VaultRepository, private val scope: Coroutin
             delay(wait.coerceAtLeast(0))
             fire()
         }
+    }
+
+    private companion object {
+        const val SYSTEM_SCREEN_GRACE_MS = 2 * 60_000L
     }
 
     private fun fire() {
