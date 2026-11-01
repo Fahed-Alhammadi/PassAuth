@@ -12,14 +12,14 @@ FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS wasm
 RUN rustup target add wasm32-unknown-unknown
 WORKDIR /src
 COPY Cargo.lock ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)" && \
     cargo install wasm-bindgen-cli --version "$v" --locked
 COPY Cargo.toml ./
 COPY .cargo ./.cargo
 COPY crates ./crates
 COPY scripts ./scripts
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=passauth-wasm-target \
     scripts/build-wasm.sh /wasm-out
 
@@ -56,7 +56,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=passauth-target-${TARGETARCH} \
     set -eux; \
     target="$(cat /target)"; linker="$(cat /linker)"; \

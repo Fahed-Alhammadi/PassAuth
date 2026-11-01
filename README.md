@@ -18,6 +18,10 @@ Open `http://localhost:8080`.
 - **Images.** Images are published to `ghcr.io/fahed-alhammadi/passauth` with three tags: the exact version (`1.2.3`), the minor series (`1.2`) and `latest`.
 - **Admin token.** Generate one with `docker run --rm -it ghcr.io/fahed-alhammadi/passauth hash-admin-token`.
 
+## Chrome extension
+
+Download `passauth-extension-vX.Y.Z.zip` from the GitHub release, unzip it, and load it with **Load unpacked** in `chrome://extensions`. It fills logins, one-time codes and passkeys from your vault. To build it yourself, and for a full test checklist, see [docs/TESTING.md](docs/TESTING.md).
+
 ## Security design
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). In short:
