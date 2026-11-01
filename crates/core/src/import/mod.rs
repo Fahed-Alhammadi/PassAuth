@@ -15,6 +15,8 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
+    /// PassAuth's own export (plain or password-protected), see `crate::export`.
+    PassAuthJson,
     BitwardenJson,
     BitwardenCsv,
     OnePassword1pux,
@@ -46,7 +48,10 @@ pub fn import(data: &[u8], password: Option<&str>) -> Result<ImportResult> {
             .map_err(|_| err("file is not UTF-8 text, a .1pux archive or a KeePass database"))?
             .trim_start_matches('\u{feff}');
         if text.trim_start().starts_with('{') {
-            bitwarden::parse_json(text, password)?
+            match passauth_export(text, password)? {
+                Some(r) => r,
+                None => bitwarden::parse_json(text, password)?,
+            }
         } else {
             csv_generic::parse(text)?
         }
@@ -56,6 +61,25 @@ pub fn import(data: &[u8], password: Option<&str>) -> Result<ImportResult> {
         result.warnings.push("no items found in this file".into());
     }
     Ok(result)
+}
+
+/// PassAuth's own export formats; `None` when the JSON is something else.
+fn passauth_export(text: &str, password: Option<&str>) -> Result<Option<ImportResult>> {
+    use crate::export::{Encrypted, FORMAT, FORMAT_ENCRYPTED, Plain, decrypt};
+    let v: serde_json::Value = serde_json::from_str(text)?;
+    let plain = match v.get("format").and_then(|f| f.as_str()) {
+        Some(FORMAT) => serde_json::from_value::<Plain>(v)?,
+        Some(FORMAT_ENCRYPTED) => {
+            let password = password.ok_or(Error::PasswordRequired)?;
+            decrypt(&serde_json::from_value::<Encrypted>(v)?, password)?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(ImportResult {
+        format: Format::PassAuthJson,
+        items: plain.items,
+        warnings: vec![],
+    }))
 }
 
 pub(crate) fn err(msg: impl Into<String>) -> Error {

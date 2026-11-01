@@ -473,4 +473,7 @@ export const generatePassphrase = core.generatePassphrase;
 export const estimateBits = core.estimateBits;
 export const totpCode = core.totpCode;
 export const importFile = core.importFile;
+export const exportVaultJson = core.exportVaultJson;
+export const exportVaultEncrypted = core.exportVaultEncrypted;
+export const exportVaultCsv = core.exportVaultCsv;
 export const fingerprint = core.fingerprint;

@@ -136,3 +136,13 @@ Folders: none. Use the vault name, falling back to `tags[0]`. Passkeys are **not
 | fields | fields[] | fields | other loginFields + sections | — | other strings | — |
 | folder | folders[].name | folder | vault name / tags[0] | Tags | group path | Group |
 | passkeys | login.fido2Credentials | — | — | — | — | — |
+
+## PassAuth export (`crates/core/src/export.rs`)
+
+Every client exports through the core, and `import::import` reads the results back (format `pass_auth_json`).
+
+- **JSON:** `{"format":"passauth","version":1,"exported_at":<unix>,"items":[<Item>…]}`. Contains every item kind, as the same item JSON the clients encrypt.
+- **Password-protected JSON:** `{"format":"passauth-encrypted","version":1,"kdf":{memory_kib,iterations,parallelism,salt},"data":"<base64url>"}`.
+  - `data` is the JSON above, encrypted with XChaCha20-Poly1305 (AAD `passauth/export/v1`) under a key derived from the export password by Argon2id with the account defaults.
+  - Export passwords need at least 10 characters.
+- **CSV:** columns `folder,favorite,type,name,notes,login_uri,login_username,login_password,login_totp`, containing logins and secure notes only. Several website addresses are joined with commas.

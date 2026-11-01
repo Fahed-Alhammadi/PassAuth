@@ -16,6 +16,7 @@ type Step =
   | { kind: "done"; count: number; vaultId: string; vaultName: string };
 
 const FORMAT_LABEL: Record<string, string> = {
+  pass_auth_json: "PassAuth export",
   bitwarden_json: "Bitwarden JSON",
   bitwarden_csv: "Bitwarden CSV",
   one_password1pux: "1Password (.1pux)",

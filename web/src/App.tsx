@@ -3,6 +3,7 @@ import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } fr
 import { ToastHost } from "./components/ui";
 import { lock, useVault } from "./lib/vault";
 import { AdminPage } from "./pages/Admin";
+import { ExportPage } from "./pages/Export";
 import { ImportPage } from "./pages/Import";
 import { LoginPage } from "./pages/Login";
 import { RegisterPage } from "./pages/Register";
@@ -64,6 +65,7 @@ const router = createBrowserRouter([
           { path: "/vault/:filter/:itemId", element: <VaultPage /> },
           { path: "/generator", element: <GeneratorPage /> },
           { path: "/import", element: <ImportPage /> },
+          { path: "/export", element: <ExportPage /> },
           { path: "/settings", element: <SettingsPage /> },
           { path: "/settings/:tab", element: <SettingsPage /> },
         ],

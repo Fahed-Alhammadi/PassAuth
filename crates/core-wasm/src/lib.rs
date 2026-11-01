@@ -7,7 +7,7 @@ use passauth_core::crypto::SymmetricKey;
 use passauth_core::item::{EncryptedItem, Item, unb64};
 use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{self, AccountBundle, NewAccount as CoreNew, UnlockedAccount};
-use passauth_core::{Error, generator, import, opaque, totp};
+use passauth_core::{Error, export, generator, import, opaque, totp};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -340,6 +340,32 @@ pub fn opaque_login_finish(state: &[u8], master: &MasterKeys, response: &str) ->
 #[wasm_bindgen(js_name = importFile)]
 pub fn import_file(data: &[u8], password: Option<String>) -> R<JsValue> {
     to_js(&import::import(data, password.as_deref()).map_err(js_err)?)
+}
+
+/// The browser's clock (std's SystemTime isn't available in wasm32).
+fn unix_now() -> i64 {
+    (js_sys::Date::now() / 1000.0) as i64
+}
+
+/// Plaintext PassAuth JSON export of an array of items.
+#[wasm_bindgen(js_name = exportVaultJson)]
+pub fn export_vault_json(items: JsValue) -> R<String> {
+    let items: Vec<Item> = from_js(items)?;
+    export::json_at(&items, unix_now()).map_err(js_err)
+}
+
+/// Password-protected PassAuth JSON export (password: at least 10 characters).
+#[wasm_bindgen(js_name = exportVaultEncrypted)]
+pub fn export_vault_encrypted(items: JsValue, password: &str) -> R<String> {
+    let items: Vec<Item> = from_js(items)?;
+    export::encrypted_at(&items, password, unix_now()).map_err(js_err)
+}
+
+/// CSV export of logins and secure notes.
+#[wasm_bindgen(js_name = exportVaultCsv)]
+pub fn export_vault_csv(items: JsValue) -> R<String> {
+    let items: Vec<Item> = from_js(items)?;
+    export::csv(&items).map_err(js_err)
 }
 
 #[derive(Serialize)]

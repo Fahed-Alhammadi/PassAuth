@@ -11,7 +11,7 @@ use passauth_core::crypto::{KeyPair, SymmetricKey, fingerprint as key_fingerprin
 use passauth_core::item::{EncryptedItem as CoreEncrypted, Item, b64, unb64};
 use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{self, AccountBundle, NewAccount as CoreNew, UnlockedAccount};
-use passauth_core::{Error, generator, import, opaque, passkey, totp};
+use passauth_core::{Error, export, generator, import, opaque, passkey, totp};
 
 uniffi::setup_scaffolding!();
 
@@ -410,6 +410,27 @@ pub fn new_id() -> R<String> {
         &h[16..20],
         &h[20..]
     ))
+}
+
+/// Plaintext PassAuth JSON export of `items_json` (a JSON array of items).
+#[uniffi::export]
+pub fn export_vault_json(items_json: String) -> R<String> {
+    let items: Vec<Item> = json_in(&items_json)?;
+    Ok(export::json(&items)?)
+}
+
+/// Password-protected PassAuth JSON export (password: at least 10 characters).
+#[uniffi::export]
+pub fn export_vault_encrypted(items_json: String, password: String) -> R<String> {
+    let items: Vec<Item> = json_in(&items_json)?;
+    Ok(export::encrypted(&items, &password)?)
+}
+
+/// CSV export of logins and secure notes.
+#[uniffi::export]
+pub fn export_vault_csv(items_json: String) -> R<String> {
+    let items: Vec<Item> = json_in(&items_json)?;
+    Ok(export::csv(&items)?)
 }
 
 /// Create a discoverable ES256 passkey for `rp_id` (call after the user confirmed).

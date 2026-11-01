@@ -65,6 +65,9 @@ export function Shell() {
           <NavLink to="/import">
             <Icon name="upload" /> Import
           </NavLink>
+          <NavLink to="/export">
+            <Icon name="download" /> Export
+          </NavLink>
           <NavLink to={filterPath("trash")}>
             <Icon name="trash" /> Trash
           </NavLink>
