@@ -14,7 +14,7 @@ PassAuth is a self-hosted, zero-knowledge password manager. The server stores on
 | `mobile/` (stage 2) | Swift / Kotlin | Native apps calling `core` through UniFFI. |
 
 ### Why Rust
-- Memory-safe without a garbage collector: fast, small container, low RAM (Vaultwarden proves the model).
+- Memory-safe without a garbage collector: fast, small container, low RAM.
 - The same crypto code compiles to WASM (browser, extension) and native libraries (iOS, Android), so there is exactly one audited implementation of the vault format.
 - Mature, audited crates: RustCrypto (`argon2`, `chacha20poly1305`, `hkdf`, `x25519-dalek`, `ed25519-dalek`), `opaque-ke`, `webauthn-rs`, `lettre`.
 
@@ -51,7 +51,7 @@ Item Key (random 256-bit per item) ─ wrapped by Vault Key ─► encrypts item
 ## Features (stage 1: server + extension)
 - Item types: Login (multiple URLs, TOTP, passkeys), Secure Note, Card, Identity, SSH Key. Plus custom fields, folders, favorites, trash, password history, attachments.
 - Password and passphrase generator; breach check via HIBP k-anonymity, run from the client only.
-- **Import** (client-side only; plaintext never reaches the server): Bitwarden/Vaultwarden JSON and CSV (including password-protected encrypted JSON), 1Password `.1pux` and CSV, Passbolt CSV and KDBX. **Export**: encrypted PassAuth JSON plus plaintext JSON/CSV.
+- **Import** (client-side only; plaintext never reaches the server): export files from other password managers (JSON, password-protected JSON, CSV, `.1pux`, KDBX). Formats and field mappings: `docs/IMPORT_FORMATS.md`. **Export**: encrypted PassAuth JSON plus plaintext JSON/CSV.
 - SMTP: verification, invites, new-device alerts, email 2FA, recovery, admin test mail.
 - Admin panel: off by default, Argon2-hashed token, no shell or executable-path settings.
 - Real-time sync over WebSocket (`/api/ws`), plus a revision-date check for cheap polling.

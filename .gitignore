@@ -53,3 +53,8 @@ Thumbs.db
 # Generated WASM bindings (scripts/build-wasm.sh)
 web/src/wasm/
 extension/src/wasm/
+
+# Local-only working material (browser test scripts, test checklist, store submission kit)
+tests/e2e/
+docs/TESTING.md
+docs/store/

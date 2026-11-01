@@ -753,7 +753,7 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
         <h2 id="totp-title">Authenticator app</h2>
         {on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
       </div>
-      <p className="card-text">Get a new 6-digit code every 30 seconds from an app like 1Password, Aegis, Google Authenticator or Microsoft Authenticator.</p>
+      <p className="card-text">Get a new 6-digit code every 30 seconds from an authenticator app, such as Aegis, Google Authenticator or Microsoft Authenticator.</p>
 
       {on ? (
         <div>

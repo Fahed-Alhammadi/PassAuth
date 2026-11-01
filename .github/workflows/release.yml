@@ -1,7 +1,9 @@
 name: Release
 
 # Push a tag like v1.2.3 to publish:
-#   ghcr.io/fahed-alhammadi/passauth:1.2.3, :1.2 and :latest
+#   ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest
+# Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
+# always gets the newest version. Pre-release tags (v1.2.3-rc.1) don't move :latest.
 on:
   push:
     tags: ["v*.*.*"]
@@ -35,9 +37,9 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/passauth
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - uses: docker/build-push-action@v6
