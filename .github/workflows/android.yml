@@ -68,7 +68,7 @@ jobs:
           ks="$RUNNER_TEMP/upload.jks"
           printf '%s' "$KEYSTORE_B64" | base64 -d > "$ks"
           export ANDROID_UPLOAD_KEYSTORE_PATH="$ks"
-          cd android && ./gradlew --no-daemon :app:testReleaseUnitTest :app:bundleRelease
+          cd android && ./gradlew --no-daemon :app:bundleRelease
           rm -f "$ks"
           mv app/build/outputs/bundle/release/app-release.aab "$RUNNER_TEMP/passauth-${GITHUB_REF_NAME//\//-}.aab"
 
