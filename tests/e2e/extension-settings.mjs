@@ -150,18 +150,56 @@ try {
     console.log(`\n    clipboard: ${clip} expected ${expected}`);
   });
 
+  await step("popup: create, edit and trash an item", async () => {
+    await popup.ev(`location.reload()`); await sleep(500);
+    await popup.waitFor(`document.body.innerText.includes('All items')`, 30000);
+    await popup.ev(`document.querySelector('[aria-label="New item"]').click()`);
+    await popup.waitFor(`!!document.querySelector('.pop-menu')`);
+    await popup.click("Login");
+    await popup.waitFor(`document.body.innerText.includes('New login')`);
+    await popup.fillLabel("Name", "Popup item"); await popup.fillLabel("Username", "pop@user.test");
+    await popup.ev(`document.querySelector('[aria-label="Generate password"]').click()`); await sleep(300);
+    const pw = await popup.ev(`document.querySelector('input[autocomplete="new-password"]').value`);
+    if (pw.length < 12) throw new Error("generator did not fill: " + pw);
+    await popup.fillLabel("Website", "https://popup.example");
+    await popup.shot("v2-14-popup-new-item.png");
+    await popup.click("Save item");
+    await popup.waitFor(`document.querySelector('h2')?.textContent === 'Popup item' && document.body.innerText.includes('Item saved')`);
+    await popup.click("Edit");
+    await popup.waitFor(`document.body.innerText.includes('Edit item')`);
+    await popup.fillLabel("Username", "edited@user.test");
+    await popup.click("Save changes");
+    await popup.waitFor(`document.body.innerText.includes('edited@user.test') && document.body.innerText.includes('Changes saved')`);
+    const items = await send({ type: "items" });
+    const it = items.data.all.find((i) => i.name === "Popup item");
+    const full = await send({ type: "item", id: it.id });
+    if (full.data.item.login.password !== pw || full.data.item.login.urls[0].match !== "default") throw new Error("saved item wrong");
+    await popup.ev(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Move to trash').click()`);
+    await popup.waitFor(`document.body.innerText.includes('You can restore it from the web vault')`);
+    await popup.ev(`[...document.querySelectorAll('.pop-card button')].find(b => b.textContent.trim() === 'Move to trash').click()`);
+    await popup.waitFor(`document.body.innerText.includes('Moved to trash') && document.body.innerText.includes('All items')`);
+    const after = await send({ type: "items" });
+    if (after.data.all.some((i) => i.name === "Popup item")) throw new Error("item not trashed");
+  });
+
+  const openSection = (title) => popup.ev(`[...document.querySelectorAll('.pop-settings-menu .pop-row')].find(r => r.querySelector('.title').textContent === ${JSON.stringify(title)}).click()`);
   await step("popup sync shows status", async () => {
     await popup.ev(`location.reload()`); await sleep(500);
     await popup.waitFor(`document.body.innerText.includes('All items')`, 30000);
     await popup.click("Settings");
+    await popup.waitFor(`!!document.querySelector('.pop-settings-menu')`);
+    const titles = await popup.ev(`[...document.querySelectorAll('.pop-settings-menu .title')].map(t => t.textContent).join(', ')`);
+    console.log(`\n    categories: ${titles}`);
+    await popup.shot("v2-15-settings-menu.png");
+    await openSection("Sync");
     await popup.waitFor(`document.body.innerText.includes('Sync vault now')`);
     await popup.click("Sync vault now");
     await popup.waitFor(`document.body.innerText.includes('Sync complete') && /Last sync: today at/.test(document.body.innerText)`);
     await popup.shot("v2-08-settings-sync.png");
-    await popup.ev(`document.querySelector('.pop-body').scrollTop = 0`);
-    await popup.shot("v2-09-settings-top.png");
-    const opts = await popup.ev(`[...document.querySelectorAll('select')].map(s => [...s.options].map(o => o.text).join('|')).join(' || ')`);
-    console.log("\n    " + opts);
+    await popup.click("Settings");
+    await openSection("Autofill");
+    await popup.waitFor(`document.body.innerText.includes('Default URI match detection')`);
+    await popup.shot("v2-09-settings-autofill.png");
   });
 
   await step("timeout: Immediately + Lock, then Log out", async () => {

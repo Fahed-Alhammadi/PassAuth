@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark, Wordmark } from "@web/components/Logo";
-import { ErrorText, Icon, PasswordInput, SiteIcon } from "@web/components/ui";
-import type { Item } from "@web/lib/types";
+import { ItemEditor } from "@web/components/ItemEditor";
+import { ErrorText, Icon, PasswordInput, SiteIcon, type IconName } from "@web/components/ui";
+import { emptyItem, KIND_LABEL, type Item, type ItemKind } from "@web/lib/types";
 import { send, type ItemSummary, type PopupState, type Settings, type TwoFactorChallenge, type VaultTimeout } from "../shared/messages";
 
 const msg = (e: unknown) => {
@@ -229,9 +230,12 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
 
 type Tab = "vault" | "generator" | "settings";
 
+type View = { at: "list" } | { at: "item"; id: string } | { at: "edit"; id: string } | { at: "new"; kind: ItemKind };
+
 function Main({ state, onChange }: { state: PopupState; onChange: () => void }) {
   const [tab, setTab] = useState<Tab>("vault");
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [view, setView] = useState<View>({ at: "list" });
+  const [adding, setAdding] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const notify = useCallback((text: string) => {
@@ -247,12 +251,26 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
       ),
     [notify, state.settings.clearClipboard],
   );
-  const ctx = { state, copy, notify };
+  const ctx = useMemo(() => ({ state, copy, notify }), [state, copy, notify]);
   return (
     <div className="pop">
       <header className="pop-head">
         <Wordmark />
         <span className="grow" />
+        <div className="pop-more">
+          <button className="btn btn-icon" title="New item" aria-label="New item" aria-expanded={adding} onClick={() => setAdding(!adding)}>
+            <Icon name="plus" />
+          </button>
+          {adding && (
+            <div className="pop-menu" role="menu" onClick={() => setAdding(false)}>
+              {(Object.keys(KIND_LABEL) as ItemKind[]).map((k) => (
+                <button key={k} role="menuitem" onClick={() => (setTab("vault"), setView({ at: "new", kind: k }))}>
+                  {KIND_LABEL[k]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button className="btn btn-icon" title="Open web vault" aria-label="Open web vault" onClick={() => chrome.tabs.create({ url: state.server })}>
           <Icon name="external" />
         </button>
@@ -261,7 +279,19 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
         </button>
       </header>
       <main className="pop-body">
-        {tab === "vault" && (openId ? <Detail id={openId} ctx={ctx} onBack={() => setOpenId(null)} /> : <ItemList ctx={ctx} onOpen={setOpenId} />)}
+        {tab === "vault" && view.at === "list" && <ItemList ctx={ctx} onOpen={(id) => setView({ at: "item", id })} />}
+        {tab === "vault" && view.at === "item" && (
+          <Detail key={view.id} id={view.id} ctx={ctx} onBack={() => setView({ at: "list" })} onEdit={() => setView({ at: "edit", id: view.id })} />
+        )}
+        {tab === "vault" && (view.at === "edit" || view.at === "new") && (
+          <EditorView
+            key={view.at === "edit" ? view.id : view.kind}
+            id={view.at === "edit" ? view.id : undefined}
+            kind={view.at === "new" ? view.kind : undefined}
+            ctx={ctx}
+            onDone={(id) => setView(id ? { at: "item", id } : { at: "list" })}
+          />
+        )}
         {tab === "generator" && <Generator ctx={ctx} />}
         {tab === "settings" && <SettingsView state={state} onChange={onChange} notify={notify} />}
       </main>
@@ -278,7 +308,7 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
             ["settings", "Settings", "settings"],
           ] as const
         ).map(([t, label, icon]) => (
-          <button key={t} aria-current={tab === t} onClick={() => (setTab(t), setOpenId(null))}>
+          <button key={t} aria-current={tab === t} onClick={() => (setTab(t), setView({ at: "list" }))}>
             <Icon name={icon} />
             {label}
           </button>
@@ -398,13 +428,15 @@ function ItemList({ ctx, onOpen }: { ctx: Ctx; onOpen: (id: string) => void }) {
   );
 }
 
-function Detail({ id, ctx, onBack }: { id: string; ctx: Ctx; onBack: () => void }) {
+function Detail({ id, ctx, onBack, onEdit }: { id: string; ctx: Ctx; onBack: () => void; onEdit: () => void }) {
   const [item, setItem] = useState<Item | null>(null);
+  const [canWrite, setCanWrite] = useState(false);
   const [code, setCode] = useState<{ code: string; remaining: number } | null>(null);
   const [show, setShow] = useState(false);
+  const [confirmTrash, setConfirmTrash] = useState(false);
   useEffect(() => {
-    send<{ item: Item }>({ type: "item", id }).then((r) => setItem(r.item));
-  }, [id]);
+    send<{ item: Item; canWrite: boolean }>({ type: "item", id }).then((r) => (setItem(r.item), setCanWrite(r.canWrite)), (e) => ctx.notify(msg(e)));
+  }, [id, ctx]);
   useEffect(() => {
     if (!item?.login?.totp) return;
     const tick = () => send({ type: "totp", id }).then(setCode, () => {});
@@ -435,9 +467,16 @@ function Detail({ id, ctx, onBack }: { id: string; ctx: Ctx; onBack: () => void 
     ) : null;
   return (
     <>
-      <button className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={onBack}>
-        <Icon name="back" /> Back
-      </button>
+      <div className="row-between">
+        <button className="btn btn-ghost" onClick={onBack}>
+          <Icon name="back" /> Back
+        </button>
+        {canWrite && (
+          <button className="btn" onClick={onEdit}>
+            <Icon name="edit" /> Edit
+          </button>
+        )}
+      </div>
       <h2 style={{ overflowWrap: "anywhere" }}>{item.name}</h2>
       <div className="pop-list">
         {l && field("Username", l.username)}
@@ -461,7 +500,72 @@ function Detail({ id, ctx, onBack }: { id: string; ctx: Ctx; onBack: () => void 
         {item.notes && field("Notes", item.notes)}
       </div>
       {l?.passkeys.length ? <p className="small muted">{l.passkeys.length === 1 ? "Has a passkey" : `Has ${l.passkeys.length} passkeys`} for {l.passkeys[0].rp_id}.</p> : null}
+      {canWrite &&
+        (confirmTrash ? (
+          <div className="pop-card">
+            <p className="small">Move "{item.name}" to the trash? You can restore it from the web vault.</p>
+            <div className="row">
+              <button className="btn btn-danger grow" onClick={() => send({ type: "trashItem", id }).then(() => (ctx.notify("Moved to trash."), onBack()), (e) => ctx.notify(msg(e)))}>
+                Move to trash
+              </button>
+              <button className="btn grow" onClick={() => setConfirmTrash(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button className="btn btn-ghost pop-danger-link" onClick={() => setConfirmTrash(true)}>
+            <Icon name="trash" /> Move to trash
+          </button>
+        ))}
     </>
+  );
+}
+
+/** New item (pre-filled with the current website for logins) or edit an existing one. */
+function EditorView({ id, kind, ctx, onDone }: { id?: string; kind?: ItemKind; ctx: Ctx; onDone: (id?: string) => void }) {
+  const [init, setInit] = useState<{ item: Item; vaults: { id: string; name: string }[]; vaultId: string; folders: string[] } | null>(null);
+  useEffect(() => {
+    (async () => {
+      const info = await send<{ vaults: { id: string; name: string }[]; folders: string[] }>({ type: "editorInfo" });
+      if (id) {
+        const r = await send<{ item: Item; vaultId: string }>({ type: "item", id });
+        return setInit({ item: structuredClone(r.item), vaults: [], vaultId: r.vaultId, folders: info.folders });
+      }
+      const item = emptyItem(kind ?? "login");
+      const tab = await activeTab();
+      if (item.login && tab?.url?.startsWith("http")) {
+        const u = new URL(tab.url);
+        item.name = u.hostname.replace(/^www\./, "");
+        item.login.urls = [{ url: u.origin, match: "default" }];
+      }
+      setInit({ item, vaults: info.vaults, vaultId: info.vaults[0]?.id ?? "", folders: info.folders });
+    })().catch((e) => ctx.notify(msg(e)));
+  }, [id, kind, ctx]);
+  if (!init) return null;
+  return (
+    <div className="pop-editor">
+      <ItemEditor
+        initial={init.item}
+        isNew={!id}
+        vaults={init.vaults}
+        defaultVault={init.vaultId}
+        folders={init.folders}
+        generate={() => send<string>({ type: "generate", mode: "password" })}
+        onCancel={() => onDone(id)}
+        onSave={async (item, vaultId) => {
+          if (id) {
+            await send({ type: "updateItem", id, item });
+            ctx.notify("Changes saved.");
+            onDone(id);
+          } else {
+            const newId = await send<string>({ type: "createItem", item, vaultId });
+            ctx.notify("Item saved.");
+            onDone(newId);
+          }
+        }}
+      />
+    </div>
   );
 }
 
@@ -534,15 +638,6 @@ const MATCH_HELP: Record<Settings["defaultMatch"], string> = {
   never: "Never suggest or fill logins automatically. Items can still set their own matching.",
 };
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="pop-settings">
-      <h3>{title}</h3>
-      <div className="pop-card">{children}</div>
-    </section>
-  );
-}
-
 function Toggle({ label, help, checked, onChange }: { label: string; help?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <label className="check">
@@ -568,6 +663,7 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(state.lastSync);
   const [neverSave, setNeverSave] = useState(state.neverSave);
+  const [section, setSection] = useState<string | null>(null);
   if (changingServer) return <Setup initial={state.server} onDone={onChange} />;
 
   const update = (patch: Partial<Settings>) => {
@@ -590,9 +686,15 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
   const timeoutValue = String(settings.vaultTimeout);
   const isMac = navigator.platform.toLowerCase().includes("mac");
 
-  return (
-    <div className="stack">
-      <Section title="Account security">
+  const timeoutLabel = TIMEOUTS.find(([v]) => v === settings.vaultTimeout)?.[1] ?? "";
+  const sections: { key: string; title: string; icon: IconName; summary: string; body: ReactNode }[] = [
+    {
+      key: "security",
+      title: "Account security",
+      icon: "lock",
+      summary: `${timeoutLabel} · ${settings.timeoutAction === "lock" ? "Lock" : "Log out"}`,
+      body: (
+        <>
         <label className="field">
           <span>Vault timeout</span>
           <select
@@ -628,9 +730,16 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
         <button className="btn" onClick={() => send({ type: "lock" }).then(onChange)}>
           <Icon name="lock" /> Lock now
         </button>
-      </Section>
-
-      <Section title="Autofill">
+        </>
+      ),
+    },
+    {
+      key: "autofill",
+      title: "Autofill",
+      icon: "wand",
+      summary: `Inline menu ${settings.inlineMenu === "off" ? "off" : settings.inlineMenu === "focus" ? "on field select" : "on icon click"} · ${MATCHES.find(([m]) => m === settings.defaultMatch)?.[1]}`,
+      body: (
+        <>
         <label className="field">
           <span>Show inline autofill menu</span>
           <select className="select" value={settings.inlineMenu} onChange={(e) => update({ inlineMenu: e.target.value as Settings["inlineMenu"] })}>
@@ -662,9 +771,16 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
             Change shortcuts
           </button>
         </p>
-      </Section>
-
-      <Section title="Notifications">
+        </>
+      ),
+    },
+    {
+      key: "notifications",
+      title: "Notifications",
+      icon: "bell",
+      summary: settings.askToSave ? `Ask to save logins${neverSave.length ? ` · ${neverSave.length} excluded` : ""}` : "Don't ask to save logins",
+      body: (
+        <>
         <Toggle label="Ask to save and update logins" checked={settings.askToSave} onChange={(v) => update({ askToSave: v })} />
         {neverSave.length > 0 && (
           <div className="stack-s">
@@ -684,18 +800,32 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
             ))}
           </div>
         )}
-      </Section>
-
-      <Section title="Appearance">
+        </>
+      ),
+    },
+    {
+      key: "appearance",
+      title: "Appearance",
+      icon: "eye",
+      summary: settings.showIcons ? "Website icons on" : "Website icons off",
+      body: (
+        <>
         <Toggle
           label="Show website icons"
           help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
           checked={settings.showIcons}
           onChange={(v) => update({ showIcons: v })}
         />
-      </Section>
-
-      <Section title="Clipboard">
+        </>
+      ),
+    },
+    {
+      key: "clipboard",
+      title: "Clipboard",
+      icon: "copy",
+      summary: settings.clearClipboard ? `Clear after ${seconds(settings.clearClipboard)}` : "Never clear",
+      body: (
+        <>
         <label className="field">
           <span>Clear clipboard</span>
           <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
@@ -707,18 +837,32 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
             ))}
           </select>
         </label>
-      </Section>
-
-      <Section title="Sync">
+        </>
+      ),
+    },
+    {
+      key: "sync",
+      title: "Sync",
+      icon: "sync",
+      summary: `Last sync: ${formatTime(lastSync)}`,
+      body: (
+        <>
         <button className="btn" onClick={sync} disabled={syncing}>
           <Icon name="sync" /> {syncing ? "Syncing…" : "Sync vault now"}
         </button>
         <p className="small muted" aria-live="polite">
           Last sync: {formatTime(lastSync)}
         </p>
-      </Section>
-
-      <Section title="Account">
+        </>
+      ),
+    },
+    {
+      key: "account",
+      title: "Account",
+      icon: "person",
+      summary: state.email,
+      body: (
+        <>
         <div>
           <div>{state.email}</div>
           <div className="small muted">{state.server}</div>
@@ -729,7 +873,38 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
         <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(onChange)}>
           Log out
         </button>
-      </Section>
-    </div>
+        </>
+      ),
+    },
+  ];
+  const open = sections.find((x) => x.key === section);
+  if (open) {
+    return (
+      <div className="stack">
+        <div className="row">
+          <button className="btn btn-ghost" onClick={() => setSection(null)}>
+            <Icon name="back" /> Settings
+          </button>
+        </div>
+        <h2>{open.title}</h2>
+        <div className="pop-card">{open.body}</div>
+      </div>
+    );
+  }
+  return (
+    <nav className="pop-list pop-settings-menu" aria-label="Settings">
+      {sections.map((x) => (
+        <button key={x.key} className="pop-row" onClick={() => setSection(x.key)}>
+          <span className="pop-set-ic">
+            <Icon name={x.icon} />
+          </span>
+          <span className="grow">
+            <span className="title">{x.title}</span>
+            <span className="sub">{x.summary}</span>
+          </span>
+          <Icon name="chevron" />
+        </button>
+      ))}
+    </nav>
   );
 }

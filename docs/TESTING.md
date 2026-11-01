@@ -14,7 +14,7 @@ docker compose logs -f passauth
 On macOS with Colima, `./data` belongs to your Mac user, not uid 1000. Either set `PUID=$(id -u)` and `PGID=$(id -g)` in `.env`, or run `sudo chown 1000:1000 data`. The server refuses to start, with a clear message, if it can't write to `/data`.
 
 ### Option B: use a published image
-Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.2.2` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
+Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.2.3` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
 
 Open http://localhost:8080 and create an account.
 
@@ -44,6 +44,8 @@ cd extension && pnpm install && pnpm build
 
 ### Extension
 - [ ] Sign in (with 2FA if enabled). Logins for the current site appear under "Autofill suggestions for <site>".
+- [ ] **+** in the popup header creates a login, note, card, identity or SSH key (a new login is pre-filled with the current website). An item's page has **Edit** and **Move to trash**.
+- [ ] Settings shows categories (Account security, Autofill, Notifications, Appearance, Clipboard, Sync, Account) with their current values; each opens its own page.
 - [ ] With many items, the list scrolls while the header, search box and bottom tabs stay in place. Each login has a "⋯" menu to copy the username, password or verification code.
 - [ ] **Fill** fills the username and password. **Cmd/Ctrl+Shift+L** fills when there's exactly one match.
 - [ ] Filling a login that has an authenticator key copies the current code ("Verification code copied" appears on the page). Turn it off in Settings → Autofill.
@@ -64,6 +66,6 @@ Set the `SMTP_*` variables in `.env` and restart. Check: the verification email 
 ## Release
 ```bash
 # bump version in Cargo.toml (workspace.package.version), commit, then:
-git tag v0.2.2 && git push origin v0.2.2
+git tag v0.2.3 && git push origin v0.2.3
 ```
-GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.2.2`, `:0.2` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.2.2.zip` attached.
+GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.2.3`, `:0.2` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.2.3.zip` attached.

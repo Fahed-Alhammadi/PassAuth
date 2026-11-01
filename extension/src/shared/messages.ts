@@ -61,7 +61,10 @@ export type Request =
   | { type: "totp"; id: string }
   | { type: "fill"; id: string; tabId: number }
   | { type: "generate"; mode: "password" | "passphrase"; options?: Record<string, unknown> }
-  | { type: "createItem"; item: Item }
+  | { type: "createItem"; item: Item; vaultId?: string }
+  | { type: "updateItem"; id: string; item: Item }
+  | { type: "trashItem"; id: string }
+  | { type: "editorInfo" }
   | { type: "settings"; patch: Partial<Settings> }
   | { type: "neverSave:remove"; domain: string }
   | { type: "copy"; text: string }

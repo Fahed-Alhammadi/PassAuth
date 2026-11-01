@@ -321,9 +321,30 @@ export async function createItem(item: Item, vaultId?: string): Promise<string> 
 export async function updateItem(entry: Entry, item: Item) {
   const vault = vaults.find((v) => v.id === entry.vaultId);
   if (!vault) throw new Error("Vault not found.");
-  const enc = vault.key.updateItem(entry.enc, { ...item, updated_at: Math.floor(Date.now() / 1000) });
+  if (vault.role === "read") throw new Error("You can only view items in this vault.");
+  const now = Math.floor(Date.now() / 1000);
+  const next = { ...item, updated_at: now };
+  const old = entry.item.login?.password;
+  if (next.login && old && old !== next.login.password && next.password_history === entry.item.password_history) {
+    next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
+  }
+  const enc = vault.key.updateItem(entry.enc, next);
   await api(`/items/${entry.id}`, { method: "PUT", body: { ...enc, revision: entry.revision } });
   await sync();
+}
+
+export async function trashItem(entry: Entry) {
+  if (!canWrite(entry)) throw new Error("You can only view items in this vault.");
+  await api(`/items/${entry.id}`, { method: "DELETE" });
+  await sync();
+}
+
+/** Vaults the user can add items to, and folder names in use (for the item editor). */
+export function editorInfo() {
+  return {
+    vaults: vaults.filter((v) => v.role !== "read").map((v) => ({ id: v.id, name: v.name })),
+    folders: [...new Set(entries.map((e) => e.item.folder).filter(Boolean))] as string[],
+  };
 }
 
 export function canWrite(entry: Entry) {

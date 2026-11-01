@@ -41,3 +41,18 @@ body { background: var(--paper); }
 .pk-site { font-family: var(--mono); padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-s); text-align: center; overflow-wrap: anywhere; }
 .pk-choice { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--surface); cursor: pointer; text-align: left; width: 100%; }
 .pk-choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+/* Item editor (shared with the web vault) in the narrow popup. */
+.pop-editor .detail { padding: 14px 0 4px; max-width: none; gap: 14px; }
+.pop-editor .detail h1 { font-size: 1.15rem; }
+.pop-editor .row { flex-wrap: wrap; }
+.pop-editor .row > .field { flex: 1 1 140px; min-width: 0; }
+.pop-editor .toolbar { position: sticky; bottom: 0; background: var(--paper); padding: 10px 0 2px; display: flex; gap: 8px; }
+.pop-editor .toolbar .btn { flex: 1; justify-content: center; }
+.pop-danger-link { color: var(--danger); align-self: flex-start; }
+/* Settings: a menu of categories, each opening its own page. */
+.pop-settings-menu .pop-row { width: 100%; border: 0; border-bottom: 1px solid var(--line); background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; padding: 12px; }
+.pop-settings-menu .pop-row:last-child { border-bottom: 0; }
+.pop-settings-menu .pop-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.pop-settings-menu .grow { min-width: 0; }
+.pop-settings-menu svg:last-child { color: var(--ink-3); flex: none; }
+.pop-set-ic { flex: none; width: 34px; height: 34px; border-radius: var(--radius-s); display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }

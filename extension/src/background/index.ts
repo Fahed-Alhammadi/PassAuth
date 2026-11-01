@@ -310,7 +310,7 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
       const e = vault.getEntry(req.id);
       if (!e) throw new Error("Item not found.");
-      return { item: e.item, vaultName: vault.vaultName(e.vaultId) };
+      return { item: e.item, vaultName: vault.vaultName(e.vaultId), vaultId: e.vaultId, canWrite: vault.canWrite(e) };
     }
     case "totp": {
       const secret = vault.getEntry(req.id)?.item.login?.totp;
@@ -323,7 +323,17 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return vault.generate(req.mode, req.options);
     case "createItem":
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
-      return vault.createItem(req.item);
+      return vault.createItem(req.item, req.vaultId);
+    case "updateItem":
+    case "trashItem": {
+      if (!(await vault.ensureUnlocked())) throw new Error("locked");
+      const e = vault.getEntry(req.id);
+      if (!e) throw new Error("Item not found.");
+      return req.type === "updateItem" ? vault.updateItem(e, req.item) : vault.trashItem(e);
+    }
+    case "editorInfo":
+      if (!(await vault.ensureUnlocked())) throw new Error("locked");
+      return vault.editorInfo();
     case "settings": {
       const settings: Settings = { ...(await getSettings()), ...req.patch };
       await local.set({ settings });

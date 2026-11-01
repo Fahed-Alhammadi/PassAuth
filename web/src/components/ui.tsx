@@ -32,6 +32,8 @@ const paths = {
   wand: "M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8l1.4 1.4M17.8 6.2l1.4-1.4M3 21l9-9",
   more: "M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM13 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM20 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0z",
   close: "M6 6l12 12M18 6L6 18",
+  chevron: "M9 6l6 6-6 6",
+  bell: "M6 9a6 6 0 1 1 12 0c0 6 3 8 3 8H3s3-2 3-8M10.3 21a1.9 1.9 0 0 0 3.4 0",
   sync: "M20 11a8 8 0 0 0-14.3-4.9L4 8M4 3v5h5M4 13a8 8 0 0 0 14.3 4.9L20 16M20 21v-5h-5",
 } as const;
 
@@ -126,7 +128,8 @@ export function PasswordInput({
 }: {
   value: string;
   onChange: (v: string) => void;
-  generate?: boolean;
+  /** true = the web vault's generator; a function supplies another (e.g. the extension's). */
+  generate?: boolean | (() => Promise<string>);
   autoComplete?: string;
   autoFocus?: boolean;
   id?: string;
@@ -147,7 +150,7 @@ export function PasswordInput({
         placeholder={placeholder}
       />
       {generate && (
-        <button type="button" className="btn btn-icon" title="Generate password" aria-label="Generate password" onClick={() => onChange(generatePassword(undefined))}>
+        <button type="button" className="btn btn-icon" title="Generate password" aria-label="Generate password" onClick={async () => onChange(typeof generate === "function" ? await generate() : generatePassword(undefined))}>
           <Icon name="dice" />
         </button>
       )}
