@@ -31,6 +31,8 @@ let bundle: any = null;
 let vaults: Vault[] = [];
 let entries: Entry[] = [];
 let revision = 0;
+/** Whether the unlocked account has synced at least once (an empty vault is still "loaded"). */
+let loaded = false;
 let pendingMaster: core.MasterKeys | null = null;
 let pendingEmail = "";
 
@@ -196,7 +198,7 @@ export async function persistForNever(data?: SessionData | null) {
 /** Restore keys after a service-worker restart. Returns false when locked. */
 export async function ensureUnlocked(): Promise<boolean> {
   if (account) {
-    if (!entries.length && !revision) await sync();
+    if (!loaded) await sync();
     return true;
   }
   let s = await session.get();
@@ -218,6 +220,7 @@ async function clearUnlocked() {
   vaults = [];
   entries = [];
   revision = 0;
+  loaded = false;
   account?.free();
   account = null;
   await session.clear();
@@ -248,6 +251,7 @@ function unload() {
   vaults = [];
   entries = [];
   revision = 0;
+  loaded = false;
   account?.free();
   account = null;
   bundle = null;
@@ -333,6 +337,7 @@ export async function sync() {
   vaults = next;
   entries = list;
   revision = data.revision;
+  loaded = true;
   await local.set({ lastSync: Date.now(), name: data.user?.name ?? "" });
 }
 

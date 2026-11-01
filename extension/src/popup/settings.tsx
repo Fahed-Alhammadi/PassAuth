@@ -320,6 +320,12 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
           </select>
         </label>
         <Toggle
+          label="Show the number of logins on the PassAuth icon"
+          help="The toolbar icon shows how many saved logins match the site you're on."
+          checked={settings.badge}
+          onChange={(v) => update({ badge: v })}
+        />
+        <Toggle
           label="Show website icons"
           help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
           checked={settings.showIcons}

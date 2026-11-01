@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PassAuth",
   "short_name": "PassAuth",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Fill passwords, one-time codes and passkeys from your self-hosted PassAuth vault.",
   "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
   "action": {
@@ -11,7 +11,7 @@
     "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" }
   },
   "background": { "service_worker": "background.js", "type": "module" },
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "idle", "contextMenus", "clipboardWrite", "offscreen"],
+  "permissions": ["storage", "alarms", "idle", "contextMenus", "clipboardWrite", "offscreen"],
   "optional_permissions": ["privacy"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [

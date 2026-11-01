@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PassAuth privacy policy</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { --ink: #0b1a3a; --muted: #3a4a68; --line: #d6dfec; --accent: #0866ed; --bg: #f4f7fc; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e7edf7; --muted: #b3c0d6; --line: #26344d; --accent: #3d8bff; --bg: #0a1120; } }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 20px 80px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+  header img { height: 40px; }
+  h1 { font-size: 1.8rem; margin: 0; line-height: 1.2; }
+  h2 { font-size: 1.15rem; margin: 2em 0 0.4em; }
+  p, li { color: var(--muted); }
+  a { color: var(--accent); }
+  .updated { font-size: 0.9rem; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 0.9rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header><img src="/favicon.svg" alt=""><h1>PassAuth privacy policy</h1></header>
+  <p class="updated">Last updated: 1 November 2026</p>
+
+  <p>PassAuth is a self-hosted password manager. This policy covers the PassAuth browser extension and the PassAuth web vault. You choose the PassAuth server they connect to; it is run by you or by the organization that gave you an account, not by the PassAuth developer.</p>
+
+  <h2>What the extension handles</h2>
+  <ul>
+    <li><strong>Your vault:</strong> logins, passwords, verification-code keys, passkeys, cards, identities, notes and other items you save.</li>
+    <li><strong>Your account:</strong> your email address, your name if you add one, and sign-in tokens for your PassAuth server.</li>
+    <li><strong>The pages you visit:</strong> the address of the current page, to find logins saved for that site, and the login form fields on it, to fill them or offer to save what you type. Page contents are not stored or sent anywhere.</li>
+  </ul>
+
+  <h2>Encryption</h2>
+  <p>Vault items are encrypted on your device with keys derived from your master password (and your Secret Key, if you use one) before they are sent to your PassAuth server. The server stores only encrypted data and can't read your items. Your master password is never sent to the server: sign-in uses the OPAQUE protocol.</p>
+
+  <h2>Where data goes</h2>
+  <ul>
+    <li>Encrypted vault data and account details go only to the PassAuth server address you enter.</li>
+    <li>If "Show website icons" is on, the extension asks <em>your</em> PassAuth server for the icon of a website saved in your vault. Your server then fetches that icon from the website, so it learns which website addresses have icons requested, but nothing else from your vault. You can turn this off in Settings → Appearance.</li>
+    <li>Nothing is sent to the PassAuth developer. There are no analytics, ads, trackers or third-party services in the extension.</li>
+  </ul>
+
+  <h2>Data stored in your browser</h2>
+  <p>The extension keeps your settings, your accounts' server addresses and sign-in tokens, and a copy of your encrypted vault data in the browser's extension storage. While the vault is unlocked, its keys are kept in memory-only session storage, which the browser clears when it closes. If you set the vault timeout to "Never", the keys stay on this device until you lock or log out. Logging out removes the account and its data from the extension.</p>
+
+  <h2>Clipboard</h2>
+  <p>When you copy a password, username or verification code, the extension writes it to your clipboard and, by default, clears it again after 30 seconds (Settings → Autofill → Clear clipboard).</p>
+
+  <h2>Chrome settings</h2>
+  <p>If you turn on "Make PassAuth your default password manager", the extension uses Chrome's privacy settings to turn off Chrome's own password saving and address and card autofill. Turning the option off gives these settings back to Chrome.</p>
+
+  <h2>Sharing and selling</h2>
+  <p>Your data is not sold, rented or shared with anyone, is not used for advertising, and is not used for any purpose other than storing, filling and syncing your vault. The PassAuth developer has no access to it.</p>
+
+  <h2>Your control</h2>
+  <p>You can export, edit or delete your items at any time in the web vault, and delete your account in the web vault under Settings → Account. Removing the extension deletes the data it stored in your browser. Questions about the data on a particular server go to whoever runs that server.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the new version will be published at this address with a new date.</p>
+
+  <footer>© Fahed Alhammadi</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Copperleaf — Sign in</title>
+<style>
+  /* A fictional shop's sign-in page, used for the store screenshots. */
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; font: 15px/1.5 Georgia, "Times New Roman", serif; color: #2b2118; background: #f6efe6; display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 22px 48px; border-bottom: 1px solid #e3d5c3; }
+  .brand { font-size: 1.5rem; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; }
+  .brand i { width: 26px; height: 26px; border-radius: 50% 0; background: #b5652b; transform: rotate(-45deg); display: inline-block; }
+  nav { display: flex; gap: 28px; font: 14px system-ui, sans-serif; color: #6b5a4a; }
+  main { display: grid; place-items: center; padding: 40px; }
+  form { width: 380px; background: #fffaf3; border: 1px solid #e3d5c3; border-radius: 14px; padding: 34px 32px; display: grid; gap: 16px; box-shadow: 0 18px 40px rgb(80 50 20 / 0.08); }
+  h1 { margin: 0 0 4px; font-weight: 400; font-size: 1.7rem; }
+  p { margin: 0; color: #6b5a4a; font: 14px system-ui, sans-serif; }
+  label { display: grid; gap: 6px; font: 600 13px system-ui, sans-serif; color: #4a3b2e; }
+  input { font: 15px system-ui, sans-serif; padding: 11px 12px; border: 1px solid #d6c4ae; border-radius: 8px; background: #fff; }
+  input:focus { outline: 2px solid #b5652b; outline-offset: 1px; }
+  button { font: 600 15px system-ui, sans-serif; padding: 12px; border: 0; border-radius: 8px; background: #2b2118; color: #fffaf3; cursor: pointer; }
+  .small { font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand"><i></i> Copperleaf</div>
+    <nav><span>Shop</span><span>Journal</span><span>Stores</span><span>Basket (0)</span></nav>
+  </header>
+  <main>
+    <form id="f" onsubmit="event.preventDefault(); document.getElementById('status').textContent = 'Welcome back.';">
+      <h1>Sign in</h1>
+      <p>Welcome back to Copperleaf.</p>
+      <label>Email <input id="user" name="email" type="email" autocomplete="username"></label>
+      <label>Password <input id="pass" name="password" type="password" autocomplete="current-password"></label>
+      <button type="submit">Sign in</button>
+      <p class="small" id="status">New here? Create an account</p>
+    </form>
+  </main>
+</body>
+</html>

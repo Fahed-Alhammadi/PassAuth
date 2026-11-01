@@ -18,6 +18,8 @@ export interface Settings {
   defaultMatch: Exclude<UrlMatch, "default">;
   askToSave: boolean;
   theme: "system" | "light" | "dark";
+  /** Number of matching logins on the toolbar icon. */
+  badge: boolean;
 }
 
 export interface AccountSummary {

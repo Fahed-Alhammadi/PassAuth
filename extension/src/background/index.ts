@@ -50,6 +50,32 @@ async function isVaultPage(url: string) {
   return !!server && !!page && page.origin === new URL(server).origin;
 }
 
+// ------------------------------------------------------------ icon badge
+
+/** Show how many saved logins match each window's active tab (nothing while locked). */
+async function updateBadge() {
+  const { settings } = await local.get();
+  const unlocked = settings.badge && (await vault.ensureUnlocked().catch(() => false));
+  for (const tab of await chrome.tabs.query({ active: true })) {
+    if (tab.id === undefined) continue;
+    const n = unlocked && tab.url?.startsWith("http") ? (await matching(tab.url)).length : 0;
+    await chrome.action.setBadgeText({ tabId: tab.id, text: n ? String(Math.min(n, 99)) : "" }).catch(() => {});
+  }
+}
+
+let badgeTimer: ReturnType<typeof setTimeout> | undefined;
+const refreshBadge = () => {
+  clearTimeout(badgeTimer);
+  badgeTimer = setTimeout(() => void updateBadge(), 250);
+};
+chrome.action.setBadgeBackgroundColor({ color: "#0866ED" });
+chrome.action.setBadgeTextColor?.({ color: "#FFFFFF" });
+chrome.tabs.onActivated.addListener(refreshBadge);
+chrome.tabs.onUpdated.addListener((_id, change) => (change.url || change.status === "complete") && refreshBadge());
+chrome.windows.onFocusChanged.addListener(refreshBadge);
+// Lock/unlock, account switches, syncs (item changes) and settings all touch storage.
+chrome.storage.onChanged.addListener(refreshBadge);
+
 async function matching(url: string) {
   const { defaultMatch } = await getSettings();
   return vault.allEntries().filter((e) => e.item.login?.urls.some((u) => matchesUrl(url, u, defaultMatch)));

@@ -20,6 +20,8 @@ Open `http://localhost:8080`.
 
 ## Chrome extension
 
+To publish it on the Chrome Web Store, follow [docs/store/LISTING.md](docs/store/LISTING.md) (listing text, permission justifications, screenshots, privacy policy at `/privacy.html` on your server).
+
 Download `passauth-extension-vX.Y.Z.zip` from the GitHub release, unzip it, and load it with **Load unpacked** in `chrome://extensions`. It fills logins, one-time codes and passkeys from your vault. To build it yourself, and for a full test checklist, see [docs/TESTING.md](docs/TESTING.md).
 
 ## Security design

@@ -49,6 +49,7 @@ export const defaultSettings: Settings = {
   defaultMatch: "domain",
   askToSave: true,
   theme: "system",
+  badge: true,
 };
 
 const emptyAccount: AccountData = { server: "", email: "", name: "", tokens: null, lastSync: 0, persistedKeys: null };

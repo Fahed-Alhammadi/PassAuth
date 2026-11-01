@@ -18,7 +18,8 @@ DATABASE_URL="sqlite:///tmp/pa-e2e/passauth.db?mode=rwc" WEB_VAULT_DIR="$PWD/web
 mkdir -p /tmp/pa-shots
 node tests/e2e/web.mjs /tmp/pa-shots                                         # web vault (Google Chrome)
 node tests/e2e/extension-basic.mjs "$PWD/extension/dist" /tmp/pa-shots       # fill, save prompt, passkeys
-node tests/e2e/extension-settings.mjs "$PWD/extension/dist" /tmp/pa-shots    # inline menu, timeouts, URI match, sync, icons
+node tests/e2e/extension-settings.mjs "$PWD/extension/dist" /tmp/pa-shots    # inline menu, timeouts, URI match, sync, icons, accounts
+node tests/e2e/store-screenshots.mjs "$PWD/extension/dist"                   # Chrome Web Store screenshots + promo tiles → docs/store/
 ```
 
 - The extension tests need **Chromium** (branded Chrome ignores `--load-extension`). Override paths with `CHROMIUM=` / `CHROME=`.
