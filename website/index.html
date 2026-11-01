@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PassAuth — self-hosted password manager</title>
+<meta name="description" content="PassAuth is a password manager you host yourself. Passwords, verification codes and passkeys, encrypted on your devices, synced through your own server.">
+<link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt=""><span>Pass<b>Auth</b></span></a>
+    <nav aria-label="Main">
+      <a class="opt" href="#features">Features</a>
+      <a class="opt" href="#install">Install</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="support.html">Support</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <div class="wrap">
+      <div>
+        <h1>Your passwords, on your own server.</h1>
+        <p>PassAuth keeps your logins, verification codes and passkeys encrypted on your devices and syncs them through a server you run.</p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#install">Install PassAuth</a>
+          <a class="btn btn-line" href="https://github.com/Fahed-Alhammadi/PassAuth">Source code</a>
+        </div>
+      </div>
+      <img class="shot popup" src="assets/popup-vault.png" width="760" height="1200" alt="The PassAuth extension showing the login saved for the current site, favorites and all items.">
+    </div>
+  </div>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>Everything a password manager should do</h2>
+      <p class="lead">Fill logins in your browser and apps, keep two-step codes next to your passwords, and use passkeys, with nothing readable leaving your devices.</p>
+      <div class="features">
+        <div class="feature"><h3>Fill in one click</h3><p>Pick a login from the menu under the field, from the toolbar, or with a keyboard shortcut. The icon shows how many logins match the site.</p></div>
+        <div class="feature"><h3>Verification codes</h3><p>Two-step codes count down next to the password and are copied after you fill, ready to paste.</p></div>
+        <div class="feature"><h3>Passkeys</h3><p>Save and use passkeys on sites that support them. They sync to all your devices like your passwords.</p></div>
+        <div class="feature"><h3>Save as you sign in</h3><p>PassAuth offers to save new logins and update changed passwords the moment you use them.</p></div>
+        <div class="feature"><h3>Share with your people</h3><p>Share vaults with family or a team. Keys are sealed to each person, and you can check who you share with.</p></div>
+        <div class="feature"><h3>Bring your passwords</h3><p>Import the export file from your current password manager. It's read and encrypted on your device.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <img src="assets/page-inline.png" width="2000" height="1280" alt="A website's sign-in page with the PassAuth menu under the email field, offering the saved login.">
+      <div>
+        <h2>Fill right from the login field</h2>
+        <p class="lead">Click into a login field and PassAuth lists the logins saved for that site. The list is shown by the extension, so the website can't read it. Logins only fill on the site they belong to.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="wrap split">
+      <div>
+        <h2>Encrypted before it leaves your device</h2>
+        <p class="lead">Your master password never reaches the server, not even as a hash. Every item has its own key, and the server stores only encrypted data, including item names and website addresses.</p>
+        <ul class="points">
+          <li><b>Sign-in without sending your password.</b> The OPAQUE protocol proves you know it without revealing it.</li>
+          <li><b>Strong keys.</b> Argon2id, with an optional Secret Key that never leaves your devices.</li>
+          <li><b>Modern encryption.</b> XChaCha20-Poly1305 for every item, bound to its vault so it can't be swapped.</li>
+        </ul>
+      </div>
+      <img class="popup" src="assets/popup-item.png" width="760" height="1200" alt="A login in PassAuth showing its username, password and a verification code with a countdown.">
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="wrap">
+      <h2>Run your own server</h2>
+      <p class="lead">PassAuth runs as one small container. You need a machine with Docker and, to use it from your phone or other computers, a domain with HTTPS.</p>
+      <pre><code>git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
+cd passauth
+cp .env.example .env        # set DOMAIN, then the admin token and email
+docker compose up -d</code></pre>
+      <p>The full guide covers the admin token, email, HTTPS, updates and backups: <a href="https://github.com/Fahed-Alhammadi/PassAuth#install-the-server">installation guide</a>.</p>
+    </div>
+  </section>
+
+  <section class="band" id="apps">
+    <div class="wrap">
+      <h2>Apps</h2>
+      <p class="lead">Use PassAuth in the web vault on your server, in your browser and on your phone.</p>
+      <div class="apps">
+        <div class="app"><h3>Chrome extension</h3><span class="state">Available from <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest">GitHub releases</a>; Chrome Web Store coming soon.</span></div>
+        <div class="app"><h3>Android</h3><span class="state">In testing. Google Play coming soon.</span></div>
+        <div class="app"><h3>iPhone and iPad</h3><span class="state">Coming soon.</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="grow">© Fahed Alhammadi. PassAuth is open source under the MIT License.</span>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="support.html">Support</a>
+    <a href="https://github.com/Fahed-Alhammadi/PassAuth">GitHub</a>
+  </div>
+</footer>
+</body>
+</html>

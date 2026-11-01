@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support — PassAuth</title>
+<meta name="description" content="Get help with PassAuth: setup, sign-in, deleting your account and reporting problems.">
+<link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="assets/logo.svg" alt=""><span>Pass<b>Auth</b></span></a>
+    <nav aria-label="Main"><a href="./">Home</a><a href="privacy.html">Privacy</a><a href="support.html" aria-current="page">Support</a></nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <h1>Support</h1>
+    <p class="updated">Help with PassAuth apps, the browser extension and the server.</p>
+
+    <h2>Contact</h2>
+    <p>Ask a question or report a problem on <a href="https://github.com/Fahed-Alhammadi/PassAuth/issues">GitHub Issues</a>. Please don't include passwords, codes or other vault contents in your report.</p>
+    <p>To report a security vulnerability privately, use <a href="https://github.com/Fahed-Alhammadi/PassAuth/security/advisories/new">Report a vulnerability</a> on GitHub instead of a public issue.</p>
+
+    <h2>Getting started</h2>
+    <ul>
+      <li><strong>You need a PassAuth server.</strong> Run your own (see the <a href="https://github.com/Fahed-Alhammadi/PassAuth#install-the-server">installation guide</a>) or ask the person who runs your organization's server for an account.</li>
+      <li><strong>Connect an app or the extension</strong> by entering the server's address (it must start with <code>https://</code>), then sign in with your email and master password.</li>
+      <li><strong>Turn on autofill</strong> on Android in the app's Settings → Autofill, which opens the system setting where you choose PassAuth.</li>
+    </ul>
+
+    <h2>I forgot my master password</h2>
+    <p>Nobody can recover it, not even the server's administrator: your vault is encrypted with keys only your master password (and Secret Key, if you use one) can unlock. If you still have a device where PassAuth is unlocked, you can change the master password in the web vault under Settings → Security. Otherwise the account can only be deleted and created again.</p>
+
+    <h2>I lost my Secret Key</h2>
+    <p>Your Secret Key is in the Emergency Kit you saved when you created the account, and on every device where you've signed in. Without it you can't sign in on a new device.</p>
+
+    <h2 id="delete-account">Delete your account</h2>
+    <p>Open your PassAuth server in a browser, sign in to the web vault, and go to <strong>Settings → Account → Delete account</strong>. This permanently deletes the account and all vaults you own. If you can't sign in, ask your server's administrator to delete it from the admin page. See also the <a href="privacy.html#delete-account">privacy policy</a>.</p>
+
+    <h2>Running the server</h2>
+    <p>Installation, the admin token, email, HTTPS, updates and backups are covered in the <a href="https://github.com/Fahed-Alhammadi/PassAuth#install-the-server">installation guide</a>.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span class="grow">© Fahed Alhammadi. PassAuth is open source under the MIT License.</span>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="support.html">Support</a>
+    <a href="https://github.com/Fahed-Alhammadi/PassAuth">GitHub</a>
+  </div>
+</footer>
+</body>
+</html>
