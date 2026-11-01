@@ -46,6 +46,8 @@ import io.passauth.app.data.ItemCodec
 import io.passauth.app.data.ItemKind
 import io.passauth.app.data.Login
 import io.passauth.app.data.LoginUrl
+import io.passauth.app.data.OtpAuth
+import io.passauth.app.data.OtpParse
 import io.passauth.app.data.SshKey
 import io.passauth.app.data.UrlMatch
 import io.passauth.app.ui.Route
@@ -78,9 +80,12 @@ val MATCH_OPTIONS = listOf(
 fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
     val v = vault ?: return
-    val entry = id?.let { v.get(it) }
+    // The item as it was when editing started: if live sync brings a newer version meanwhile,
+    // saving reports the conflict (revision check) instead of silently overwriting it.
+    val current = id?.let { v.get(it) }
+    val entry = remember(id, current == null) { current }
     val done = { to: String? -> ctx.go(if (to != null) Route.ItemView(to) else Route.Vault) }
-    if (id != null && entry == null) return run { done(null) }
+    if (id != null && (current == null || entry == null)) return run { done(null) }
 
     // Saved as JSON so edits survive rotation.
     var json by rememberSaveable { mutableStateOf(ItemCodec.encode(entry?.item ?: Item.empty(kind ?: ItemKind.Login))) }
@@ -105,7 +110,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
         val clean = item.copy(
             name = item.name.trim(),
             folder = item.folder?.trim()?.ifEmpty { null },
-            login = item.login?.let { l -> l.copy(urls = l.urls.filter { it.url.isNotBlank() }.map { it.copy(url = it.url.trim()) }, totp = l.totp?.trim()?.ifEmpty { null }) },
+            login = item.login?.let { l -> l.copy(urls = l.urls.filter { it.url.isNotBlank() }.map { it.copy(url = it.url.trim()) }, totp = l.totp?.trim()?.ifEmpty { null }?.let(::normalizeTotp)) },
         )
         busy = true
         ctx.scope.launch {
@@ -154,7 +159,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                         },
                     )
                     StrengthMeter(l.password)
-                    TextInput(l.totp.orEmpty(), { t -> login { it.copy(totp = t.ifEmpty { null }) } }, "Authenticator key (TOTP)", mono = true)
+                    TotpInput(ctx, l.totp.orEmpty()) { t -> login { it.copy(totp = t.ifEmpty { null }) } }
                 }
                 Group("Autofill options") {
                     l.urls.forEachIndexed { n, u ->
@@ -295,3 +300,6 @@ private fun Group(title: String?, content: @Composable ColumnScope.() -> Unit) {
         Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
     }
 }
+
+/** A valid plain key is stored cleaned up (upper case, no spaces); URIs and anything else stay as typed. */
+private fun normalizeTotp(value: String): String = (OtpAuth.parse(value) as? OtpParse.Valid)?.key?.value ?: value

@@ -582,6 +582,9 @@ class VaultRepository(
         if (r > current.revision || current.offline) mutex.withLock { syncLocked() }
     }
 
+    /** Ask the server whether this session still exists: an ended one signs the account out (refresh fails). */
+    suspend fun checkSession() = refreshIfStale()
+
     private suspend fun syncLocked(fallbackToCache: Boolean = false) {
         val id = activeId()
         val session = sessions[id] ?: return
@@ -682,13 +685,19 @@ class VaultRepository(
         id
     }
 
-    suspend fun updateItem(entry: Entry, item: Item) {
+    /**
+     * Save changes to an item; with another [targetVaultId] the item also moves to that vault
+     * (re-encrypted with its key under the same id), like the web vault's `updateItem`.
+     */
+    suspend fun updateItem(entry: Entry, item: Item, targetVaultId: String = entry.vaultId) {
         mutex.withLock {
             val v = requireVault()
             requireOnline(v)
             val vault = v.vaults.firstOrNull { it.id == entry.vaultId } ?: throw UserException("Vault not found.")
             if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
-            val key = vaultKeys[vault.id] ?: throw UserException("Vault not found.")
+            val target = v.vaults.firstOrNull { it.id == targetVaultId } ?: throw UserException("Vault not found.")
+            if (target.role == Role.Read) throw UserException("You can't add items to ${target.name}.")
+            val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
             val t = now()
             var next = item.copy(updatedAt = t)
             val old = entry.item.login?.password
@@ -696,7 +705,8 @@ class VaultRepository(
             if (next.login != null && !old.isNullOrEmpty() && old != newPassword && next.passwordHistory == entry.item.passwordHistory) {
                 next = next.copy(passwordHistory = (listOf(PasswordChange(old, t)) + next.passwordHistory).take(20))
             }
-            val enc = core { key.updateItem(entry.enc, ItemCodec.encode(next)) }
+            val json = ItemCodec.encode(next)
+            val enc = core { if (target.id == entry.vaultId) key.updateItem(entry.enc, json) else key.encryptItem(json, entry.id, target.id) }
             val body = enc.toJson().let { JsonObject(it + ("revision" to kotlinx.serialization.json.JsonPrimitive(entry.revision))) }
             try {
                 api.call(activeId(), "/items/${entry.id}", body = body, method = "PUT")
@@ -706,6 +716,12 @@ class VaultRepository(
             }
             syncLocked()
         }
+    }
+
+    /** Move an item to another vault the user can write to. */
+    suspend fun moveItem(entry: Entry, vaultId: String) {
+        if (vaultId == entry.vaultId) return
+        updateItem(entry, entry.item, vaultId)
     }
 
     suspend fun setFavorite(entry: Entry, favorite: Boolean) = updateItem(entry, entry.item.copy(favorite = favorite))
@@ -718,6 +734,111 @@ class VaultRepository(
             api.call(activeId(), "/items/${entry.id}", method = "DELETE")
             syncLocked()
         }
+    }
+
+    // ------------------------------------------- re-authentication, account
+
+    /**
+     * A fresh proof of the master password from the server: an OPAQUE login with
+     * `purpose: "reauth"` on the signed-in session (the web vault's `reauth`).
+     * The token is good for one sensitive request within five minutes.
+     */
+    private suspend fun reauthToken(id: String, password: String, secretKey: String?): String {
+        val s = store.get()
+        val a = s.accounts[id]?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+        val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        val pre = api.call(id, "/auth/prelogin", body = buildJsonObject { put("email", a.email) }, auth = false).jsonObject
+        val skRequired = pre.bool("secret_key_required")
+        if (skRequired && sk == null) throw UserException(SECRET_KEY_REQUIRED)
+        val master = core { deriveMasterKeys(password, if (skRequired) sk else null, pre.str("account_id"), pre["kdf"].toString(), skRequired) }
+        try {
+            val start = core { opaqueLoginStart(master) }
+            val resp = api.call(
+                id, "/auth/login/start", auth = false,
+                body = buildJsonObject { put("email", a.email); put("message", start.message) },
+            ).jsonObject
+            val fin = try {
+                core { opaqueLoginFinish(start.state, master, resp.str("message")) }
+            } catch (_: CoreException) {
+                throw UserException("Wrong master password or Secret Key.")
+            }
+            val result = api.call(
+                id, "/auth/login/finish",
+                body = buildJsonObject {
+                    put("login_id", resp.str("login_id"))
+                    put("message", fin)
+                    put("device", deviceInfo())
+                    put("purpose", "reauth")
+                },
+            ).jsonObject
+            return result.strOrNull("reauth_token") ?: throw UserException("Your server didn't confirm the master password. Try again.")
+        } finally {
+            master.destroy()
+        }
+    }
+
+    /**
+     * Delete the active account on the server (with every vault it owns), after
+     * re-authenticating with the master password, then forget it on this device
+     * like Log out.
+     */
+    suspend fun deleteAccount(password: String, secretKey: String?) {
+        mutex.withLock {
+            val s = store.get()
+            val id = s.activeId
+            val a = s.active ?: throw UserException("Sign in first.")
+            if (_vault.value?.offline == true) throw UserException("You're offline. Deleting your account needs your server.")
+            val token = reauthToken(id, password, secretKey)
+            api.call(id, "/account", method = "DELETE", headers = mapOf("x-reauth-token" to token))
+            // The server has ended every session of this account: no remote logout.
+            closeSession(id)
+            pendingMaster?.destroy()
+            pendingMaster = null
+            Keystore.deleteBiometricKey(id)
+            store.deleteCache(id)
+            val email = a.email.lowercase()
+            val sameEmailElsewhere = s.accounts.any { (k, v) -> k != id && v.email.equals(email, ignoreCase = true) }
+            store.update { st ->
+                st.copy(
+                    secretKeys = if (sameEmailElsewhere) st.secretKeys else st.secretKeys - email,
+                    rememberTokens = st.rememberTokens - "${a.server}|$email",
+                )
+            }
+            val listed = s.accounts.filterValues(::isListed)
+            if (listed.size > 1 || !listed.containsKey(id)) {
+                removeAccount(id)
+            } else {
+                // Keep only the server address, so the sign-in screen still knows where to go.
+                store.updateAccount(id) { AccountData(server = it.server) }
+            }
+        }
+    }
+
+    /** Check the master password locally against the account bundle (works offline). */
+    suspend fun verifyMasterPassword(password: String) {
+        val s = store.get()
+        val a = s.active ?: throw UserException("Sign in first.")
+        val bundle = a.bundle ?: throw UserException("Sync your vault first.")
+        val b = AppJson.parseToJsonElement(bundle).jsonObject
+        val skEnabled = b.bool("secret_key_enabled")
+        val sk = s.secretKeys[a.email.lowercase()]
+        if (skEnabled && sk == null) throw UserException(SECRET_KEY_REQUIRED)
+        core {
+            val master = deriveMasterKeys(password, sk, b.str("account_id"), b["kdf"].toString(), skEnabled)
+            try {
+                master.unlock(bundle).destroy()
+            } catch (_: CoreException) {
+                throw UserException("Wrong master password.")
+            } finally {
+                master.destroy()
+            }
+        }
+    }
+
+    /** The unlocked vault's items as a JSON array in the item format (input of the core's export functions). */
+    fun itemsJsonForExport(): String {
+        val v = requireVault()
+        return v.entries.joinToString(",", "[", "]") { ItemCodec.encode(it.item) }
     }
 
     // ---------------------------------------------- queries (autofill, phase 2)

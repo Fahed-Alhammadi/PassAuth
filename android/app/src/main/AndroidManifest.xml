@@ -3,6 +3,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Only to scan authenticator QR codes, requested when the user taps "Scan QR code". -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <!-- Browsers must be visible to check their signing certificates against the privileged allowlist (autofill). -->
     <queries>

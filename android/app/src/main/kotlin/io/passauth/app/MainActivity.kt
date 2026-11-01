@@ -7,7 +7,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import io.passauth.app.ui.AppRoot
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.theme.PassAuthTheme
@@ -21,6 +23,8 @@ class MainActivity : SecureActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         if (savedInstanceState == null) handle(intent)
+        // Live sync only while PassAuth is on screen (and unlocked: see LiveSync).
+        lifecycleScope.launch { repeatOnLifecycle(Lifecycle.State.STARTED) { graph.live.run() } }
         setContent {
             val state by graph.repo.state.collectAsStateWithLifecycle()
             PassAuthTheme(state.settings.theme) {

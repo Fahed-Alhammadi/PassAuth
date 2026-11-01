@@ -50,6 +50,7 @@ import io.passauth.app.ui.settings.SettingsScreen
 import io.passauth.app.ui.vault.EditScreen
 import io.passauth.app.ui.vault.ItemScreen
 import io.passauth.app.ui.vault.ListFilter
+import io.passauth.app.ui.vault.PasswordHistoryScreen
 import io.passauth.app.ui.vault.VaultListScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -59,6 +60,7 @@ sealed interface Route {
     data object Vault : Route
     data class ItemView(val id: String) : Route
     data class Edit(val id: String) : Route
+    data class History(val id: String) : Route
     data class New(val kind: ItemKind) : Route
     data object Generator : Route
     data class Settings(val section: String? = null) : Route
@@ -214,7 +216,12 @@ private fun Main(ctx: UiCtx, route: Route, go: (Route) -> Unit) {
         go(
             when (route) {
                 is Route.Edit -> Route.ItemView(route.id)
-                is Route.Settings -> if (route.section != null) Route.Settings() else Route.Vault
+                is Route.History -> Route.ItemView(route.id)
+                is Route.Settings -> when (route.section) {
+                    null -> Route.Vault
+                    "export" -> Route.Settings("vault")
+                    else -> Route.Settings()
+                }
                 else -> Route.Vault
             },
         )
@@ -224,6 +231,7 @@ private fun Main(ctx: UiCtx, route: Route, go: (Route) -> Unit) {
         Route.Vault -> VaultListScreen(ctx, filter) { filter = it }
         is Route.ItemView -> ItemScreen(ctx, route.id)
         is Route.Edit -> EditScreen(ctx, id = route.id)
+        is Route.History -> PasswordHistoryScreen(ctx, route.id)
         is Route.New -> EditScreen(ctx, kind = route.kind)
         Route.Generator -> GeneratorScreen(ctx)
         is Route.Settings -> SettingsScreen(ctx, route.section)
@@ -237,6 +245,7 @@ private val RouteSaver = androidx.compose.runtime.saveable.Saver<Route, String>(
             Route.Vault -> "vault"
             is Route.ItemView -> "item:${r.id}"
             is Route.Edit -> "edit:${r.id}"
+            is Route.History -> "history:${r.id}"
             is Route.New -> "new:${r.kind.name}"
             Route.Generator -> "generator"
             is Route.Settings -> "settings:${r.section.orEmpty()}"
@@ -247,6 +256,7 @@ private val RouteSaver = androidx.compose.runtime.saveable.Saver<Route, String>(
         when (k) {
             "item" -> Route.ItemView(arg)
             "edit" -> Route.Edit(arg)
+            "history" -> Route.History(arg)
             "new" -> Route.New(ItemKind.valueOf(arg))
             "generator" -> Route.Generator
             "settings" -> Route.Settings(arg.ifEmpty { null })

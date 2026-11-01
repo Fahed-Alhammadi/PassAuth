@@ -53,6 +53,7 @@ class ApiClient(private val store: SecureStore) {
         body: JsonElement? = null,
         method: String = if (body == null) "GET" else "POST",
         auth: Boolean = true,
+        headers: Map<String, String> = emptyMap(),
     ): JsonElement {
         suspend fun send(): Response {
             val a = store.get().accounts[accountId]
@@ -61,6 +62,7 @@ class ApiClient(private val store: SecureStore) {
                 .url("$server/api$path")
                 .method(method, body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET") null else ByteArray(0).toRequestBody())
                 .apply { if (auth && a.tokens != null) header("Authorization", "Bearer ${a.tokens.access}") }
+                .apply { headers.forEach { (k, v) -> header(k, v) } }
                 .build()
             return execute(req)
         }

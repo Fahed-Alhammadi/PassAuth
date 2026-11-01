@@ -49,6 +49,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -58,11 +59,14 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.passauth.app.R
 import io.passauth.app.data.IconLoader
 import io.passauth.app.ui.theme.Brand
 import io.passauth.app.ui.theme.PassAuthTheme
+
+/** Text sized in dp: drawn inside fixed-size shapes, so it must not grow with the system font scale. */
+@Composable
+private fun fixedSp(size: Dp) = with(androidx.compose.ui.platform.LocalDensity.current) { size.toSp() }
 
 @Composable
 fun LogoMark(size: Dp, modifier: Modifier = Modifier) {
@@ -85,7 +89,8 @@ fun Avatar(text: String, size: Dp = 36.dp, modifier: Modifier = Modifier) {
         modifier.size(size).clip(CircleShape).background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Brand.Blue, Brand.Cyan))),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = (size.value * 0.38f).sp)
+        // Sized to the circle, not the font scale (the account menu button has its own description).
+        Text(text, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = fixedSp(size * 0.38f), maxLines = 1)
     }
 }
 
@@ -108,7 +113,7 @@ fun SiteIcon(host: String, name: String, server: String, enabled: Boolean, icons
                 (name.trim().firstOrNull() ?: '?').uppercase(),
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = (size.value * 0.42f).sp,
+                fontSize = fixedSp(size * 0.42f),
             )
         }
     }
@@ -134,7 +139,7 @@ fun TotpRing(remaining: Int, period: Int, size: Dp = 30.dp) {
                 drawArc(Brand.ringBrush, -90f, sweep, false, topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Round))
             }
         }
-        Text("$remaining", fontSize = 11.sp, color = if (low) lowColor else MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("$remaining", fontSize = fixedSp(11.dp), lineHeight = fixedSp(12.dp), color = if (low) lowColor else MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -213,7 +218,9 @@ fun <T> SelectField(label: String, options: List<Pair<T, String>>, selected: T, 
             value = options.firstOrNull { it.first == selected }?.second.orEmpty(),
             onValueChange = {},
             readOnly = true,
-            singleLine = true,
+            // Long choices wrap instead of being cut off at large font sizes.
+            singleLine = false,
+            maxLines = 3,
             label = { Text(label) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = open) },
             modifier = Modifier.menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable).fillMaxWidth(),
@@ -283,7 +290,7 @@ fun CardSection(title: String?, modifier: Modifier = Modifier, content: @Composa
                 title,
                 style = MaterialTheme.typography.labelMedium,
                 color = PassAuthTheme.colors.muted,
-                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
+                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp).semantics { heading() },
             )
         }
         Surface(
@@ -301,7 +308,8 @@ fun CardSection(title: String?, modifier: Modifier = Modifier, content: @Composa
 @Composable
 fun KeyValue(label: String, actions: @Composable RowScope.() -> Unit = {}, content: @Composable ColumnScope.() -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        // Label and value are read together ("Username, alice"), then the actions.
+        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
             content()
         }
@@ -310,11 +318,13 @@ fun KeyValue(label: String, actions: @Composable RowScope.() -> Unit = {}, conte
 }
 
 @Composable
-fun ValueText(text: String, mono: Boolean = false, maxLines: Int = Int.MAX_VALUE) {
+fun ValueText(text: String, mono: Boolean = false, maxLines: Int = Int.MAX_VALUE, description: String? = null) {
     Text(
         text,
         style = MaterialTheme.typography.bodyLarge.let { if (mono) it.copy(fontFamily = FontFamily.Monospace) else it },
         maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
+        // e.g. a masked secret is read as "hidden", not as a row of bullets.
+        modifier = if (description != null) Modifier.semantics { contentDescription = description } else Modifier,
     )
 }

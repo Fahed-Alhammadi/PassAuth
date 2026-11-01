@@ -1,6 +1,13 @@
 package io.passauth.app.ui.vault
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,7 +19,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
@@ -24,6 +35,10 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -40,12 +55,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.passauth.app.data.Entry
 import io.passauth.app.data.FieldType
+import io.passauth.app.data.PasswordHistory
+import io.passauth.app.data.Role
+import io.passauth.app.data.VaultInfo
 import io.passauth.app.data.UrlMatch
 import io.passauth.app.data.UrlMatcher
 import io.passauth.app.ui.Route
@@ -67,6 +88,7 @@ data class TotpCodeView(val code: String, val remaining: Int, val period: Int)
 fun formatDate(unixSeconds: Long): String =
     DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(unixSeconds * 1000))
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ItemScreen(ctx: UiCtx, id: String) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
@@ -79,6 +101,10 @@ fun ItemScreen(ctx: UiCtx, id: String) {
     val l = i.login
     val canWrite = v.canWrite(entry)
     var confirmDelete by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
+    // Vaults this item can move to: only ones where the user may add items (owner, admin, write).
+    val targets = v.vaults.filter { it.id != entry.vaultId && it.role in setOf(Role.Owner, Role.Admin, Role.Write) }
     val weak = remember(l?.password) { l?.password?.let { it.isNotEmpty() && estimateBits(it) < 50 } ?: false }
 
     var code by remember { mutableStateOf<TotpCodeView?>(null) }
@@ -109,12 +135,28 @@ fun ItemScreen(ctx: UiCtx, id: String) {
         )
     }
 
+    if (moving) {
+        MoveDialog(ctx, entry, v.vaultName(entry.vaultId), targets) { moving = false }
+    }
+
     Scaffold(
         topBar = {
             PageBar("View ${i.kind.label.lowercase()}", onBack = back) {
                 if (canWrite) {
                     IconButton(onClick = { ctx.launch { ctx.repo.setFavorite(entry, !i.favorite) } }) {
                         Icon(if (i.favorite) Icons.Filled.Star else Icons.Outlined.StarBorder, if (i.favorite) "Remove from favorites" else "Add to favorites")
+                    }
+                }
+                if (canWrite && targets.isNotEmpty()) {
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) { Icon(Icons.Outlined.MoreVert, "More options") }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                leadingIcon = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
+                                text = { Text("Move to another vault") },
+                                onClick = { menuOpen = false; moving = true },
+                            )
+                        }
                     }
                 }
             }
@@ -140,10 +182,10 @@ fun ItemScreen(ctx: UiCtx, id: String) {
             CardSection(null) {
                 Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 44.dp)
-                    Text(i.name.ifEmpty { "Untitled" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text(i.name.ifEmpty { "Untitled" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).semantics { heading() })
                     if (i.favorite) Icon(Icons.Filled.Star, "Favorite", tint = MaterialTheme.colorScheme.primary)
                 }
-                Row(Modifier.padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                FlowRow(Modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Meta(Icons.Outlined.Folder, i.folder?.takeIf { it.isNotEmpty() } ?: "No folder")
                     Meta(Icons.Outlined.Lock, v.vaultName(entry.vaultId))
                 }
@@ -259,17 +301,93 @@ fun ItemScreen(ctx: UiCtx, id: String) {
             }
 
             CardSection("Item history") {
-                Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val muted = PassAuthTheme.colors.muted
+                val muted = PassAuthTheme.colors.muted
+                Column(Modifier.padding(vertical = 8.dp).semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (i.updatedAt > 0) Text("Last edited ${formatDate(i.updatedAt)}", style = MaterialTheme.typography.bodySmall, color = muted)
                     if (i.createdAt > 0) Text("Created ${formatDate(i.createdAt)}", style = MaterialTheme.typography.bodySmall, color = muted)
                     i.passwordHistory.firstOrNull()?.let {
                         Text("Password changed ${formatDate(it.changedAt)}", style = MaterialTheme.typography.bodySmall, color = muted)
                     }
                 }
+                val previous = PasswordHistory.entries(i.passwordHistory)
+                if (previous.isNotEmpty()) {
+                    HorizontalDivider(color = PassAuthTheme.colors.line)
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Open password history") { ctx.go(Route.History(id)) }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.History, null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.size(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Password history", style = MaterialTheme.typography.bodyLarge)
+                            Text(PasswordHistory.summary(previous.size), style = MaterialTheme.typography.bodySmall, color = muted)
+                        }
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = muted)
+                    }
+                }
             }
         }
     }
+}
+
+/** Choose the vault to move an item to (re-encrypted with that vault's key). */
+@Composable
+private fun MoveDialog(ctx: UiCtx, entry: Entry, from: String, targets: List<VaultInfo>, close: () -> Unit) {
+    var selected by rememberSaveable { mutableStateOf(targets.firstOrNull()?.id.orEmpty()) }
+    var busy by remember { mutableStateOf(false) }
+    val target = targets.firstOrNull { it.id == selected }
+    AlertDialog(
+        onDismissRequest = { if (!busy) close() },
+        title = { Text("Move to another vault") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()).selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Now in $from.", style = MaterialTheme.typography.bodyMedium)
+                targets.forEach { t ->
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                            .selectable(selected = t.id == selected, role = androidx.compose.ui.semantics.Role.RadioButton) { selected = t.id },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = t.id == selected, onClick = null)
+                        Spacer(Modifier.size(10.dp))
+                        Column {
+                            Text(t.name, style = MaterialTheme.typography.bodyLarge)
+                            Text(roleLabel(t.role), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+                        }
+                    }
+                }
+                Text(
+                    "Everyone who can open ${target?.name ?: "the new vault"} will see this item, and people who can only open $from lose access to it.",
+                    style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = !busy && target != null, onClick = {
+                val t = target ?: return@TextButton
+                busy = true
+                ctx.launch {
+                    try {
+                        ctx.repo.moveItem(entry, t.id)
+                        ctx.notify("Moved to ${t.name}.")
+                    } finally {
+                        busy = false
+                        close()
+                    }
+                }
+            }) { Text(if (busy) "Moving…" else "Move") }
+        },
+        dismissButton = { TextButton(enabled = !busy, onClick = close) { Text("Cancel") } },
+    )
+}
+
+private fun roleLabel(r: Role) = when (r) {
+    Role.Owner -> "Your vault"
+    Role.Admin -> "Shared with you · you manage it"
+    Role.Write -> "Shared with you · you can edit"
+    Role.Read -> "Shared with you · view only"
 }
 
 @Composable
@@ -295,6 +413,6 @@ private fun Secret(ctx: UiCtx, label: String, value: String, maxLines: Int = 1) 
         }
         CopyButton(ctx, value, label)
     }) {
-        ValueText(if (show) value else "••••••••", mono = true, maxLines = if (show) Int.MAX_VALUE else maxLines)
+        ValueText(if (show) value else "••••••••", mono = true, maxLines = if (show) Int.MAX_VALUE else maxLines, description = if (show) null else "hidden")
     }
 }

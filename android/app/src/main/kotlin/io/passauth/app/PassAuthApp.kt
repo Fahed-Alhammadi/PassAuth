@@ -6,6 +6,7 @@ import io.passauth.app.credentials.AssetLinksVerifier
 import io.passauth.app.data.ApiClient
 import io.passauth.app.data.ClipboardHelper
 import io.passauth.app.data.IconLoader
+import io.passauth.app.data.LiveSync
 import io.passauth.app.data.LockManager
 import io.passauth.app.data.SecureStore
 import io.passauth.app.data.Status
@@ -29,6 +30,7 @@ class AppGraph(app: Application) {
     val lock = LockManager(repo, scope)
     val clipboard = ClipboardHelper(app, scope) { repo.state.value.settings.clearClipboard }
     val icons = IconLoader(api.http)
+    val live = LiveSync(repo, store, api.http)
 
     /** Digital Asset Links checks for apps (passkeys, WebViews). Debug builds can point it at a local test server. */
     val assetLinks = AssetLinksVerifier(api.http).let { default ->

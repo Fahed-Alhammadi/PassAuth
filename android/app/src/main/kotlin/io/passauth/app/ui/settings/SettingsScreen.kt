@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -18,11 +19,13 @@ import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -43,6 +47,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -115,6 +122,7 @@ private val SECTIONS = listOf(
 /** Settings: a list of categories, each opening its own page (like the extension popup). */
 @Composable
 fun SettingsScreen(ctx: UiCtx, section: String?) {
+    if (section == "export") return ExportScreen(ctx)
     val open = SECTIONS.firstOrNull { it.key == section }
     if (open == null) {
         Scaffold(topBar = { PageBar("Settings", brand = true) { AccountMenu(ctx) } }) { padding ->
@@ -123,7 +131,7 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
                     SECTIONS.forEachIndexed { n, s ->
                         if (n > 0) HorizontalDivider(color = PassAuthTheme.colors.line)
                         Row(
-                            Modifier.fillMaxWidth().clickable { ctx.go(Route.Settings(s.key)) }.padding(vertical = 14.dp),
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = 14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
@@ -160,7 +168,7 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
 private fun UiCtx.update(f: (Settings) -> Settings) = launch { repo.updateSettings(f) }
 
 @Composable
-private fun Muted(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+internal fun Muted(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
 
 @Composable
 private fun ColumnScope.Security(ctx: UiCtx) {
@@ -206,6 +214,29 @@ private fun ColumnScope.Security(ctx: UiCtx) {
         Icon(Icons.Outlined.Lock, null, Modifier.size(18.dp))
         Spacer(Modifier.size(8.dp))
         Text("Lock now")
+    }
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    Text("In the web vault", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+    WebLink(ctx, "Two-step login", "Authenticator app, email codes and recovery codes.", "/settings/two-step")
+    WebLink(ctx, "Change master password", "Also turns the Secret Key on or off.", "/settings/security")
+    Muted("These open your web vault in the browser. Sign in there if it asks.")
+}
+
+/** A shortcut to a page of the account's web vault (path routes). */
+@Composable
+private fun WebLink(ctx: UiCtx, title: String, help: String, path: String) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .clickable(role = Role.Button, onClickLabel = "Open in browser") { ctx.openUrl(ctx.state.server.trimEnd('/') + path) }
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Muted(help)
+        }
+        Icon(Icons.AutoMirrored.Outlined.OpenInNew, null, tint = PassAuthTheme.colors.muted)
     }
 }
 
@@ -312,16 +343,24 @@ private fun ColumnScope.VaultOptions(ctx: UiCtx) {
         Text(if (syncing) "Syncing…" else "Sync vault now")
     }
     Muted("Last sync: ${formatTime(ctx.state.lastSync)}")
-    OutlinedButton(onClick = { ctx.openUrl("${ctx.state.server}/import") }) {
-        Icon(Icons.Outlined.Upload, null, Modifier.size(18.dp))
-        Spacer(Modifier.size(8.dp))
-        Text("Import items")
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings("export")) }.padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(Icons.Outlined.Download, null, tint = MaterialTheme.colorScheme.primary)
+        Column(Modifier.weight(1f)) {
+            Text("Export vault", style = MaterialTheme.typography.bodyLarge)
+            Muted("Save a copy of your items to a file.")
+        }
+        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
     }
-    OutlinedButton(onClick = { ctx.openUrl(ctx.state.server) }) {
-        Icon(Icons.AutoMirrored.Outlined.OpenInNew, null, Modifier.size(18.dp))
-        Spacer(Modifier.size(8.dp))
-        Text("Open web vault")
-    }
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    Text("In the web vault", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+    WebLink(ctx, "Vaults & sharing", "Create vaults and share them with others.", "/settings/vaults")
+    WebLink(ctx, "Import items", "From another password manager or a PassAuth export.", "/import")
+    WebLink(ctx, "Open web vault", "Everything else, in the browser.", "/vault")
 }
 
 @Composable
@@ -360,4 +399,72 @@ private fun ColumnScope.About(ctx: UiCtx) {
         onClick = { ctx.launch { ctx.repo.logout() } },
         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
     ) { Text("Log out") }
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    Text("Delete account", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+    Muted("Permanently delete ${ctx.state.email} from ${hostOf(ctx.state.server)}, with every vault you own and every item in them.")
+    var deleting by remember { mutableStateOf(false) }
+    OutlinedButton(
+        onClick = { deleting = true },
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+    ) {
+        Icon(Icons.Outlined.DeleteForever, null, Modifier.size(18.dp))
+        Spacer(Modifier.size(8.dp))
+        Text("Delete account…")
+    }
+    if (deleting) DeleteAccountDialog(ctx) { deleting = false }
+}
+
+private fun hostOf(server: String) = io.passauth.app.data.UrlMatcher.parse(server)?.host ?: server
+
+/** Google Play's in-app account deletion: warning, master password (server re-authentication), DELETE /api/account. */
+@Composable
+private fun DeleteAccountDialog(ctx: UiCtx, close: () -> Unit) {
+    var password by remember { mutableStateOf("") }
+    var secretKey by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val needsSecretKey = ctx.state.secretKeyRequired && !ctx.state.secretKeyStored
+    fun submit() {
+        if (busy) return
+        if (password.isEmpty()) return run { error = "Enter your master password." }
+        busy = true
+        error = null
+        ctx.scope.launch {
+            try {
+                ctx.repo.deleteAccount(password, secretKey.ifBlank { null })
+                close()
+                ctx.notify("Your account has been deleted.")
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                error = errorMessage(e)
+                busy = false
+            }
+        }
+    }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = { if (!busy) close() },
+        icon = { Icon(Icons.Outlined.Warning, null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text("Delete your account?") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "This permanently deletes ${ctx.state.email} from your PassAuth server, with every vault you own and every item in them. " +
+                        "People you shared those vaults with lose access too. Vaults others shared with you are not deleted.",
+                )
+                Alert("This can't be undone. Export your vault first if you want to keep a copy.", AlertKind.Error)
+                io.passauth.app.ui.components.PasswordField(password, { password = it }, "Master password", onImeAction = ::submit)
+                if (needsSecretKey) {
+                    io.passauth.app.ui.components.TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
+                }
+                io.passauth.app.ui.components.ErrorText(error)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = ::submit, enabled = !busy) {
+                Text(if (busy) "Deleting…" else "Delete account", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(onClick = close, enabled = !busy) { Text("Cancel") } },
+    )
 }
