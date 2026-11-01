@@ -9,6 +9,7 @@ pub mod error;
 pub mod item;
 pub mod kdf;
 pub mod keys;
+pub mod opaque;
 pub mod totp;
 
 pub use error::{Error, Result};

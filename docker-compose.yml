@@ -1,0 +1,29 @@
+# PassAuth — self-hosted, zero-knowledge password manager.
+#
+#   cp .env.example .env        # then edit it
+#   mkdir -p data && sudo chown ${PUID:-1000}:${PGID:-1000} data
+#   docker compose up -d
+#
+# The container never runs as root. It runs as PUID:PGID (default 1000:1000);
+# the ./data folder must be owned by that user.
+
+services:
+  passauth:
+    image: ghcr.io/fahed-alhammadi/passauth:${PASSAUTH_VERSION:-latest}
+    build:
+      context: .
+    container_name: passauth
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: .env
+    ports:
+      - "${PASSAUTH_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

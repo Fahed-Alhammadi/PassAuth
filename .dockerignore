@@ -1,0 +1,15 @@
+**/target
+**/node_modules
+**/dist
+data
+.git
+.github
+.claude
+CLAUDE.md
+.env
+.env.*
+!.env.example
+extension
+mobile
+docs
+*.md

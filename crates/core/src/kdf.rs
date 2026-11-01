@@ -37,6 +37,10 @@ impl KdfParams {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // Only other crates' test builds enable this feature (never release builds).
+        if cfg!(feature = "insecure-test-kdf") {
+            return Ok(());
+        }
         let ok = (MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&self.memory_kib)
             && (MIN_ITERATIONS..=MAX_ITERATIONS).contains(&self.iterations)
             && (1..=MAX_PARALLELISM).contains(&self.parallelism);
@@ -79,24 +83,24 @@ impl SecretKey {
     }
 }
 
-/// Derive the Account Unlock Key. `account_id` binds the Secret Key mix to this
+/// Derive the master keys (AUK + OPAQUE login key). `account_id` binds the Secret Key mix to this
 /// account so the same key material is never reused across accounts.
-pub fn derive_auk(
+pub fn derive_master(
     password: &str,
     params: &KdfParams,
     secret_key: Option<&SecretKey>,
     account_id: &str,
-) -> Result<SymmetricKey> {
+) -> Result<MasterKeys> {
     params.validate()?;
-    derive_auk_unchecked(password, params, secret_key, account_id)
+    derive_master_unchecked(password, params, secret_key, account_id)
 }
 
-pub(crate) fn derive_auk_unchecked(
+pub(crate) fn derive_master_unchecked(
     password: &str,
     params: &KdfParams,
     secret_key: Option<&SecretKey>,
     account_id: &str,
-) -> Result<SymmetricKey> {
+) -> Result<MasterKeys> {
     let salt = crate::item::unb64(&params.salt)?;
     let argon = Argon2::new(
         Algorithm::Argon2id,
@@ -109,10 +113,9 @@ pub(crate) fn derive_auk_unchecked(
         )
         .map_err(|_| Error::Kdf)?,
     );
-    let normalized: String = password.trim_end_matches(['\r', '\n']).to_owned();
     let mut stretched = [0u8; 32];
     argon
-        .hash_password_into(normalized.as_bytes(), &salt, &mut stretched)
+        .hash_password_into(password.as_bytes(), &salt, &mut stretched)
         .map_err(|_| Error::Kdf)?;
 
     if let Some(sk) = secret_key {
@@ -121,9 +124,20 @@ pub(crate) fn derive_auk_unchecked(
             *a ^= b;
         }
     }
-    let auk = hkdf_key(&stretched, account_id.as_bytes(), b"passauth/auk/v1");
+    let salt = account_id.as_bytes();
+    let keys = MasterKeys {
+        auk: hkdf_key(&stretched, salt, b"passauth/auk/v1"),
+        login: hkdf_key(&stretched, salt, b"passauth/opaque-password/v1"),
+    };
     stretched.zeroize();
-    Ok(auk)
+    Ok(keys)
+}
+
+/// Two independent keys from one Argon2id run: `auk` decrypts the Account Key
+/// and never leaves the client; `login` is the OPAQUE password input.
+pub struct MasterKeys {
+    pub auk: SymmetricKey,
+    pub login: SymmetricKey,
 }
 
 #[cfg(test)]
@@ -152,7 +166,7 @@ mod tests {
     #[test]
     fn weak_params_rejected() {
         assert!(matches!(
-            derive_auk("pw", &test_params(), None, "u"),
+            derive_master("pw", &test_params(), None, "u"),
             Err(Error::WeakKdf)
         ));
     }
@@ -161,15 +175,16 @@ mod tests {
     fn secret_key_changes_auk() {
         let p = test_params();
         let sk = SecretKey::generate().unwrap();
-        let a = derive_auk_unchecked("pw", &p, None, "u").unwrap();
-        let b = derive_auk_unchecked("pw", &p, Some(&sk), "u").unwrap();
-        let c = derive_auk_unchecked("pw", &p, None, "other").unwrap();
-        assert_ne!(a.as_bytes(), b.as_bytes());
-        assert_ne!(a.as_bytes(), c.as_bytes());
+        let a = derive_master_unchecked("pw", &p, None, "u").unwrap();
+        let b = derive_master_unchecked("pw", &p, Some(&sk), "u").unwrap();
+        let c = derive_master_unchecked("pw", &p, None, "other").unwrap();
+        assert_ne!(a.auk.as_bytes(), b.auk.as_bytes());
+        assert_ne!(a.auk.as_bytes(), c.auk.as_bytes());
         assert_eq!(
-            a.as_bytes(),
-            derive_auk_unchecked("pw", &p, None, "u")
+            a.auk.as_bytes(),
+            derive_master_unchecked("pw", &p, None, "u")
                 .unwrap()
+                .auk
                 .as_bytes()
         );
     }
