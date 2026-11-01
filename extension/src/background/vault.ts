@@ -293,6 +293,8 @@ export function summarize(e: Entry): ItemSummary {
     name: i.name || "Untitled",
     subtitle: i.login?.username || host || (i.card ? `•••• ${i.card.number.slice(-4)}` : i.notes.split("\n")[0].slice(0, 50)),
     host,
+    url: i.login?.urls.find((u) => u.match !== "regex" && /^https?:\/\//i.test(u.url))?.url ?? (host ? `https://${host}` : ""),
+    folder: i.folder ?? "",
     kind: kindOf(i),
     favorite: i.favorite,
     hasPassword: !!i.login?.password,
@@ -349,6 +351,11 @@ export function editorInfo() {
 
 export function canWrite(entry: Entry) {
   return vaults.find((v) => v.id === entry.vaultId)?.role !== "read";
+}
+
+/** Weak if it would take few guesses (same threshold as the web vault's "easy to guess"). */
+export function weakPassword(password: string) {
+  return !!password && core.estimateBits(password) < 50;
 }
 
 export function totp(secret: string) {

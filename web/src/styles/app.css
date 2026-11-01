@@ -203,6 +203,8 @@ kbd { font-family: var(--mono); font-size: 0.85em; padding: 1px 6px; border: 1px
 .avatar img { width: 62%; height: 62%; object-fit: contain; }
 /* Kept in layout (lazy images that aren't laid out never load), invisible until it has loaded. */
 .avatar { position: relative; }
+/* Website icons are drawn for light backgrounds: give them a light tile in both themes. */
+.avatar.has-img { background: #fff; box-shadow: inset 0 0 0 1px var(--line); }
 .avatar img.pending { position: absolute; opacity: 0; }
 .empty { padding: 48px 24px; text-align: center; color: var(--ink-3); display: flex; flex-direction: column; gap: 12px; align-items: center; }
 

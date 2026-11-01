@@ -311,7 +311,13 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
       const e = vault.getEntry(req.id);
       if (!e) throw new Error("Item not found.");
-      return { item: e.item, vaultName: vault.vaultName(e.vaultId), vaultId: e.vaultId, canWrite: vault.canWrite(e) };
+      return {
+        item: e.item,
+        vaultName: vault.vaultName(e.vaultId),
+        vaultId: e.vaultId,
+        canWrite: vault.canWrite(e),
+        weakPassword: vault.weakPassword(e.item.login?.password ?? ""),
+      };
     }
     case "totp": {
       const secret = vault.getEntry(req.id)?.item.login?.totp;

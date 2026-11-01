@@ -95,24 +95,24 @@ try {
 
   await step("popup layout: tabs fixed, list scrolls", async () => {
     await popup.ev(`location.reload()`); await sleep(500);
-    await popup.waitFor(`document.body.innerText.includes('All items (31)')`, 30000);
+    await popup.waitFor(`[...document.querySelectorAll('.group-title')].some(h => h.textContent === 'All items31')`, 30000);
     await sleep(1500);
     await popup.shot("v2-03-popup-list.png");
-    const before = await popup.ev(`JSON.stringify({tabs: document.querySelector('.pop-tabs').getBoundingClientRect().bottom, body: document.querySelector('.pop-body').scrollHeight > document.querySelector('.pop-body').clientHeight, h: document.querySelector('.pop').getBoundingClientRect().height})`);
-    await popup.ev(`document.querySelector('.pop-body').scrollTop = 99999`); await sleep(200);
-    const after = await popup.ev(`document.querySelector('.pop-tabs').getBoundingClientRect().bottom`);
-    const search = await popup.ev(`document.querySelector('.pop-search').getBoundingClientRect().top - document.querySelector('.pop-body').getBoundingClientRect().top`);
+    const before = await popup.ev(`JSON.stringify({tabs: document.querySelector('.tabbar').getBoundingClientRect().bottom, body: document.querySelector('.pg-body').scrollHeight > document.querySelector('.pg-body').clientHeight, h: document.querySelector('.pop').getBoundingClientRect().height})`);
+    await popup.ev(`document.querySelector('.pg-body').scrollTop = 99999`); await sleep(200);
+    const after = await popup.ev(`document.querySelector('.tabbar').getBoundingClientRect().bottom`);
+    const search = await popup.ev(`document.querySelector('.search-bar').getBoundingClientRect().top - document.querySelector('.pg-body').getBoundingClientRect().top`);
     console.log(`\n    ${before}; tabs bottom after scroll ${after}; search offset ${search}`);
-    const b = JSON.parse(before); if (!b.body || b.tabs > 600 || after !== b.tabs || Math.abs(search) > 1) throw new Error("layout");
+    const b = JSON.parse(before); if (!b.body || b.tabs > 600 || after !== b.tabs || Math.abs(search) > 1) throw new Error("layout " + search);
     await popup.shot("v2-04-popup-scrolled.png");
-    const icon = await popup.ev(`[...document.querySelectorAll('.pop-row')].find(r=>r.innerText.includes('GitHub'))?.querySelector('img')?.naturalWidth ?? -1`);
+    const icon = await popup.ev(`[...document.querySelectorAll('.item-row')].find(r=>r.innerText.includes('GitHub'))?.querySelector('img')?.naturalWidth ?? -1`);
     console.log(`    github icon naturalWidth: ${icon}`);
   });
 
   await step("popup: more menu → copy password note", async () => {
-    await popup.ev(`document.querySelector('.pop-body').scrollTop = 0`);
-    await popup.ev(`[...document.querySelectorAll('.pop-row')].find(r=>r.innerText.includes('GitHub')).querySelector('[aria-label^=\"Options\"]').click()`);
-    await popup.waitFor(`!!document.querySelector('.pop-menu')`);
+    await popup.ev(`document.querySelector('.pg-body').scrollTop = 0`);
+    await popup.ev(`document.querySelector('[aria-label="Copy from GitHub"]').click()`);
+    await popup.waitFor(`!!document.querySelector('.menu')`);
     await popup.shot("v2-05-more-menu.png");
     await popup.click("Copy password");
     await popup.waitFor(`document.querySelector('.pop-note')?.innerText.includes('Password copied. Clipboard clears in 30 seconds')`);
@@ -154,9 +154,9 @@ try {
     await popup.ev(`location.reload()`); await sleep(500);
     await popup.waitFor(`document.body.innerText.includes('All items')`, 30000);
     await popup.ev(`document.querySelector('[aria-label="New item"]').click()`);
-    await popup.waitFor(`!!document.querySelector('.pop-menu')`);
+    await popup.waitFor(`!!document.querySelector('.menu')`);
     await popup.click("Login");
-    await popup.waitFor(`document.body.innerText.includes('New login')`);
+    await popup.waitFor(`document.body.innerText.includes('New login') && !!document.querySelector('.pop-editor form')`);
     await popup.fillLabel("Name", "Popup item"); await popup.fillLabel("Username", "pop@user.test");
     await popup.ev(`document.querySelector('[aria-label="Generate password"]').click()`); await sleep(300);
     const pw = await popup.ev(`document.querySelector('input[autocomplete="new-password"]').value`);
@@ -166,7 +166,8 @@ try {
     await popup.click("Save item");
     await popup.waitFor(`document.querySelector('h2')?.textContent === 'Popup item' && document.body.innerText.includes('Item saved')`);
     await popup.click("Edit");
-    await popup.waitFor(`document.body.innerText.includes('Edit item')`);
+    await popup.waitFor(`document.body.innerText.includes('Edit login') && !!document.querySelector('.pop-editor form')`);
+    await popup.shot("v2-17-edit.png");
     await popup.fillLabel("Username", "edited@user.test");
     await popup.click("Save changes");
     await popup.waitFor(`document.body.innerText.includes('edited@user.test') && document.body.innerText.includes('Changes saved')`);
@@ -174,34 +175,35 @@ try {
     const it = items.data.all.find((i) => i.name === "Popup item");
     const full = await send({ type: "item", id: it.id });
     if (full.data.item.login.password !== pw || full.data.item.login.urls[0].match !== "default") throw new Error("saved item wrong");
-    await popup.ev(`[...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Move to trash').click()`);
-    await popup.waitFor(`document.body.innerText.includes('You can restore it from the web vault')`);
-    await popup.ev(`[...document.querySelectorAll('.pop-card button')].find(b => b.textContent.trim() === 'Move to trash').click()`);
+    await popup.shot("v2-18-item.png");
+    await popup.ev(`document.querySelector('[aria-label="Move to trash"]').click()`);
+    await popup.waitFor(`document.body.innerText.includes('Move this item to the trash?')`);
+    await popup.ev(`[...document.querySelectorAll('.pg-foot button')].find(b => b.textContent.trim() === 'Move to trash').click()`);
     await popup.waitFor(`document.body.innerText.includes('Moved to trash') && document.body.innerText.includes('All items')`);
     const after = await send({ type: "items" });
     if (after.data.all.some((i) => i.name === "Popup item")) throw new Error("item not trashed");
   });
 
-  const openSection = (title) => popup.ev(`[...document.querySelectorAll('.pop-settings-menu .pop-row')].find(r => r.querySelector('.title').textContent === ${JSON.stringify(title)}).click()`);
+  const openSection = (title) => popup.ev(`[...document.querySelectorAll('.settings-row')].find(r => r.textContent.trim() === ${JSON.stringify(title)}).click()`);
   await step("popup sync shows status", async () => {
     await popup.ev(`location.reload()`); await sleep(500);
     await popup.waitFor(`document.body.innerText.includes('All items')`, 30000);
     await popup.click("Settings");
-    await popup.waitFor(`!!document.querySelector('.pop-settings-menu')`);
-    const titles = await popup.ev(`[...document.querySelectorAll('.pop-settings-menu .title')].map(t => t.textContent).join(', ')`);
+    await popup.waitFor(`!!document.querySelector('.settings-list')`);
+    const titles = await popup.ev(`[...document.querySelectorAll('.settings-row')].map(t => t.textContent.trim()).join(', ')`);
     console.log(`\n    categories: ${titles}`);
     await popup.shot("v2-15-settings-menu.png");
-    await openSection("Sync");
+    await openSection("Vault options");
     await popup.waitFor(`document.body.innerText.includes('Sync vault now')`);
     await popup.click("Sync vault now");
     await popup.waitFor(`document.body.innerText.includes('Sync complete') && /Last sync: today at/.test(document.body.innerText)`);
     await popup.shot("v2-08-settings-sync.png");
     await popup.click("Settings");
     await openSection("Autofill");
-    await popup.waitFor(`document.body.innerText.includes('Default URI match detection') && document.body.innerText.includes('Clear clipboard')`);
+    await popup.waitFor(`document.body.innerText.includes('Default URI match detection') && document.body.innerText.includes('Clear clipboard') && document.body.innerText.includes('Make PassAuth your default password manager')`);
     await popup.shot("v2-09-settings-autofill.png");
     await popup.click("Settings");
-    if (await popup.ev(`[...document.querySelectorAll('.pop-settings-menu .title')].some(t => t.textContent === 'Clipboard')`)) throw new Error("Clipboard still a separate category");
+    if (await popup.ev(`[...document.querySelectorAll('.settings-row')].some(t => t.textContent.trim() === 'Clipboard')`)) throw new Error("Clipboard still a separate category");
     await openSection("Appearance");
     const pick = (v) => popup.ev(`(() => { const s = [...document.querySelectorAll('label.field')].find(l => l.querySelector('span')?.textContent === 'Theme').querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(v)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     const bg = () => popup.ev(`getComputedStyle(document.body).backgroundColor`);

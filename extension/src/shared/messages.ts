@@ -37,6 +37,9 @@ export interface ItemSummary {
   subtitle: string;
   /** Host of the first website, for the site icon. */
   host: string;
+  /** Website to open from the list (first http(s) address), or "". */
+  url: string;
+  folder: string;
   kind: ItemKind;
   favorite: boolean;
   hasPassword: boolean;

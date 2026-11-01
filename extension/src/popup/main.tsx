@@ -14,5 +14,6 @@ import { loadTheme } from "./theme";
 chrome.runtime.connect({ name: "popup" });
 
 const passkey = location.hash.match(/^#passkey=(.+)$/)?.[1];
+if (new URLSearchParams(location.search).has("popout")) document.documentElement.classList.add("popout");
 await loadTheme();
 createRoot(document.getElementById("root")!).render(passkey ? <PasskeyConfirm requestId={passkey} /> : <App />);
