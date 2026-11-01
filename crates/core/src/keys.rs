@@ -128,14 +128,23 @@ impl AccountBundle {
     /// Re-wrap the Account Key for a new password and/or Secret Key setting.
     /// Vault data is untouched. The caller must also re-register OPAQUE with
     /// the returned `master.login`.
+    ///
+    /// With `with_secret_key`, `existing_secret_key` is kept when given;
+    /// otherwise a new one is generated and returned in `secret_key` (which
+    /// is `None` whenever the user already has their key).
     pub fn rewrap(
         &self,
         unlocked: &UnlockedAccount,
         new_password: &str,
         with_secret_key: bool,
+        existing_secret_key: Option<&str>,
     ) -> Result<NewAccount> {
         let kdf = KdfParams::new_default()?;
-        let sk = with_secret_key.then(SecretKey::generate).transpose()?;
+        let (sk, generated) = match (with_secret_key, existing_secret_key) {
+            (false, _) => (None, false),
+            (true, Some(s)) => (Some(SecretKey::parse(s)?), false),
+            (true, None) => (Some(SecretKey::generate()?), true),
+        };
         let master = derive(new_password, &kdf, sk.as_ref(), &self.account_id)?;
         let mut bundle = self.clone();
         bundle.kdf = kdf;
@@ -151,7 +160,7 @@ impl AccountBundle {
                 keypair: unlocked.keypair.clone(),
             },
             master,
-            secret_key: sk.map(|k| k.format()),
+            secret_key: sk.filter(|_| generated).map(|k| k.format()),
         })
     }
 }
@@ -203,6 +212,15 @@ pub fn share_vault_key(
     )?))
 }
 
+/// Encrypt vault metadata (name, icon…) under its vault key.
+pub fn encrypt_vault_meta(vault_key: &SymmetricKey, vault_id: &str, json: &[u8]) -> Result<String> {
+    Ok(b64(&vault_key.encrypt(json, &aad("vault-meta", vault_id))?))
+}
+
+pub fn decrypt_vault_meta(vault_key: &SymmetricKey, vault_id: &str, meta: &str) -> Result<Vec<u8>> {
+    vault_key.decrypt(&unb64(meta)?, &aad("vault-meta", vault_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,7 +269,10 @@ mod tests {
     #[test]
     fn rewrap_keeps_account_key() {
         let acct = new(false);
-        let next = acct.bundle.rewrap(&acct.unlocked, "new pw", true).unwrap();
+        let next = acct
+            .bundle
+            .rewrap(&acct.unlocked, "new pw", true, None)
+            .unwrap();
         let sk = next.secret_key.clone().unwrap();
         let m = master(&next.bundle, "new pw", Some(&sk)).unwrap();
         let u = next.bundle.unlock(&m.auk).unwrap();
@@ -259,6 +280,11 @@ mod tests {
             u.account_key.as_bytes(),
             acct.unlocked.account_key.as_bytes()
         );
+        // Changing only the password keeps the existing Secret Key.
+        let again = next.bundle.rewrap(&u, "newer pw", true, Some(&sk)).unwrap();
+        assert!(again.secret_key.is_none());
+        let m = master(&again.bundle, "newer pw", Some(&sk)).unwrap();
+        assert!(again.bundle.unlock(&m.auk).is_ok());
     }
 
     #[test]

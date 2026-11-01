@@ -1,0 +1,47 @@
+/* Settings page: section tabs and a few layout helpers. Tokens come from app.css. */
+
+.settings-head { display: flex; flex-direction: column; gap: 16px; }
+
+.settings-tabs {
+  display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+.settings-tabs::-webkit-scrollbar { display: none; }
+.settings-tabs a {
+  padding: 8px 12px; margin-bottom: -1px; white-space: nowrap; text-decoration: none;
+  color: var(--ink-2); font-weight: 500; border-bottom: 2px solid transparent;
+  border-radius: var(--radius-s) var(--radius-s) 0 0;
+}
+.settings-tabs a:hover { color: var(--ink); background: var(--surface-2); }
+.settings-tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--brass); }
+
+.settings-section { display: flex; flex-direction: column; gap: 20px; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.card-head h2 { font-size: 1.05rem; }
+.card-text { color: var(--ink-2); font-size: 0.92rem; }
+
+.inline-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.inline-form .field { flex: 1; min-width: 200px; }
+
+.fingerprint {
+  font-family: var(--mono); font-variant-ligatures: none; font-size: 1.05rem; letter-spacing: 0.04em;
+  padding: 12px 14px; border-radius: var(--radius-s); background: var(--surface-2); word-break: break-all;
+}
+.fingerprint-s { font-family: var(--mono); font-variant-ligatures: none; font-size: 0.8rem; color: var(--ink-3); word-break: break-all; }
+
+.danger-zone { border-color: var(--danger); }
+.danger-zone h2 { color: var(--danger); }
+
+.totp-setup { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.totp-setup > .stack-s { flex: 1; min-width: 220px; }
+.totp-setup .qr img { display: block; width: 200px; height: 200px; }
+.code-input { max-width: 180px; letter-spacing: 0.12em; }
+
+.table-wrap { overflow-x: auto; }
+.table .actions { text-align: right; white-space: nowrap; }
+
+.vault-manage { border-top: 1px solid var(--line); padding-top: 16px; display: flex; flex-direction: column; gap: 18px; }
+.person { padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface-2); display: flex; flex-direction: column; gap: 10px; }
+
+.recovery-codes { padding: 14px; border-radius: var(--radius-m); background: var(--surface-2); }
+.settings-section .field > label, .modal .field > label { font-size: 0.85rem; font-weight: 500; color: var(--ink-2); }

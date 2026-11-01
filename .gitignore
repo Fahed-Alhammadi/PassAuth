@@ -49,3 +49,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Generated WASM bindings (scripts/build-wasm.sh)
+web/src/wasm/
+extension/src/wasm/

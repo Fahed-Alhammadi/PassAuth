@@ -1,9 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/server"]
+members = ["crates/core", "crates/core-wasm", "crates/server"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "UNLICENSED"
 repository = "https://github.com/Fahed-Alhammadi/PassAuth"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# wasm-bindgen needs the target_features section that `strip` removes.
+[profile.release.package.passauth-core-wasm]
+strip = false
+opt-level = 3

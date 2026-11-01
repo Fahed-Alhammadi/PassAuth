@@ -41,7 +41,7 @@ impl FromRequestParts<AppState> for Admin {
             .as_deref()
             .ok_or(ApiError::NotFound)?;
         let ip = client_ip(state, &parts.headers);
-        if !state.limiter.check(&format!("admin:{ip}"), 20, 60) {
+        if !state.limiter.check(&format!("admin:{ip}"), 120, 60) {
             return Err(ApiError::TooManyRequests);
         }
         let given = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;

@@ -7,15 +7,30 @@
 
 ARG RUST_VERSION=1.99
 
+# ------------------------------------------------- core crypto → WebAssembly
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS wasm
+RUN rustup target add wasm32-unknown-unknown
+WORKDIR /src
+COPY Cargo.lock ./
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)" && \
+    cargo install wasm-bindgen-cli --version "$v" --locked
+COPY Cargo.toml ./
+COPY .cargo ./.cargo
+COPY crates ./crates
+COPY scripts ./scripts
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target,id=passauth-wasm-target \
+    scripts/build-wasm.sh /wasm-out
+
 # ---------------------------------------------------------------- web vault
 FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web
 WORKDIR /web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
-RUN if [ -f package.json ]; then \
-      corepack enable && pnpm install --frozen-lockfile && pnpm build; \
-    else \
-      mkdir -p dist; \
-    fi
+COPY --from=wasm /wasm-out ./src/wasm
+RUN pnpm build
 
 # ------------------------------------------------------------------- server
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
