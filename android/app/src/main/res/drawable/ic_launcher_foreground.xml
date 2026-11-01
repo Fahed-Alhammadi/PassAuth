@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: the PassAuth shield centred in the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.42" android:scaleY="0.42" android:translateX="27.12" android:translateY="23.76">
+        <path android:pathData="M64,5 L111,27 Q117,30 117,39 V82 Q117,114 64,139 Q11,114 11,82 V39 Q11,30 17,27 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear" android:startX="11" android:startY="139" android:endX="117" android:endY="5">
+                    <item android:offset="0" android:color="#FF082052" />
+                    <item android:offset="0.52" android:color="#FF0866ED" />
+                    <item android:offset="1" android:color="#FF23D5F4" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd" android:pathData="M42,30 H70 C95,30 103,45 103,62 C103,82 89,96 66,96 H55 V121 L38,112 V30 Z M55,48 V78 H67 C79,78 84,72 84,63 C84,54 79,48 67,48 Z" />
+        <path android:fillColor="#FF082052" android:pathData="M69,59 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0 Z" />
+        <path android:fillColor="#FF082052" android:pathData="M66.8,62 H71.2 L74,71 H64 Z" />
+    </group>
+</vector>

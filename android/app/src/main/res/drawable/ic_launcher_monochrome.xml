@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed (monochrome) icon: shield with the P cut out. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.42" android:scaleY="0.42" android:translateX="27.12" android:translateY="23.76">
+        <path android:fillColor="#FF000000" android:fillType="evenOdd" android:pathData="M64,5 L111,27 Q117,30 117,39 V82 Q117,114 64,139 Q11,114 11,82 V39 Q11,30 17,27 Z M42,30 H70 C95,30 103,45 103,62 C103,82 89,96 66,96 H55 V121 L38,112 V30 Z M55,48 V78 H67 C79,78 84,72 84,63 C84,54 79,48 67,48 Z" />
+    </group>
+</vector>
