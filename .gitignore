@@ -22,7 +22,7 @@ google-services.json
 GoogleService-Info.plist
 
 # --- Runtime data (vault DB, attachments, logs) ---
-data/
+/data/
 *.sqlite
 *.sqlite3
 *.db
