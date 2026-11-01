@@ -1,0 +1,6 @@
+[bindings.kotlin]
+package_name = "io.passauth.core"
+cdylib_name = "passauth_ffi"
+
+[bindings.swift]
+module_name = "PassAuthCore"

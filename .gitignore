@@ -58,3 +58,14 @@ extension/src/wasm/
 tests/e2e/
 docs/TESTING.md
 docs/store/
+
+# Android: generated core bindings/libraries, build output, local config, signing
+android/core/src/main/jniLibs/
+android/core/src/main/kotlin/io/passauth/core/
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
+*.jks
+*.keystore
+keystore.properties

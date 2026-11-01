@@ -30,6 +30,7 @@ aes = "0.9.3"
 cbc = "0.2.1"
 pbkdf2 = "0.13.0"
 keepass = { version = "0.17.0", features = ["totp"] }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "std", "arithmetic"] }
 
 [dev-dependencies]
 keepass = { version = "0.17.0", features = ["totp", "save_kdbx4"] }
