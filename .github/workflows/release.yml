@@ -75,6 +75,8 @@ jobs:
           node-version: 24
       - name: Build Chrome extension
         run: |
+          # The extension reuses web vault components, which import the web copy of the core.
+          scripts/build-wasm.sh web/src/wasm
           scripts/build-wasm.sh extension/src/wasm
           cd extension
           pnpm install --frozen-lockfile
