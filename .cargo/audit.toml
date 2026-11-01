@@ -1,0 +1,6 @@
+[advisories]
+# RUSTSEC-2026-0387: timing variability in crypto-bigint 0.5 (via opaque-ke ->
+# elliptic-curve 0.13). Only reachable through NIST-curve arithmetic; PassAuth's
+# OPAQUE suite is Ristretto255 (curve25519-dalek), so the vulnerable code is
+# never executed. Remove once opaque-ke ships on elliptic-curve >= 0.14.
+ignore = ["RUSTSEC-2026-0387"]

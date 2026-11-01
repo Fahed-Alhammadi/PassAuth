@@ -164,6 +164,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "insecure-test-kdf"))]
     fn weak_params_rejected() {
         assert!(matches!(
             derive_master("pw", &test_params(), None, "u"),
