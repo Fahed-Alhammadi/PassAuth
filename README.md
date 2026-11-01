@@ -2,6 +2,8 @@
 
 # PassAuth
 
+**Website:** https://fahed-alhammadi.github.io/PassAuth/ · [Privacy policy](https://fahed-alhammadi.github.io/PassAuth/privacy.html) · [Support](https://fahed-alhammadi.github.io/PassAuth/support.html)
+
 PassAuth is a self-hosted password manager. You run the server; your passwords, verification codes, passkeys, cards and notes are encrypted on your own devices before they reach it.
 
 - **Server**: one small container with the web vault built in. SQLite by default, PostgreSQL optional.
@@ -19,7 +21,7 @@ You need a Linux or macOS machine with **Docker** and **Docker Compose**. To use
 
 ### 1. Get the files
 
-Clone the repository, or copy `docker-compose.yml` and `.env.example` into an empty folder:
+Clone the repository, or copy `docker-compose.yml` and `.env.example` into an empty folder. The container image is public at `ghcr.io/fahed-alhammadi/passauth`:
 
 ```bash
 git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
@@ -27,17 +29,7 @@ cd passauth
 cp .env.example .env
 ```
 
-### 2. Sign in to the image registry
-
-The container image is published to GitHub's registry. While the repository is private, Docker needs a token to download it:
-
-1. On GitHub open **Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token** and tick only `read:packages`.
-2. Then run:
-   ```bash
-   echo YOUR_TOKEN | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-   ```
-
-### 3. Edit `.env`
+### 2. Edit `.env`
 
 Open `.env` in a text editor and set at least:
 
@@ -48,7 +40,7 @@ Open `.env` in a text editor and set at least:
 | `PUID` / `PGID` | The user and group the container runs as (default `1000`). The container never runs as root. |
 | `PASSAUTH_PORT` | Port on this machine (default `8080`). |
 
-### 4. Create the data folder
+### 3. Create the data folder
 
 Everything PassAuth stores (the database and cached website icons) goes into `./data`, which must belong to the `PUID:PGID` user:
 
@@ -59,7 +51,7 @@ sudo chown 1000:1000 data        # use your PUID:PGID if you changed them
 
 On macOS you can instead set `PUID` and `PGID` in `.env` to the output of `id -u` and `id -g`, and skip `chown`.
 
-### 5. Create an admin token
+### 4. Create an admin token
 
 The admin page (`/admin`) is where you manage users, send invitations and close sign-ups. It stays off until you set an admin token. Only a **hash** of the token goes into `.env`; you type the token itself on the admin page.
 
@@ -85,7 +77,7 @@ printf '%s\n' 'YOUR-TOKEN' | docker compose run --rm -T passauth hash-admin-toke
 
 To turn the admin page off again, remove `ADMIN_TOKEN` from `.env` and run `docker compose up -d`.
 
-### 6. Email (optional, recommended)
+### 5. Email (optional, recommended)
 
 With email set up, PassAuth sends sign-up verification, new-device alerts, two-step codes by email and invitations. Fill in the `SMTP_*` settings in `.env`:
 
@@ -100,7 +92,7 @@ SMTP_FROM=passauth@example.com
 
 Check it from the admin page with **Send test email**.
 
-### 7. Start PassAuth
+### 6. Start PassAuth
 
 ```bash
 docker compose up -d
@@ -156,14 +148,14 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 | `PASSAUTH_PORT` | `8080` | Port on the host. |
 | `PUID` / `PGID` | `1000` | User and group the container runs as. |
 | `DATABASE_URL` | SQLite in `/data` | `postgres://user:pass@host:5432/db` to use PostgreSQL. |
-| `ADMIN_TOKEN` | off | Hash of the admin token (see step 5). |
+| `ADMIN_TOKEN` | off | Hash of the admin token (see step 4). |
 | `SIGNUPS_ALLOWED` | `true` | Starting value for open sign-ups; the admin page can change it. |
 | `SIGNUPS_DOMAINS_WHITELIST` | any | Only these email domains may sign up, e.g. `example.com,example.org`. |
 | `SIGNUPS_VERIFY` | on when email is set up | Require email verification before the first sign-in. |
 | `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |
 | `ICON_SERVICE` | `internal` | `off` stops the server fetching website icons. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / text | Logging detail; `json` for structured logs. |
-| `SMTP_*` | off | Email delivery (see step 6). |
+| `SMTP_*` | off | Email delivery (see step 5). |
 
 ---
 
