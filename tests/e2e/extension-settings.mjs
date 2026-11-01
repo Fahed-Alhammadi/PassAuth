@@ -217,6 +217,10 @@ try {
     console.log(`\n    light ${light}; dark ${dark}; after reload ${kept}`);
     if (light[0] !== "light" || dark[0] !== "dark" || light[1] === dark[1] || kept !== "dark") throw new Error("theme");
     await send({ type: "settings", patch: { theme: "system" } });
+    await popup.click("Settings");
+    await openSection("About");
+    await popup.waitFor(`document.body.innerText.includes('© Fahed Alhammadi') && /Version \\d+\\.\\d+\\.\\d+/.test(document.body.innerText)`);
+    await popup.shot("v2-19-about.png");
   });
 
   await step("timeout: Immediately + Lock, then Log out", async () => {

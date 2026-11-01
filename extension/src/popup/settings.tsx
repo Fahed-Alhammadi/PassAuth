@@ -1,5 +1,6 @@
 /** Settings tab: a list of categories, each opening its own page. */
 import { useEffect, useState, type ReactNode } from "react";
+import { LogoMark } from "@web/components/Logo";
 import { Icon, type IconName } from "@web/components/ui";
 import { send, type PopupState, type Settings, type VaultTimeout } from "../shared/messages";
 import { msg, seconds, type Ctx } from "./ctx";
@@ -333,9 +334,18 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "info",
       body: (
         <>
+        <div className="about-brand">
+          <LogoMark size={64} />
+          <span className="wordmark">
+            <span>
+              Pass<span className="wm-auth">Auth</span>
+            </span>
+          </span>
+          <span className="small muted">Version {chrome.runtime.getManifest().version}</span>
+          <span className="small muted">© Fahed Alhammadi</span>
+        </div>
         <Field label="Signed in as">{state.email}</Field>
         <Field label="Server">{state.server}</Field>
-        <Field label="Extension version">{chrome.runtime.getManifest().version}</Field>
         <p className="small muted">To use another PassAuth server, log out and choose "Change server" on the sign-in screen.</p>
         <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(ctx.reload)}>
           Log out
