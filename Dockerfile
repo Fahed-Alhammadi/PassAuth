@@ -76,7 +76,7 @@ LABEL org.opencontainers.image.title="PassAuth" \
       org.opencontainers.image.description="Self-hosted, zero-knowledge password manager" \
       org.opencontainers.image.source="https://github.com/Fahed-Alhammadi/PassAuth" \
       org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.licenses="UNLICENSED"
+      org.opencontainers.image.licenses="MIT"
 
 COPY --from=builder --chown=1000:1000 /rootfs/ /
 COPY --from=builder /passauth-server /usr/local/bin/passauth-server

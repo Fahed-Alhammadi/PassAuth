@@ -5,7 +5,7 @@ members = ["crates/core", "crates/core-wasm", "crates/server"]
 [workspace.package]
 version = "0.3.2"
 edition = "2024"
-license = "UNLICENSED"
+license = "MIT"
 repository = "https://github.com/Fahed-Alhammadi/PassAuth"
 
 [profile.release]

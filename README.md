@@ -212,4 +212,12 @@ GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.3.2`, moves `:lates
 
 ---
 
-© Fahed Alhammadi
+## License
+
+PassAuth is released under the [MIT License](LICENSE). © 2026 Fahed Alhammadi
+
+Third-party components keep their own licenses:
+
+- The passphrase word list is the [EFF Large Wordlist](https://www.eff.org/dice) by the Electronic Frontier Foundation, licensed under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/).
+- The web vault and extension use the [IBM Plex](https://github.com/IBM/plex) fonts, licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
+- Rust and JavaScript dependencies are under their own licenses (mostly MIT or Apache-2.0); see `Cargo.lock` and the `pnpm-lock.yaml` files.
