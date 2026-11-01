@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
 import { ErrorText, Icon, PasswordInput } from "@web/components/ui";
 import { send, type PopupState, type TwoFactorChallenge } from "../shared/messages";
 import { msg, seconds, type CopyRequest, type Ctx, type Route } from "./ctx";
 import { GeneratorPage } from "./generator";
 import { SettingsPage } from "./settings";
+import { OtherAccounts } from "./shell";
 import { EditPage, ItemPage, VaultList, type ListFilter } from "./vault";
 
 /** Copies through the background, which also clears the clipboard after the user's delay (even once the popup closes). */
@@ -17,10 +18,18 @@ export function App() {
   useEffect(() => void reload(), [reload]);
 
   if (!state) return <div className="pop-auth">{error ? <ErrorText error={error} /> : null}</div>;
-  if (state.status === "setup") return <Setup onDone={reload} />;
-  if (state.status === "logged-out") return <Login state={state} onDone={reload} />;
-  if (state.status === "locked") return <Unlock state={state} onDone={reload} />;
-  return <Main state={state} onChange={reload} />;
+  // Keyed by account so switching accounts starts each screen fresh.
+  const others = <OtherAccounts state={state} onChange={reload} />;
+  const screen = (body: ReactNode) => (
+    <div key={state.activeId}>
+      {body}
+      {others}
+    </div>
+  );
+  if (state.status === "setup") return screen(<Setup onDone={reload} />);
+  if (state.status === "logged-out") return screen(<Login state={state} onDone={reload} />);
+  if (state.status === "locked") return screen(<Unlock state={state} onDone={reload} />);
+  return <Main key={state.activeId} state={state} onChange={reload} />;
 }
 
 // ------------------------------------------------------------------ setup
@@ -220,7 +229,7 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
         {busy ? "Unlocking…" : "Unlock"}
       </button>
       <button type="button" className="btn btn-ghost" onClick={() => send({ type: "logout" }).then(onDone)}>
-        Sign out
+        Log out
       </button>
     </form>
   );

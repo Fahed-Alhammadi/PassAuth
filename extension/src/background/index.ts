@@ -11,10 +11,9 @@ import * as vault from "./vault";
 
 /** Run the user's timeout action (lock, or log out which also forgets the vault data). */
 async function timeout() {
-  const { settings, tokens } = await local.get();
-  if (!tokens) return;
-  if (settings.timeoutAction === "logout") await vault.logout();
-  else await vault.lock();
+  const { settings } = await local.get();
+  if (settings.timeoutAction === "logout") await vault.logoutAll();
+  else await vault.lockAll();
 }
 
 /** Activity in PassAuth restarts the inactivity timer. */
@@ -298,6 +297,12 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return vault.unlock(req.password, req.secretKey);
     case "lock":
       return vault.lock();
+    case "account:add":
+      return vault.addAccount();
+    case "account:switch":
+      return vault.switchAccount(req.id);
+    case "account:cancelAdd":
+      return vault.cancelAddAccount();
     case "logout":
       return vault.logout();
     case "sync":

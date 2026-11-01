@@ -2,7 +2,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
 import { Icon } from "@web/components/ui";
-import { send, type PopupState } from "../shared/messages";
+import { send, type PopupState, type Status } from "../shared/messages";
 
 export function Page({
   title,
@@ -110,19 +110,47 @@ export function PopOut() {
   );
 }
 
-/** Account avatar: who is signed in, plus lock / web vault / log out. */
+/** Initials from the profile name ("Fahed Alhammadi" → "FA"), else from the email. */
+export function initials(name: string, email: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length > 1) return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  const parts = (email.split("@")[0] ?? "").split(/[._-]+/).filter(Boolean);
+  return ((parts.length > 1 ? parts[0][0] + parts[1][0] : parts[0]?.slice(0, 2)) || "?").toUpperCase();
+}
+
+const STATUS_LABEL: Record<Status, string> = { unlocked: "Unlocked", locked: "Locked", "logged-out": "Logged out", setup: "" };
+
+/** Account menu: who is signed in, other accounts to switch to, add account, lock, web vault, log out. */
 export function Account({ state, onChange }: { state: PopupState; onChange: () => void }) {
-  const local = state.email.split("@")[0] ?? "";
-  const parts = local.split(/[._-]+/).filter(Boolean);
-  const initials = ((parts.length > 1 ? parts[0][0] + parts[1][0] : local.slice(0, 2)) || "?").toUpperCase();
+  const others = state.accounts.filter((a) => a.id !== state.activeId);
   return (
-    <Menu label="Account" className="avatar-btn" trigger={<span aria-hidden="true">{initials}</span>}>
+    <Menu label="Accounts" className="avatar-btn" trigger={<span aria-hidden="true">{initials(state.name, state.email)}</span>}>
       <div className="menu-head">
-        <span className="title">{state.email}</span>
+        <span className="title">{state.name || state.email}</span>
+        {state.name && <span className="sub">{state.email}</span>}
         <span className="sub">{new URL(state.server).host}</span>
       </div>
+      {others.map((a) => (
+        <button key={a.id} role="menuitem" className="account-item" onClick={() => send({ type: "account:switch", id: a.id }).then(onChange)}>
+          <span className="avatar-sm" aria-hidden="true">
+            {initials(a.name, a.email)}
+          </span>
+          <span className="grow">
+            <span className="title">{a.name || a.email}</span>
+            <span className="sub">{new URL(a.server).host}</span>
+          </span>
+          <span className="state">{STATUS_LABEL[a.status]}</span>
+        </button>
+      ))}
+      {state.accounts.length < 5 && (
+        <MenuItem icon="plus" onClick={() => send({ type: "account:add" }).then(onChange)}>
+          Add account
+        </MenuItem>
+      )}
+      <hr />
       <MenuItem icon="lock" onClick={() => send({ type: "lock" }).then(onChange)}>
-        Lock now
+        Lock
       </MenuItem>
       <MenuItem icon="external" onClick={() => chrome.tabs.create({ url: state.server })}>
         Open web vault
@@ -131,6 +159,38 @@ export function Account({ state, onChange }: { state: PopupState; onChange: () =
         Log out
       </MenuItem>
     </Menu>
+  );
+}
+
+/**
+ * On the setup, sign-in and unlock screens: switch to another account, or
+ * cancel adding one.
+ */
+export function OtherAccounts({ state, onChange }: { state: PopupState; onChange: () => void }) {
+  const others = state.accounts.filter((a) => a.id !== state.activeId);
+  if (!others.length) return null;
+  const adding = state.status === "setup" || (state.status === "logged-out" && !state.accounts.some((a) => a.id === state.activeId));
+  return (
+    <div className="other-accounts">
+      <span className="small muted">{adding ? "Or go back to" : "Switch account"}</span>
+      {others.map((a) => (
+        <button
+          key={a.id}
+          type="button"
+          className="account-item"
+          onClick={() => send(adding ? { type: "account:cancelAdd" } : { type: "account:switch", id: a.id }).then(() => (adding ? send({ type: "account:switch", id: a.id }) : null)).then(onChange)}
+        >
+          <span className="avatar-sm" aria-hidden="true">
+            {initials(a.name, a.email)}
+          </span>
+          <span className="grow">
+            <span className="title">{a.name || a.email}</span>
+            <span className="sub">{new URL(a.server).host}</span>
+          </span>
+          <span className="state">{STATUS_LABEL[a.status]}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 

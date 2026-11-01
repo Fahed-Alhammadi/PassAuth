@@ -6,9 +6,9 @@
 import init, * as core from "../wasm/passauth_core";
 import type { EncryptedItem, Item, Role } from "@web/lib/types";
 import { kindOf, siteHost } from "@web/lib/types";
-import { api, setSessionLostHandler } from "./api";
-import { local, session, type SessionData } from "./storage";
-import type { ItemSummary, PopupState, TwoFactorChallenge } from "../shared/messages";
+import { api, logoutRemote, setSessionLostHandler } from "./api";
+import { local, session, type AccountData, type SessionData } from "./storage";
+import type { AccountSummary, ItemSummary, PopupState, Status, TwoFactorChallenge } from "../shared/messages";
 
 export interface Entry {
   id: string;
@@ -43,18 +43,34 @@ export function initWasm() {
   return ready;
 }
 
-setSessionLostHandler(() => {
-  void clearUnlocked();
+setSessionLostHandler(async (id) => {
+  if (id === (await local.get()).activeId) await clearUnlocked();
+  else await session.clear(id);
 });
 
 // ------------------------------------------------------------------ state
+
+async function statusOf(a: AccountData | undefined, id: string, neverTimeout: boolean): Promise<Status> {
+  if (!a?.server) return "setup";
+  if (!a.tokens) return "logged-out";
+  return (await session.get(id)) || (neverTimeout && a.persistedKeys) ? "unlocked" : "locked";
+}
 
 export async function state(): Promise<PopupState> {
   const l = await local.get();
   const s = await session.get();
   const status = !l.server ? "setup" : !l.tokens ? "logged-out" : s || account ? "unlocked" : "locked";
+  const never = l.settings.vaultTimeout === "never";
+  const accounts: AccountSummary[] = [];
+  for (const [id, a] of Object.entries(l.accounts)) {
+    if (!a.server || !a.email) continue;
+    accounts.push({ id, email: a.email, name: a.name, server: a.server, status: id === l.activeId ? status : await statusOf(a, id, never) });
+  }
   return {
     status,
+    activeId: l.activeId,
+    accounts,
+    name: l.name,
     server: l.server,
     email: l.email,
     secretKeyRequired: !!(bundle ?? s?.bundle as any)?.secret_key_enabled,
@@ -105,13 +121,13 @@ export async function login(email: string, password: string, secretKey?: string)
   const key = email.trim().toLowerCase();
   const result = await api("/auth/login/finish", {
     auth: false,
-    body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), remember_token: l.rememberTokens[key] },
+    body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), remember_token: l.rememberTokens[`${l.server}|${key}`] },
   });
   if (sk && pre.secret_key_required) await local.set({ secretKeys: { ...l.secretKeys, [key]: sk } });
   if (result.two_factor_required) {
     pendingMaster?.free();
     pendingMaster = master;
-    pendingEmail = key;
+    pendingEmail = `${l.server}|${key}`;
     return { twoFactor: { token: result.two_factor_token, providers: result.providers } };
   }
   await finishLogin(master, result);
@@ -212,6 +228,7 @@ export async function lock() {
   await clearUnlocked();
 }
 
+/** Log out of the active account. With other accounts present it's removed from the list and the next one becomes active. */
 export async function logout() {
   try {
     await api("/auth/logout", { method: "POST" });
@@ -220,7 +237,62 @@ export async function logout() {
   }
   await clearUnlocked();
   bundle = null;
-  await local.set({ tokens: null });
+  const { activeId, accounts } = await local.get();
+  if (Object.values(accounts).filter((a) => a.server).length > 1) await local.removeAccount(activeId);
+  else await local.set({ tokens: null });
+}
+
+/** Forget the active account's keys in memory only (its session stays, so switching back is instant). */
+function unload() {
+  vaults.forEach((v) => v.key.free());
+  vaults = [];
+  entries = [];
+  revision = 0;
+  account?.free();
+  account = null;
+  bundle = null;
+  pendingMaster?.free();
+  pendingMaster = null;
+}
+
+export async function switchAccount(id: string) {
+  const { accounts, activeId } = await local.get();
+  if (!accounts[id]?.server) throw new Error("That account isn't on this device any more.");
+  if (id === activeId) return;
+  unload();
+  await local.setActive(id);
+}
+
+export async function addAccount() {
+  unload();
+  await local.addAccount();
+}
+
+/** Leave an unfinished "add account" (no sign-in yet) and go back to a signed-in account. */
+export async function cancelAddAccount() {
+  const { activeId, tokens, accounts } = await local.get();
+  if (tokens || !Object.values(accounts).some((a) => a.tokens)) return;
+  unload();
+  await local.removeAccount(activeId);
+}
+
+/** Vault timeout: lock every account. */
+export async function lockAll() {
+  const { accounts } = await local.get();
+  unload();
+  for (const id of Object.keys(accounts)) await session.clear(id);
+  for (const [id, a] of Object.entries(accounts)) if (a.persistedKeys) await local.set({ persistedKeys: null }, id);
+}
+
+/** Vault timeout with the "log out" action: sign every account out (they stay listed). */
+export async function logoutAll() {
+  const { accounts } = await local.get();
+  await lockAll();
+  for (const [id, a] of Object.entries(accounts)) {
+    if (!a.tokens) continue;
+    await logoutRemote(a.server, a.tokens);
+    await local.set({ tokens: null }, id);
+  }
 }
 
 // -------------------------------------------------------------------- sync
@@ -261,7 +333,7 @@ export async function sync() {
   vaults = next;
   entries = list;
   revision = data.revision;
-  await local.set({ lastSync: Date.now() });
+  await local.set({ lastSync: Date.now(), name: data.user?.name ?? "" });
 }
 
 /** Re-sync if the server has newer data (cheap revision check). */

@@ -7,16 +7,20 @@ export class ApiError extends Error {
   }
 }
 
-let refreshing: Promise<boolean> | null = null;
-export let onSessionLost: () => void = () => {};
-export function setSessionLostHandler(fn: () => void) {
+// One refresh at a time per account.
+const refreshing = new Map<string, Promise<boolean>>();
+export let onSessionLost: (accountId: string) => void = () => {};
+export function setSessionLostHandler(fn: (accountId: string) => void) {
   onSessionLost = fn;
 }
 
-async function refresh(): Promise<boolean> {
-  refreshing ??= (async () => {
-    const { server, tokens } = await local.get();
-    if (!tokens) return false;
+async function refresh(accountId: string): Promise<boolean> {
+  const running = refreshing.get(accountId);
+  if (running) return running;
+  const p = (async () => {
+    const { accounts } = await local.get();
+    const { server, tokens } = accounts[accountId] ?? {};
+    if (!server || !tokens) return false;
     try {
       const r = await fetch(`${server}/api/auth/refresh`, {
         method: "POST",
@@ -25,23 +29,26 @@ async function refresh(): Promise<boolean> {
       });
       if (!r.ok) return false;
       const j = await r.json();
-      await local.set({ tokens: { access: j.access_token, refresh: j.refresh_token } });
+      await local.set({ tokens: { access: j.access_token, refresh: j.refresh_token } }, accountId);
       return true;
     } catch {
       return false;
     } finally {
-      refreshing = null;
+      refreshing.delete(accountId);
     }
   })();
-  return refreshing;
+  refreshing.set(accountId, p);
+  return p;
 }
 
 type Options = { method?: string; body?: unknown; auth?: boolean; headers?: Record<string, string> };
 
 export async function api<T = any>(path: string, opts: Options = {}): Promise<T> {
   const { method = opts.body === undefined ? "GET" : "POST", body, auth = true, headers = {} } = opts;
+  // Pin the account for this request, so switching accounts mid-request can't mix them up.
+  const { activeId } = await local.get();
   const send = async () => {
-    const { server, tokens } = await local.get();
+    const { server, tokens } = (await local.get()).accounts[activeId] ?? { server: "", tokens: null };
     if (!server) throw new Error("Set your PassAuth server address first.");
     return fetch(`${server}/api${path}`, {
       method,
@@ -61,10 +68,10 @@ export async function api<T = any>(path: string, opts: Options = {}): Promise<T>
     throw new Error("Can't reach your PassAuth server. Check the server address and your connection.");
   }
   if (res.status === 401 && auth) {
-    if (await refresh()) res = await send();
+    if (await refresh(activeId)) res = await send();
     else {
-      await local.set({ tokens: null });
-      onSessionLost();
+      await local.set({ tokens: null }, activeId);
+      onSessionLost(activeId);
     }
   }
   const text = await res.text();
@@ -76,4 +83,10 @@ export async function api<T = any>(path: string, opts: Options = {}): Promise<T>
   }
   if (!res.ok) throw new ApiError(res.status, json?.error ?? "error", json?.message ?? `Request failed (${res.status})`);
   return json as T;
+}
+
+/** Best-effort sign-out of an account that isn't active (its own server and tokens). */
+export async function logoutRemote(server: string, tokens: { access: string } | null) {
+  if (!server || !tokens) return;
+  await fetch(`${server}/api/auth/logout`, { method: "POST", headers: { authorization: `Bearer ${tokens.access}` } }).catch(() => {});
 }

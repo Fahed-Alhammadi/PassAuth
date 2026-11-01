@@ -20,8 +20,21 @@ export interface Settings {
   theme: "system" | "light" | "dark";
 }
 
+export interface AccountSummary {
+  id: string;
+  email: string;
+  name: string;
+  server: string;
+  status: Status;
+}
+
 export interface PopupState {
   status: Status;
+  activeId: string;
+  /** Signed-in (or signed-out but remembered) accounts on this device. */
+  accounts: AccountSummary[];
+  /** Profile name of the active account ("" if not set). */
+  name: string;
   server: string;
   email: string;
   secretKeyRequired: boolean;
@@ -74,6 +87,9 @@ export type Request =
   | { type: "copy"; text: string }
   | { type: "copyField"; id: string; field: "username" | "password" | "totp" }
   | { type: "openPopup" }
+  | { type: "account:add" }
+  | { type: "account:switch"; id: string }
+  | { type: "account:cancelAdd" }
   // inline autofill menu (extension frame) → background
   | { type: "inline:items"; nonce: string }
   | { type: "inline:fill"; nonce: string; id: string }

@@ -14,7 +14,7 @@ docker compose logs -f passauth
 On macOS with Colima, `./data` belongs to your Mac user, not uid 1000. Either set `PUID=$(id -u)` and `PGID=$(id -g)` in `.env`, or run `sudo chown 1000:1000 data`. The server refuses to start, with a clear message, if it can't write to `/data`.
 
 ### Option B: use a published image
-Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.3.0` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
+Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.3.1` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
 
 Open http://localhost:8080 and create an account.
 
@@ -45,6 +45,7 @@ cd extension && pnpm install && pnpm build
 ### Extension
 - [ ] Sign in (with 2FA if enabled). Logins for the current site appear under "Autofill suggestions for <site>".
 - [ ] Popup layout: each page has a title bar (Vault / Generator / Settings, with **New**, open-in-window and your account initials menu: lock, web vault, log out). The vault search has a filter button (type, folder). An item opens a "View" page with cards (credentials, autofill options, custom fields, notes, item history) and a footer with **Edit** and the trash button.
+- [ ] Accounts: the round button shows your name's initials (from the web vault profile name). Its menu lists other accounts with their status, **Add account** (up to 5, any server), Lock and Log out. Switching keeps each account locked or unlocked on its own; the unlock and sign-in screens offer "Switch account". Autofill and save prompts use the active account. The vault timeout locks (or logs out) all accounts.
 - [ ] Settings → Autofill → **Make PassAuth your default password manager**: Chrome asks for the "privacy" permission, then its own password saving and address/card autofill are off (check chrome://password-manager/settings). Turning it off gives them back to Chrome.
 - [ ] **New** in the popup header creates a login, note, card, identity or SSH key (a new login is pre-filled with the current website). An item's page has **Edit** and **Move to trash**.
 - [ ] Settings shows categories (Account security, Autofill, Notifications, Vault options, Appearance, About) with their current values; each opens its own page.
@@ -69,6 +70,6 @@ Set the `SMTP_*` variables in `.env` and restart. Check: the verification email 
 ## Release
 ```bash
 # bump version in Cargo.toml (workspace.package.version), commit, then:
-git tag v0.3.0 && git push origin v0.3.0
+git tag v0.3.1 && git push origin v0.3.1
 ```
-GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.3.0`, `:0.3` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.3.0.zip` attached.
+GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.3.1`, `:0.3` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.3.1.zip` attached.

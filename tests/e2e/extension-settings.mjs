@@ -223,6 +223,52 @@ try {
     await popup.shot("v2-19-about.png");
   });
 
+  await step("multiple accounts: add, initials from name, switch, cancel", async () => {
+    const EMAIL2 = `second${Date.now()}@example.com`;
+    const w = await page(`${SERVER}/register`);
+    await w.waitFor(`document.body.innerText.includes('Create your PassAuth account')`);
+    await w.fillLabel("Email", EMAIL2); await w.fillLabel("Your name", "Fahed Alhammadi");
+    await w.fillLabel("Master password", PW); await w.fillLabel("Confirm master password", PW);
+    await w.click("Create account");
+    await w.waitFor(`document.body.innerText.includes('Your vault is ready')`, 60000);
+    await cmd("Target.closeTarget", { targetId: w.targetId });
+
+    await popup.ev(`location.reload()`); await sleep(600);
+    await popup.waitFor(`!!document.querySelector('.avatar-btn')`, 30000);
+    const first = await popup.ev(`document.querySelector('.avatar-btn').textContent`);
+    await popup.ev(`document.querySelector('.avatar-btn').click()`);
+    await popup.click("Add account");
+    await popup.waitFor(`document.body.innerText.includes('Connect to your PassAuth server') && document.body.innerText.includes('Or go back to')`);
+    await popup.fillLabel("Server address", SERVER); await popup.click("Connect");
+    await popup.waitFor(`document.body.innerText.includes('Sign in to PassAuth')`);
+    await popup.fillLabel("Email", EMAIL2); await popup.fillLabel("Master password", PW); await popup.click("Sign in");
+    await popup.waitFor(`document.querySelector('.avatar-btn')?.textContent === 'FA'`, 60000);
+    let st = (await send({ type: "state" })).data;
+    if (st.accounts.length !== 2 || st.email !== EMAIL2) throw new Error("second account not active: " + JSON.stringify(st.accounts));
+    await popup.ev(`document.querySelector('.avatar-btn').click()`);
+    await popup.waitFor(`document.querySelectorAll('.menu .account-item').length === 1`);
+    await popup.shot("v2-20-accounts-menu.png");
+    // Switch back to the first account: still unlocked, its items are there.
+    await popup.ev(`document.querySelector('.menu .account-item').click()`);
+    await popup.waitFor(`document.querySelector('.avatar-btn')?.textContent === ${JSON.stringify(first)} && document.body.innerText.includes('Example site')`, 30000);
+    // Lock affects only the active account.
+    await send({ type: "lock" });
+    st = (await send({ type: "state" })).data;
+    const second = st.accounts.find((a) => a.email === EMAIL2);
+    if (st.status !== "locked" || second.status !== "unlocked") throw new Error("lock should be per account: " + JSON.stringify(st.accounts));
+    await popup.ev(`location.reload()`); await sleep(600);
+    await popup.waitFor(`document.body.innerText.includes('Unlock PassAuth') && document.body.innerText.includes('Switch account')`);
+    await popup.shot("v2-21-unlock-switch.png");
+    await send({ type: "unlock", password: PW });
+    // Adding then cancelling returns to the account we came from.
+    await send({ type: "account:add" });
+    await send({ type: "account:cancelAdd" });
+    st = (await send({ type: "state" })).data;
+    if (st.status !== "unlocked" || st.accounts.length !== 2) throw new Error("cancel add: " + JSON.stringify(st));
+    await popup.ev(`location.reload()`); await sleep(600);
+    await popup.waitFor(`document.body.innerText.includes('All items')`, 30000);
+  });
+
   await step("timeout: Immediately + Lock, then Log out", async () => {
     await send({ type: "settings", patch: { vaultTimeout: "immediately", timeoutAction: "lock" } });
     let p2 = await page(`chrome-extension://${extId}/popup.html`); await sleep(800);
@@ -239,7 +285,7 @@ try {
 
   await step("timeout: Never survives a lost session", async () => {
     await send({ type: "settings", patch: { vaultTimeout: "never" } });
-    const has = await popup.ev(`chrome.storage.local.get('persistedKeys').then(v => !!v.persistedKeys)`);
+    const has = await popup.ev(`chrome.storage.local.get(['accounts', 'active']).then(v => !!v.accounts[v.active].persistedKeys)`);
     if (!has) throw new Error("keys not persisted");
     const restart = async () => {
       await popup.ev(`chrome.storage.session.clear()`);
@@ -252,7 +298,7 @@ try {
     if (s !== "unlocked") throw new Error("not unlocked after worker restart: " + s);
     console.log(`\n    never: ${s}`);
     await send({ type: "settings", patch: { vaultTimeout: 15 } });
-    const gone = await popup.ev(`chrome.storage.local.get('persistedKeys').then(v => !v.persistedKeys)`);
+    const gone = await popup.ev(`chrome.storage.local.get(['accounts', 'active']).then(v => !v.accounts[v.active].persistedKeys)`);
     if (!gone) throw new Error("persisted keys not removed");
     const s15 = await restart();
     console.log(`    15 minutes: ${s15}`);

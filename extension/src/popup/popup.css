@@ -33,6 +33,16 @@ html.popout .pop { height: 100vh; }
 .menu-head { display: grid; padding: 8px 10px 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
 .menu-head .title { font-weight: 600; font-size: 0.9rem; overflow-wrap: anywhere; }
 .menu-head .sub { font-size: 0.8rem; color: var(--ink-3); }
+.menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.account-item .grow { min-width: 0; display: grid; }
+.account-item .title { font-size: 0.88rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-item .sub { font-size: 0.76rem; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-item .state { flex: none; font-size: 0.74rem; color: var(--ink-3); }
+.avatar-sm { flex: none; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); font-size: 0.68rem; font-weight: 600; }
+.other-accounts { display: grid; gap: 6px; padding: 0 18px 20px; }
+.other-accounts .account-item { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+.other-accounts .account-item:hover { background: var(--surface-2); }
+.other-accounts .account-item:focus-visible { outline: 2px solid var(--focus); }
 
 /* -------------------------------------------------------------- search */
 .search-bar { display: flex; gap: 8px; align-items: center; position: sticky; top: -14px; z-index: 5; margin: -14px -14px 0; padding: 14px 14px 4px; background: var(--paper); }
