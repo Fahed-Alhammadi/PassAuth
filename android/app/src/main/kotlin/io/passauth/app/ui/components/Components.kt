@@ -280,7 +280,7 @@ fun CardSection(title: String?, modifier: Modifier = Modifier, content: @Composa
     Column(modifier.fillMaxWidth()) {
         if (title != null) {
             Text(
-                title.uppercase(),
+                title,
                 style = MaterialTheme.typography.labelMedium,
                 color = PassAuthTheme.colors.muted,
                 modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),

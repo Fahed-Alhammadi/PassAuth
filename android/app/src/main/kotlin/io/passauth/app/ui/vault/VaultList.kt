@@ -225,7 +225,7 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
 private fun LazyListScope.section(ctx: UiCtx, title: String, items: List<ItemSummary>, empty: (@Composable () -> Unit)? = null) {
     item(key = "h:$title") {
         Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp, start = 4.dp, end = 4.dp)) {
-            Text(title.uppercase(), style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted, modifier = Modifier.weight(1f))
+            Text(title, style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted, modifier = Modifier.weight(1f))
             Text("${items.size}", style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
         }
     }

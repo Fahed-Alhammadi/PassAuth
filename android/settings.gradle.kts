@@ -15,3 +15,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "PassAuth"
 include(":core", ":app")
+// Debug-only test app for the autofill service (never part of the PassAuth app or its release bundle).
+include(":samples:login")

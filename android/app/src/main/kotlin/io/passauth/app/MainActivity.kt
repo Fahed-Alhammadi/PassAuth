@@ -1,24 +1,26 @@
 package io.passauth.app
 
+import android.content.Intent
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
-import androidx.fragment.app.FragmentActivity
+import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import io.passauth.app.ui.AppRoot
+import io.passauth.app.ui.Route
 import io.passauth.app.ui.theme.PassAuthTheme
 import kotlinx.coroutines.launch
 
-class MainActivity : FragmentActivity() {
-    private val graph get() = (application as PassAuthApp).graph
-    private var secureRequests = 0
+class MainActivity : SecureActivity() {
+    /** A screen to open, requested by an intent (Android's autofill or passkey settings). */
+    val requestedRoute = mutableStateOf<Route?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null) handle(intent)
         setContent {
             val state by graph.repo.state.collectAsStateWithLifecycle()
             PassAuthTheme(state.settings.theme) {
@@ -27,26 +29,24 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handle(intent)
+    }
+
+    private fun handle(intent: Intent?) {
+        // The "AutofillSettings" alias is the settings activity of the autofill service and the passkey provider.
+        if (intent?.component?.className?.endsWith(".AutofillSettings") == true || intent?.getBooleanExtra(EXTRA_AUTOFILL_SETTINGS, false) == true) {
+            requestedRoute.value = Route.Settings("autofill")
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         lifecycleScope.launch { runCatching { graph.repo.refreshIfStale() } }
     }
 
-    override fun onUserInteraction() {
-        super.onUserInteraction()
-        graph.lock.touch()
-    }
-
-    /**
-     * Screens that show secrets keep the window out of screenshots, screen
-     * recordings and the recents preview (FLAG_SECURE). Reference-counted.
-     */
-    fun setSecure(on: Boolean) {
-        secureRequests = (secureRequests + if (on) 1 else -1).coerceAtLeast(0)
-        if (secureRequests > 0 && !BuildConfig.ALLOW_SCREENSHOTS) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        } else {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        }
+    companion object {
+        const val EXTRA_AUTOFILL_SETTINGS = "io.passauth.app.AUTOFILL_SETTINGS"
     }
 }

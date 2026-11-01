@@ -77,7 +77,7 @@ import kotlinx.coroutines.launch
 
 /** Centered, scrollable column for the sign-in screens. */
 @Composable
-private fun AuthFrame(title: String, subtitle: String? = null, content: @Composable ColumnScope.() -> Unit) {
+fun AuthFrame(title: String, subtitle: String? = null, content: @Composable ColumnScope.() -> Unit) {
     Box(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding().imePadding(),
         contentAlignment = Alignment.TopCenter,
@@ -441,7 +441,7 @@ fun StrengthMeter(password: String) {
 // ----------------------------------------------------------------- unlock
 
 @Composable
-fun UnlockScreen(ctx: UiCtx) {
+fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth", embedded: Boolean = false) {
     val state = ctx.state
     var password by remember { mutableStateOf("") }
     var secretKey by remember { mutableStateOf("") }
@@ -491,7 +491,7 @@ fun UnlockScreen(ctx: UiCtx) {
     }
     LaunchedEffect(Unit) { if (canBio) biometric() }
 
-    AuthFrame("Unlock PassAuth", state.email) {
+    AuthFrame(title, state.email) {
         PasswordField(
             password, { password = it }, "Master password",
             imeAction = if (needKey) ImeAction.Next else ImeAction.Done, onImeAction = { if (!needKey) submit() },
@@ -508,7 +508,8 @@ fun UnlockScreen(ctx: UiCtx) {
                 Text("Unlock with biometrics")
             }
         }
-        TextButton(onClick = { ctx.launch { ctx.repo.logout() } }) { Text("Log out") }
+        // Started from autofill or a passkey request: no logging out here.
+        if (!embedded) TextButton(onClick = { ctx.launch { ctx.repo.logout() } }) { Text("Log out") }
         OtherAccounts(ctx)
     }
 }

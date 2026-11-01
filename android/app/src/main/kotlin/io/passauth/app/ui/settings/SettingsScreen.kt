@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.AutoFixHigh
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
@@ -27,22 +28,26 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.passauth.app.BuildConfig
 import io.passauth.app.data.Keystore
 import io.passauth.app.data.Settings
@@ -207,9 +212,30 @@ private fun ColumnScope.Security(ctx: UiCtx) {
 @Composable
 private fun ColumnScope.Autofill(ctx: UiCtx) {
     val s = ctx.state.settings
-    Alert("Filling logins and passkeys in other apps and in your browser is coming in the next update. These settings already apply to it.")
+    val context = LocalContext.current
+    // Re-read the system settings whenever the screen comes back (after choosing PassAuth there).
+    var resumes by remember { mutableIntStateOf(0) }
+    LifecycleResumeEffect(Unit) {
+        resumes++
+        onPauseOrDispose { }
+    }
+    val autofillOn = remember(resumes) { SystemServices.autofillEnabled(context) }
+    val providerOn = remember(resumes) { SystemServices.providerEnabled(context) }
+
+    ServiceRow(
+        "Autofill service", autofillOn,
+        "Fill and save logins in apps and browsers.",
+        if (autofillOn) "Change" else "Use PassAuth",
+    ) { if (!SystemServices.openAutofillSettings(context)) ctx.notify("Open Android settings → Passwords, passkeys & accounts to choose PassAuth.") }
+    ServiceRow(
+        "Passkeys and passwords", providerOn,
+        "Create and use passkeys, and sign in with saved passwords, through Android's Credential Manager.",
+        if (providerOn) "Change" else "Use PassAuth",
+    ) { if (!SystemServices.openProviderSettings(context)) ctx.notify("Open Android settings → Passwords, passkeys & accounts to turn on PassAuth.") }
+    Muted("In Chrome on Android, also choose \"Autofill using another service\" in Chrome's settings (Autofill services), then restart Chrome.")
+    HorizontalDivider(color = PassAuthTheme.colors.line)
     SelectField("Default URI match detection", MATCHES, s.defaultMatch, { v -> ctx.update { it.copy(defaultMatch = v) } })
-    Muted("${matchHelp(s.defaultMatch)} Applies to websites set to \"Default\" in an item.")
+    Muted("${matchHelp(s.defaultMatch)} Applies to websites set to \"Default\" in an item. Apps match logins with the website androidapp://<package name>.")
     ToggleRow(
         "Copy verification code automatically", s.autoCopyTotp, { v -> ctx.update { it.copy(autoCopyTotp = v) } },
         help = "After filling a login that has an authenticator key, the current code is copied so you can paste it.",
@@ -221,6 +247,46 @@ private fun ColumnScope.Autofill(ctx: UiCtx) {
         { v -> ctx.update { it.copy(clearClipboard = v) } },
     )
     Muted("Applies to everything PassAuth copies: passwords, usernames and verification codes.")
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    ToggleRow(
+        "Ask to save and update logins", s.askToSave, { v -> ctx.update { it.copy(askToSave = v) } },
+        help = "After you sign in somewhere, offer to save the login or update its changed password.",
+    )
+    Text("Never save on", style = MaterialTheme.typography.labelLarge)
+    if (s.neverSave.isEmpty()) {
+        Muted("No sites or apps. Choose \"Never\" on a save prompt to add one.")
+    } else {
+        Column {
+            s.neverSave.sorted().forEach { key ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(neverSaveLabel(key), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { ctx.update { st -> st.copy(neverSave = st.neverSave - key) } }) {
+                        Icon(Icons.Outlined.Close, contentDescription = "Remove ${neverSaveLabel(key)}", tint = PassAuthTheme.colors.muted)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun neverSaveLabel(key: String) = key.removePrefix("androidapp://").let { if (it != key) "App: $it" else it }
+
+/** A system service PassAuth can be chosen for, with its status. */
+@Composable
+private fun ServiceRow(title: String, on: Boolean, help: String, action: String, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                if (on) "On: PassAuth is selected" else "Off",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (on) PassAuthTheme.colors.ok else PassAuthTheme.colors.muted,
+                fontWeight = FontWeight.Medium,
+            )
+            Muted(help)
+        }
+        OutlinedButton(onClick = onClick) { Text(action) }
+    }
 }
 
 @Composable

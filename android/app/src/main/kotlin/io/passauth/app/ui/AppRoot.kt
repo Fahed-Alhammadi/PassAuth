@@ -15,6 +15,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -35,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.passauth.app.AppGraph
 import io.passauth.app.MainActivity
+import io.passauth.app.SecureActivity
 import io.passauth.app.data.ApiException
 import io.passauth.app.data.AppState
 import io.passauth.app.data.ItemKind
@@ -66,7 +68,7 @@ sealed interface Route {
 class UiCtx(
     val graph: AppGraph,
     val state: AppState,
-    val activity: MainActivity,
+    val activity: SecureActivity,
     val scope: CoroutineScope,
     val notify: (String) -> Unit,
     val go: (Route) -> Unit,
@@ -113,7 +115,7 @@ fun errorMessage(e: Throwable): String {
 /** Keeps the window secure (FLAG_SECURE) while this is in the composition. */
 @Composable
 fun SecureWindow() {
-    val activity = LocalContext.current as? MainActivity
+    val activity = LocalContext.current as? SecureActivity
     DisposableEffect(activity) {
         activity?.setSecure(true)
         onDispose { activity?.setSecure(false) }
@@ -135,6 +137,15 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
     var route by rememberSaveable(state.activeId, stateSaver = RouteSaver) { mutableStateOf<Route>(Route.Vault) }
     val ctx = UiCtx(graph, state, activity, scope, notify) { route = it }
     LaunchedEffect(state.status) { if (state.status != Status.Unlocked) route = Route.Vault }
+    // Opened from Android's autofill / passkey settings: show Settings → Autofill once unlocked.
+    val requested by activity.requestedRoute
+    LaunchedEffect(requested, state.status) {
+        val r = requested ?: return@LaunchedEffect
+        if (state.status == Status.Unlocked) {
+            route = r
+            activity.requestedRoute.value = null
+        }
+    }
     // Light status bar icons over the navy header (unlocked screens) and in dark mode.
     val dark = io.passauth.app.ui.theme.isDark(state.settings.theme)
     androidx.compose.runtime.SideEffect {
@@ -153,17 +164,23 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
         bottomBar = {
             if (state.status == Status.Unlocked && (route is Route.Vault || route is Route.Generator || route is Route.Settings)) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                    // The selected tab uses the brand accent (#0866ED light, #3D8BFF dark), as in the extension.
+                    val navColors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                    )
                     NavigationBarItem(
                         selected = route is Route.Vault, onClick = { route = Route.Vault },
-                        icon = { Icon(Icons.Outlined.Lock, null) }, label = { Text("Vault") },
+                        icon = { Icon(Icons.Outlined.Lock, null) }, label = { Text("Vault") }, colors = navColors,
                     )
                     NavigationBarItem(
                         selected = route is Route.Generator, onClick = { route = Route.Generator },
-                        icon = { Icon(Icons.Outlined.Casino, null) }, label = { Text("Generator") },
+                        icon = { Icon(Icons.Outlined.Casino, null) }, label = { Text("Generator") }, colors = navColors,
                     )
                     NavigationBarItem(
                         selected = route is Route.Settings, onClick = { route = Route.Settings() },
-                        icon = { Icon(Icons.Outlined.Settings, null) }, label = { Text("Settings") },
+                        icon = { Icon(Icons.Outlined.Settings, null) }, label = { Text("Settings") }, colors = navColors,
                     )
                 }
             }

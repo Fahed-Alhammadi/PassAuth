@@ -24,6 +24,15 @@ val uploadSigning = uploadKeystore?.takeIf { it.isNotBlank() }?.let {
 // ./gradlew :app:assembleDebug -Ppassauth.allowScreenshots=true (never applies to release).
 val allowScreenshots = providers.gradleProperty("passauth.allowScreenshots").orNull == "true"
 
+// Debug builds only: fetch Digital Asset Links from a local test server instead of
+// https://<domain>/.well-known/assetlinks.json, e.g. -Ppassauth.testAssetLinksBase=http://10.0.2.2:8094
+// (emulator tests of passkeys for apps). Never applies to release builds.
+val testAssetLinksBase = providers.gradleProperty("passauth.testAssetLinksBase").orNull.orEmpty()
+
+// Debug builds only: trust one more browser as privileged ("package|SHA-256 cert fingerprint"),
+// e.g. a Chromium snapshot build on the emulator. Never applies to release builds.
+val testPrivilegedApp = providers.gradleProperty("passauth.testPrivilegedApp").orNull.orEmpty()
+
 android {
     namespace = "io.passauth.app"
     compileSdk = 36
@@ -36,6 +45,8 @@ android {
         versionCode = appVersion.code
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("boolean", "ALLOW_SCREENSHOTS", "false")
+        buildConfigField("String", "ASSET_LINKS_TEST_BASE", "\"\"")
+        buildConfigField("String", "TEST_PRIVILEGED_APP", "\"\"")
     }
 
     signingConfigs {
@@ -54,6 +65,8 @@ android {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
             buildConfigField("boolean", "ALLOW_SCREENSHOTS", allowScreenshots.toString())
+            buildConfigField("String", "ASSET_LINKS_TEST_BASE", "\"$testAssetLinksBase\"")
+            buildConfigField("String", "TEST_PRIVILEGED_APP", "\"$testPrivilegedApp\"")
         }
         release {
             isMinifyEnabled = true
@@ -87,6 +100,12 @@ android {
     }
 }
 
+// AGP 9 creates host (unit) tests for the debug build type only; the release workflow runs
+// :app:testReleaseUnitTest, so enable them for every build type.
+androidComponents {
+    beforeVariants { v -> v.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true }
+}
+
 kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
@@ -101,6 +120,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.datastore)
     implementation(libs.androidx.biometric)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.autofill)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

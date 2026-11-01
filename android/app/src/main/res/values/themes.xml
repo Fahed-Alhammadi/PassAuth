@@ -7,4 +7,12 @@
         <item name="android:windowSplashScreenBackground">@color/paper</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
     </style>
+    <!-- Activities started by the autofill and credential services: see-through until they need to show something. -->
+    <style name="Theme.PassAuth.Service" parent="Theme.PassAuth">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
 </resources>
