@@ -16,7 +16,7 @@ Open `http://localhost:8080`.
 
 - **No root.** The container runs as uid/gid `1000` by default. Set `PUID` and `PGID` in `.env` to change that, and make sure `./data` is owned by the same uid/gid.
 - **Images.** Images are published to `ghcr.io/fahed-alhammadi/passauth` with three tags: the exact version (`1.2.3`), the minor series (`1.2`) and `latest`.
-- **Admin.** Open `/admin` (e.g. `http://localhost:8080/admin`) and sign in with the admin token. There you manage users and invitations and can close sign-ups. Generate a token hash with `docker run --rm -it ghcr.io/fahed-alhammadi/passauth hash-admin-token`.
+- **Admin.** Open `/admin` (e.g. `http://localhost:8080/admin`) and sign in with the admin token. There you manage users and invitations and can close sign-ups. To create a token, follow the steps in the admin section of `.env.example` (`docker compose run --rm passauth hash-admin-token`).
 
 ## Chrome extension
 
