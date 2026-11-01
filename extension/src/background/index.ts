@@ -215,9 +215,10 @@ async function handleInline(req: Request, sender: chrome.runtime.MessageSender):
     case "inline:items": {
       inlineMenu(req.nonce, sender);
       const { server, settings } = await local.get();
-      if (!(await vault.ensureUnlocked().catch(() => false))) return { server, showIcons: settings.showIcons, locked: true, items: [] } satisfies InlineItems;
+      const base = { server, theme: settings.theme, showIcons: settings.showIcons };
+      if (!(await vault.ensureUnlocked().catch(() => false))) return { ...base, locked: true, items: [] } satisfies InlineItems;
       const items = (await matching(sender.tab?.url ?? "")).map(vault.summarize);
-      return { server, showIcons: settings.showIcons, locked: false, items } satisfies InlineItems;
+      return { ...base, locked: false, items } satisfies InlineItems;
     }
     case "inline:fill": {
       const m = inlineMenu(req.nonce, sender);

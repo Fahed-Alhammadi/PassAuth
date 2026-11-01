@@ -198,8 +198,23 @@ try {
     await popup.shot("v2-08-settings-sync.png");
     await popup.click("Settings");
     await openSection("Autofill");
-    await popup.waitFor(`document.body.innerText.includes('Default URI match detection')`);
+    await popup.waitFor(`document.body.innerText.includes('Default URI match detection') && document.body.innerText.includes('Clear clipboard')`);
     await popup.shot("v2-09-settings-autofill.png");
+    await popup.click("Settings");
+    if (await popup.ev(`[...document.querySelectorAll('.pop-settings-menu .title')].some(t => t.textContent === 'Clipboard')`)) throw new Error("Clipboard still a separate category");
+    await openSection("Appearance");
+    const pick = (v) => popup.ev(`(() => { const s = [...document.querySelectorAll('label.field')].find(l => l.querySelector('span')?.textContent === 'Theme').querySelector('select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, ${JSON.stringify(v)}); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const bg = () => popup.ev(`getComputedStyle(document.body).backgroundColor`);
+    await pick("light"); await sleep(300);
+    const light = [await popup.ev(`document.documentElement.dataset.theme`), await bg()];
+    await popup.shot("v2-16-theme-light.png");
+    await pick("dark"); await sleep(300);
+    const dark = [await popup.ev(`document.documentElement.dataset.theme`), await bg()];
+    await popup.ev(`location.reload()`); await sleep(800);
+    const kept = await popup.ev(`document.documentElement.dataset.theme`);
+    console.log(`\n    light ${light}; dark ${dark}; after reload ${kept}`);
+    if (light[0] !== "light" || dark[0] !== "dark" || light[1] === dark[1] || kept !== "dark") throw new Error("theme");
+    await send({ type: "settings", patch: { theme: "system" } });
   });
 
   await step("timeout: Immediately + Lock, then Log out", async () => {

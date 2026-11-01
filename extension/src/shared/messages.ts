@@ -17,6 +17,7 @@ export interface Settings {
   showIcons: boolean;
   defaultMatch: Exclude<UrlMatch, "default">;
   askToSave: boolean;
+  theme: "system" | "light" | "dark";
 }
 
 export interface PopupState {
@@ -92,6 +93,7 @@ export interface InlineInfo {
 
 export interface InlineItems {
   server: string;
+  theme: Settings["theme"];
   showIcons: boolean;
   locked: boolean;
   items: ItemSummary[];

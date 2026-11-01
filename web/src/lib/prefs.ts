@@ -26,3 +26,37 @@ export const useShowIcons = () =>
     listeners.add(cb);
     return () => listeners.delete(cb);
   }, getShowIcons);
+
+export type Theme = "system" | "light" | "dark";
+const THEME = "passauth.theme";
+
+export function getTheme(): Theme {
+  try {
+    const t = localStorage.getItem(THEME);
+    return t === "light" || t === "dark" ? t : "system";
+  } catch {
+    return "system";
+  }
+}
+
+/** Apply the theme to the page (html[data-theme]); "system" follows the OS. */
+export function applyTheme(theme: Theme = getTheme()) {
+  if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+}
+
+export function setTheme(theme: Theme) {
+  try {
+    localStorage.setItem(THEME, theme);
+  } catch {
+    /* storage unavailable: applies to this page only */
+  }
+  applyTheme(theme);
+  listeners.forEach((l) => l());
+}
+
+export const useTheme = () =>
+  useSyncExternalStore((cb) => {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  }, getTheme);

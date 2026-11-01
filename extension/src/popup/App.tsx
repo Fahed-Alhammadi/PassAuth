@@ -3,6 +3,7 @@ import { LogoMark, Wordmark } from "@web/components/Logo";
 import { ItemEditor } from "@web/components/ItemEditor";
 import { ErrorText, Icon, PasswordInput, SiteIcon, type IconName } from "@web/components/ui";
 import { emptyItem, KIND_LABEL, type Item, type ItemKind } from "@web/lib/types";
+import { applyTheme } from "./theme";
 import { send, type ItemSummary, type PopupState, type Settings, type TwoFactorChallenge, type VaultTimeout } from "../shared/messages";
 
 const msg = (e: unknown) => {
@@ -629,6 +630,8 @@ const MATCHES: [Settings["defaultMatch"], string][] = [
   ["never", "Never"],
 ];
 
+const THEMES: Record<Settings["theme"], string> = { system: "System", light: "Light", dark: "Dark" };
+
 const MATCH_HELP: Record<Settings["defaultMatch"], string> = {
   domain: "login.example.com and www.example.com both match example.com.",
   host: "Same host name and port only: login.example.com doesn't match www.example.com.",
@@ -771,6 +774,18 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
             Change shortcuts
           </button>
         </p>
+        <label className="field">
+          <span>Clear clipboard</span>
+          <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
+            <option value={0}>Never</option>
+            {[10, 20, 30, 60, 120, 300].map((s) => (
+              <option key={s} value={s}>
+                After {seconds(s)}
+              </option>
+            ))}
+          </select>
+          <span className="small muted">Applies to everything PassAuth copies: passwords, usernames and verification codes.</span>
+        </label>
         </>
       ),
     },
@@ -807,36 +822,33 @@ function SettingsView({ state, onChange, notify }: { state: PopupState; onChange
       key: "appearance",
       title: "Appearance",
       icon: "eye",
-      summary: settings.showIcons ? "Website icons on" : "Website icons off",
+      summary: `${THEMES[settings.theme]} theme · ${settings.showIcons ? "website icons on" : "website icons off"}`,
       body: (
         <>
+        <label className="field">
+          <span>Theme</span>
+          <select
+            className="select"
+            value={settings.theme}
+            onChange={(e) => {
+              const theme = e.target.value as Settings["theme"];
+              applyTheme(theme);
+              update({ theme });
+            }}
+          >
+            {(Object.keys(THEMES) as Settings["theme"][]).map((t) => (
+              <option key={t} value={t}>
+                {t === "system" ? "Same as system" : THEMES[t]}
+              </option>
+            ))}
+          </select>
+        </label>
         <Toggle
           label="Show website icons"
           help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
           checked={settings.showIcons}
           onChange={(v) => update({ showIcons: v })}
         />
-        </>
-      ),
-    },
-    {
-      key: "clipboard",
-      title: "Clipboard",
-      icon: "copy",
-      summary: settings.clearClipboard ? `Clear after ${seconds(settings.clearClipboard)}` : "Never clear",
-      body: (
-        <>
-        <label className="field">
-          <span>Clear clipboard</span>
-          <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
-            <option value={0}>Never</option>
-            {[10, 20, 30, 60, 120, 300].map((s) => (
-              <option key={s} value={s}>
-                After {seconds(s)}
-              </option>
-            ))}
-          </select>
-        </label>
         </>
       ),
     },

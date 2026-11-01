@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { setShowIcons, useShowIcons } from "../lib/prefs";
+import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
@@ -303,6 +303,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   const [deleting, setDeleting] = useState(false);
   const fp = account.fingerprint ?? getAccount()?.fingerprint() ?? null;
   const showIcons = useShowIcons();
+  const theme = useTheme();
 
   async function saveName(e: FormEvent) {
     e.preventDefault();
@@ -385,6 +386,14 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
 
       <section className="card" aria-labelledby="appearance-title">
         <h2 id="appearance-title">Appearance</h2>
+        <label className="field">
+          <span>Theme</span>
+          <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+            <option value="system">Same as system</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
         <label className="check">
           <input type="checkbox" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />
           <span>

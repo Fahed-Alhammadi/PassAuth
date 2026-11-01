@@ -80,7 +80,6 @@ export function ItemEditor({
               className="input mono"
               value={item.login.totp ?? ""}
               onChange={(e) => sub("login", { totp: e.target.value || null })}
-              placeholder="otpauth://… or the setup key"
               spellCheck={false}
             />
           </label>

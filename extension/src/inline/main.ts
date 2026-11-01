@@ -24,6 +24,7 @@ function siteIcon(item: ItemSummary, data: InlineItems) {
 }
 
 function render(data: InlineItems) {
+  if (data.theme !== "system") document.documentElement.dataset.theme = data.theme;
   if (data.locked) {
     const unlock = el("button", { className: "btn", type: "button", textContent: "Unlock PassAuth" });
     unlock.addEventListener("click", () => void send({ type: "openPopup" }).then(() => send({ type: "inline:close", nonce })));

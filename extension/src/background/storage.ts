@@ -29,6 +29,7 @@ export const defaultSettings: Settings = {
   showIcons: true,
   defaultMatch: "domain",
   askToSave: true,
+  theme: "system",
 };
 
 const defaults: LocalData = {

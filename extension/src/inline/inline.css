@@ -3,8 +3,9 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #111b2e; --fg: #e7edf7; --muted: #8090ab; --hover: #19253b; --line: #26344d; --accent: #3d8bff; color-scheme: dark; }
+  :root:not([data-theme="light"]) { --bg: #111b2e; --fg: #e7edf7; --muted: #8090ab; --hover: #19253b; --line: #26344d; --accent: #3d8bff; color-scheme: dark; }
 }
+:root[data-theme="dark"] { --bg: #111b2e; --fg: #e7edf7; --muted: #8090ab; --hover: #19253b; --line: #26344d; --accent: #3d8bff; color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: transparent; }
 body { font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif; color: var(--fg); -webkit-font-smoothing: antialiased; }

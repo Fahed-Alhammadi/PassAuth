@@ -10,6 +10,9 @@ import { createRoot } from "react-dom/client";
 import init from "./wasm/passauth_core";
 import { App } from "./App";
 import { boot } from "./lib/vault";
+import { applyTheme } from "./lib/prefs";
+
+applyTheme();
 
 await init();
 await boot();
