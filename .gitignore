@@ -69,3 +69,6 @@ android/.kotlin/
 *.jks
 *.keystore
 keystore.properties
+# Signing keys and their passwords (never commit)
+/PassAuth-keys/
+upload_certificate.pem
