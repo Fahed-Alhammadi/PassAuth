@@ -16,7 +16,7 @@ const step = async (name, fn) => {
 
 try {
   await step("register", async () => {
-    await b.goto(`${BASE}/#/register`);
+    await b.goto(`${BASE}/register`);
     await b.waitText("Create your PassAuth account");
     await b.screenshot(`${OUT}/01-register.png`);
     await b.fill("Email", EMAIL);
@@ -31,7 +31,7 @@ try {
   });
 
   await step("create login with TOTP", async () => {
-    await b.goto(`${BASE}/#/vault/all/new-login`);
+    await b.nav("/vault/all/new-login");
     await b.waitText("New login");
     await b.fill("Name", "GitHub");
     await b.fill("Username", "octocat");
@@ -51,7 +51,7 @@ Work,,login,Mail,,,0,https://mail.example.com,fahed@example.com,pw2,
 `;
     const path = `${OUT}/bitwarden.csv`;
     writeFileSync(path, csv);
-    await b.goto(`${BASE}/#/import`);
+    await b.nav("/import");
     await b.waitFor(`!!document.querySelector('input[type=file]')`);
     await b.setFile("input[type=file]", path);
     await b.waitText("3", 10000);
@@ -62,25 +62,25 @@ Work,,login,Mail,,,0,https://mail.example.com,fahed@example.com,pw2,
     await b.evaluate(`[...document.querySelectorAll('button')].filter(b=>/^Import/.test(b.textContent.trim())).pop().click()`);
     await b.waitFor(`document.body.innerText.match(/imported|added|saved/i)`, 30000);
     await b.screenshot(`${OUT}/05-import-done.png`);
-    await b.goto(`${BASE}/#/vault/all`);
+    await b.nav("/vault/all");
     await b.waitText("Jira");
     await b.screenshot(`${OUT}/06-vault-list.png`);
   });
 
   await step("generator + settings pages render", async () => {
-    await b.goto(`${BASE}/#/generator`);
+    await b.nav("/generator");
     await sleep(800);
     await b.screenshot(`${OUT}/07-generator.png`);
-    await b.goto(`${BASE}/#/settings/security`);
+    await b.nav("/settings/security");
     await sleep(800);
     await b.screenshot(`${OUT}/08-settings-security.png`);
-    await b.goto(`${BASE}/#/settings/two-step`);
+    await b.nav("/settings/two-step");
     await sleep(800);
     await b.screenshot(`${OUT}/09-settings-2fa.png`);
   });
 
   await step("lock and unlock", async () => {
-    await b.goto(`${BASE}/#/vault/all`);
+    await b.nav("/vault/all");
     await b.waitText("Jira");
     await b.click(".sidebar button", "Lock");
     await b.waitText("Your vault is locked");
@@ -105,16 +105,26 @@ Work,,login,Mail,,,0,https://mail.example.com,fahed@example.com,pw2,
   });
 
   await step("admin panel", async () => {
-    await b.goto(`${BASE}/#/admin`);
+    await b.nav("/admin");
     await sleep(600);
     await b.evaluate(`(() => { const i = document.querySelector('input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,'e2e-admin-token-123'); i.dispatchEvent(new Event('input',{bubbles:true})); i.form?.requestSubmit(); })()`);
     await b.waitText(EMAIL, 15000);
     await b.screenshot(`${OUT}/12-admin.png`);
+    // Close sign-ups from the admin page, check the public pages, then reopen.
+    await b.evaluate(`[...document.querySelectorAll('label.check')].find(l => l.textContent.includes('Allow new accounts')).querySelector('input').click()`);
+    await b.click("button", "Save sign-up settings");
+    await b.waitText("Sign-ups are closed", 10000);
+    const closed = await b.evaluate(`fetch('/api/config').then(r => r.json()).then(c => c.signups_allowed)`);
+    if (closed !== false) throw new Error("sign-ups still open");
+    await b.screenshot(`${OUT}/12b-admin-signups-closed.png`);
+    await b.evaluate(`[...document.querySelectorAll('label.check')].find(l => l.textContent.includes('Allow new accounts')).querySelector('input').click()`);
+    await b.click("button", "Save sign-up settings");
+    await b.waitText("Sign-ups are open", 10000);
   });
 
   await step("mobile layout", async () => {
     await b.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-    await b.goto(`${BASE}/#/vault/all`);
+    await b.nav("/vault/all");
     await b.waitText("GitHub", 30000);
     await b.screenshot(`${OUT}/13-mobile-list.png`);
   });

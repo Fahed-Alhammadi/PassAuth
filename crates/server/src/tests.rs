@@ -535,3 +535,64 @@ async fn icons_serve_cached_entries() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_eq!(resp.headers()["cache-control"], "public, max-age=86400");
 }
+
+#[tokio::test]
+async fn admin_can_close_signups() {
+    let app = app().await;
+    let admin = Some("test-admin");
+    let init = |email: &'static str| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                Method::POST,
+                "/api/auth/register/init",
+                None,
+                json!({ "email": email }),
+            )
+            .await
+            .0
+        }
+    };
+    let policy = |body: Value| {
+        call(
+            &app,
+            Method::PUT,
+            "/api/admin/settings/signups",
+            admin,
+            body,
+        )
+    };
+
+    let (s, v) = policy(json!({ "allowed": false, "domains": [] })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, cfg) = call(&app, Method::GET, "/api/config", None, json!(null)).await;
+    assert_eq!(cfg["signups_allowed"], false);
+    assert_eq!(init("a@example.com").await, StatusCode::FORBIDDEN);
+
+    let (s, _) = policy(json!({ "allowed": true, "domains": ["not a domain"] })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, v) = policy(json!({ "allowed": true, "domains": ["@Example.ORG"] })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["domains"], json!(["example.org"]));
+    assert_eq!(init("a@example.com").await, StatusCode::FORBIDDEN);
+    assert_eq!(init("b@example.org").await, StatusCode::OK);
+
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/api/admin/settings/signups",
+        None,
+        json!({ "allowed": true, "domains": [] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn unknown_api_path_is_404() {
+    let app = app().await;
+    let (s, _) = call(&app, Method::GET, "/api/nope", None, json!(null)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

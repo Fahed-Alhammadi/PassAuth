@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { createHashRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
+import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
 import { ToastHost } from "./components/ui";
 import { lock, useVault } from "./lib/vault";
 import { AdminPage } from "./pages/Admin";
@@ -44,7 +44,10 @@ function useAutoLock(active: boolean) {
   }, [active]);
 }
 
-const router = createHashRouter([
+// Links from before 0.2.2 used hash routes (/#/admin); keep them working.
+if (location.hash.startsWith("#/")) history.replaceState(null, "", location.hash.slice(1));
+
+const router = createBrowserRouter([
   { path: "/login", element: <LoginPage /> },
   { path: "/register", element: <RegisterPage /> },
   { path: "/verify-email", element: <VerifyEmailPage /> },

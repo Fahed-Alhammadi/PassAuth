@@ -9,7 +9,7 @@ use rand_core06::OsRng;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use crate::config::Config;
+use crate::config::{Config, SignupPolicy};
 use crate::db::{self, Db, now};
 use crate::icons::IconService;
 use crate::mail::Mailer;
@@ -30,6 +30,8 @@ pub struct App {
     pub limiter: RateLimiter,
     pub notify: DashMap<String, broadcast::Sender<String>>,
     pub icons: IconService,
+    /// Effective sign-up policy (env defaults, overridden from the admin page).
+    pub signups: std::sync::RwLock<SignupPolicy>,
 }
 
 pub struct PendingRegistration {
@@ -72,7 +74,19 @@ impl App {
         let prelogin_secret = unb64(&prelogin)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid prelogin secret"))?;
+        let mut signups = config.signup_policy();
+        if let Some(v) = db::setting(&db, "signups_allowed").await? {
+            signups.allowed = v == "1";
+        }
+        if let Some(v) = db::setting(&db, "signups_domains").await? {
+            signups.domains = v
+                .split(',')
+                .filter(|d| !d.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
         Ok(Arc::new(Self {
+            signups: std::sync::RwLock::new(signups),
             mailer: Arc::new(Mailer::new(&config)?),
             icons: IconService::new(&config),
             config,

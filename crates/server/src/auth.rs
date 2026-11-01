@@ -227,7 +227,12 @@ async fn register_init(
     .fetch_one(&state.db)
     .await?
         > 0;
-    if !invited && !state.config.signup_permitted(&email) {
+    let permitted = state
+        .signups
+        .read()
+        .expect("signup policy lock")
+        .permits(&email);
+    if !invited && !permitted {
         return Err(ApiError::Forbidden(
             "registration is closed on this server".into(),
         ));
@@ -365,7 +370,7 @@ async fn send_verification(state: &AppState, user_id: &str, email: &str) -> ApiR
             subject: "Verify your PassAuth email".into(),
             heading: "Confirm your email address".into(),
             body: "Welcome to PassAuth! Confirm this address to finish setting up your account. The link expires in 48 hours.".into(),
-            action: Some(("Verify email".into(), format!("{}/#/verify-email?token={token}", state.config.domain))),
+            action: Some(("Verify email".into(), format!("{}/verify-email?token={token}", state.config.domain))),
             code: None,
         },
     );
@@ -738,7 +743,7 @@ async fn issue_session(
                     "Your account was just accessed from a new device: {} ({}).\nIf this wasn't you, change your master password and review your sessions.",
                     device.name, device.kind
                 ),
-                action: Some(("Review sessions".into(), format!("{}/#/settings/security", state.config.domain))),
+                action: Some(("Review sessions".into(), format!("{}/settings/security", state.config.domain))),
                 code: None,
             },
         );

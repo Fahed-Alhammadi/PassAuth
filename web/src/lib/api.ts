@@ -1,4 +1,5 @@
 /** PassAuth HTTP client: bearer auth, automatic refresh-token rotation. */
+import { useEffect, useState } from "react";
 
 export class ApiError extends Error {
   constructor(
@@ -128,4 +129,23 @@ export function errorMessage(e: unknown): string {
     return e.message;
   }
   return String(e);
+}
+
+export interface PublicConfig {
+  name: string;
+  version: string;
+  signups_allowed: boolean;
+  email_enabled: boolean;
+}
+
+let configRequest: Promise<PublicConfig | null> | null = null;
+
+/** Server's public settings (cached per page load). Null while loading or if unreachable. */
+export function usePublicConfig() {
+  const [config, setConfig] = useState<PublicConfig | null>(null);
+  useEffect(() => {
+    configRequest ??= api<PublicConfig>("/config", { auth: false }).catch(() => null);
+    configRequest.then(setConfig);
+  }, []);
+  return config;
 }

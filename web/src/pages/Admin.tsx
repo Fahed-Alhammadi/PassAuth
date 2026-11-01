@@ -293,6 +293,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
   return (
     <main className="admin-main">
       <OverviewCard o={overview} />
+      <SignupsCard config={overview.config} call={call} reload={load} />
       <UsersCard users={users} call={call} reload={load} />
       <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />
       <SmtpCard smtp={overview.config.smtp_enabled} call={call} />
@@ -359,6 +360,65 @@ function OverviewCard({ o }: { o: Overview }) {
           </div>
         </dl>
       </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------- sign-ups
+
+function SignupsCard({ config, call, reload }: { config: Overview["config"]; call: Call; reload: () => Promise<void> }) {
+  const current = Array.isArray(config.signups_domains) ? config.signups_domains : config.signups_domains ? String(config.signups_domains).split(",") : [];
+  const [allowed, setAllowed] = useState(config.signups_allowed);
+  const [domains, setDomains] = useState(current.join(", "));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const list = domains
+    .split(/[\s,]+/)
+    .map((d) => d.trim())
+    .filter(Boolean);
+  const changed = allowed !== config.signups_allowed || list.join(",") !== current.join(",");
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await call("/settings/signups", { method: "PUT", body: { allowed, domains: list } });
+      await reload();
+      toast(allowed ? "Sign-ups are open" : "Sign-ups are closed");
+    } catch (err) {
+      if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="signups-title">
+      <h2 id="signups-title">Sign-ups</h2>
+      <form className="stack" onSubmit={save}>
+        <label className="check">
+          <input type="checkbox" checked={allowed} onChange={(e) => setAllowed(e.target.checked)} />
+          <span>
+            Allow new accounts to sign up
+            <span className="small muted block">When off, only people you invite below can create an account. Existing accounts are not affected.</span>
+          </span>
+        </label>
+        {allowed && (
+          <label className="field">
+            <span>Only these email domains (optional)</span>
+            <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com, example.org" spellCheck={false} />
+            <span className="small muted">Leave empty to allow any email address. Separate domains with commas.</span>
+          </label>
+        )}
+        <ErrorText error={error} />
+        <div className="row">
+          <button type="submit" className="btn btn-primary" disabled={busy || !changed}>
+            {busy ? "Saving…" : "Save sign-up settings"}
+          </button>
+        </div>
+        <p className="small muted">This overrides SIGNUPS_ALLOWED and SIGNUPS_DOMAINS_WHITELIST from the server configuration and takes effect immediately.</p>
+      </form>
     </section>
   );
 }
@@ -535,7 +595,7 @@ function InvitesCard({ invites, smtp, domain, call, reload }: { invites: Invite[
       setNotice(
         r.email_sent
           ? `Invitation sent to ${r.invited}. It is valid for 7 days.`
-          : `Invitation saved for ${r.invited}, but email is not set up on this server. Send them this link yourself: ${domain}/#/register?email=${encodeURIComponent(r.invited)}`,
+          : `Invitation saved for ${r.invited}, but email is not set up on this server. Send them this link yourself: ${domain}/register?email=${encodeURIComponent(r.invited)}`,
       );
       await reload();
     } catch (err) {

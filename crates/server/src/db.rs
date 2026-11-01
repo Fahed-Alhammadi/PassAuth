@@ -7,8 +7,6 @@ use sqlx::any::{AnyPoolOptions, install_default_drivers};
 
 pub type Db = sqlx::AnyPool;
 
-const SCHEMA_VERSION: i64 = 1;
-
 const SCHEMA_V1: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS server_secrets (name TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS users (
@@ -130,6 +128,13 @@ pub async fn connect(url: &str) -> Result<Db> {
     Ok(pool)
 }
 
+/// Schema changes in order; each runs once, in one transaction, when the stored version is lower.
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+
+/// Server-wide settings the admin can change at runtime (override the env defaults).
+const SCHEMA_V2: &[&str] =
+    &["CREATE TABLE IF NOT EXISTS server_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)"];
+
 async fn migrate(db: &Db) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")
         .execute(db)
@@ -137,22 +142,24 @@ async fn migrate(db: &Db) -> Result<()> {
     let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
         .fetch_one(db)
         .await?;
-    if current.unwrap_or(0) >= SCHEMA_VERSION {
-        return Ok(());
-    }
-    let mut tx = db.begin().await?;
-    for stmt in SCHEMA_V1 {
-        sqlx::query(*stmt)
+    for (version, stmts) in MIGRATIONS {
+        if current.unwrap_or(0) >= *version {
+            continue;
+        }
+        let mut tx = db.begin().await?;
+        for stmt in *stmts {
+            sqlx::query(*stmt)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("migration {version}: {stmt}"))?;
+        }
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(*version)
             .execute(&mut *tx)
-            .await
-            .with_context(|| format!("migration: {stmt}"))?;
+            .await?;
+        tx.commit().await?;
+        tracing::info!(version, "database schema migrated");
     }
-    sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
-        .bind(SCHEMA_VERSION)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    tracing::info!(version = SCHEMA_VERSION, "database schema migrated");
     Ok(())
 }
 
@@ -188,4 +195,29 @@ pub async fn server_secret(db: &Db, name: &str, init: impl FnOnce() -> String) -
         .execute(db)
         .await?;
     Ok(value)
+}
+
+/// Read an admin-changed server setting (None = use the env default).
+pub async fn setting(db: &Db, name: &str) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT value FROM server_settings WHERE name = $1")
+            .bind(name)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+pub async fn set_setting(db: &Db, name: &str, value: &str) -> Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM server_settings WHERE name = $1")
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO server_settings (name, value) VALUES ($1, $2)")
+        .bind(name)
+        .bind(value)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }

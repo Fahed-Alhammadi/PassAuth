@@ -51,6 +51,8 @@ export async function launch({ port = 9333, width = 1280, height = 820, extraArg
   const api = {
     send, evaluate, logs,
     async goto(url) { await send("Page.navigate", { url }); await sleep(600); await evaluate(helpers); },
+    /** In-app navigation (no reload, so the vault stays unlocked). */
+    async nav(path) { await evaluate(`history.pushState(null, "", ${JSON.stringify(path)}); dispatchEvent(new PopStateEvent("popstate"))`); await sleep(400); await evaluate(helpers); },
     async ensureHelpers() { await evaluate(helpers); },
     async waitFor(expr, timeout = 15000) {
       const t = Date.now();

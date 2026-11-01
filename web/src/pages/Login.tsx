@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate } from "react-router";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, PasswordInput } from "../components/ui";
-import { errorMessage } from "../lib/api";
+import { errorMessage, usePublicConfig } from "../lib/api";
 import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor } from "../lib/vault";
 
 const PROVIDER_LABEL: Record<string, string> = {
@@ -12,6 +12,7 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 export function LoginPage() {
+  const config = usePublicConfig();
   const { status } = useVault();
   const nav = useNavigate();
   const [email, setEmail] = useState(lastEmail());
@@ -153,9 +154,11 @@ export function LoginPage() {
           </form>
         )}
 
-        <p className="auth-foot">
-          New to this server? <Link to="/register">Create an account</Link>
-        </p>
+        {config?.signups_allowed !== false && (
+          <p className="auth-foot">
+            New to this server? <Link to="/register">Create an account</Link>
+          </p>
+        )}
       </div>
     </main>
   );

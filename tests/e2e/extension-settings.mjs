@@ -55,7 +55,7 @@ try {
   });
 
   await step("register in web vault, new branding, login item with TOTP", async () => {
-    const w = await page(`${SERVER}/#/register`);
+    const w = await page(`${SERVER}/register`);
     await w.waitFor(`document.body.innerText.includes('Create your PassAuth account')`);
     await w.shot("v2-01-register.png");
     await w.fillLabel("Email", EMAIL); await w.fillLabel("Master password", PW); await w.fillLabel("Confirm master password", PW);
@@ -63,7 +63,7 @@ try {
     await w.waitFor(`document.body.innerText.includes('Your vault is ready')`, 60000);
     await w.click("Open my vault");
     await w.waitFor(`!!document.querySelector('.list-pane')`, 60000);
-    await w.ev(`location.hash = '#/vault/all/new-login'`);
+    await w.ev(`history.pushState(null, "", "/vault/all/new-login"); dispatchEvent(new PopStateEvent("popstate"))`);
     await w.waitFor(`document.body.innerText.includes('New login')`);
     const def = await w.ev(`document.querySelector('select')?.value ?? [...document.querySelectorAll('select')].map(s=>s.value).join(',')`);
     console.log(`\n    first select default: ${def}`);

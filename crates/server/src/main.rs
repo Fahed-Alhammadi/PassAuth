@@ -116,6 +116,8 @@ pub fn router(state: AppState) -> Router {
         ))
         // Added after the no-store layer: icons set their own caching headers.
         .merge(icons::routes());
+    // Unknown /api paths are API 404s, not the web vault's index.html.
+    let api = api.fallback(|| async { error::ApiError::NotFound });
 
     let mut app = Router::new().nest("/api", api);
     if let Some(dir) = &state.config.web_vault_dir {
@@ -160,7 +162,7 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "name": "PassAuth",
         "version": env!("CARGO_PKG_VERSION"),
-        "signups_allowed": state.config.signups_allowed,
+        "signups_allowed": state.signups.read().expect("signup policy lock").allowed,
         "email_enabled": state.mailer.enabled(),
     }))
 }

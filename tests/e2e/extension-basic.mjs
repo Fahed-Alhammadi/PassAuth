@@ -58,14 +58,14 @@ try {
   });
 
   await step("register user and save a login for the test site (web vault)", async () => {
-    const w = await page(`${SERVER}/#/register`);
+    const w = await page(`${SERVER}/register`);
     await w.waitFor(`document.body.innerText.includes('Create your PassAuth account')`);
     await w.fillLabel("Email", EMAIL); await w.fillLabel("Master password", PW); await w.fillLabel("Confirm master password", PW);
     await w.click("Create account");
     await w.waitFor(`document.body.innerText.includes('Your vault is ready')`, 60000);
     await w.click("Open my vault");
     await w.waitFor(`!!document.querySelector('.list-pane')`, 60000);
-    await w.ev(`location.hash = '#/vault/all/new-login'`);
+    await w.ev(`history.pushState(null, "", "/vault/all/new-login"); dispatchEvent(new PopStateEvent("popstate"))`);
     await w.waitFor(`document.body.innerText.includes('New login')`);
     await w.fillLabel("Name", "Example site"); await w.fillLabel("Username", "alice@localhost"); await w.fillLabel("Password", "old-password-1");
     await w.fillLabel("Website", "http://localhost:8099");

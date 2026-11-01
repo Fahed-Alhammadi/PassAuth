@@ -5,13 +5,14 @@
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::extract::{FromRequestParts, Path, State};
 use axum::http::request::Parts;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::{bearer, client_ip};
-use crate::db::now;
+use crate::config::SignupPolicy;
+use crate::db::{self, now};
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
 use crate::state::{AppState, ct_eq, normalize_email};
@@ -27,6 +28,7 @@ pub fn routes() -> Router<AppState> {
         .route("/invites", get(list_invites).post(invite))
         .route("/invites/{email}", delete(delete_invite))
         .route("/smtp/test", post(smtp_test))
+        .route("/settings/signups", put(set_signups))
 }
 
 pub struct Admin;
@@ -78,14 +80,15 @@ async fn overview(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Val
         .fetch_one(&state.db)
         .await?;
     let c = &state.config;
+    let signups = state.signups.read().expect("signup policy lock").clone();
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "users": users, "vaults": vaults, "items": items,
         "config": {
             "domain": c.domain,
             "database": if c.database_url.starts_with("postgres") { "postgresql" } else { "sqlite" },
-            "signups_allowed": c.signups_allowed,
-            "signups_domains": c.signups_domains,
+            "signups_allowed": signups.allowed,
+            "signups_domains": signups.domains,
             "signups_verify": c.signups_verify,
             "smtp_enabled": state.mailer.enabled(),
             "admin_token_hashed": c.admin_token.as_deref().is_some_and(|t| t.starts_with("$argon2")),
@@ -226,7 +229,7 @@ async fn invite(
             subject: "You're invited to PassAuth".into(),
             heading: "You've been invited to PassAuth".into(),
             body: "An administrator invited you to create a PassAuth account, a private, end-to-end encrypted password manager. The invitation is valid for 7 days.".into(),
-            action: Some(("Create your account".into(), format!("{}/#/register?email={}", state.config.domain, email))),
+            action: Some(("Create your account".into(), format!("{}/register?email={}", state.config.domain, email))),
             code: None,
         },
     );
@@ -275,4 +278,43 @@ async fn smtp_test(
         .await
         .map_err(|e| ApiError::bad(format!("SMTP error: {e:#}")))?;
     Ok(Json(json!({ "sent": true })))
+}
+
+/// Open or close self-registration and limit it to email domains. Invitations keep working.
+async fn set_signups(
+    _: Admin,
+    State(state): State<AppState>,
+    Json(policy): Json<SignupPolicy>,
+) -> ApiResult<Json<SignupPolicy>> {
+    let mut domains = Vec::new();
+    for d in &policy.domains {
+        let d = d.trim().trim_start_matches('@').to_ascii_lowercase();
+        let valid = !d.is_empty()
+            && d.len() <= 253
+            && d.contains('.')
+            && d.split('.')
+                .all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        if !valid {
+            return Err(ApiError::BadRequest(format!(
+                "\"{d}\" is not a valid email domain"
+            )));
+        }
+        if !domains.contains(&d) {
+            domains.push(d);
+        }
+    }
+    let policy = SignupPolicy {
+        allowed: policy.allowed,
+        domains,
+    };
+    db::set_setting(
+        &state.db,
+        "signups_allowed",
+        if policy.allowed { "1" } else { "0" },
+    )
+    .await?;
+    db::set_setting(&state.db, "signups_domains", &policy.domains.join(",")).await?;
+    *state.signups.write().expect("signup policy lock") = policy.clone();
+    tracing::info!(allowed = policy.allowed, domains = ?policy.domains, "sign-up policy changed by admin");
+    Ok(Json(policy))
 }

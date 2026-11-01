@@ -163,17 +163,12 @@ impl Config {
         })
     }
 
-    /// Whether `email` may self-register (invites bypass this).
-    pub fn signup_permitted(&self, email: &str) -> bool {
-        if !self.signups_allowed {
-            return false;
+    /// Sign-up policy from the environment, before any admin changes.
+    pub fn signup_policy(&self) -> SignupPolicy {
+        SignupPolicy {
+            allowed: self.signups_allowed,
+            domains: self.signups_domains.clone(),
         }
-        if self.signups_domains.is_empty() {
-            return true;
-        }
-        email
-            .rsplit_once('@')
-            .is_some_and(|(_, d)| self.signups_domains.iter().any(|w| w == d))
     }
 
     #[cfg(test)]
@@ -193,5 +188,25 @@ impl Config {
             icon_service: true,
             icon_cache_dir: None,
         }
+    }
+}
+
+/// Who may self-register. Starts from `SIGNUPS_ALLOWED` / `SIGNUPS_DOMAINS_WHITELIST`;
+/// the admin page can change it at runtime (stored in `server_settings`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SignupPolicy {
+    pub allowed: bool,
+    /// Email domains allowed to sign up; empty = any.
+    pub domains: Vec<String>,
+}
+
+impl SignupPolicy {
+    /// Whether `email` may self-register (invites bypass this).
+    pub fn permits(&self, email: &str) -> bool {
+        self.allowed
+            && (self.domains.is_empty()
+                || email
+                    .rsplit_once('@')
+                    .is_some_and(|(_, d)| self.domains.iter().any(|w| w == d)))
     }
 }

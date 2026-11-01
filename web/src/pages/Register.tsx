@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { LogoMark } from "../components/Logo";
 import { CopyButton, ErrorText, PasswordInput, StrengthMeter } from "../components/ui";
-import { errorMessage } from "../lib/api";
+import { errorMessage, usePublicConfig } from "../lib/api";
 import { estimateBits, login, register } from "../lib/vault";
 
 export function downloadEmergencyKit(email: string, secretKey: string) {
@@ -29,6 +29,8 @@ export function downloadEmergencyKit(email: string, secretKey: string) {
 export function RegisterPage() {
   const nav = useNavigate();
   const [params] = useSearchParams();
+  // Invitation links carry ?email=; the server accepts invited addresses even when sign-ups are closed.
+  const closed = usePublicConfig()?.signups_allowed === false && !params.get("email");
   const [email, setEmail] = useState(params.get("email") ?? "");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -119,6 +121,11 @@ export function RegisterPage() {
           <h1>Create your PassAuth account</h1>
           <p className="muted">Everything is encrypted on this device before it reaches the server.</p>
         </div>
+        {closed && (
+          <div className="alert alert-info" role="note">
+            Sign-ups are closed on this server. Ask the administrator for an invitation, then open the link in the invitation email.
+          </div>
+        )}
         <form className="auth-panel stack" onSubmit={submit}>
           <label className="field">
             <span>Email</span>
