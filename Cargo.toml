@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+repository = "https://github.com/Fahed-Alhammadi/PassAuth"

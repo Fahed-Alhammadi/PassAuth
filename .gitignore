@@ -1,0 +1,51 @@
+# --- AI assistant / local tooling (not public) ---
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+AGENTS.md
+
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+*.mobileprovision
+secrets/
+credentials*.json
+google-services.json
+GoogleService-Info.plist
+
+# --- Runtime data (vault DB, attachments, logs) ---
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# --- Rust ---
+target/
+
+# --- Node / web / extension ---
+node_modules/
+dist/
+build/
+.vite/
+coverage/
+*.tsbuildinfo
+*.crx
+*.zip
+
+# --- OS / editors ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

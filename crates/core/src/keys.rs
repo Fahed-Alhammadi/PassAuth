@@ -1,0 +1,246 @@
+//! Account key hierarchy.
+//!
+//! ```text
+//! AUK ─wraps─► Account Key ─wraps─► X25519 private key
+//!                         └─wraps─► personal Vault Keys ─wraps─► Item Keys
+//! ```
+//! Everything in [`AccountBundle`] is safe to store on the server.
+
+use serde::{Deserialize, Serialize};
+
+use crate::crypto::{KeyPair, SymmetricKey, seal_to};
+use crate::item::{b64, unb64};
+use crate::kdf::{KdfParams, SecretKey, derive_auk};
+use crate::{Error, Result};
+
+fn aad(kind: &str, id: &str) -> Vec<u8> {
+    format!("passauth/{kind}/v1/{id}").into_bytes()
+}
+
+/// Encrypted key material stored server-side. The server cannot open any of it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountBundle {
+    pub account_id: String,
+    pub kdf: KdfParams,
+    pub secret_key_enabled: bool,
+    pub wrapped_account_key: String,
+    pub public_key: String,
+    pub wrapped_private_key: String,
+}
+
+/// Decrypted keys held in client memory while the vault is unlocked.
+pub struct UnlockedAccount {
+    pub account_id: String,
+    pub account_key: SymmetricKey,
+    pub keypair: KeyPair,
+}
+
+pub struct NewAccount {
+    pub bundle: AccountBundle,
+    pub unlocked: UnlockedAccount,
+    /// Present only when the Secret Key is enabled; show it once in the Emergency Kit.
+    pub secret_key: Option<String>,
+}
+
+impl AccountBundle {
+    pub fn create(account_id: &str, password: &str, with_secret_key: bool) -> Result<NewAccount> {
+        Self::create_with(
+            account_id,
+            password,
+            with_secret_key,
+            KdfParams::new_default()?,
+        )
+    }
+
+    fn create_with(
+        account_id: &str,
+        password: &str,
+        with_secret_key: bool,
+        kdf: KdfParams,
+    ) -> Result<NewAccount> {
+        let sk = with_secret_key.then(SecretKey::generate).transpose()?;
+        let auk = derive_auk_for(password, &kdf, sk.as_ref(), account_id)?;
+        let account_key = SymmetricKey::generate()?;
+        let keypair = KeyPair::generate()?;
+        let bundle = AccountBundle {
+            account_id: account_id.to_owned(),
+            secret_key_enabled: sk.is_some(),
+            wrapped_account_key: b64(&auk.wrap(&account_key, &aad("account-key", account_id))?),
+            public_key: b64(&keypair.public_bytes()),
+            wrapped_private_key: b64(
+                &account_key.encrypt(&keypair.secret_bytes(), &aad("private-key", account_id))?
+            ),
+            kdf,
+        };
+        Ok(NewAccount {
+            bundle,
+            unlocked: UnlockedAccount {
+                account_id: account_id.to_owned(),
+                account_key,
+                keypair,
+            },
+            secret_key: sk.map(|k| k.format()),
+        })
+    }
+
+    pub fn unlock(&self, password: &str, secret_key: Option<&str>) -> Result<UnlockedAccount> {
+        let sk = match (self.secret_key_enabled, secret_key) {
+            (true, Some(s)) => Some(SecretKey::parse(s)?),
+            (true, None) => return Err(Error::InvalidSecretKey),
+            (false, _) => None,
+        };
+        let auk = derive_auk_for(password, &self.kdf, sk.as_ref(), &self.account_id)?;
+        self.unlock_with_auk(&auk)
+    }
+
+    fn unlock_with_auk(&self, auk: &SymmetricKey) -> Result<UnlockedAccount> {
+        let id = &self.account_id;
+        let account_key =
+            auk.unwrap_key(&unb64(&self.wrapped_account_key)?, &aad("account-key", id))?;
+        let secret =
+            account_key.decrypt(&unb64(&self.wrapped_private_key)?, &aad("private-key", id))?;
+        let secret: [u8; 32] = secret
+            .try_into()
+            .map_err(|_| Error::Malformed("private key"))?;
+        let keypair = KeyPair::from_secret_bytes(secret);
+        if b64(&keypair.public_bytes()) != self.public_key {
+            return Err(Error::Malformed("public key does not match private key"));
+        }
+        Ok(UnlockedAccount {
+            account_id: id.clone(),
+            account_key,
+            keypair,
+        })
+    }
+
+    /// Re-wrap the Account Key for a new password and/or Secret Key setting.
+    /// Vault data is untouched. Returns the new Secret Key when one is enabled.
+    pub fn rewrap(
+        &self,
+        unlocked: &UnlockedAccount,
+        new_password: &str,
+        with_secret_key: bool,
+    ) -> Result<(AccountBundle, Option<String>)> {
+        let kdf = KdfParams::new_default()?;
+        let sk = with_secret_key.then(SecretKey::generate).transpose()?;
+        let auk = derive_auk(new_password, &kdf, sk.as_ref(), &self.account_id)?;
+        let mut bundle = self.clone();
+        bundle.kdf = kdf;
+        bundle.secret_key_enabled = sk.is_some();
+        bundle.wrapped_account_key =
+            b64(&auk.wrap(&unlocked.account_key, &aad("account-key", &self.account_id))?);
+        Ok((bundle, sk.map(|k| k.format())))
+    }
+}
+
+#[cfg(not(test))]
+fn derive_auk_for(
+    pw: &str,
+    kdf: &KdfParams,
+    sk: Option<&SecretKey>,
+    id: &str,
+) -> Result<SymmetricKey> {
+    derive_auk(pw, kdf, sk, id)
+}
+
+#[cfg(test)]
+fn derive_auk_for(
+    pw: &str,
+    kdf: &KdfParams,
+    sk: Option<&SecretKey>,
+    id: &str,
+) -> Result<SymmetricKey> {
+    crate::kdf::derive_auk_unchecked(pw, kdf, sk, id)
+}
+
+impl UnlockedAccount {
+    pub fn new_vault_key(&self, vault_id: &str) -> Result<(SymmetricKey, String)> {
+        let key = SymmetricKey::generate()?;
+        let wrapped = b64(&self.account_key.wrap(&key, &aad("vault-key", vault_id))?);
+        Ok((key, wrapped))
+    }
+
+    pub fn open_vault_key(&self, vault_id: &str, wrapped: &str) -> Result<SymmetricKey> {
+        self.account_key
+            .unwrap_key(&unb64(wrapped)?, &aad("vault-key", vault_id))
+    }
+
+    /// Open a vault key that another member sealed to this account's public key.
+    pub fn open_shared_vault_key(&self, vault_id: &str, sealed: &str) -> Result<SymmetricKey> {
+        let raw = self
+            .keypair
+            .open(&unb64(sealed)?, &aad("shared-vault-key", vault_id))?;
+        SymmetricKey::from_slice(&raw)
+    }
+}
+
+/// Seal a vault key to another member's public key (base64url).
+pub fn share_vault_key(
+    vault_id: &str,
+    key: &SymmetricKey,
+    recipient_public: &str,
+) -> Result<String> {
+    let pk: [u8; 32] = unb64(recipient_public)?
+        .try_into()
+        .map_err(|_| Error::Malformed("public key length"))?;
+    Ok(b64(&seal_to(
+        &pk,
+        key.as_bytes(),
+        &aad("shared-vault-key", vault_id),
+    )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kdf::test_params;
+
+    fn new(sk: bool) -> NewAccount {
+        AccountBundle::create_with("user-1", "correct horse", sk, test_params()).unwrap()
+    }
+
+    #[test]
+    fn create_and_unlock() {
+        let acct = new(false);
+        assert!(acct.secret_key.is_none());
+        let u = acct.bundle.unlock("correct horse", None).unwrap();
+        assert_eq!(
+            u.account_key.as_bytes(),
+            acct.unlocked.account_key.as_bytes()
+        );
+        assert!(acct.bundle.unlock("wrong", None).is_err());
+    }
+
+    #[test]
+    fn secret_key_required_when_enabled() {
+        let acct = new(true);
+        let sk = acct.secret_key.clone().unwrap();
+        assert!(acct.bundle.unlock("correct horse", None).is_err());
+        assert!(acct.bundle.unlock("correct horse", Some(&sk)).is_ok());
+    }
+
+    #[test]
+    fn bundle_bound_to_account_id() {
+        let mut acct = new(false);
+        acct.bundle.account_id = "user-2".into();
+        assert!(acct.bundle.unlock("correct horse", None).is_err());
+    }
+
+    #[test]
+    fn vault_sharing() {
+        let alice = new(false).unlocked;
+        let bob = new(false).unlocked;
+        let (vk, wrapped) = alice.new_vault_key("v1").unwrap();
+        assert_eq!(
+            alice.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
+            vk.as_bytes()
+        );
+        assert!(alice.open_vault_key("v2", &wrapped).is_err());
+        let sealed = share_vault_key("v1", &vk, &b64(&bob.keypair.public_bytes())).unwrap();
+        assert_eq!(
+            bob.open_shared_vault_key("v1", &sealed).unwrap().as_bytes(),
+            vk.as_bytes()
+        );
+        assert!(alice.open_shared_vault_key("v1", &sealed).is_err());
+    }
+}
