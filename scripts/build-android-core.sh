@@ -21,9 +21,10 @@ flag=(); [ "$PROFILE" = release ] && flag=(--release)
 
 cargo ndk -t arm64-v8a -t x86_64 -P 34 -o "$JNI" build -p passauth-core-ffi "${flag[@]}"
 
-# Bindings come from the host build of the same crate (library mode reads its metadata).
-cargo build -p passauth-core-ffi "${flag[@]}"
-lib="target/$PROFILE/libpassauth_ffi.dylib"; [ -f "$lib" ] || lib="target/$PROFILE/libpassauth_ffi.so"
+# Bindings come from an unstripped host (debug) build of the same crate: library mode reads
+# UniFFI metadata symbols, which the release profile's `strip` removes on Linux.
+cargo build -p passauth-core-ffi
+lib="target/debug/libpassauth_ffi.dylib"; [ -f "$lib" ] || lib="target/debug/libpassauth_ffi.so"
 rm -rf "$KOTLIN/io/passauth/core"
 cargo run -q -p passauth-core-ffi --features cli --bin uniffi-bindgen -- \
   generate --library "$lib" --language kotlin --out-dir "$KOTLIN" --no-format
