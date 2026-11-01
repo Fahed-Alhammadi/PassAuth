@@ -6,6 +6,7 @@
 
 pub mod crypto;
 pub mod error;
+pub mod import;
 pub mod item;
 pub mod kdf;
 pub mod keys;

@@ -21,6 +21,10 @@ pub enum Error {
     InvalidSecretKey,
     #[error("invalid TOTP secret")]
     InvalidTotp,
+    #[error("{0}")]
+    Import(String),
+    #[error("this file is password protected")]
+    PasswordRequired,
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }
