@@ -39,6 +39,31 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  clients:
+    name: web vault + extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-bindgen CLI (version from Cargo.lock)
+        run: |
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: scripts/build-wasm.sh web/src/wasm extension/src/wasm
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: web
+      - run: pnpm install --frozen-lockfile && pnpm build && pnpm test
+        working-directory: extension
+
   docker:
     runs-on: ubuntu-latest
     steps:
