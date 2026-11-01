@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod icons;
 mod mail;
 mod state;
 mod twofactor;
@@ -13,11 +14,14 @@ mod ws;
 #[cfg(test)]
 mod tests;
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Request, State};
 use axum::http::{HeaderName, HeaderValue, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -71,6 +75,7 @@ async fn serve() -> Result<()> {
         loop {
             tick.tick().await;
             sweeper.sweep();
+            sweeper.icons.sweep().await;
             let cutoff = db::now();
             let _ = sqlx::query("DELETE FROM sessions WHERE refresh_expires < $1")
                 .bind(cutoff)
@@ -85,11 +90,14 @@ async fn serve() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, version = env!("CARGO_PKG_VERSION"), "PassAuth server listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }
 
@@ -105,7 +113,9 @@ pub fn router(state: AppState) -> Router {
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
-        ));
+        ))
+        // Added after the no-store layer: icons set their own caching headers.
+        .merge(icons::routes());
 
     let mut app = Router::new().nest("/api", api);
     if let Some(dir) = &state.config.web_vault_dir {
@@ -128,7 +138,22 @@ pub fn router(state: AppState) -> Router {
             "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(peer_ip))
         .with_state(state)
+}
+
+/// Records the TCP peer address for rate limiting when no `IP_HEADER` is set.
+/// Any client-sent value is dropped first, so it can't be spoofed.
+async fn peer_ip(mut req: Request, next: Next) -> Response {
+    req.headers_mut().remove(auth::PEER_IP_HEADER);
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    if let Some(v) = peer.and_then(|ip| HeaderValue::from_str(&ip.to_string()).ok()) {
+        req.headers_mut().insert(auth::PEER_IP_HEADER, v);
+    }
+    next.run(req).await
 }
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {

@@ -1,5 +1,5 @@
 /** Website matching for autofill. */
-import type { LoginUrl } from "@web/lib/types";
+import type { LoginUrl, UrlMatch } from "@web/lib/types";
 
 // Common multi-label public suffixes. Not the full Public Suffix List: for
 // hosts under other multi-label suffixes "domain" matching falls back to the
@@ -30,13 +30,22 @@ export function baseDomain(host: string): string {
   return last2;
 }
 
-export function matchesUrl(page: string, item: LoginUrl): boolean {
+/** Does the page URL match a saved website? `fallback` resolves "default" (the user's setting). */
+export function matchesUrl(page: string, item: LoginUrl, fallback: Exclude<UrlMatch, "default"> = "domain"): boolean {
   const p = parse(page);
-  const u = parse(item.url);
-  if (!p || !u || !/^https?:$/.test(p.protocol)) return false;
-  switch (item.match) {
-    case "never":
+  if (!p || !/^https?:$/.test(p.protocol)) return false;
+  const match = item.match === "default" ? fallback : item.match;
+  if (match === "never") return false;
+  if (match === "regex") {
+    try {
+      return new RegExp(item.url, "i").test(page);
+    } catch {
       return false;
+    }
+  }
+  const u = parse(item.url);
+  if (!u) return false;
+  switch (match) {
     case "exact":
       return p.href === u.href;
     case "starts_with":
@@ -50,6 +59,7 @@ export function matchesUrl(page: string, item: LoginUrl): boolean {
 
 /** Refuse to send a secret saved for an https site to an http page. */
 export function downgrade(page: string, item: LoginUrl): boolean {
+  if (item.match === "regex") return /^http:/i.test(page) && !/^https?:\/\/localhost[:/]/i.test(page) && /^\^?https:/i.test(item.url);
   const p = parse(page);
   const u = parse(item.url);
   return !!p && !!u && u.protocol === "https:" && p.protocol === "http:" && p.hostname !== "localhost";

@@ -463,3 +463,74 @@ async fn admin_requires_token() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["config"]["database"], "sqlite");
 }
+
+async fn get_raw(app: &Router, path: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn icons_off_returns_404() {
+    let config = Config {
+        icon_service: false,
+        ..Config::for_tests()
+    };
+    let app = crate::router(App::new(config).await.unwrap());
+    let resp = get_raw(&app, "/api/icons/github.com").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn icons_reject_invalid_hosts_without_fetching() {
+    let app = app().await;
+    for host in [
+        "localhost",
+        "127.0.0.1",
+        "169.254.169.254",
+        "%5B%3A%3A1%5D",
+        "printer.local",
+        "metadata.google.internal",
+        "nas.lan",
+        "example..com",
+        "exa_mple.com",
+        "127.1",
+    ] {
+        let resp = get_raw(&app, &format!("/api/icons/{host}")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}");
+        let h = resp.headers();
+        assert_eq!(h["content-security-policy"], "default-src 'none'");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        assert_eq!(h["cache-control"], "public, max-age=86400");
+    }
+}
+
+#[tokio::test]
+async fn icons_serve_cached_entries() {
+    use crate::icons::{Icon, ImageKind};
+    let state = App::new(Config::for_tests()).await.unwrap();
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    let icon = Icon {
+        bytes: png.clone().into(),
+        kind: ImageKind::Png,
+    };
+    state.icons.store("example.com", Some(&icon)).await;
+    state.icons.store("example.org", None).await;
+    let app = crate::router(state);
+
+    let resp = get_raw(&app, "/api/icons/Example.COM").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let h = resp.headers();
+    assert_eq!(h["content-type"], "image/png");
+    assert_eq!(h["cache-control"], "public, max-age=604800");
+    assert_eq!(h["content-security-policy"], "default-src 'none'");
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), png.as_slice());
+
+    let resp = get_raw(&app, "/api/icons/example.org").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.headers()["cache-control"], "public, max-age=86400");
+}

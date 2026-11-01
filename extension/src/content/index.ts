@@ -6,64 +6,21 @@
  * - Relays WebAuthn requests (passkey bridge).
  */
 import type { ContentCommand } from "../shared/messages";
-import { matchesUrl } from "../background/urls";
+import { baseDomain } from "../background/urls";
+import { otpField, passwordFields, setValue, usernameFieldFor } from "./fields";
+import { closeInlineMenu, installInlineMenu, suppressInlineMenu } from "./inline";
 import { installPasskeyBridge } from "./passkey-bridge";
+import { logoSvg, panelCss } from "./brand";
 
 installPasskeyBridge();
+installInlineMenu();
 
-// ------------------------------------------------------------------ fields
-
-function visible(el: HTMLElement) {
-  const r = el.getBoundingClientRect();
-  const s = getComputedStyle(el);
-  return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
-}
-
-const USER_HINT = /user|email|login|account|identifier|mail|e-mail|username/i;
-const OTP_HINT = /otp|totp|2fa|mfa|one.?time|verification|auth.?code|security.?code/i;
-
-function passwordFields(root: ParentNode = document) {
-  return [...root.querySelectorAll<HTMLInputElement>('input[type="password"]')].filter((i) => visible(i) && !i.disabled && !i.readOnly);
-}
-
-function usernameFieldFor(pw: HTMLInputElement | null): HTMLInputElement | null {
-  const scope: ParentNode = pw?.form ?? document;
-  const candidates = [...scope.querySelectorAll<HTMLInputElement>("input")].filter(
-    (i) => visible(i) && !i.disabled && ["text", "email", "tel", ""].includes(i.type) && !OTP_HINT.test(attrs(i)),
-  );
-  const byAutocomplete = candidates.find((i) => /username|email/.test(i.autocomplete));
-  if (byAutocomplete) return byAutocomplete;
-  if (pw) {
-    // The closest text field before the password field.
-    const before = candidates.filter((i) => i.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING);
-    return before.at(-1) ?? null;
-  }
-  return candidates.find((i) => USER_HINT.test(attrs(i))) ?? null;
-}
-
-function otpField(): HTMLInputElement | null {
-  return (
-    [...document.querySelectorAll<HTMLInputElement>("input")].find(
-      (i) => visible(i) && !i.disabled && (i.autocomplete === "one-time-code" || (OTP_HINT.test(attrs(i)) && i.type !== "password")),
-    ) ?? null
-  );
-}
-
-function attrs(i: HTMLInputElement) {
-  return `${i.name} ${i.id} ${i.autocomplete} ${i.placeholder} ${i.getAttribute("aria-label") ?? ""}`;
-}
-
-function setValue(el: HTMLInputElement, value: string) {
-  el.focus();
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true }));
-  el.blur();
-}
+// ------------------------------------------------------------------ fill
 
 function fill(cmd: Extract<ContentCommand, { type: "fill" }>): boolean {
-  // Never fill a frame that isn't the saved website (e.g. a third-party iframe).
-  if (cmd.itemUrls.length && !cmd.itemUrls.some((url) => matchesUrl(location.href, { url, match: "domain" }))) return false;
+  // Never fill a frame from another site (e.g. a third-party iframe); the background verified the tab's URL.
+  if (!/^https?:$/.test(location.protocol) || baseDomain(location.hostname) !== cmd.site) return false;
+  suppressInlineMenu();
   const pw = passwordFields()[0] ?? null;
   const user = usernameFieldFor(pw);
   let filled = false;
@@ -77,6 +34,8 @@ function fill(cmd: Extract<ContentCommand, { type: "fill" }>): boolean {
 chrome.runtime.onMessage.addListener((cmd: ContentCommand, _sender, respond) => {
   if (cmd.type === "fill") respond({ filled: fill(cmd) });
   else if (cmd.type === "showSave") showSaveBanner(cmd.host, cmd.update);
+  else if (cmd.type === "toast") showToast(cmd.text);
+  else if (cmd.type === "inline:close") closeInlineMenu();
   else if (cmd.type === "probe") respond({ hasLogin: passwordFields().length > 0 });
 });
 
@@ -138,19 +97,13 @@ function showSaveBanner(host: string, update: boolean) {
   shadow.innerHTML = `
     <style>
       :host { all: initial; position: fixed; top: 16px; right: 16px; z-index: 2147483647; }
-      .b { font: 14px/1.45 system-ui, sans-serif; width: 320px; background: #1b2a41; color: #e6ebf2; border-radius: 12px;
-           box-shadow: 0 12px 32px rgb(0 0 0 / .3); padding: 16px; display: grid; gap: 12px; }
-      .t { display: flex; gap: 10px; align-items: center; font-weight: 600; }
-      .t svg { flex: none; }
-      p { margin: 0; color: #b4bfcd; overflow-wrap: anywhere; }
+      .b { width: 320px; }
       .a { display: flex; gap: 8px; flex-wrap: wrap; }
-      button { font: inherit; border-radius: 6px; padding: 7px 12px; cursor: pointer; border: 1px solid #44546b; background: transparent; color: #e6ebf2; }
-      button.p { background: #c99a3e; border-color: #c99a3e; color: #1b2a41; font-weight: 600; }
-      button:focus-visible { outline: 2px solid #6fb3b6; outline-offset: 2px; }
+      ${panelCss}
     </style>
     <div class="b" role="dialog" aria-label="PassAuth">
       <div class="t">
-        <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#0e1622"/><g fill="#c99a3e"><path d="M34 8.5a15.5 15.5 0 1 1 0 31 15.5 15.5 0 0 1 0-31zm0 7a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17z"/><rect x="17" y="10" width="7.5" height="45" rx="3.75"/><rect x="23" y="41" width="9" height="5" rx="1.5"/><rect x="23" y="49" width="6" height="5" rx="1.5"/></g></svg>
+        ${logoSvg(22)}
         <span>${update ? "Update saved password?" : "Save this login?"}</span>
       </div>
       <p></p>
@@ -175,4 +128,22 @@ function showSaveBanner(host: string, update: boolean) {
   setTimeout(() => {
     if (banner === hostEl) (hostEl.remove(), (banner = null));
   }, 30_000);
+}
+
+// ------------------------------------------------------------------ toast
+
+function showToast(text: string) {
+  if (window.top !== window) return;
+  const hostEl = document.createElement("passauth-toast");
+  const shadow = hostEl.attachShadow({ mode: "closed" });
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; position: fixed; top: 16px; right: 16px; z-index: 2147483647; }
+      ${panelCss}
+      .b { padding: 12px 14px; max-width: 320px; }
+    </style>
+    <div class="b" role="status"><div class="t">${logoSvg(20)}<span></span></div></div>`;
+  shadow.querySelector("span")!.textContent = text;
+  (document.body ?? document.documentElement).appendChild(hostEl);
+  setTimeout(() => hostEl.remove(), 4000);
 }

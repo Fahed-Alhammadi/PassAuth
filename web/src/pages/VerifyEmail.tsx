@@ -25,7 +25,7 @@ export function VerifyEmailPage() {
         {state !== "working" && (
           <div className="auth-panel stack">
             {state === "ok" ? <p>Your email address is confirmed. You can sign in now.</p> : <div className="alert alert-error">{state}</div>}
-            <Link className="btn btn-brass btn-block" to="/login">
+            <Link className="btn btn-accent btn-block" to="/login">
               Go to sign in
             </Link>
           </div>

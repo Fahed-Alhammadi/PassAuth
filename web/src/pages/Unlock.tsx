@@ -45,7 +45,7 @@ export function UnlockPage() {
             </label>
           )}
           <ErrorText error={error} />
-          <button className="btn btn-brass btn-block" disabled={busy || !password}>
+          <button className="btn btn-accent btn-block" disabled={busy || !password}>
             {busy ? "Unlocking…" : "Unlock"}
           </button>
           <button type="button" className="btn btn-ghost" onClick={logout}>

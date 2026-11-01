@@ -104,15 +104,25 @@ pub fn bearer(headers: &HeaderMap) -> Option<String> {
         .map(|t| t.trim().to_owned())
 }
 
+/// Internal header set by the server from the TCP peer address (see `main::peer_ip`).
+pub const PEER_IP_HEADER: &str = "x-passauth-peer-ip";
+
+/// Client address for rate limiting: the configured proxy header, else the TCP peer.
 pub fn client_ip(state: &AppState, headers: &HeaderMap) -> String {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+    };
     state
         .config
         .ip_header
         .as_deref()
-        .and_then(|h| headers.get(h))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_owned())
+        .and_then(header)
+        .or_else(|| header(PEER_IP_HEADER))
         .unwrap_or_else(|| "direct".into())
 }
 

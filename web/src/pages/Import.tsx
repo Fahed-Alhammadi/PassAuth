@@ -281,7 +281,7 @@ export function ImportPage() {
               </label>
               <ErrorText error={error} />
               <div className="row">
-                <button type="submit" className="btn btn-brass">
+                <button type="submit" className="btn btn-accent">
                   Unlock file
                 </button>
                 <button type="button" className="btn btn-ghost" onClick={reset}>
@@ -440,7 +440,7 @@ function Preview({
       )}
 
       {step.warnings.length > 0 && (
-        <div className="alert alert-brass">
+        <div className="alert alert-info">
           <p style={{ fontWeight: 500, marginBottom: 4 }}>{step.warnings.length === 1 ? "1 note about this file" : `${step.warnings.length} notes about this file`}</p>
           <ul className="warn-list">
             {step.warnings.map((w, i) => (
@@ -482,7 +482,7 @@ function Preview({
           </label>
           <ErrorText error={error} />
           <div className="row">
-            <button type="button" className="btn btn-brass" onClick={onImport}>
+            <button type="button" className="btn btn-accent" onClick={onImport}>
               Import {fmt(total)} {total === 1 ? "item" : "items"}
             </button>
             <button type="button" className="btn btn-ghost" onClick={onCancel}>

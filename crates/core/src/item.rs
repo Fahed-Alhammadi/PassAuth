@@ -80,12 +80,16 @@ pub struct Login {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UrlMatch {
-    /// Same registrable domain (example.com matches login.example.com).
+    /// Use the client's "default match detection" setting.
     #[default]
+    Default,
+    /// Same registrable domain (example.com matches login.example.com).
     Domain,
     Host,
     StartsWith,
     Exact,
+    /// `url` is a case-insensitive regular expression tested against the page URL.
+    Regex,
     Never,
 }
 

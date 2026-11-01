@@ -1,4 +1,4 @@
-// Builds the extension into dist/: popup + background (ES modules, WASM as a
+// Builds the extension into dist/: popup, inline menu, offscreen clipboard + background (ES modules, WASM as a
 // file) and the two content scripts (classic IIFE bundles).
 import { build } from "vite";
 import react from "@vitejs/plugin-react";
@@ -22,7 +22,7 @@ await build({
     assetsInlineLimit: 0,
     modulePreload: false,
     rollupOptions: {
-      input: { popup: "popup.html", background: "src/background/index.ts" },
+      input: { popup: "popup.html", "inline-menu": "inline-menu.html", offscreen: "offscreen.html", background: "src/background/index.ts" },
       output: { entryFileNames: "[name].js", chunkFileNames: "chunks/[name]-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" },
     },
   },

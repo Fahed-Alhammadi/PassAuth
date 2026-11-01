@@ -44,7 +44,7 @@ const CHAR_CLASSES: { key: "lowercase" | "uppercase" | "digits" | "symbols"; lab
 
 function strength(bits: number): { label: string; color: string; pct: number } {
   if (bits < 40) return { label: "Weak", color: "var(--danger)", pct: 25 };
-  if (bits < 60) return { label: "Fair", color: "var(--brass)", pct: 50 };
+  if (bits < 60) return { label: "Fair", color: "var(--accent)", pct: 50 };
   if (bits < 80) return { label: "Good", color: "var(--patina)", pct: 75 };
   return { label: "Strong", color: "var(--patina)", pct: 100 };
 }
@@ -125,7 +125,7 @@ export function GeneratorPage() {
           </div>
           <ErrorText error={error} />
           <div className="row">
-            <button type="button" className="btn btn-brass" disabled={!value} onClick={() => copySecret(value, `${noun} copied`)}>
+            <button type="button" className="btn btn-accent" disabled={!value} onClick={() => copySecret(value, `${noun} copied`)}>
               <Icon name="copy" /> Copy {mode}
             </button>
             <button type="button" className="btn" onClick={regenerate}>

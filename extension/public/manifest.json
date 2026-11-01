@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PassAuth",
   "short_name": "PassAuth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Fill passwords, one-time codes and passkeys from your self-hosted PassAuth vault.",
   "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
   "action": {
@@ -11,7 +11,7 @@
     "default_icon": { "16": "icons/icon-16.png", "32": "icons/icon-32.png" }
   },
   "background": { "service_worker": "background.js", "type": "module" },
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "idle", "contextMenus", "clipboardWrite"],
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "idle", "contextMenus", "clipboardWrite", "offscreen"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {
@@ -28,6 +28,7 @@
       "all_frames": true
     }
   ],
+  "web_accessible_resources": [{ "resources": ["inline-menu.html"], "matches": ["http://*/*", "https://*/*"] }],
   "commands": {
     "_execute_action": {
       "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" },

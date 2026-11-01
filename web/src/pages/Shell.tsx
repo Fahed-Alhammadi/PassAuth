@@ -82,7 +82,7 @@ export function Shell() {
         </nav>
       </aside>
       {!emailVerified && (
-        <div className="alert alert-brass small" style={{ position: "fixed", top: 12, right: 12, zIndex: 30, maxWidth: 360 }}>
+        <div className="alert alert-info small" style={{ position: "fixed", top: 12, right: 12, zIndex: 30, maxWidth: 360 }}>
           Confirm your email address to receive security alerts. Check your inbox for the verification link.
         </div>
       )}

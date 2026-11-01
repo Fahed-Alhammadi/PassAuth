@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { setShowIcons, useShowIcons } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
@@ -301,6 +302,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const fp = account.fingerprint ?? getAccount()?.fingerprint() ?? null;
+  const showIcons = useShowIcons();
 
   async function saveName(e: FormEvent) {
     e.preventDefault();
@@ -379,6 +381,17 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
             Delete account
           </button>
         </div>
+      </section>
+
+      <section className="card" aria-labelledby="appearance-title">
+        <h2 id="appearance-title">Appearance</h2>
+        <label className="check">
+          <input type="checkbox" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />
+          <span>
+            Show website icons
+            <span className="small muted block">Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to this browser.</span>
+          </span>
+        </label>
       </section>
 
       {deleting && (
@@ -552,7 +565,7 @@ function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; emai
         {secretKey}
       </div>
       <div className="row" style={{ flexWrap: "wrap" }}>
-        <button type="button" className="btn btn-brass" onClick={downloadKit}>
+        <button type="button" className="btn btn-accent" onClick={downloadKit}>
           <Icon name="upload" />
           Download Emergency Kit
         </button>
@@ -625,7 +638,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
               {account.recovery_codes_left === 1 ? "code" : "codes"} left.
             </p>
             {account.recovery_codes_left <= 3 && (
-              <div className="alert alert-brass">You're running low on recovery codes. Generate new ones and store them somewhere safe.</div>
+              <div className="alert alert-info">You're running low on recovery codes. Generate new ones and store them somewhere safe.</div>
             )}
             <div>
               <button type="button" className="btn" onClick={() => setRegenerating(true)}>
@@ -1262,7 +1275,7 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
             </p>
           </div>
           {existing && (
-            <div className="alert alert-brass">
+            <div className="alert alert-info">
               They already have {ROLE_LABEL[existing.role].toLowerCase()} access. Sharing again changes their access to what you choose below.
             </div>
           )}

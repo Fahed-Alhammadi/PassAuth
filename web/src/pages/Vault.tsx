@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { CopyButton, ErrorText, Icon, Modal, PasswordInput, TotpView, toast } from "../components/ui";
+import { CopyButton, ErrorText, Icon, Modal, PasswordInput, SiteIcon, TotpView, toast } from "../components/ui";
 import { errorMessage } from "../lib/api";
 import { createItem, purgeItem, restoreItem, trashItem, updateItem, useVault, writableVaults } from "../lib/vault";
-import { emptyItem, KIND_LABEL, kindOf, type Field, type Item, type ItemKind, type VaultEntry } from "../lib/types";
+import { useShowIcons } from "../lib/prefs";
+import { emptyItem, KIND_LABEL, kindOf, siteHost, type Field, type Item, type ItemKind, type VaultEntry } from "../lib/types";
 import { filterPath } from "./Shell";
 
 function matches(e: VaultEntry, filter: string): boolean {
@@ -32,12 +33,9 @@ function hostOf(url: string) {
   }
 }
 
-function initial(name: string) {
-  return (name.trim()[0] ?? "?").toUpperCase();
-}
-
 export function VaultPage() {
   const params = useParams();
+  const showIcons = useShowIcons();
   const filter = params.filter ?? "all";
   const itemId = params.itemId;
   const nav = useNavigate();
@@ -106,7 +104,7 @@ export function VaultPage() {
           ) : (
             list.map((e) => (
               <button key={e.id} className="list-item" aria-current={e.id === itemId} onClick={() => open(e.id)}>
-                <span className="avatar">{initial(e.item.name)}</span>
+                <SiteIcon host={siteHost(e.item)} name={e.item.name} enabled={showIcons} />
                 <span className="grow">
                   <span className="title" style={{ display: "block" }}>
                     {e.item.name || "Untitled"}
@@ -191,6 +189,7 @@ function Row({ label, value, secret, mono, children }: { label: string; value?: 
 
 function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) {
   const { vaults } = useVault();
+  const showIcons = useShowIcons();
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -220,7 +219,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
         <Icon name="back" /> Back
       </button>
       <header className="detail-head">
-        <span className="avatar">{initial(i.name)}</span>
+        <SiteIcon host={siteHost(i)} name={i.name} enabled={showIcons} />
         <div className="grow">
           <h1 style={{ overflowWrap: "anywhere" }}>{i.name || "Untitled"}</h1>
           <p className="muted small">
@@ -463,16 +462,18 @@ function Editor({ entry, kind, onDone }: { entry?: VaultEntry; kind: ItemKind; o
                   value={u.match}
                   onChange={(e) => sub("login", { urls: item.login!.urls.map((x, j) => (j === n ? { ...x, match: e.target.value as typeof u.match } : x)) })}
                 >
-                  <option value="domain">Domain</option>
+                  <option value="default">Default (extension setting)</option>
+                  <option value="domain">Base domain</option>
                   <option value="host">Host</option>
                   <option value="starts_with">Starts with</option>
+                  <option value="regex">Regular expression</option>
                   <option value="exact">Exact</option>
                   <option value="never">Never</option>
                 </select>
               </label>
             </div>
           ))}
-          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => sub("login", { urls: [...item.login!.urls, { url: "", match: "domain" }] })}>
+          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => sub("login", { urls: [...item.login!.urls, { url: "", match: "default" }] })}>
             <Icon name="plus" /> Add website
           </button>
         </div>
@@ -561,7 +562,7 @@ function Editor({ entry, kind, onDone }: { entry?: VaultEntry; kind: ItemKind; o
 
       <ErrorText error={error} />
       <div className="toolbar">
-        <button className="btn btn-brass" disabled={busy}>
+        <button className="btn btn-accent" disabled={busy}>
           {busy ? "Saving…" : entry ? "Save changes" : "Save item"}
         </button>
         <button type="button" className="btn" onClick={() => onDone(entry?.id)}>

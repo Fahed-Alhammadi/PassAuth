@@ -11,6 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::db::{self, Db, now};
+use crate::icons::IconService;
 use crate::mail::Mailer;
 
 pub type AppState = Arc<App>;
@@ -28,6 +29,7 @@ pub struct App {
     pub reauth: Expiring<String>,
     pub limiter: RateLimiter,
     pub notify: DashMap<String, broadcast::Sender<String>>,
+    pub icons: IconService,
 }
 
 pub struct PendingRegistration {
@@ -72,6 +74,7 @@ impl App {
             .map_err(|_| anyhow::anyhow!("invalid prelogin secret"))?;
         Ok(Arc::new(Self {
             mailer: Arc::new(Mailer::new(&config)?),
+            icons: IconService::new(&config),
             config,
             db,
             opaque,

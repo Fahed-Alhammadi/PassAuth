@@ -218,7 +218,7 @@ function TokenForm({ initialError, onSignedIn }: { initialError: string | null; 
           </label>
           <p className="small muted">This is the token you set in ADMIN_TOKEN, not a user password. It is kept only in this tab and forgotten when you close it.</p>
           <ErrorText error={error} />
-          <button type="submit" className="btn btn-brass btn-block" disabled={busy}>
+          <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
             {busy ? "Checking token" : "Open admin panel"}
           </button>
         </form>
@@ -311,7 +311,7 @@ function OverviewCard({ o }: { o: Overview }) {
         <span className="small muted">PassAuth server version {o.version}</span>
       </div>
       {!c.admin_token_hashed && (
-        <div className="alert alert-brass" role="note">
+        <div className="alert alert-info" role="note">
           ADMIN_TOKEN is stored as plain text in your server configuration. Run <code className="mono">passauth-server hash-admin-token</code>, set ADMIN_TOKEN to
           the hash it prints and restart the server. You keep signing in here with the same token.
         </div>

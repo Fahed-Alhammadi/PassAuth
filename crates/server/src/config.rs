@@ -39,6 +39,11 @@ pub struct Config {
     /// Header holding the client IP when behind a reverse proxy.
     pub ip_header: Option<String>,
     pub log_json: bool,
+    /// `ICON_SERVICE=internal` (default) serves `/api/icons/{host}`; `off` disables it.
+    pub icon_service: bool,
+    /// Disk cache for fetched icons. Defaults to `icons/` next to the SQLite
+    /// file; `None` (e.g. PostgreSQL without `ICON_CACHE_DIR`) caches in memory.
+    pub icon_cache_dir: Option<String>,
 }
 
 fn var(name: &str) -> Result<Option<String>> {
@@ -60,6 +65,22 @@ fn flag(name: &str, default: bool) -> Result<bool> {
         Some("0" | "false" | "no" | "off") => Ok(false),
         Some(v) => bail!("{name}: expected true/false, got {v:?}"),
     }
+}
+
+/// Directory holding the SQLite database file, if `url` names one on disk.
+pub(crate) fn sqlite_dir(url: &str) -> Option<String> {
+    let path = url.strip_prefix("sqlite:")?;
+    let path = path.strip_prefix("//").unwrap_or(path);
+    let path = path.split('?').next().unwrap_or_default();
+    if path.is_empty() || path.contains(":memory:") {
+        return None;
+    }
+    let dir = std::path::Path::new(path).parent()?.to_str()?;
+    Some(if dir.is_empty() {
+        ".".into()
+    } else {
+        dir.into()
+    })
 }
 
 impl Config {
@@ -93,6 +114,20 @@ impl Config {
                 })
             }
         };
+        let icon_service = match var("ICON_SERVICE")?
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("internal") => true,
+            Some("off") => false,
+            Some(v) => bail!("ICON_SERVICE: expected internal or off, got {v:?}"),
+        };
+        let database_url =
+            var("DATABASE_URL")?.unwrap_or_else(|| "sqlite:///data/passauth.db?mode=rwc".into());
+        let icon_cache_dir = match var("ICON_CACHE_DIR")? {
+            Some(dir) => Some(dir),
+            None => sqlite_dir(&database_url).map(|d| format!("{d}/icons")),
+        };
         let domain = var("DOMAIN")?
             .unwrap_or_else(|| "http://localhost:8080".into())
             .trim_end_matches('/')
@@ -102,8 +137,7 @@ impl Config {
                 .unwrap_or_else(|| "0.0.0.0:8080".into())
                 .parse()
                 .context("BIND")?,
-            database_url: var("DATABASE_URL")?
-                .unwrap_or_else(|| "sqlite:///data/passauth.db?mode=rwc".into()),
+            database_url,
             signups_allowed: flag("SIGNUPS_ALLOWED", true)?,
             signups_domains: var("SIGNUPS_DOMAINS_WHITELIST")?
                 .map(|v| {
@@ -122,6 +156,8 @@ impl Config {
             },
             ip_header: var("IP_HEADER")?,
             log_json: var("LOG_FORMAT")?.as_deref() == Some("json"),
+            icon_service,
+            icon_cache_dir,
             smtp,
             domain,
         })
@@ -154,6 +190,8 @@ impl Config {
             web_vault_dir: None,
             ip_header: None,
             log_json: false,
+            icon_service: true,
+            icon_cache_dir: None,
         }
     }
 }

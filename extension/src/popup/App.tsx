@@ -1,20 +1,18 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark, Wordmark } from "@web/components/Logo";
-import { ErrorText, Icon, PasswordInput } from "@web/components/ui";
+import { ErrorText, Icon, PasswordInput, SiteIcon } from "@web/components/ui";
 import type { Item } from "@web/lib/types";
-import { send, type ItemSummary, type PopupState, type TwoFactorChallenge } from "../shared/messages";
+import { send, type ItemSummary, type PopupState, type Settings, type TwoFactorChallenge, type VaultTimeout } from "../shared/messages";
 
 const msg = (e: unknown) => {
   const m = e instanceof Error ? e.message : String(e);
   return m === "secret_key_required" ? "This account uses a Secret Key. Enter it from your Emergency Kit." : m === "email_not_verified" ? "Confirm your email address first, then sign in." : m;
 };
 
-async function copy(value: string, setNote: (s: string) => void, label: string) {
-  await navigator.clipboard.writeText(value);
-  setNote(`${label} copied. Clipboard clears in 30 seconds.`);
-  // The popup may close before then; the background can't touch the clipboard, so best effort here.
-  setTimeout(() => navigator.clipboard.writeText("").catch(() => {}), 30_000);
-}
+const seconds = (s: number) => (s < 60 ? `${s} seconds` : `${s / 60} minute${s > 60 ? "s" : ""}`);
+
+/** Copies through the background, which also clears the clipboard after the user's delay (even once the popup closes). */
+const copiedNote = (label: string, clearAfter: number) => `${label} copied.${clearAfter ? ` Clipboard clears in ${seconds(clearAfter)}.` : ""}`;
 
 export function App() {
   const [state, setState] = useState<PopupState | null>(null);
@@ -58,7 +56,7 @@ function Setup({ onDone, initial = "" }: { onDone: () => void; initial?: string 
         <input className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://vault.example.com" autoFocus required />
       </label>
       <ErrorText error={error} />
-      <button className="btn btn-brass btn-block" disabled={busy || !url}>
+      <button className="btn btn-accent btn-block" disabled={busy || !url}>
         {busy ? "Checking…" : "Connect"}
       </button>
     </form>
@@ -141,7 +139,7 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
         )}
         {note && <div className="alert alert-ok">{note}</div>}
         <ErrorText error={error} />
-        <button className="btn btn-brass btn-block" disabled={busy || !code}>
+        <button className="btn btn-accent btn-block" disabled={busy || !code}>
           {busy ? "Verifying…" : "Verify and sign in"}
         </button>
       </form>
@@ -169,7 +167,7 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
         </label>
       )}
       <ErrorText error={error} />
-      <button className="btn btn-brass btn-block" disabled={busy || !email || !password}>
+      <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
         {busy ? "Signing in…" : "Sign in"}
       </button>
       <p className="small muted" style={{ textAlign: "center" }}>
@@ -217,7 +215,7 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
         </label>
       )}
       <ErrorText error={error} />
-      <button className="btn btn-brass btn-block" disabled={busy || !password}>
+      <button className="btn btn-accent btn-block" disabled={busy || !password}>
         {busy ? "Unlocking…" : "Unlock"}
       </button>
       <button type="button" className="btn btn-ghost" onClick={() => send({ type: "logout" }).then(onDone)}>
@@ -234,8 +232,24 @@ type Tab = "vault" | "generator" | "settings";
 function Main({ state, onChange }: { state: PopupState; onChange: () => void }) {
   const [tab, setTab] = useState<Tab>("vault");
   const [openId, setOpenId] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const notify = useCallback((text: string) => {
+    setNote(text);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setNote(null), 4000);
+  }, []);
+  const copy = useCallback(
+    (req: { text: string } | { id: string; field: "username" | "password" | "totp" }, label: string) =>
+      send("text" in req ? { type: "copy", text: req.text } : { type: "copyField", ...req }).then(
+        () => notify(copiedNote(label, state.settings.clearClipboard)),
+        (e) => notify(msg(e)),
+      ),
+    [notify, state.settings.clearClipboard],
+  );
+  const ctx = { state, copy, notify };
   return (
-    <>
+    <div className="pop">
       <header className="pop-head">
         <Wordmark />
         <span className="grow" />
@@ -246,11 +260,16 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
           <Icon name="lock" />
         </button>
       </header>
-      <div className="pop-body">
-        {tab === "vault" && (openId ? <Detail id={openId} onBack={() => setOpenId(null)} /> : <ItemList onOpen={setOpenId} />)}
-        {tab === "generator" && <Generator />}
-        {tab === "settings" && <Settings state={state} onChange={onChange} />}
-      </div>
+      <main className="pop-body">
+        {tab === "vault" && (openId ? <Detail id={openId} ctx={ctx} onBack={() => setOpenId(null)} /> : <ItemList ctx={ctx} onOpen={setOpenId} />)}
+        {tab === "generator" && <Generator ctx={ctx} />}
+        {tab === "settings" && <SettingsView state={state} onChange={onChange} notify={notify} />}
+      </main>
+      {note && (
+        <div className="pop-note" role="status">
+          {note}
+        </div>
+      )}
       <nav className="pop-tabs" aria-label="Sections">
         {(
           [
@@ -265,8 +284,14 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
           </button>
         ))}
       </nav>
-    </>
+    </div>
   );
+}
+
+interface Ctx {
+  state: PopupState;
+  copy: (req: { text: string } | { id: string; field: "username" | "password" | "totp" }, label: string) => Promise<void>;
+  notify: (text: string) => void;
 }
 
 async function activeTab() {
@@ -274,11 +299,13 @@ async function activeTab() {
   return tab;
 }
 
-function ItemList({ onOpen }: { onOpen: (id: string) => void }) {
+function ItemList({ ctx, onOpen }: { ctx: Ctx; onOpen: (id: string) => void }) {
   const [data, setData] = useState<{ suggested: ItemSummary[]; all: ItemSummary[] } | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [host, setHost] = useState("");
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const { server, settings } = ctx.state;
   useEffect(() => {
     activeTab().then(async (tab) => {
       const url = tab?.url?.startsWith("http") ? tab.url : undefined;
@@ -303,7 +330,7 @@ function ItemList({ onOpen }: { onOpen: (id: string) => void }) {
   const filtered = q ? data.all.filter((i) => i.name.toLowerCase().includes(q) || i.subtitle.toLowerCase().includes(q)) : data.all;
   const row = (i: ItemSummary, canFill: boolean) => (
     <div className="pop-row" key={i.id}>
-      <span className="avatar">{(i.name[0] ?? "?").toUpperCase()}</span>
+      <SiteIcon host={i.host} name={i.name} server={server} enabled={settings.showIcons} />
       <button className="main" onClick={() => onOpen(i.id)}>
         <span className="title">{i.name}</span>
         <span className="sub">{i.subtitle}</span>
@@ -313,16 +340,47 @@ function ItemList({ onOpen }: { onOpen: (id: string) => void }) {
           Fill
         </button>
       )}
+      {i.kind === "login" && (
+        <div className="pop-more">
+          <button className="btn btn-icon" aria-label={`Options for ${i.name}`} aria-expanded={menuFor === i.id} onClick={() => setMenuFor(menuFor === i.id ? null : i.id)}>
+            <Icon name="more" />
+          </button>
+          {menuFor === i.id && (
+            <div className="pop-menu" role="menu" onClick={() => setMenuFor(null)}>
+              {i.subtitle && (
+                <button role="menuitem" onClick={() => ctx.copy({ id: i.id, field: "username" }, "Username")}>
+                  Copy username
+                </button>
+              )}
+              {i.hasPassword && (
+                <button role="menuitem" onClick={() => ctx.copy({ id: i.id, field: "password" }, "Password")}>
+                  Copy password
+                </button>
+              )}
+              {i.hasTotp && (
+                <button role="menuitem" onClick={() => ctx.copy({ id: i.id, field: "totp" }, "Verification code")}>
+                  Copy verification code
+                </button>
+              )}
+              <button role="menuitem" onClick={() => onOpen(i.id)}>
+                View item
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 
   return (
     <>
-      <input className="input" type="search" placeholder="Search vault" aria-label="Search vault" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+      <div className="pop-search">
+        <input className="input" type="search" placeholder="Search vault" aria-label="Search vault" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+      </div>
       <ErrorText error={error} />
       {!q && host && (
         <>
-          <div className="pop-section">For {host}</div>
+          <div className="pop-section">Autofill suggestions for {host}</div>
           {data.suggested.length ? (
             <div className="pop-list">{data.suggested.map((i) => row(i, true))}</div>
           ) : (
@@ -330,9 +388,9 @@ function ItemList({ onOpen }: { onOpen: (id: string) => void }) {
           )}
         </>
       )}
-      <div className="pop-section">{q ? `Results for "${query}"` : "All items"}</div>
+      <div className="pop-section">{q ? `Results for "${query}"` : `All items (${data.all.length})`}</div>
       {filtered.length ? (
-        <div className="pop-list">{filtered.slice(0, 200).map((i) => row(i, data.suggested.some((s) => s.id === i.id)))}</div>
+        <div className="pop-list">{filtered.slice(0, 300).map((i) => row(i, data.suggested.some((s) => s.id === i.id)))}</div>
       ) : (
         <p className="small muted">{q ? "Nothing matches your search." : "Your vault is empty. Add items in the web vault."}</p>
       )}
@@ -340,10 +398,9 @@ function ItemList({ onOpen }: { onOpen: (id: string) => void }) {
   );
 }
 
-function Detail({ id, onBack }: { id: string; onBack: () => void }) {
+function Detail({ id, ctx, onBack }: { id: string; ctx: Ctx; onBack: () => void }) {
   const [item, setItem] = useState<Item | null>(null);
   const [code, setCode] = useState<{ code: string; remaining: number } | null>(null);
-  const [note, setNote] = useState<string | null>(null);
   const [show, setShow] = useState(false);
   useEffect(() => {
     send<{ item: Item }>({ type: "item", id }).then((r) => setItem(r.item));
@@ -359,7 +416,7 @@ function Detail({ id, onBack }: { id: string; onBack: () => void }) {
   const l = item.login;
   const field = (label: string, value: string, secret = false) =>
     value ? (
-      <div className="pop-row">
+      <div className="pop-row" key={label}>
         <div className="grow">
           <span className="sub">{label}</span>
           <span className={secret ? "mono" : undefined} style={{ display: "block", overflowWrap: "anywhere" }}>
@@ -371,7 +428,7 @@ function Detail({ id, onBack }: { id: string; onBack: () => void }) {
             <Icon name={show ? "eyeOff" : "eye"} />
           </button>
         )}
-        <button className="btn btn-icon" aria-label={`Copy ${label.toLowerCase()}`} onClick={() => copy(value, setNote, label)}>
+        <button className="btn btn-icon" aria-label={`Copy ${label.toLowerCase()}`} onClick={() => ctx.copy({ text: value }, label)}>
           <Icon name="copy" />
         </button>
       </div>
@@ -388,12 +445,12 @@ function Detail({ id, onBack }: { id: string; onBack: () => void }) {
         {code && (
           <div className="pop-row">
             <div className="grow">
-              <span className="sub">One-time code, {code.remaining}s left</span>
+              <span className="sub">Verification code, {code.remaining}s left</span>
               <span className="totp-code" style={{ fontSize: "1.3rem" }}>
                 {code.code.slice(0, 3)} {code.code.slice(3)}
               </span>
             </div>
-            <button className="btn btn-icon" aria-label="Copy code" onClick={() => copy(code.code, setNote, "Code")}>
+            <button className="btn btn-icon" aria-label="Copy code" onClick={() => ctx.copy({ text: code.code }, "Verification code")}>
               <Icon name="copy" />
             </button>
           </div>
@@ -404,16 +461,14 @@ function Detail({ id, onBack }: { id: string; onBack: () => void }) {
         {item.notes && field("Notes", item.notes)}
       </div>
       {l?.passkeys.length ? <p className="small muted">{l.passkeys.length === 1 ? "Has a passkey" : `Has ${l.passkeys.length} passkeys`} for {l.passkeys[0].rp_id}.</p> : null}
-      {note && <div className="alert alert-ok small">{note}</div>}
     </>
   );
 }
 
-function Generator() {
+function Generator({ ctx }: { ctx: Ctx }) {
   const [mode, setMode] = useState<"password" | "passphrase">("password");
   const [length, setLength] = useState(20);
   const [value, setValue] = useState("");
-  const [note, setNote] = useState<string | null>(null);
   const gen = useCallback(
     () => send<string>({ type: "generate", mode, options: mode === "password" ? { length } : { words: Math.max(3, Math.round(length / 4)) } }).then(setValue),
     [mode, length],
@@ -435,56 +490,246 @@ function Generator() {
         <input type="range" min={mode === "password" ? 8 : 12} max={mode === "password" ? 64 : 40} value={length} onChange={(e) => setLength(+e.target.value)} />
       </label>
       <div className="row">
-        <button className="btn btn-brass grow" onClick={() => copy(value, setNote, mode === "password" ? "Password" : "Passphrase")}>
+        <button className="btn btn-accent grow" onClick={() => ctx.copy({ text: value }, mode === "password" ? "Password" : "Passphrase")}>
           Copy
         </button>
         <button className="btn grow" onClick={gen}>
           Regenerate
         </button>
       </div>
-      {note && <div className="alert alert-ok small">{note}</div>}
     </>
   );
 }
 
-function Settings({ state, onChange }: { state: PopupState; onChange: () => void }) {
-  const [minutes, setMinutes] = useState(state.autoLockMinutes);
+// --------------------------------------------------------------- settings
+
+const TIMEOUTS: [VaultTimeout, string][] = [
+  ["immediately", "Immediately"],
+  [1, "1 minute"],
+  [5, "5 minutes"],
+  [15, "15 minutes"],
+  [30, "30 minutes"],
+  [60, "1 hour"],
+  [240, "4 hours"],
+  ["system-lock", "On system lock"],
+  ["restart", "On browser restart"],
+  ["never", "Never"],
+];
+
+const MATCHES: [Settings["defaultMatch"], string][] = [
+  ["domain", "Base domain"],
+  ["host", "Host"],
+  ["starts_with", "Starts with"],
+  ["regex", "Regular expression"],
+  ["exact", "Exact"],
+  ["never", "Never"],
+];
+
+const MATCH_HELP: Record<Settings["defaultMatch"], string> = {
+  domain: "login.example.com and www.example.com both match example.com.",
+  host: "Same host name and port only: login.example.com doesn't match www.example.com.",
+  starts_with: "The page address must start with the saved website address.",
+  regex: "The saved website is a regular expression tested against the page address. Advanced.",
+  exact: "The page address must be exactly the saved website address.",
+  never: "Never suggest or fill logins automatically. Items can still set their own matching.",
+};
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="pop-settings">
+      <h3>{title}</h3>
+      <div className="pop-card">{children}</div>
+    </section>
+  );
+}
+
+function Toggle({ label, help, checked, onChange }: { label: string; help?: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="check">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>
+        {label}
+        {help && <span className="small muted block">{help}</span>}
+      </span>
+    </label>
+  );
+}
+
+function formatTime(ms: number) {
+  if (!ms) return "never";
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? `today at ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}` : d.toLocaleString();
+}
+
+function SettingsView({ state, onChange, notify }: { state: PopupState; onChange: () => void; notify: (t: string) => void }) {
+  const [settings, setSettings] = useState(state.settings);
   const [changingServer, setChangingServer] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(state.lastSync);
+  const [neverSave, setNeverSave] = useState(state.neverSave);
   if (changingServer) return <Setup initial={state.server} onDone={onChange} />;
+
+  const update = (patch: Partial<Settings>) => {
+    setSettings({ ...settings, ...patch });
+    send<Settings>({ type: "settings", patch }).then(setSettings, (e) => notify(msg(e)));
+  };
+  async function sync() {
+    setSyncing(true);
+    try {
+      await send({ type: "sync" });
+      const s = await send<PopupState>({ type: "state" });
+      setLastSync(s.lastSync);
+      notify("Sync complete. Your vault is up to date.");
+    } catch (e) {
+      notify(`Sync failed: ${msg(e)}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+  const timeoutValue = String(settings.vaultTimeout);
+  const isMac = navigator.platform.toLowerCase().includes("mac");
+
   return (
     <div className="stack">
-      <div className="card">
-        <div className="small muted">Signed in as</div>
-        <div>{state.email}</div>
-        <div className="small muted">{state.server}</div>
-      </div>
-      <label className="field">
-        <span>Lock after inactivity</span>
-        <select
-          className="select"
-          value={minutes}
-          onChange={(e) => {
-            setMinutes(+e.target.value);
-            void send({ type: "settings", autoLockMinutes: +e.target.value });
-          }}
-        >
-          {[1, 5, 15, 30, 60, 240].map((m) => (
-            <option key={m} value={m}>
-              {m < 60 ? `${m} minute${m > 1 ? "s" : ""}` : `${m / 60} hour${m > 60 ? "s" : ""}`}
-            </option>
-          ))}
-          <option value={0}>Only when the browser closes</option>
-        </select>
-      </label>
-      <button className="btn" onClick={() => send({ type: "sync" }).then(onChange)}>
-        Sync now
-      </button>
-      <button className="btn" onClick={() => send({ type: "logout" }).then(() => setChangingServer(true))}>
-        Change server
-      </button>
-      <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(onChange)}>
-        Sign out
-      </button>
+      <Section title="Account security">
+        <label className="field">
+          <span>Vault timeout</span>
+          <select
+            className="select"
+            value={timeoutValue}
+            onChange={(e) => {
+              const v = TIMEOUTS.find(([t]) => String(t) === e.target.value)![0];
+              update({ vaultTimeout: v });
+            }}
+          >
+            {TIMEOUTS.map(([v, label]) => (
+              <option key={String(v)} value={String(v)}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        {settings.vaultTimeout === "never" && (
+          <div className="alert alert-error small">With "Never", your vault key is stored on this device without the master password protecting it. Anyone who can use this browser profile can open your vault.</div>
+        )}
+        <label className="field">
+          <span>Timeout action</span>
+          <select className="select" value={settings.timeoutAction} onChange={(e) => update({ timeoutAction: e.target.value as Settings["timeoutAction"] })}>
+            <option value="lock">Lock</option>
+            <option value="logout">Log out</option>
+          </select>
+        </label>
+        <p className="small muted">
+          {settings.timeoutAction === "lock"
+            ? "Locking keeps your encrypted vault here; unlock with your master password."
+            : "Logging out removes the vault from this browser; sign in again (with two-step login) to use it."}
+        </p>
+        <button className="btn" onClick={() => send({ type: "lock" }).then(onChange)}>
+          <Icon name="lock" /> Lock now
+        </button>
+      </Section>
+
+      <Section title="Autofill">
+        <label className="field">
+          <span>Show inline autofill menu</span>
+          <select className="select" value={settings.inlineMenu} onChange={(e) => update({ inlineMenu: e.target.value as Settings["inlineMenu"] })}>
+            <option value="focus">When a login field is selected</option>
+            <option value="click">When I click the PassAuth icon in a field</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Default URI match detection</span>
+          <select className="select" value={settings.defaultMatch} onChange={(e) => update({ defaultMatch: e.target.value as Settings["defaultMatch"] })}>
+            {MATCHES.map(([v, label]) => (
+              <option key={v} value={v}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="small muted">{MATCH_HELP[settings.defaultMatch]} Applies to websites set to "Default" in an item.</p>
+        <Toggle
+          label="Copy verification code automatically"
+          help="After filling a login that has an authenticator key, the current code is copied so you can paste it."
+          checked={settings.autoCopyTotp}
+          onChange={(v) => update({ autoCopyTotp: v })}
+        />
+        <p className="small muted">
+          Fill the login for the current page with <kbd>{isMac ? "⌘ ⇧ L" : "Ctrl+Shift+L"}</kbd>.{" "}
+          <button className="link" onClick={() => chrome.tabs.create({ url: "chrome://extensions/shortcuts" })}>
+            Change shortcuts
+          </button>
+        </p>
+      </Section>
+
+      <Section title="Notifications">
+        <Toggle label="Ask to save and update logins" checked={settings.askToSave} onChange={(v) => update({ askToSave: v })} />
+        {neverSave.length > 0 && (
+          <div className="stack-s">
+            <span className="small muted">Never ask on these sites:</span>
+            {neverSave.map((d) => (
+              <div className="row" key={d}>
+                <span className="grow mono small">{d}</span>
+                <button
+                  className="btn btn-ghost btn-icon"
+                  aria-label={`Ask again on ${d}`}
+                  title="Ask again on this site"
+                  onClick={() => send({ type: "neverSave:remove", domain: d }).then(() => setNeverSave(neverSave.filter((x) => x !== d)))}
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Appearance">
+        <Toggle
+          label="Show website icons"
+          help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
+          checked={settings.showIcons}
+          onChange={(v) => update({ showIcons: v })}
+        />
+      </Section>
+
+      <Section title="Clipboard">
+        <label className="field">
+          <span>Clear clipboard</span>
+          <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
+            <option value={0}>Never</option>
+            {[10, 20, 30, 60, 120, 300].map((s) => (
+              <option key={s} value={s}>
+                After {seconds(s)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </Section>
+
+      <Section title="Sync">
+        <button className="btn" onClick={sync} disabled={syncing}>
+          <Icon name="sync" /> {syncing ? "Syncing…" : "Sync vault now"}
+        </button>
+        <p className="small muted" aria-live="polite">
+          Last sync: {formatTime(lastSync)}
+        </p>
+      </Section>
+
+      <Section title="Account">
+        <div>
+          <div>{state.email}</div>
+          <div className="small muted">{state.server}</div>
+        </div>
+        <button className="btn" onClick={() => send({ type: "logout" }).then(() => setChangingServer(true))}>
+          Change server
+        </button>
+        <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(onChange)}>
+          Log out
+        </button>
+      </Section>
     </div>
   );
 }

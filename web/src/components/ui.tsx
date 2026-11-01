@@ -30,6 +30,9 @@ const paths = {
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
   restore: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5",
   wand: "M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8l1.4 1.4M17.8 6.2l1.4-1.4M3 21l9-9",
+  more: "M6 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM13 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0zM20 12a1 1 0 1 1-2 0 1 1 0 0 1 2 0z",
+  close: "M6 6l12 12M18 6L6 18",
+  sync: "M20 11a8 8 0 0 0-14.3-4.9L4 8M4 3v5h5M4 13a8 8 0 0 0 14.3 4.9L20 16M20 21v-5h-5",
 } as const;
 
 export type IconName = keyof typeof paths;
@@ -78,6 +81,28 @@ export async function copySecret(value: string, label = "Copied") {
       /* clipboard read not permitted; leave it */
     }
   }, 30_000);
+}
+
+/** Website icon from the server's icon service, falling back to the item's initial. */
+export function SiteIcon({ host, name, server = "", enabled = true }: { host: string; name: string; server?: string; enabled?: boolean }) {
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => setLoaded(false), [host]);
+  return (
+    <span className="avatar" aria-hidden="true">
+      {enabled && host ? (
+        <img
+          src={`${server}/api/icons/${encodeURIComponent(host)}`}
+          alt=""
+          referrerPolicy="no-referrer"
+          loading="lazy"
+          className={loaded ? undefined : "pending"}
+          onLoad={() => setLoaded(true)}
+          onError={() => setLoaded(false)}
+        />
+      ) : null}
+      {loaded ? null : (name.trim()[0] ?? "?").toUpperCase()}
+    </span>
+  );
 }
 
 export function CopyButton({ value, label = "Copy" }: { value: string; label?: string }) {
@@ -137,7 +162,7 @@ export function StrengthMeter({ password }: { password: string }) {
   if (!password) return null;
   const bits = estimateBits(password);
   const [label, color, pct] =
-    bits < 40 ? ["Weak", "var(--danger)", 25] : bits < 60 ? ["Fair", "var(--brass)", 50] : bits < 80 ? ["Good", "var(--patina)", 75] : ["Strong", "var(--patina)", 100];
+    bits < 40 ? ["Weak", "var(--danger)", 25] : bits < 60 ? ["Fair", "var(--accent)", 50] : bits < 80 ? ["Good", "var(--patina)", 75] : ["Strong", "var(--patina)", 100];
   return (
     <div className="stack-s">
       <div className="meter" aria-hidden="true">

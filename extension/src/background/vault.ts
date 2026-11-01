@@ -5,9 +5,9 @@
  */
 import init, * as core from "../wasm/passauth_core";
 import type { EncryptedItem, Item, Role } from "@web/lib/types";
-import { kindOf } from "@web/lib/types";
+import { kindOf, siteHost } from "@web/lib/types";
 import { api, setSessionLostHandler } from "./api";
-import { local, session } from "./storage";
+import { local, session, type SessionData } from "./storage";
 import type { ItemSummary, PopupState, TwoFactorChallenge } from "../shared/messages";
 
 export interface Entry {
@@ -59,7 +59,9 @@ export async function state(): Promise<PopupState> {
     email: l.email,
     secretKeyRequired: !!(bundle ?? s?.bundle as any)?.secret_key_enabled,
     secretKeyStored: !!l.secretKeys[l.email],
-    autoLockMinutes: l.autoLockMinutes,
+    settings: l.settings,
+    lastSync: l.lastSync,
+    neverSave: l.neverSave,
   };
 }
 
@@ -162,7 +164,17 @@ export async function unlock(password: string, secretKey?: string) {
 
 async function persistUnlocked() {
   if (!account) return;
-  await session.set({ accountId: bundle.account_id, keys: b64(account.toSessionBytes()), bundle });
+  const data: SessionData = { accountId: bundle.account_id, keys: b64(account.toSessionBytes()), bundle };
+  await session.set(data);
+  await persistForNever(data);
+}
+
+/** Vault timeout "never": keep the unlocked keys on disk so a browser restart stays unlocked. */
+export async function persistForNever(data?: SessionData | null) {
+  const { settings } = await local.get();
+  if (settings.vaultTimeout !== "never") return local.set({ persistedKeys: null });
+  data ??= await session.get();
+  if (data) await local.set({ persistedKeys: data });
 }
 
 /** Restore keys after a service-worker restart. Returns false when locked. */
@@ -171,8 +183,13 @@ export async function ensureUnlocked(): Promise<boolean> {
     if (!entries.length && !revision) await sync();
     return true;
   }
-  const s = await session.get();
-  if (!s) return false;
+  let s = await session.get();
+  if (!s) {
+    const l = await local.get();
+    if (l.settings.vaultTimeout !== "never" || !l.persistedKeys || !l.tokens) return false;
+    s = l.persistedKeys;
+    await session.set(s);
+  }
   await initWasm();
   bundle = s.bundle;
   account = core.accountFromSessionBytes(s.accountId, unb64(s.keys));
@@ -188,6 +205,7 @@ async function clearUnlocked() {
   account?.free();
   account = null;
   await session.clear();
+  await local.set({ persistedKeys: null });
 }
 
 export async function lock() {
@@ -243,6 +261,7 @@ export async function sync() {
   vaults = next;
   entries = list;
   revision = data.revision;
+  await local.set({ lastSync: Date.now() });
 }
 
 /** Re-sync if the server has newer data (cheap revision check). */
@@ -268,11 +287,12 @@ export function vaultName(id: string) {
 
 export function summarize(e: Entry): ItemSummary {
   const i = e.item;
-  const host = i.login?.urls[0]?.url ? new URL(i.login.urls[0].url.includes("://") ? i.login.urls[0].url : `https://${i.login.urls[0].url}`).host : "";
+  const host = siteHost(i);
   return {
     id: e.id,
     name: i.name || "Untitled",
     subtitle: i.login?.username || host || (i.card ? `•••• ${i.card.number.slice(-4)}` : i.notes.split("\n")[0].slice(0, 50)),
+    host,
     kind: kindOf(i),
     favorite: i.favorite,
     hasPassword: !!i.login?.password,

@@ -1,7 +1,23 @@
 /** Messages between popup, content scripts and the background service worker. */
-import type { Item, ItemKind } from "@web/lib/types";
+import type { Item, ItemKind, UrlMatch } from "@web/lib/types";
 
 export type Status = "setup" | "logged-out" | "locked" | "unlocked";
+
+/** Minutes of inactivity, or a special trigger. */
+export type VaultTimeout = number | "immediately" | "system-lock" | "restart" | "never";
+
+export interface Settings {
+  vaultTimeout: VaultTimeout;
+  timeoutAction: "lock" | "logout";
+  /** Inline autofill menu on login fields. */
+  inlineMenu: "focus" | "click" | "off";
+  autoCopyTotp: boolean;
+  /** Seconds; 0 = never. */
+  clearClipboard: number;
+  showIcons: boolean;
+  defaultMatch: Exclude<UrlMatch, "default">;
+  askToSave: boolean;
+}
 
 export interface PopupState {
   status: Status;
@@ -9,13 +25,17 @@ export interface PopupState {
   email: string;
   secretKeyRequired: boolean;
   secretKeyStored: boolean;
-  autoLockMinutes: number;
+  settings: Settings;
+  lastSync: number;
+  neverSave: string[];
 }
 
 export interface ItemSummary {
   id: string;
   name: string;
   subtitle: string;
+  /** Host of the first website, for the site icon. */
+  host: string;
   kind: ItemKind;
   favorite: boolean;
   hasPassword: boolean;
@@ -42,18 +62,44 @@ export type Request =
   | { type: "fill"; id: string; tabId: number }
   | { type: "generate"; mode: "password" | "passphrase"; options?: Record<string, unknown> }
   | { type: "createItem"; item: Item }
-  | { type: "settings"; autoLockMinutes: number }
+  | { type: "settings"; patch: Partial<Settings> }
+  | { type: "neverSave:remove"; domain: string }
+  | { type: "copy"; text: string }
+  | { type: "copyField"; id: string; field: "username" | "password" | "totp" }
+  | { type: "openPopup" }
+  // inline autofill menu (extension frame) → background
+  | { type: "inline:items"; nonce: string }
+  | { type: "inline:fill"; nonce: string; id: string }
+  | { type: "inline:close"; nonce: string }
   | { type: "passkey:pending"; requestId: string }
   | { type: "passkey:decide"; requestId: string; accept: boolean; credentialId?: string; fallback?: boolean }
   // content script → background
   | { type: "page:submitted"; url: string; username: string; password: string }
   | { type: "page:pendingSave" }
   | { type: "page:save"; accept: "save" | "never" | "dismiss" }
-  | { type: "page:fillRequest" };
+  | { type: "page:fillRequest" }
+  | { type: "page:inlineInfo" }
+  | { type: "page:inlineOpen" };
+
+export interface InlineInfo {
+  mode: Settings["inlineMenu"];
+  status: "locked" | "unlocked";
+  count: number;
+}
+
+export interface InlineItems {
+  server: string;
+  showIcons: boolean;
+  locked: boolean;
+  items: ItemSummary[];
+}
 
 /** background → content script (chrome.tabs.sendMessage). */
 export type ContentCommand =
-  | { type: "fill"; username: string; password: string; totp?: string; itemUrls: string[] }
+  /** `site`: base domain of the verified top page; only same-site frames fill. */
+  | { type: "fill"; username: string; password: string; totp?: string; site: string }
+  | { type: "toast"; text: string }
+  | { type: "inline:close" }
   | { type: "showSave"; host: string; update: boolean }
   | { type: "probe" };
 

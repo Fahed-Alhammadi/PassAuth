@@ -54,6 +54,7 @@ Item Key (random 256-bit per item) ─ wrapped by Vault Key ─► encrypts item
 - SMTP: verification, invites, new-device alerts, email 2FA, recovery, admin test mail.
 - Admin panel: off by default, Argon2-hashed token, no shell or executable-path settings.
 - Real-time sync over WebSocket (`/api/ws`), plus a revision-date check for cheap polling.
+- Website icons: `GET /api/icons/{host}` (unauthenticated, used as `<img src>`; clients fall back to a letter avatar on error). The server fetches the site's `<link rel=icon>` or `/favicon.ico` defensively: public DNS names only, every resolved IP must be public and the connection is pinned to it, redirects re-validated (max 3), ports 80/443, 5 s budget, 100 KiB cap, only PNG/ICO/GIF/JPEG/WebP by magic bytes (never SVG/HTML), `CSP: default-src 'none'`. Hits cached 7 days, misses 1 day (`ICON_CACHE_DIR`, default `icons/` beside the SQLite file). Uncached fetches are rate-limited per client IP (60/min) and capped at 8 concurrent. `ICON_SERVICE=off` disables it. Privacy: the server learns which sites' icons are requested (not which user, not vault contents); turn it off if that matters.
 - Extension: login to any PassAuth server URL; autofill only on user action, in the top-level same-origin frame; inline save prompts; TOTP codes; acts as a WebAuthn **passkey provider** (ES256 keys stored inside the encrypted item, with fallback to browser or hardware keys).
 
 ## Deployment

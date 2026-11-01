@@ -93,7 +93,7 @@ fn parse_plain(v: &Value) -> Result<ImportResult> {
             })
             .collect();
         match it["type"].as_i64() {
-            Some(1) => item.login = Some(login(&it["login"], &mut warnings)),
+            Some(1) => item.login = Some(login(&it["login"])),
             Some(2) => {}
             Some(3) => {
                 let c = &it["card"];
@@ -167,7 +167,7 @@ fn field(f: &Value) -> Option<Field> {
     })
 }
 
-fn login(l: &Value, warnings: &mut Vec<String>) -> Login {
+fn login(l: &Value) -> Login {
     let urls = l["uris"]
         .as_array()
         .into_iter()
@@ -178,15 +178,10 @@ fn login(l: &Value, warnings: &mut Vec<String>) -> Login {
                 Some(1) => UrlMatch::Host,
                 Some(2) => UrlMatch::StartsWith,
                 Some(3) => UrlMatch::Exact,
+                Some(0) => UrlMatch::Domain,
+                Some(4) => UrlMatch::Regex,
                 Some(5) => UrlMatch::Never,
-                Some(4) => {
-                    warnings.push(format!(
-                        "regex URL match for {} imported as domain match",
-                        s(&u["uri"])
-                    ));
-                    UrlMatch::Domain
-                }
-                _ => UrlMatch::Domain,
+                _ => UrlMatch::Default,
             },
         })
         .filter(|u| !u.url.is_empty())
@@ -347,7 +342,7 @@ mod tests {
         {"type":1,"name":"GitHub","folderId":"f1","favorite":true,"notes":"n",
          "fields":[{"name":"PIN","value":"1234","type":1},{"name":"l","value":null,"type":3,"linkedId":100}],
          "login":{"username":"octo","password":"pw","totp":"JBSWY3DPEHPK3PXP",
-           "uris":[{"uri":"https://github.com","match":null},{"uri":"https://x.io","match":3}],
+           "uris":[{"uri":"https://github.com","match":null},{"uri":"https://x.io","match":3},{"uri":"^https://a\\\\.b/","match":4}],
            "fido2Credentials":[{"credentialId":"b64.AAEC","keyType":"public-key","keyAlgorithm":"ECDSA","keyCurve":"P-256",
              "keyValue":"MIGH","rpId":"github.com","userHandle":"dQ","userName":"octo","counter":"5","discoverable":"true"}]}},
         {"type":3,"name":"Visa","card":{"cardholderName":"O C","number":"4111","expMonth":"1","expYear":"2030","code":"123"}},
@@ -364,7 +359,9 @@ mod tests {
         assert_eq!(gh.fields.len(), 1);
         assert_eq!(gh.fields[0].field_type, FieldType::Hidden);
         let l = gh.login.as_ref().unwrap();
+        assert_eq!(l.urls[0].match_type, UrlMatch::Default);
         assert_eq!(l.urls[1].match_type, UrlMatch::Exact);
+        assert_eq!(l.urls[2].match_type, UrlMatch::Regex);
         assert_eq!(l.passkeys[0].credential_id, "AAEC");
         assert_eq!(l.passkeys[0].counter, 5);
         assert!(l.passkeys[0].discoverable);

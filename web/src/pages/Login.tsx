@@ -103,7 +103,7 @@ export function LoginPage() {
               </label>
             )}
             <ErrorText error={error} />
-            <button className="btn btn-brass btn-block" disabled={busy || !email || !password}>
+            <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
               {busy ? "Unlocking…" : "Sign in"}
             </button>
           </form>
@@ -144,7 +144,7 @@ export function LoginPage() {
               <span>Don't ask again on this device for 30 days</span>
             </label>
             <ErrorText error={error} />
-            <button className="btn btn-brass btn-block" disabled={busy || !code}>
+            <button className="btn btn-accent btn-block" disabled={busy || !code}>
               {busy ? "Verifying…" : "Verify and sign in"}
             </button>
             <button type="button" className="btn btn-ghost" onClick={() => (setTwoFactor(null), setCode(""), setError(null))}>

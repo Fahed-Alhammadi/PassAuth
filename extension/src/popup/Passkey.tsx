@@ -67,7 +67,7 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
           ))}
         </div>
       )}
-      <button className="btn btn-brass btn-block" onClick={() => decide(true)} autoFocus>
+      <button className="btn btn-accent btn-block" onClick={() => decide(true)} autoFocus>
         {info.kind === "create" ? "Save passkey" : "Sign in"}
       </button>
       <button className="btn btn-block" onClick={() => decide(false, true)}>

@@ -9,5 +9,8 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { PasskeyConfirm } from "./Passkey";
 
+// Lets the background run the "Immediately" vault timeout when the popup closes.
+chrome.runtime.connect({ name: "popup" });
+
 const passkey = location.hash.match(/^#passkey=(.+)$/)?.[1];
 createRoot(document.getElementById("root")!).render(passkey ? <PasskeyConfirm requestId={passkey} /> : <App />);

@@ -104,7 +104,7 @@ async function storePasskey(passkey: Passkey, rpName: string) {
     favorite: false,
     folder: null,
     tags: [],
-    login: { username: passkey.user_name, password: "", urls: [{ url: `https://${passkey.rp_id}`, match: "domain" }], totp: null, passkeys: [passkey] },
+    login: { username: passkey.user_name, password: "", urls: [{ url: `https://${passkey.rp_id}`, match: "default" }], totp: null, passkeys: [passkey] },
     card: null,
     identity: null,
     ssh_key: null,

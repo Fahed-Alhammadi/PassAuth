@@ -1,6 +1,6 @@
 /** Mirrors `passauth_core::item` (snake_case JSON). */
 
-export type UrlMatch = "domain" | "host" | "starts_with" | "exact" | "never";
+export type UrlMatch = "default" | "domain" | "host" | "starts_with" | "exact" | "regex" | "never";
 export type FieldType = "text" | "hidden" | "boolean";
 
 export interface LoginUrl {
@@ -113,7 +113,7 @@ export function emptyItem(kind: ItemKind): Item {
     favorite: false,
     folder: null,
     tags: [],
-    login: kind === "login" ? { username: "", password: "", urls: [{ url: "", match: "domain" }], totp: null, passkeys: [] } : null,
+    login: kind === "login" ? { username: "", password: "", urls: [{ url: "", match: "default" }], totp: null, passkeys: [] } : null,
     card: kind === "card" ? { cardholder_name: "", brand: "", number: "", exp_month: "", exp_year: "", code: "" } : null,
     identity:
       kind === "identity"
@@ -144,3 +144,17 @@ export interface VaultEntry {
 }
 
 export type Role = "owner" | "admin" | "write" | "read";
+
+/** Host of the first website (patterns excluded), for site icons. */
+export function siteHost(item: Item): string {
+  for (const u of item.login?.urls ?? []) {
+    if (u.match === "regex" || !u.url) continue;
+    try {
+      const p = new URL(u.url.includes("://") ? u.url : `https://${u.url}`);
+      if (/^https?:$/.test(p.protocol)) return p.hostname;
+    } catch {
+      /* not a URL */
+    }
+  }
+  return "";
+}

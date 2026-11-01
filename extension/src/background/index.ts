@@ -1,24 +1,60 @@
-/** PassAuth extension service worker: message router, autofill, save prompts, auto-lock. */
-import type { ContentCommand, Request, Reply } from "../shared/messages";
-import { local } from "./storage";
+/** PassAuth extension service worker: message router, autofill, inline menu, save prompts, vault timeout. */
+import type { ContentCommand, InlineInfo, InlineItems, Request, Reply, Settings } from "../shared/messages";
+import type { LoginUrl } from "@web/lib/types";
+import { copy } from "./clipboard";
+import { getSettings, local } from "./storage";
 import { decide, handlePasskey, pendingRequest } from "./passkey-handler";
 import { baseDomain, downgrade, matchesUrl, parse } from "./urls";
 import * as vault from "./vault";
 
-// ------------------------------------------------------------ auto-lock
+// ---------------------------------------------------------- vault timeout
 
+/** Run the user's timeout action (lock, or log out which also forgets the vault data). */
+async function timeout() {
+  const { settings, tokens } = await local.get();
+  if (!tokens) return;
+  if (settings.timeoutAction === "logout") await vault.logout();
+  else await vault.lock();
+}
+
+/** Activity in PassAuth restarts the inactivity timer. */
 async function touch() {
-  const { autoLockMinutes } = await local.get();
-  if (autoLockMinutes > 0) await chrome.alarms.create("autolock", { delayInMinutes: autoLockMinutes });
+  const { vaultTimeout } = await getSettings();
+  if (typeof vaultTimeout === "number" && vaultTimeout > 0) await chrome.alarms.create("autolock", { delayInMinutes: vaultTimeout });
+  else await chrome.alarms.clear("autolock");
 }
 
 chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "autolock") void vault.lock();
+  if (a.name === "autolock") void timeout();
 });
 chrome.idle.setDetectionInterval(60);
-chrome.idle.onStateChanged.addListener((s) => {
-  if (s === "locked") void vault.lock();
+chrome.idle.onStateChanged.addListener(async (s) => {
+  if (s === "locked" && (await getSettings()).vaultTimeout === "system-lock") await timeout();
 });
+// Keys in session storage are gone after a browser restart (locked); "log out" also drops the session.
+chrome.runtime.onStartup.addListener(async () => {
+  const { vaultTimeout, timeoutAction } = await getSettings();
+  if (vaultTimeout !== "never" && timeoutAction === "logout") await timeout();
+});
+// "Immediately": time out as soon as the popup closes.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "popup" || port.sender?.id !== chrome.runtime.id) return;
+  port.onDisconnect.addListener(async () => {
+    if ((await getSettings()).vaultTimeout === "immediately") await timeout();
+  });
+});
+
+/** PassAuth's own web vault: never offer to fill or save there (it would capture the master password). */
+async function isVaultPage(url: string) {
+  const { server } = await local.get();
+  const page = parse(url);
+  return !!server && !!page && page.origin === new URL(server).origin;
+}
+
+async function matching(url: string) {
+  const { defaultMatch } = await getSettings();
+  return vault.allEntries().filter((e) => e.item.login?.urls.some((u) => matchesUrl(url, u, defaultMatch)));
+}
 
 // ------------------------------------------------------------- save prompts
 
@@ -34,9 +70,9 @@ const saves = new Map<number, PendingSave>();
 async function onSubmitted(tabId: number, url: string, username: string, password: string) {
   if (!password || !(await vault.ensureUnlocked())) return null;
   const host = parse(url)?.hostname ?? "";
-  const { neverSave } = await local.get();
-  if (!host || neverSave.includes(baseDomain(host))) return null;
-  const sameSite = vault.allEntries().filter((e) => e.item.login?.urls.some((u) => matchesUrl(url, u)));
+  const { neverSave, settings } = await local.get();
+  if (!settings.askToSave || !host || neverSave.includes(baseDomain(host)) || (await isVaultPage(url))) return null;
+  const sameSite = await matching(url);
   const sameUser = sameSite.find((e) => e.item.login!.username.toLowerCase() === username.toLowerCase());
   if (sameUser?.item.login!.password === password) return null;
   if (sameUser && !vault.canWrite(sameUser)) return null;
@@ -73,7 +109,7 @@ async function applySave(tabId: number, accept: "save" | "never" | "dismiss") {
     favorite: false,
     folder: null,
     tags: [],
-    login: { username: p.username, password: p.password, urls: [{ url: origin, match: "domain" }], totp: null, passkeys: [] },
+    login: { username: p.username, password: p.password, urls: [{ url: origin, match: "default" }], totp: null, passkeys: [] },
     card: null,
     identity: null,
     ssh_key: null,
@@ -86,28 +122,33 @@ async function applySave(tabId: number, accept: "save" | "never" | "dismiss") {
 
 // ------------------------------------------------------------------ fill
 
+const describe = (u: LoginUrl) => (u.match === "regex" ? u.url : (parse(u.url)?.host ?? u.url));
+
 async function fill(id: string, tabId: number) {
   if (!(await vault.ensureUnlocked())) throw new Error("Unlock PassAuth first.");
   const entry = vault.getEntry(id);
   const login = entry?.item.login;
   if (!login) throw new Error("This item has no login to fill.");
+  const settings = await getSettings();
   const tab = await chrome.tabs.get(tabId);
   const url = tab.url ?? "";
-  if (login.urls.length && !login.urls.some((u) => matchesUrl(url, u))) {
-    throw new Error(`This login is saved for ${login.urls.map((u) => parse(u.url)?.host ?? u.url).join(", ")}, not for this site.`);
+  const page = parse(url);
+  if (!page || !/^https?:$/.test(page.protocol)) throw new Error("PassAuth can only fill on websites.");
+  if (login.urls.length && !login.urls.some((u) => matchesUrl(url, u, settings.defaultMatch))) {
+    throw new Error(`This login is saved for ${login.urls.map(describe).join(", ")}, not for this site.`);
   }
   if (login.urls.some((u) => downgrade(url, u))) throw new Error("This page isn't secure (http). PassAuth won't fill a login saved for an https site here.");
-  const cmd: ContentCommand = {
-    type: "fill",
-    username: login.username,
-    password: login.password,
-    totp: login.totp ? vault.totp(login.totp).code : undefined,
-    itemUrls: login.urls.map((u) => u.url),
-  };
-  // Every frame receives the command; each frame fills only if its own origin matches.
+  const code = login.totp ? vault.totp(login.totp).code : undefined;
+  const cmd: ContentCommand = { type: "fill", username: login.username, password: login.password, totp: code, site: baseDomain(page.hostname) };
+  // Every frame receives the command; each frame fills only if it is on the same site as the tab.
   await chrome.tabs.sendMessage(tabId, cmd).catch(() => {
     throw new Error("This page can't be filled. Reload it and try again.");
   });
+  if (code && settings.autoCopyTotp) {
+    await copy(code);
+    const toast: ContentCommand = { type: "toast", text: "Verification code copied. Paste it when the site asks." };
+    await chrome.tabs.sendMessage(tabId, toast, { frameId: 0 }).catch(() => {});
+  }
 }
 
 /** Keyboard shortcut / context menu: fill the single matching login, or open the popup. */
@@ -115,8 +156,7 @@ async function fillForActiveTab(tab?: chrome.tabs.Tab) {
   tab ??= (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
   if (!tab?.id || !tab.url) return;
   if (!(await vault.ensureUnlocked())) return chrome.action.openPopup().catch(() => {});
-  const url = tab.url;
-  const matches = vault.allEntries().filter((e) => e.item.login?.urls.some((u) => matchesUrl(url, u)));
+  const matches = await matching(tab.url);
   if (matches.length === 1) await fill(matches[0].id, tab.id).catch(() => {});
   else await chrome.action.openPopup().catch(() => {});
 }
@@ -132,12 +172,84 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "passauth-fill") void fillForActiveTab(tab);
 });
 
+async function openPopup() {
+  try {
+    await chrome.action.openPopup();
+  } catch {
+    await chrome.windows.create({ url: chrome.runtime.getURL("popup.html"), type: "popup", width: 380, height: 620, focused: true });
+  }
+}
+
+// ------------------------------------------------------------ inline menu
+
+/**
+ * The menu is an extension page in an iframe the content script places under
+ * the field, so the website can't read the logins shown in it. A one-time
+ * nonce ties each menu to the tab and frame that opened it.
+ */
+const inlineMenus = new Map<string, { tabId: number; frameId: number; expires: number }>();
+
+async function inlineInfo(sender: chrome.runtime.MessageSender): Promise<InlineInfo> {
+  const { settings, tokens } = await local.get();
+  const off: InlineInfo = { mode: "off", status: "locked", count: 0 };
+  const top = parse(sender.tab?.url ?? "");
+  const frame = parse(sender.url ?? "");
+  if (settings.inlineMenu === "off" || !tokens || !top || !frame || !/^https?:$/.test(top.protocol) || (await isVaultPage(top.href))) return off;
+  // Only frames on the same site as the tab: fill() refuses the others anyway.
+  if (baseDomain(top.hostname) !== baseDomain(frame.hostname)) return off;
+  if (!(await vault.ensureUnlocked().catch(() => false))) return { mode: settings.inlineMenu, status: "locked", count: 0 };
+  return { mode: settings.inlineMenu, status: "unlocked", count: (await matching(top.href)).length };
+}
+
+function inlineMenu(nonce: string, sender: chrome.runtime.MessageSender) {
+  const m = inlineMenus.get(nonce);
+  if (!m || m.expires < Date.now() || m.tabId !== sender.tab?.id) throw new Error("This menu has expired.");
+  return m;
+}
+
+const closeInline = (m: { tabId: number; frameId: number }) =>
+  chrome.tabs.sendMessage(m.tabId, { type: "inline:close" } satisfies ContentCommand, { frameId: m.frameId }).catch(() => {});
+
+async function handleInline(req: Request, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  switch (req.type) {
+    case "inline:items": {
+      inlineMenu(req.nonce, sender);
+      const { server, settings } = await local.get();
+      if (!(await vault.ensureUnlocked().catch(() => false))) return { server, showIcons: settings.showIcons, locked: true, items: [] } satisfies InlineItems;
+      const items = (await matching(sender.tab?.url ?? "")).map(vault.summarize);
+      return { server, showIcons: settings.showIcons, locked: false, items } satisfies InlineItems;
+    }
+    case "inline:fill": {
+      const m = inlineMenu(req.nonce, sender);
+      inlineMenus.delete(req.nonce);
+      await closeInline(m);
+      return fill(req.id, m.tabId);
+    }
+    case "inline:close": {
+      const m = inlineMenu(req.nonce, sender);
+      inlineMenus.delete(req.nonce);
+      return closeInline(m);
+    }
+    case "openPopup":
+      return openPopup();
+    default:
+      throw new Error("Not allowed.");
+  }
+}
+
 // ---------------------------------------------------------------- router
 
 async function handle(req: Request, sender: chrome.runtime.MessageSender): Promise<unknown> {
   // Extension pages (popup, even when opened in a tab) vs. content scripts on websites.
   const fromExtension = sender.id === chrome.runtime.id && (sender.url ?? "").startsWith(chrome.runtime.getURL(""));
+  // The inline menu frame sits inside web pages: it only gets the few requests it needs.
+  const fromInlineMenu = fromExtension && /^\/inline-menu\.html$/.test(new URL(sender.url!).pathname);
   const tabId = sender.tab?.id;
+
+  if (fromInlineMenu) {
+    await touch();
+    return handleInline(req, sender);
+  }
 
   // Page-originated messages: only the small set content scripts need.
   if (!fromExtension) {
@@ -154,6 +266,15 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
         return tabId === undefined ? null : applySave(tabId, req.accept);
       case "page:fillRequest":
         return fillForActiveTab(sender.tab);
+      case "page:inlineInfo":
+        return inlineInfo(sender);
+      case "page:inlineOpen": {
+        if (tabId === undefined || sender.frameId === undefined) return null;
+        for (const [k, m] of inlineMenus) if (m.expires < Date.now() || m.tabId === tabId) inlineMenus.delete(k);
+        const nonce = crypto.randomUUID();
+        inlineMenus.set(nonce, { tabId, frameId: sender.frameId, expires: Date.now() + 10 * 60_000 });
+        return nonce;
+      }
       default:
         throw new Error("Not allowed.");
     }
@@ -182,10 +303,8 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return vault.sync();
     case "items": {
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
-      const all = vault.allEntries();
-      const url = req.url ?? "";
-      const suggested = url ? all.filter((e) => e.item.login?.urls.some((u) => matchesUrl(url, u))) : [];
-      return { suggested: suggested.map(vault.summarize), all: all.map(vault.summarize) };
+      const suggested = req.url ? await matching(req.url) : [];
+      return { suggested: suggested.map(vault.summarize), all: vault.allEntries().map(vault.summarize) };
     }
     case "item": {
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
@@ -205,10 +324,27 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
     case "createItem":
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
       return vault.createItem(req.item);
-    case "settings":
-      await local.set({ autoLockMinutes: req.autoLockMinutes });
-      if (req.autoLockMinutes <= 0) await chrome.alarms.clear("autolock");
-      return null;
+    case "settings": {
+      const settings: Settings = { ...(await getSettings()), ...req.patch };
+      await local.set({ settings });
+      await touch();
+      await vault.persistForNever();
+      return settings;
+    }
+    case "neverSave:remove": {
+      const { neverSave } = await local.get();
+      return local.set({ neverSave: neverSave.filter((d) => d !== req.domain) });
+    }
+    case "copy":
+      return copy(req.text);
+    case "copyField": {
+      const login = vault.getEntry(req.id)?.item.login;
+      const value = req.field === "totp" ? (login?.totp ? vault.totp(login.totp).code : "") : (login?.[req.field] ?? "");
+      if (!value) throw new Error("Nothing to copy.");
+      return copy(value);
+    }
+    case "openPopup":
+      return openPopup();
     case "passkey:pending":
       return pendingRequest(req.requestId);
     case "passkey:decide":

@@ -102,7 +102,7 @@ export function RegisterPage() {
             )}
             {done.verify && <div className="alert alert-ok">We sent a verification link to {email}. Open it, then sign in.</div>}
             <ErrorText error={error} />
-            <button className="btn btn-brass btn-block" disabled={busy || (!!done.secretKey && !saved)} onClick={continueToVault}>
+            <button className="btn btn-accent btn-block" disabled={busy || (!!done.secretKey && !saved)} onClick={continueToVault}>
               {done.verify ? "Go to sign in" : busy ? "Opening vault…" : "Open my vault"}
             </button>
           </div>
@@ -137,7 +137,7 @@ export function RegisterPage() {
             <span>Confirm master password</span>
             <PasswordInput value={confirm} onChange={setConfirm} autoComplete="new-password" />
           </label>
-          <div className="alert alert-brass small">
+          <div className="alert alert-info small">
             Your master password can't be reset. If you forget it, the data in your vault can't be recovered by anyone, including the server administrator.
           </div>
           <label className="check">
@@ -151,7 +151,7 @@ export function RegisterPage() {
             </span>
           </label>
           <ErrorText error={error} />
-          <button className="btn btn-brass btn-block" disabled={busy}>
+          <button className="btn btn-accent btn-block" disabled={busy}>
             {busy ? "Creating account…" : "Create account"}
           </button>
         </form>
