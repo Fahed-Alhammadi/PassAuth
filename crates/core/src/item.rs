@@ -31,9 +31,16 @@ pub enum ItemType {
     SshKey,
 }
 
+/// Current item format. Items are upgraded on decrypt and stamped on encrypt.
+/// - 0/1: before PassAuth 0.2.1. "domain" was the default URL match.
+/// - 2: URL match "default" follows the client setting; "domain" is an explicit choice.
+pub const ITEM_FORMAT: u32 = 2;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Item {
+    /// Schema version of the decrypted data (see [`ITEM_FORMAT`]).
+    pub format: u32,
     pub name: String,
     pub notes: String,
     pub favorite: bool,
@@ -51,6 +58,19 @@ pub struct Item {
 }
 
 impl Item {
+    /// Bring older item data up to [`ITEM_FORMAT`].
+    fn upgrade(&mut self) {
+        if self.format < 2 {
+            // Before format 2 every website was saved as "domain" because that was the default.
+            for u in self.login.iter_mut().flat_map(|l| l.urls.iter_mut()) {
+                if u.match_type == UrlMatch::Domain {
+                    u.match_type = UrlMatch::Default;
+                }
+            }
+        }
+        self.format = ITEM_FORMAT;
+    }
+
     pub fn item_type(&self) -> ItemType {
         if self.login.is_some() {
             ItemType::Login
@@ -225,7 +245,13 @@ impl EncryptedItem {
         vault_key: &SymmetricKey,
         item_key: &SymmetricKey,
     ) -> Result<Self> {
-        let mut json = serde_json::to_vec(item)?;
+        let mut json = if item.format == ITEM_FORMAT {
+            serde_json::to_vec(item)?
+        } else {
+            let mut item = item.clone();
+            item.upgrade();
+            serde_json::to_vec(&item)?
+        };
         let data = item_key.encrypt(&json, &item_data_aad(vault_id, id));
         json.zeroize();
         Ok(Self {
@@ -242,9 +268,11 @@ impl EncryptedItem {
             &unb64(&self.data)?,
             &item_data_aad(&self.vault_id, &self.id),
         )?;
-        let item = serde_json::from_slice(&json);
+        let item = serde_json::from_slice::<Item>(&json);
         json.zeroize();
-        Ok(item?)
+        let mut item = item?;
+        item.upgrade();
+        Ok(item)
     }
 
     /// Re-encrypt after an edit, keeping the same Item Key.
@@ -276,6 +304,7 @@ mod tests {
 
     fn sample() -> Item {
         Item {
+            format: ITEM_FORMAT,
             name: "GitHub".into(),
             login: Some(Login {
                 username: "octo".into(),
@@ -320,5 +349,42 @@ mod tests {
         let moved = upd.move_to(&vk, "v2", &vk2).unwrap();
         assert_eq!(moved.decrypt(&vk2).unwrap().name, "GitHub work");
         assert!(moved.decrypt(&vk).is_err());
+    }
+
+    #[test]
+    fn legacy_domain_match_becomes_default() {
+        let key = SymmetricKey::generate().unwrap();
+        let mut legacy = sample();
+        legacy.login.as_mut().unwrap().urls[0].match_type = UrlMatch::Domain;
+        legacy.login.as_mut().unwrap().urls.push(LoginUrl {
+            url: "https://x.io".into(),
+            match_type: UrlMatch::Exact,
+        });
+        // Write the legacy JSON (no "format" field) directly, as 0.1 did.
+        let mut json = serde_json::to_value(&legacy).unwrap();
+        json.as_object_mut().unwrap().remove("format");
+        let item_key = SymmetricKey::generate().unwrap();
+        let enc = EncryptedItem {
+            id: "i".into(),
+            vault_id: "v".into(),
+            key: b64(&key.wrap(&item_key, &item_key_aad("v", "i")).unwrap()),
+            data: b64(&item_key
+                .encrypt(
+                    &serde_json::to_vec(&json).unwrap(),
+                    &item_data_aad("v", "i"),
+                )
+                .unwrap()),
+        };
+        let item = enc.decrypt(&key).unwrap();
+        let urls = &item.login.as_ref().unwrap().urls;
+        assert_eq!(item.format, ITEM_FORMAT);
+        assert_eq!(urls[0].match_type, UrlMatch::Default);
+        assert_eq!(urls[1].match_type, UrlMatch::Exact);
+
+        // From format 2 on, an explicit "domain" choice is kept.
+        let mut chosen = item.clone();
+        chosen.login.as_mut().unwrap().urls[0].match_type = UrlMatch::Domain;
+        let again = enc.update(&chosen, &key).unwrap().decrypt(&key).unwrap();
+        assert_eq!(again.login.unwrap().urls[0].match_type, UrlMatch::Domain);
     }
 }

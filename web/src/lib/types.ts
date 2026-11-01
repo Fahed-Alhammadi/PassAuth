@@ -72,6 +72,8 @@ export interface Field {
 }
 
 export interface Item {
+  /** Data format, set by the core on encrypt (older items are upgraded on decrypt). */
+  format?: number;
   name: string;
   notes: string;
   favorite: boolean;

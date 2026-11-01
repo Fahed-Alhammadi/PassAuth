@@ -1,0 +1,24 @@
+<!doctype html><html><body>
+<h1>Passkey test</h1>
+<pre id="out"></pre>
+<script>
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+window.register = async () => {
+  const cred = await navigator.credentials.create({ publicKey: {
+    rp: { id: "localhost", name: "Local Test" },
+    user: { id: new TextEncoder().encode("user-123"), name: "alice@localhost", displayName: "Alice" },
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+    authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+  }});
+  window.credId = cred.id;
+  return { id: cred.id, type: cred.type, isPKC: cred instanceof PublicKeyCredential, alg: cred.response.getPublicKeyAlgorithm(), hasKey: !!cred.response.getPublicKey() };
+};
+window.login = async () => {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const cred = await navigator.credentials.get({ publicKey: { rpId: "localhost", challenge, userVerification: "preferred" } });
+  const cd = JSON.parse(new TextDecoder().decode(cred.response.clientDataJSON));
+  return { id: cred.id, sameId: cred.id === window.credId, type: cd.type, origin: cd.origin, challengeOk: cd.challenge === b64u(challenge), sigLen: cred.response.signature.byteLength, user: new TextDecoder().decode(cred.response.userHandle) };
+};
+</script>
+</body></html>

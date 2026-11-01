@@ -14,7 +14,7 @@ docker compose logs -f passauth
 On macOS with Colima, `./data` belongs to your Mac user, not uid 1000. Either set `PUID=$(id -u)` and `PGID=$(id -g)` in `.env`, or run `sudo chown 1000:1000 data`. The server refuses to start, with a clear message, if it can't write to `/data`.
 
 ### Option B: use a published image
-Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.2.0` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
+Push a tag (see "Release" below), then set `PASSAUTH_VERSION=0.2.1` (or `latest`) in `.env` and run `docker compose up -d` without `--build`.
 
 Open http://localhost:8080 and create an account.
 
@@ -64,6 +64,6 @@ Set the `SMTP_*` variables in `.env` and restart. Check: the verification email 
 ## Release
 ```bash
 # bump version in Cargo.toml (workspace.package.version), commit, then:
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.1 && git push origin v0.2.1
 ```
-GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.2.0`, `:0.2` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.2.0.zip` attached.
+GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.2.1`, `:0.2` and `:latest`. It also creates a GitHub release with `passauth-extension-v0.2.1.zip` attached.

@@ -34,6 +34,7 @@ Item Key (random 256-bit per item) ─ wrapped by Vault Key ─► encrypts item
 - Cipher: **XChaCha20-Poly1305** everywhere. No unauthenticated modes, no legacy fallbacks.
 - AEAD associated data binds `{format_version, item_id, vault_id}`, so ciphertexts cannot be swapped between items or fields.
 - The whole item (name, URLs, username, password, TOTP, passkeys, notes, fields) is one encrypted blob. Plaintext on the server is limited to IDs, type, timestamps, and sizes.
+- Item JSON carries a `format` number (`ITEM_FORMAT` in `crates/core/src/item.rs`). Clients upgrade older items when they decrypt them and stamp the current format when they encrypt. The server can't read items, so schema changes never need a server migration. Format 2 (0.2.1): a website's URL match `default` follows the client's "Default URI match detection" setting; older items, saved when `domain` was the implicit default, read as `default`.
 - KDF parameters are authenticated: clients enforce minimums and refuse to log in with weaker parameters than they already know.
 
 ### Authentication: OPAQUE (`opaque-ke`)

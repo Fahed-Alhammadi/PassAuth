@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use passauth_core::crypto::SymmetricKey;
-use passauth_core::item::{EncryptedItem, Item, Login, b64};
+use passauth_core::item::{EncryptedItem, ITEM_FORMAT, Item, Login, b64};
 use passauth_core::kdf::KdfParams;
 use passauth_core::keys::{AccountBundle, UnlockedAccount, derive_master_keys, share_vault_key};
 use passauth_core::opaque;
@@ -209,6 +209,7 @@ async fn items_sync_and_trash() {
     let t = token(&app, "bob@example.com", "pw-bob-123").await;
 
     let item = Item {
+        format: ITEM_FORMAT,
         name: "GitHub".into(),
         login: Some(Login {
             username: "bob".into(),
