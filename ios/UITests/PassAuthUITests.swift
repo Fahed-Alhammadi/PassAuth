@@ -141,6 +141,11 @@ final class PassAuthUITests: UITestBase {
         let stamp = Int(Date().timeIntervalSince1970)
         let email = "ios\(stamp)@example.com"
 
+        // First launch: the permissions screen, once, before the server.
+        wait(app.staticTexts["Set up PassAuth"], 20)
+        shot("00-permissions")
+        app.buttons["perm.continue"].tap()
+
         // Server, account with a Secret Key, signed in straight into the empty vault.
         connect()
         wait(app.staticTexts["Sign in to PassAuth"], 20)
@@ -233,6 +238,11 @@ final class PassAuthUITests: UITestBase {
         wait(app.navigationBars["AutoFill"])
         shot("13-autofill")
         back()
+        app.buttons["settings.permissions"].tap()
+        wait(app.navigationBars["Permissions"])
+        wait(app.staticTexts["Local network"].firstMatch)
+        shot("13b-permissions")
+        back()
         app.buttons["settings.about"].tap()
         wait(app.staticTexts["version"])
         shot("14-about")
@@ -241,6 +251,10 @@ final class PassAuthUITests: UITestBase {
         wait(app.navigationBars["Appearance"])
         shot("14b-appearance")
         wait(button("Dark")).tap()
+        back()
+        app.buttons["settings.permissions"].tap()
+        wait(app.navigationBars["Permissions"])
+        shot("14c-permissions-dark")
         back()
         tab("Vault")
         shot("15-vault-dark")

@@ -29,6 +29,8 @@ struct RootView: View {
             } else {
                 Group {
                     switch state.status {
+                    case _ where PermissionRules.showIntro(state.settings.permissions, hasAccounts: !state.accounts.isEmpty, skip: model.skipPermissionsIntro):
+                        PermissionsIntroView()
                     case .setup: SetupView()
                     case .loggedOut: LoginView()
                     case .locked: UnlockView()
@@ -135,5 +137,6 @@ struct MainView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
+        .modifier(BiometricOffer())
     }
 }

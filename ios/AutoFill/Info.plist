@@ -55,7 +55,7 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>PassAuth uses Face ID to unlock your vault.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't look for or connect to other devices.</string>
+	<string>PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't connect to other devices on your network.</string>
 	<key>PAAppGroup</key>
 	<string>group.io.passauth.app</string>
 	<key>PAKeychainGroup</key>

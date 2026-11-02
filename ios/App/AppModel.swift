@@ -13,6 +13,9 @@ final class AppModel {
     let icons: IconLoader
     @ObservationIgnored private(set) var lockManager: LockManager!
     @ObservationIgnored private(set) var liveSync: LiveSync!
+    let permissions: PermissionCenter
+    /// UI tests that aren't about it skip the first-launch permissions screen.
+    let skipPermissionsIntro: Bool
 
     /// The current notice (toast) text.
     private(set) var notice: String?
@@ -24,6 +27,9 @@ final class AppModel {
     init() {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { SecureStore.wipeAll() }
+        skipPermissionsIntro = ProcessInfo.processInfo.arguments.contains("-PASkipPermissions")
+        #else
+        skipPermissionsIntro = false
         #endif
         let store = SecureStore()
         let api = ApiClient(store: store)
@@ -37,6 +43,7 @@ final class AppModel {
         icons = IconLoader(session: api.session)
         lockManager = LockManager(repo: repo)
         liveSync = LiveSync(repo: repo)
+        permissions = PermissionCenter(repo: repo)
     }
 
     var state: AppState { repo.state }

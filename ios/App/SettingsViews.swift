@@ -24,13 +24,14 @@ private func lastSyncText(_ t: Double) -> String {
 }
 
 enum SettingsPage: String, Hashable, CaseIterable {
-    case account, security, autofill, vault, appearance, about, export
+    case account, security, autofill, permissions, vault, appearance, about, export
 
     var title: String {
         switch self {
         case .account: "Account"
         case .security: "Account security"
         case .autofill: "AutoFill"
+        case .permissions: "Permissions"
         case .vault: "Vault options"
         case .appearance: "Appearance"
         case .about: "About"
@@ -43,6 +44,7 @@ enum SettingsPage: String, Hashable, CaseIterable {
         case .account: "person.crop.circle"
         case .security: "lock.shield"
         case .autofill: "key.viewfinder"
+        case .permissions: "hand.raised"
         case .vault: "archivebox"
         case .appearance: "paintpalette"
         case .about: "info.circle"
@@ -75,7 +77,7 @@ struct SettingsTab: View {
                     .paRow()
                 }
                 Section {
-                    ForEach([SettingsPage.security, .autofill, .vault, .appearance, .about], id: \.self) { p in
+                    ForEach([SettingsPage.security, .autofill, .permissions, .vault, .appearance, .about], id: \.self) { p in
                         NavigationLink(value: p) {
                             Label { Text(p.title).foregroundStyle(Color.paInk) } icon: { Image(systemName: p.symbol).foregroundStyle(Color.paAccent) }
                         }
@@ -110,6 +112,7 @@ struct SettingsPageView: View {
             case .account: AccountPage()
             case .security: SecurityPage()
             case .autofill: AutofillPage()
+            case .permissions: PermissionsPage()
             case .vault: VaultOptionsPage()
             case .appearance: AppearancePage()
             case .about: AboutPage()
@@ -300,20 +303,11 @@ private struct AutofillPage: View {
             .accessibilityValue(enabled == true ? "on" : enabled == false ? "off" : "unknown")
             if enabled == false, #available(iOS 18.0, *) {
                 Button {
-                    ASSettingsHelper.requestToTurnOnCredentialProviderExtension { on in
-                        Task { @MainActor in
-                            enabled = on
-                            if on { model.repo.identities.invalidate(); model.repo.refreshIdentities() }
-                        }
-                    }
+                    Task { if let on = await PermissionCenter.turnOnAutofill(model.repo) { enabled = on } }
                 } label: { Label("Turn on AutoFill", systemImage: "switch.2") }
             }
             Button {
-                Task {
-                    do { try await ASSettingsHelper.openCredentialProviderAppSettings() } catch {
-                        if let url = URL(string: UIApplication.openSettingsURLString) { await UIApplication.shared.open(url) }
-                    }
-                }
+                Task { await PermissionCenter.openAutofillSettings() }
             } label: { Label("Open AutoFill settings", systemImage: "gear") }
         } footer: {
             Text("PassAuth gives iOS only the website, user name and passkey ID of your logins for the suggestions; passwords and codes stay encrypted until you pick one.")

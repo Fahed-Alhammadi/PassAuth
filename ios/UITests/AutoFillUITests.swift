@@ -105,7 +105,7 @@ final class AutoFillUITests: XCTestCase {
 
     func testAF1Setup() throws {
         continueAfterFailure = false
-        app.launchArguments = ["-PAResetState"]
+        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
         app.launch()
         type(wait(app.textFields["Server address"]), server)
         app.buttons["Connect"].firstMatch.tap()

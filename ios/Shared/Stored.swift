@@ -55,6 +55,8 @@ public struct Settings: Codable, Equatable, Sendable {
     public var neverSave: [String] = []
     /// The generator's options (Generator tab, and AutoFill's password generation).
     public var generator = GeneratorSettings()
+    /// The permissions screen: shown once, and what iOS doesn't report itself.
+    public var permissions = PermissionMemory()
 
     public init() {}
 
@@ -72,6 +74,7 @@ public struct Settings: Codable, Equatable, Sendable {
         askToSave = c.lenient(.askToSave, d.askToSave)
         neverSave = c.lenient(.neverSave, d.neverSave)
         generator = c.lenient(.generator, d.generator)
+        permissions = c.lenient(.permissions, d.permissions)
     }
 }
 

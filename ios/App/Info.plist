@@ -27,12 +27,16 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_passauth._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>PassAuth uses the camera only when you scan a two-step login QR code. The image is read on your device to find the code and is never stored or sent anywhere.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>PassAuth uses Face ID to unlock your vault.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't look for or connect to other devices.</string>
+	<string>PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't connect to other devices on your network.</string>
 	<key>PAAppGroup</key>
 	<string>group.io.passauth.app</string>
 	<key>PAKeychainGroup</key>

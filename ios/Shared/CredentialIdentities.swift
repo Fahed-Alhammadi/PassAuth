@@ -123,6 +123,16 @@ public final class CredentialIdentitySync {
         }
     }
 
+    /// As `isEnabled()`, nil when the store doesn't answer in time (the iOS 27.0 simulator's
+    /// store helper can't be reached).
+    public static func isEnabled(timeout: Duration) async -> Bool? {
+        let once = Once()
+        return await withCheckedContinuation { (c: CheckedContinuation<Bool?, Never>) in
+            ASCredentialIdentityStore.shared.getState { s in once.run { c.resume(returning: s.isEnabled) } }
+            Task { try? await Task.sleep(for: timeout); once.run { c.resume(returning: nil) } }
+        }
+    }
+
     public func replace(_ records: [IdentityRecord]) {
         let key = Self.fingerprint(records)
         guard key != last else { return }
