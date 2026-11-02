@@ -109,7 +109,7 @@ struct EditView: View {
                     Button("Cancel") { if item != original { confirmDiscard = true } else { dismiss() } }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if busy { ProgressView().tint(.white) } else { Button("Save", action: save).fontWeight(.semibold).accessibilityIdentifier("edit.save") }
+                    if busy { ProgressView().tint(Color.paAccent) } else { Button("Save", action: save).fontWeight(.semibold).accessibilityIdentifier("edit.save") }
                 }
             }
             .interactiveDismissDisabled(item != original || busy)

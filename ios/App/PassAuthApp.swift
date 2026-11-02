@@ -88,10 +88,10 @@ struct RootView: View {
 struct PrivacyCover: View {
     var body: some View {
         ZStack {
-            Color.paHeader.ignoresSafeArea()
+            Color.paBackground.ignoresSafeArea()
             VStack(spacing: 14) {
                 LogoMark(height: 72)
-                Text("PassAuth").font(.title2.weight(.semibold)).foregroundStyle(.white)
+                Wordmark(size: 24)
             }
         }
         .accessibilityHidden(true)

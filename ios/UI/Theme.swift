@@ -3,27 +3,28 @@ import PassAuthKit
 import SwiftUI
 import UIKit
 
-// Brand colours from assets/passauth-logo.svg and the web vault's CSS tokens
-// (web/src/styles/app.css), the same values as the Android theme.
+// Neutral iOS-style surfaces (light: grouped gray on white cards; dark: true black with
+// raised grays, no tinted backgrounds) with the PassAuth blue from assets/passauth-logo.svg as
+// the only accent. Dark accents are lighter and less saturated. Text pairs meet WCAG AA
+// (≥4.5:1) on their surfaces.
 extension Color {
     private static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light) })
     }
 
-    static let paAccent = dyn(0x0866ED, 0x3D8BFF)
-    static let paAccentInk = dyn(0x0650C4, 0x8CBCFF)
-    static let paAccentSoft = dyn(0xE3EEFF, 0x13284D)
-    static let paBackground = dyn(0xF4F7FC, 0x0A1120)
-    static let paSurface = dyn(0xFFFFFF, 0x111B2E)
-    static let paSurface2 = dyn(0xEAF0F9, 0x19253B)
-    static let paIconTile = dyn(0xEAF0F9, 0xE7EDF7)
-    static let paInk = dyn(0x0B1A3A, 0xE7EDF7)
-    static let paMuted = dyn(0x64748F, 0x8090AB)
-    static let paLine = dyn(0xD6DFEC, 0x26344D)
-    static let paHeader = dyn(0x082052, 0x070F20)
-    static let paOk = dyn(0x0F766E, 0x5EEAD4)
-    static let paWarn = dyn(0x9A5B00, 0xF5B85C)
-    static let paDanger = dyn(0xB3261E, 0xF2867D)
+    static let paAccent = dyn(0x0866ED, 0x3B8CFA)
+    static let paAccentInk = dyn(0x0553C9, 0x8EC2FF)
+    static let paAccentSoft = dyn(0xE7F0FE, 0x1C2633)
+    static let paBackground = dyn(0xF2F2F7, 0x000000)
+    static let paSurface = dyn(0xFFFFFF, 0x1C1C1E)
+    static let paSurface2 = dyn(0xEDEDF2, 0x2C2C2E)
+    static let paIconTile = dyn(0xF0F0F5, 0xE5E5EA)
+    static let paInk = dyn(0x1C1C1E, 0xF2F2F7)
+    static let paMuted = dyn(0x6C6C72, 0x9B9BA1)
+    static let paLine = dyn(0xD8D8DE, 0x38383A)
+    static let paOk = dyn(0x1F7A35, 0x4CD964)
+    static let paWarn = dyn(0x965A00, 0xFFB340)
+    static let paDanger = dyn(0xC4251B, 0xFF6B60)
 
     enum Brand {
         static let navy = Color(uiColor: UIColor(hex: 0x082052))
@@ -41,11 +42,10 @@ extension UIColor {
 // MARK: Screen chrome
 
 extension View {
-    /// Navy navigation bar with light content (the brand header).
+    /// Navigation bar in the page colour, following light and dark mode.
     func paNavBar() -> some View {
-        toolbarBackground(Color.paHeader, for: .navigationBar)
+        toolbarBackground(Color.paBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     /// Lists and forms on the brand background.

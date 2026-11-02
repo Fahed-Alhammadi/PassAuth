@@ -443,7 +443,7 @@ private struct MoveSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
                 ToolbarItem(placement: .confirmationAction) {
                     if busy {
-                        ProgressView().tint(.white)
+                        ProgressView().tint(Color.paAccent)
                     } else {
                         Button("Move") { move(target) }.fontWeight(.semibold).disabled(target == nil).accessibilityIdentifier("move.confirm")
                     }
