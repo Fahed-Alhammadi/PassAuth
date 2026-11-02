@@ -114,7 +114,14 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
     }
   }
 
-  if (changingServer) return <Setup initial={state.server} onDone={onDone} />;
+  if (changingServer) {
+    // The status stays "logged-out" after a server change, so this screen isn't remounted: leave the form here.
+    const changed = () => {
+      setChangingServer(false);
+      onDone();
+    };
+    return <Setup initial={state.server} onDone={changed} />;
+  }
   if (challenge) {
     return (
       <form className="pop-auth" onSubmit={verify}>
