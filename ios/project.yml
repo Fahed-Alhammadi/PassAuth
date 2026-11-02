@@ -97,6 +97,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSFaceIDUsageDescription: PassAuth uses Face ID to unlock your vault.
+        NSLocalNetworkUsageDescription: PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't look for or connect to other devices.
         # Matches the Camera section of website/privacy.html.
         NSCameraUsageDescription: PassAuth uses the camera only when you scan a two-step login QR code. The image is read on your device to find the code and is never stored or sent anywhere.
         # https only, except local development servers (localhost, IP addresses, .local names);
@@ -145,6 +146,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSFaceIDUsageDescription: PassAuth uses Face ID to unlock your vault.
+        NSLocalNetworkUsageDescription: PassAuth connects to your PassAuth server when its address is on your local network, such as a server at home. It doesn't look for or connect to other devices.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         PAKeychainGroup: $(AppIdentifierPrefix)io.passauth.shared
