@@ -1,0 +1,231 @@
+# PassAuth for iOS. Generate the Xcode project with:
+#   scripts/build-ios-core.sh && cd ios && xcodegen generate
+# (PassAuth.xcodeproj and Version.xcconfig are generated and not committed.)
+name: PassAuth
+options:
+  bundleIdPrefix: io.passauth
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  preGenCommand: scripts/version.sh
+  groupSortPosition: top
+configFiles:
+  Debug: Version.xcconfig
+  Release: Version.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # The Rust core is built for arm64 only (device and Apple silicon simulators).
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: JEXQBK3SQ5
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_MODULE_VERIFIER: NO
+targets:
+  # UniFFI bindings of the Rust core (scripts/build-ios-core.sh), like Android's :core.
+  PassAuthCore:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Core/Sources
+    dependencies:
+      - framework: Core/PassAuthCoreFFI.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app.core
+        GENERATE_INFOPLIST_FILE: YES
+        # Generated code: Swift 5 mode keeps it free of Swift 6 diagnostics.
+        SWIFT_VERSION: "5.0"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        SKIP_INSTALL: YES
+        DEFINES_MODULE: YES
+        CURRENT_PROJECT_VERSION: $(CURRENT_PROJECT_VERSION)
+        MARKETING_VERSION: $(MARKETING_VERSION)
+
+  # Data layer shared by the app and (phase 2) its AutoFill extension.
+  PassAuthKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Shared
+    dependencies:
+      - target: PassAuthCore
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app.kit
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        DEFINES_MODULE: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+
+  PassAuth:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      # Theme and form components shared with the AutoFill extension.
+      - path: UI
+    dependencies:
+      - target: PassAuthKit
+      - target: PassAuthCore
+      - target: PassAuthAutoFill
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: PassAuth
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        ITSAppUsesNonExemptEncryption: true
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchLogo
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSFaceIDUsageDescription: PassAuth uses Face ID to unlock your vault.
+        # Matches the Camera section of website/privacy.html.
+        NSCameraUsageDescription: PassAuth uses the camera only when you scan a two-step login QR code. The image is read on your device to find the code and is never stored or sent anywhere.
+        # https only, except local development servers (localhost, IP addresses, .local names);
+        # the app itself allows http only for local addresses (VaultRepository.normalizeServer).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # The shared Keychain access group, as in the entitlements (JEXQBK3SQ5.io.passauth.shared
+        # with the team; unsigned simulator builds have no prefix).
+        PAKeychainGroup: $(AppIdentifierPrefix)io.passauth.shared
+        PAAppGroup: group.io.passauth.app
+    entitlements:
+      path: App/PassAuth.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.io.passauth.app
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)io.passauth.shared
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app
+        PRODUCT_NAME: PassAuth
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_PREVIEWS: YES
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/Frameworks
+
+  # AutoFill credential provider (passwords, passkeys, verification codes). Runs in its own
+  # process with the data layer and the Rust core from the app's frameworks.
+  PassAuthAutoFill:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: AutoFill
+      - path: UI
+    dependencies:
+      - target: PassAuthKit
+        embed: false
+      - target: PassAuthCore
+        embed: false
+      - sdk: AuthenticationServices.framework
+    info:
+      path: AutoFill/Info.plist
+      properties:
+        CFBundleDisplayName: PassAuth
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSFaceIDUsageDescription: PassAuth uses Face ID to unlock your vault.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        PAKeychainGroup: $(AppIdentifierPrefix)io.passauth.shared
+        PAAppGroup: group.io.passauth.app
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
+          NSExtensionAttributes:
+            ASCredentialProviderExtensionShowsConfigurationUI: true
+            ASCredentialProviderExtensionCapabilities:
+              ProvidesPasswords: true
+              ProvidesPasskeys: true
+              # iOS 18 and later; earlier versions ignore it.
+              ProvidesOneTimeCodes: true
+              ShowsConfigurationUI: true
+              # iOS 26.2 and later: save logins from sign-up / password change forms
+              # (ASSavePasswordRequest) and generate passwords for new-password fields
+              # (ASGeneratePasswordsRequest; with UI, the default of
+              # SupportsGeneratePasswordCredentialsWithUI).
+              SupportsSavePasswordCredentials: true
+              SupportsGeneratePasswordCredentials: true
+    entitlements:
+      path: AutoFill/AutoFill.entitlements
+      properties:
+        com.apple.developer.authentication-services.autofill-credential-provider: true
+        com.apple.security.application-groups:
+          - group.io.passauth.app
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)io.passauth.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app.autofill
+        PRODUCT_NAME: PassAuthAutoFill
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+
+  PassAuthTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: PassAuth
+      - target: PassAuthKit
+      - target: PassAuthCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/PassAuth.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/PassAuth
+        BUNDLE_LOADER: $(TEST_HOST)
+
+  PassAuthUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: PassAuth
+      # The Rust core: the tests act as another device on the test server (TestServer.swift).
+      - target: PassAuthCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: PassAuth
+
+schemes:
+  PassAuth:
+    build:
+      targets:
+        PassAuth: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - PassAuthTests
+        - PassAuthUITests
+    archive:
+      config: Release

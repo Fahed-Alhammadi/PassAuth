@@ -72,3 +72,13 @@ keystore.properties
 # Signing keys and their passwords (never commit)
 /PassAuth-keys/
 upload_certificate.pem
+
+# iOS: generated project, core bindings/framework, version config, build output, local signing config
+/ios/PassAuth.xcodeproj/
+/ios/Core/PassAuthCoreFFI.xcframework/
+/ios/Core/Sources/PassAuthCore.swift
+/ios/Version.xcconfig
+/ios/Local.xcconfig
+/ios/build/
+/ios/DerivedData/
+xcuserdata/
