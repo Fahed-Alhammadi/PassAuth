@@ -263,7 +263,7 @@ async fn smtp_test(
     if !state.mailer.enabled() {
         return Err(ApiError::bad("SMTP is not configured"));
     }
-    state
+    let sent = state
         .mailer
         .send(
             &b.to,
@@ -275,8 +275,13 @@ async fn smtp_test(
                 code: None,
             },
         )
-        .await
-        .map_err(|e| ApiError::bad(format!("SMTP error: {e:#}")))?;
+        .await;
+    if let Err(e) = sent {
+        let check = state.mailer.check_connection().await.unwrap_or_default();
+        return Err(ApiError::bad(
+            format!("SMTP error: {e:#}. {check}").trim_end().to_string(),
+        ));
+    }
     Ok(Json(json!({ "sent": true })))
 }
 

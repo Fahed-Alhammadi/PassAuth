@@ -1,6 +1,9 @@
 //! Transactional email over SMTP. With no SMTP configured, mail is logged
 //! (subject only) and dropped, and features that need it are disabled.
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use lettre::message::{Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
@@ -10,6 +13,8 @@ use crate::config::{Config, SmtpConfig, SmtpSecurity};
 
 pub struct Mailer {
     transport: Option<(AsyncSmtpTransport<Tokio1Executor>, Mailbox)>,
+    /// SMTP host and port, for [`Mailer::check_connection`].
+    target: Option<(String, u16)>,
     domain: String,
 }
 
@@ -28,6 +33,7 @@ impl Mailer {
         let transport = config.smtp.as_ref().map(build).transpose()?;
         Ok(Self {
             transport,
+            target: config.smtp.as_ref().map(|s| (s.host.clone(), s.port)),
             domain: config.domain.clone(),
         })
     }
@@ -51,6 +57,28 @@ impl Mailer {
             ))?;
         transport.send(msg).await.context("sending email")?;
         Ok(())
+    }
+
+    /// Plain TCP connection to every address the SMTP host resolves to, for the admin's
+    /// test. The SMTP client reports only the last address's error, which inside Docker is
+    /// often an IPv6 "network unreachable" that hides why the IPv4 address failed.
+    pub async fn check_connection(&self) -> Option<String> {
+        let (host, port) = self.target.as_ref()?;
+        let addrs = match tokio::net::lookup_host((host.as_str(), *port)).await {
+            Ok(a) => a.collect::<Vec<_>>(),
+            Err(e) => return Some(format!("{host} could not be resolved: {e}.")),
+        };
+        let mut results = Vec::new();
+        for addr in addrs {
+            let r =
+                tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+                    .await;
+            results.push((
+                addr,
+                r.map_err(|_| None).and_then(|r| r.map(drop).map_err(Some)),
+            ));
+        }
+        Some(describe(host, *port, &results))
     }
 
     /// Send in the background; failures are logged, never surfaced to the requester.
@@ -79,6 +107,39 @@ fn build(smtp: &SmtpConfig) -> Result<(AsyncSmtpTransport<Tokio1Executor>, Mailb
         smtp.from.parse().context("SMTP_FROM")?,
     );
     Ok((builder.build(), from))
+}
+
+/// One address's outcome: connected, failed with an error, or timed out (`Err(None)`).
+type Probe = std::result::Result<(), Option<std::io::Error>>;
+
+fn describe(host: &str, port: u16, results: &[(SocketAddr, Probe)]) -> String {
+    if results.is_empty() {
+        return format!("{host} has no addresses.");
+    }
+    let parts: Vec<String> = results
+        .iter()
+        .map(|(addr, r)| match r {
+            Ok(()) => format!("{addr} connected"),
+            Err(None) => format!("{addr} timed out"),
+            Err(Some(e)) => format!("{addr} {e}"),
+        })
+        .collect();
+    let mut out = format!("Connection check: {}.", parts.join("; "));
+    let ok = |v6: bool| results.iter().any(|(a, r)| a.is_ipv6() == v6 && r.is_ok());
+    let tried = |v6: bool| results.iter().any(|(a, _)| a.is_ipv6() == v6);
+    if tried(false) && !ok(false) && !ok(true) {
+        out.push_str(&format!(
+            " Outgoing connections to port {port} fail. Many VPS providers block mail ports (25, 465, 587) on new servers: ask your provider to allow them, or use another port your mail provider offers (for example 2525)."
+        ));
+    }
+    let v6_unreachable = results.iter().any(|(a, r)| {
+        a.is_ipv6()
+            && matches!(r, Err(Some(e)) if e.kind() == std::io::ErrorKind::NetworkUnreachable)
+    });
+    if v6_unreachable {
+        out.push_str(" IPv6 isn't available inside the container, which is normal for Docker and only matters if the host has no IPv4 address.");
+    }
+    out
 }
 
 fn escape(s: &str) -> String {
@@ -131,4 +192,29 @@ fn render_html(e: &Email, domain: &str) -> String {
         action = action.unwrap_or_default(),
         domain = escape(domain),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn describes_blocked_ipv4_behind_unreachable_ipv6() {
+        let v4: SocketAddr = "192.0.2.10:587".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:587".parse().unwrap();
+        let text = describe(
+            "smtp.example.com",
+            587,
+            &[
+                (v4, Err(None)),
+                (v6, Err(Some(Error::from(ErrorKind::NetworkUnreachable)))),
+            ],
+        );
+        assert!(text.starts_with("Connection check: 192.0.2.10:587 timed out; [2001:db8::1]:587 "));
+        assert!(text.contains("block mail ports"));
+        assert!(text.contains("IPv6 isn't available"));
+        let fine = describe("smtp.example.com", 587, &[(v4, Ok(()))]);
+        assert_eq!(fine, "Connection check: 192.0.2.10:587 connected.");
+    }
 }
