@@ -4,7 +4,8 @@ name: Android
 # - Push a tag android-vX.Y.Z (scripts/release.sh android X.Y.Z; version in android/VERSION):
 #   uploads it to Google Play, once the repository variable PLAY_UPLOAD_ENABLED is "true"
 #   (Play only accepts API uploads after the app's first bundle was uploaded by hand).
-#   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing).
+#   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing),
+#   release status = PLAY_RELEASE_STATUS ("completed" when unset; "draft" until the app is published).
 # - "Run workflow" (manual): builds the bundle as a downloadable artifact; tick "upload"
 #   to also send it to Play (e.g. to re-send a release after a CI fix), on the chosen track.
 on:
@@ -91,4 +92,6 @@ jobs:
           packageName: io.passauth.app
           releaseFiles: ${{ runner.temp }}/passauth-*.aab
           track: ${{ inputs.track || vars.PLAY_TRACK || 'internal' }}
-          status: completed
+          # "draft" while the app has never been published (Play refuses anything else then);
+          # the draft is rolled out in Play Console. Unset = completed.
+          status: ${{ vars.PLAY_RELEASE_STATUS || 'completed' }}
