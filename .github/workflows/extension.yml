@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Check versions match the tag
         run: |
@@ -55,6 +57,9 @@ jobs:
           v="${GITHUB_REF_NAME#extension-v}"
           pre=()
           [[ "$v" == *-* ]] && pre=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" --generate-notes \
+          # Own notes: --generate-notes would diff against the newest release of any part.
+          scripts/release-notes.sh "$GITHUB_REF_NAME" \
+            extension web/src crates/core crates/core-wasm > notes.md
+          gh release create "$GITHUB_REF_NAME" --notes-file notes.md \
             --title "PassAuth extension $v" \
             "passauth-extension-$v.zip" "${pre[@]}"

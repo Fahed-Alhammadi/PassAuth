@@ -202,7 +202,7 @@ git push origin main                # wait for CI to pass
 git push origin server-v0.4.5
 ```
 
-- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it.
+- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes.
 - `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`.
 - `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play internal testing.
 

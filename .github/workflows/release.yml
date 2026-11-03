@@ -4,6 +4,7 @@ name: Server release
 # web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
 # Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
 # always gets the newest version. Pre-release tags (server-v1.2.3-rc.1) don't move :latest.
+# Then creates a GitHub release with the server changes (not marked Latest).
 # The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
 on:
   push:
@@ -11,11 +12,13 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   server-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -57,4 +60,37 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
+
+  # A GitHub release with the changes, so users can see what's new before pulling. It is never
+  # marked "Latest": that badge stays on the extension release, whose zip users download.
+  github-release:
+    needs: server-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#server-v}"
+          scripts/release-notes.sh "$GITHUB_REF_NAME" \
+            crates web Dockerfile Cargo.toml Cargo.lock .cargo docker-compose.yml > notes.md
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/passauth"
+          {
+            echo
+            echo "## Image"
+            echo
+            echo '```'
+            echo "docker pull $image:$v"
+            echo '```'
+            [[ "$v" == *-* ]] || echo "Also tagged \`latest\`."
+          } >> notes.md
+          pre=()
+          [[ "$v" == *-* ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --latest=false \
+            --title "PassAuth server $v" --notes-file notes.md "${pre[@]}"
 
