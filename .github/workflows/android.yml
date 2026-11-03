@@ -1,14 +1,15 @@
 name: Android
 
 # Builds the signed Android App Bundle.
-# - Push a tag vX.Y.Z (same tag as the server release): uploads it to Google Play's
+# - Push a tag android-vX.Y.Z (scripts/release.sh android X.Y.Z; version in android/VERSION):
+#   uploads it to Google Play's
 #   internal testing track, once the repository variable PLAY_UPLOAD_ENABLED is "true"
 #   (Play only accepts API uploads after the app's first bundle was uploaded by hand).
 # - "Run workflow" (manual): builds the bundle as a downloadable artifact; tick "upload"
 #   to also send it to internal testing (e.g. to re-send a release after a CI fix).
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["android-v*.*.*"]
   workflow_dispatch:
     inputs:
       upload:
@@ -29,12 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Cargo version matches tag
+      - name: Check android/VERSION matches the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          [ "$tag" = "$crate" ] || { echo "::error::Tag v$tag does not match workspace version $crate"; exit 1; }
+          tag="${GITHUB_REF_NAME#android-v}"
+          app="$(tr -d '[:space:]' < android/VERSION)"
+          [ "$tag" = "$app" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match android/VERSION $app"; exit 1; }
 
       - uses: actions/setup-java@v4
         with:

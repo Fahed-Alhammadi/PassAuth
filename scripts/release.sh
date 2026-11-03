@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Bump one part's version, commit only its version files, and tag it locally.
+#
+#   scripts/release.sh server    X.Y.Z   Cargo.toml (+ Cargo.lock) + web/package.json  -> server-vX.Y.Z    (GHCR X.Y.Z + latest)
+#   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-vX.Y.Z (GitHub release with the zip)
+#   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-vX.Y.Z       (TestFlight)
+#   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-vX.Y.Z   (Play internal testing)
+#
+# Then: git push origin main, wait for CI, git push origin <tag>.
+# The new version must be higher than the current one (stores reject lower build numbers).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+part=${1:-} version=${2:-}
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 server|extension|ios|android X.Y.Z" >&2; exit 1; }
+
+json_version() { node -p "require('./$1').version"; }
+# Replace only the top-level "version" value, keeping the file's formatting.
+set_json_version() {
+  node -e "const fs=require('fs'),f='$1',s=fs.readFileSync(f,'utf8'),t=s.replace(/^(  \"version\": )\"[^\"]*\"/m,'\$1\"$2\"');
+    if(t===s||JSON.parse(t).version!=='$2')throw new Error('no top-level version in '+f);fs.writeFileSync(f,t)"
+}
+
+case "$part" in
+  server)
+    current=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version *=/{gsub(/[" ]/,"");sub(/version=/,"");print;exit}' Cargo.toml)
+    files=(Cargo.toml Cargo.lock web/package.json) ;;
+  extension)
+    current=$(json_version extension/package.json)
+    files=(extension/package.json extension/public/manifest.json) ;;
+  ios | android)
+    current=$(tr -d '[:space:]' < "$part/VERSION")
+    files=("$part/VERSION") ;;
+  *) echo "usage: $0 server|extension|ios|android X.Y.Z" >&2; exit 1 ;;
+esac
+
+if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ] || [ "$current" = "$version" ]; then
+  echo "$part is at $current; the new version must be higher (got $version)" >&2
+  exit 1
+fi
+tag="$part-v$version"
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists" >&2; exit 1; }
+if ! git diff --quiet -- "${files[@]}" || ! git diff --cached --quiet; then
+  echo "commit or stash changes to ${files[*]} (and anything staged) first" >&2
+  exit 1
+fi
+
+case "$part" in
+  server)
+    awk -v v="$version" '/^\[workspace\.package\]/{s=1} /^\[/ && !/^\[workspace\.package\]/{s=0}
+      s && /^version *=/ && !done {sub(/"[^"]*"/, "\"" v "\""); done=1} {print}' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+    cargo update --workspace --quiet
+    set_json_version web/package.json "$version" ;;
+  extension)
+    set_json_version extension/package.json "$version"
+    set_json_version extension/public/manifest.json "$version" ;;
+  ios | android)
+    echo "$version" > "$part/VERSION" ;;
+esac
+
+git add -- "${files[@]}"
+git commit -q -m "Release $part $version"
+git tag "$tag"
+echo "Committed and tagged $tag ($part $current -> $version)."
+echo "Next: git push origin main, wait for CI, then: git push origin $tag"

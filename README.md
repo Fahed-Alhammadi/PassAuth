@@ -161,7 +161,7 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 
 ## Chrome extension
 
-1. Download `passauth-extension-vX.Y.Z.zip` from the latest [GitHub release](https://github.com/Fahed-Alhammadi/PassAuth/releases) and unzip it.
+1. Download `passauth-extension-X.Y.Z.zip` from the latest [GitHub release](https://github.com/Fahed-Alhammadi/PassAuth/releases) and unzip it.
 2. In Chrome open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the unzipped folder.
 3. Pin PassAuth, open it, enter your server address and sign in.
 
@@ -194,13 +194,17 @@ docker compose up -d --build                 # build and run the image locally
 
 Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the version in `Cargo.lock`, Node.js 24 and pnpm.
 
-**Releasing:** set `version` in the root `Cargo.toml`, commit, then push a tag:
+**Releasing:** the server (with the web vault), the extension, the iOS app and the Android app each have their own version. Bump one, then push:
 
 ```bash
-git tag v0.3.2 && git push origin v0.3.2
+scripts/release.sh server 0.4.5     # or: extension | ios | android
+git push origin main                # wait for CI to pass
+git push origin server-v0.4.5
 ```
 
-GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:0.3.2`, moves `:latest` to it, and attaches the extension zip to a GitHub release.
+- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it.
+- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`.
+- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play internal testing.
 
 ---
 

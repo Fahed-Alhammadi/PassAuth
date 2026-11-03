@@ -31,30 +31,15 @@ class AppVersionTest {
     }
 
     @Test
-    fun readsWorkspacePackageVersion() {
-        val toml = """
-            [workspace]
-            members = ["crates/*"]
-
-            [package]
-            version = "9.9.9"
-
-            [workspace.package]
-            edition = "2024"
-            version = "0.3.3" # bumped on release
-            license = "MIT"
-
-            [workspace.dependencies]
-            version = "1.0.0"
-        """.trimIndent()
-        assertEquals(AppVersion("0.3.3", 3_003), AppVersion.fromCargoToml(toml))
+    fun readsVersionFile() {
+        assertEquals(AppVersion("0.3.3", 3_003), AppVersion.fromVersionFile("0.3.3\n"))
     }
 
     @Test
-    fun repositoryCargoTomlHasAValidVersion() {
-        val cargo = generateSequence(File("").absoluteFile) { it.parentFile }.map { File(it, "Cargo.toml") }.firstOrNull { it.exists() }
+    fun repositoryVersionFileIsValid() {
+        val file = generateSequence(File("").absoluteFile) { it.parentFile }.map { File(it, "android/VERSION") }.firstOrNull { it.exists() }
             ?: return
-        val v = AppVersion.fromCargoToml(cargo.readText())
+        val v = AppVersion.fromVersionFile(file.readText())
         assertTrue(v.code > 0)
     }
 }

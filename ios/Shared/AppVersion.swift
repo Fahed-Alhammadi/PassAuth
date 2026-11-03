@@ -1,8 +1,7 @@
 import Foundation
 
-/// App version, derived from the Rust workspace version in the root `Cargo.toml`
-/// (`[workspace.package] version`) by `ios/scripts/version.sh`, so the app ships with the
-/// same number as the server. Build number = major·1 000 000 + minor·1 000 + patch
+/// App version from `ios/VERSION` (the iOS app's own version, independent of the server),
+/// written into Version.xcconfig by `ios/scripts/version.sh`. Build number = major·1 000 000 + minor·1 000 + patch
 /// (0.3.3 → 3003), as Android's versionCode. This type mirrors the script for tests.
 public struct AppVersion: Equatable, Sendable {
     public let name: String
@@ -13,7 +12,7 @@ public struct AppVersion: Equatable, Sendable {
         self.code = code
     }
 
-    public enum Problem: Error, Equatable { case notSemver, outOfRange, missing }
+    public enum Problem: Error, Equatable { case notSemver, outOfRange }
 
     public static func of(_ name: String) throws -> AppVersion {
         let n = name.trimmingCharacters(in: .whitespaces)
@@ -25,25 +24,6 @@ public struct AppVersion: Equatable, Sendable {
         return AppVersion(name: n, code: major * 1_000_000 + minor * 1_000 + patch)
     }
 
-    /// Reads `version` from the `[workspace.package]` table of a Cargo.toml.
-    public static func fromCargoToml(_ text: String) throws -> AppVersion {
-        var inSection = false
-        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = (raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
-                .trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("[") {
-                inSection = line == "[workspace.package]"
-                continue
-            }
-            guard inSection, line.hasPrefix("version") else { continue }
-            let value = line.dropFirst("version".count).trimmingCharacters(in: .whitespaces)
-            guard value.hasPrefix("=") else { continue }
-            let v = value.dropFirst().trimmingCharacters(in: .whitespaces)
-            guard v.count >= 2, v.hasPrefix("\""), v.hasSuffix("\"") else { continue }
-            return try of(String(v.dropFirst().dropLast()))
-        }
-        throw Problem.missing
-    }
 
     /// This build's version (Info.plist).
     public static var current: (name: String, build: String) {

@@ -4,8 +4,8 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-// Same version as the server: root Cargo.toml [workspace.package] version (see buildSrc/AppVersion.kt).
-val appVersion = AppVersion.fromCargoToml(rootProject.file("../Cargo.toml").readText())
+// The Android app's own version: android/VERSION (see buildSrc/AppVersion.kt).
+val appVersion = AppVersion.fromVersionFile(rootProject.file("VERSION").readText())
 
 // Release signing only when CI (or you) provide the upload key; local builds never need it.
 val uploadKeystore = providers.environmentVariable("ANDROID_UPLOAD_KEYSTORE_PATH").orNull

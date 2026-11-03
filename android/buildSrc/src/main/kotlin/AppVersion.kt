@@ -1,6 +1,6 @@
 /**
- * App version, derived from the Rust workspace version in the root `Cargo.toml`
- * (`[workspace.package] version`), so the app ships with the same number as the server.
+ * App version from `android/VERSION` (the Android app's own version, independent of the
+ * server; bump it with `scripts/release.sh android X.Y.Z`).
  *
  * versionCode = major * 1_000_000 + minor * 1_000 + patch (0.3.3 -> 3_003).
  *
@@ -18,20 +18,7 @@ data class AppVersion(val name: String, val code: Int) {
             return AppVersion(name.trim(), major * 1_000_000 + minor * 1_000 + patch)
         }
 
-        /** Reads `version` from the `[workspace.package]` table of a Cargo.toml. */
-        fun fromCargoToml(text: String): AppVersion {
-            var inSection = false
-            for (raw in text.lineSequence()) {
-                val line = raw.substringBefore('#').trim()
-                if (line.startsWith("[")) {
-                    inSection = line == "[workspace.package]"
-                    continue
-                }
-                if (!inSection) continue
-                val m = Regex("""^version\s*=\s*"([^"]+)"$""").matchEntire(line) ?: continue
-                return of(m.groupValues[1])
-            }
-            error("No [workspace.package] version in Cargo.toml")
-        }
+        /** Reads the contents of a VERSION file (one X.Y.Z line). */
+        fun fromVersionFile(text: String): AppVersion = of(text.trim())
     }
 }

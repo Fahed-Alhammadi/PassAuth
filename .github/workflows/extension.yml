@@ -1,0 +1,60 @@
+name: Extension release
+
+# Push a tag like extension-v1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
+# extension and publish passauth-extension-1.2.3.zip as a GitHub release (the zip to upload to
+# the Chrome Web Store). The version comes from extension/package.json and
+# extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
+# manifest version for every upload).
+on:
+  push:
+    tags: ["extension-v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check versions match the tag
+        run: |
+          tag="${GITHUB_REF_NAME#extension-v}"
+          pkg="$(node -p "require('./extension/package.json').version")"
+          manifest="$(node -p "require('./extension/public/manifest.json').version")"
+          [ "${tag%%-*}" = "$pkg" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match extension/package.json $pkg"; exit 1; }
+          [ "$pkg" = "$manifest" ] || { echo "::error::manifest.json version $manifest differs from package.json $pkg"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen CLI
+        run: |
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build Chrome extension
+        run: |
+          # The extension reuses web vault components, which import the web copy of the core.
+          scripts/build-wasm.sh web/src/wasm
+          scripts/build-wasm.sh extension/src/wasm
+          cd extension
+          pnpm install --frozen-lockfile
+          pnpm package
+          mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME#extension-v}.zip"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#extension-v}"
+          pre=()
+          [[ "$v" == *-* ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --generate-notes \
+            --title "PassAuth extension $v" \
+            "passauth-extension-$v.zip" "${pre[@]}"

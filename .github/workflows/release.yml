@@ -1,15 +1,16 @@
-name: Release
+name: Server release
 
-# Push a tag like v1.2.3 to publish:
-#   ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest
+# Push a tag like server-v1.2.3 (scripts/release.sh server 1.2.3) to publish the server +
+# web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
 # Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
-# always gets the newest version. Pre-release tags (v1.2.3-rc.1) don't move :latest.
+# always gets the newest version. Pre-release tags (server-v1.2.3-rc.1) don't move :latest.
+# The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["server-v*.*.*"]
 
 permissions:
-  contents: write
+  contents: read
   packages: write
 
 jobs:
@@ -18,13 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check Cargo version matches tag
+      - name: Check versions match the tag
+        id: v
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${GITHUB_REF_NAME#server-v}"
           crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          if [ "$tag" != "$crate" ]; then
-            echo "::error::Tag v$tag does not match workspace version $crate"; exit 1
-          fi
+          web="$(node -p "require('./web/package.json').version")"
+          [ "${tag%%-*}" = "$crate" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1; }
+          [ "$crate" = "$web" ] || { echo "::error::web/package.json version $web differs from Cargo.toml $crate"; exit 1; }
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -39,8 +42,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/passauth
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=${{ steps.v.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(steps.v.outputs.version, '-') }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -49,46 +52,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ steps.v.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
           sbom: true
 
-  github-release:
-    needs: server-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Install wasm-bindgen CLI
-        run: |
-          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
-          cargo install wasm-bindgen-cli --version "$v" --locked
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Build Chrome extension
-        run: |
-          # The extension reuses web vault components, which import the web copy of the core.
-          scripts/build-wasm.sh web/src/wasm
-          scripts/build-wasm.sh extension/src/wasm
-          cd extension
-          pnpm install --frozen-lockfile
-          v="${GITHUB_REF_NAME#v}"
-          node -e "const f='public/manifest.json',m=require('./'+f);m.version='${v%%-*}';require('fs').writeFileSync(f,JSON.stringify(m,null,2))"
-          pnpm package
-          mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME}.zip"
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" --generate-notes \
-            --title "PassAuth $GITHUB_REF_NAME" \
-            "passauth-extension-${GITHUB_REF_NAME}.zip" \
-            $([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease)

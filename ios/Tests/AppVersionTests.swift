@@ -20,30 +20,11 @@ final class AppVersionTests: XCTestCase {
         XCTAssertThrowsError(try AppVersion.of("1.1000.0"))
     }
 
-    func testReadsWorkspacePackageVersion() throws {
-        let toml = """
-        [workspace]
-        members = ["crates/*"]
-
-        [package]
-        version = "9.9.9"
-
-        [workspace.package]
-        edition = "2024"
-        version = "0.3.3" # bumped on release
-        license = "MIT"
-
-        [workspace.dependencies]
-        version = "1.0.0"
-        """
-        XCTAssertEqual(try AppVersion.fromCargoToml(toml), AppVersion(name: "0.3.3", code: 3_003))
-    }
-
-    /// The built app carries the repository's version (scripts/version.sh → Version.xcconfig → Info.plist).
-    func testAppBundleMatchesCargoToml() throws {
-        let cargo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../Cargo.toml")
-        guard let text = try? String(contentsOf: cargo, encoding: .utf8) else { throw XCTSkip("Cargo.toml not readable from the simulator") }
-        let v = try AppVersion.fromCargoToml(text)
+    /// The built app carries ios/VERSION (scripts/version.sh → Version.xcconfig → Info.plist).
+    func testAppBundleMatchesVersionFile() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../VERSION")
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { throw XCTSkip("ios/VERSION not readable from the simulator") }
+        let v = try AppVersion.of(text.trimmingCharacters(in: .whitespacesAndNewlines))
         let info = Bundle.main.infoDictionary ?? [:]
         XCTAssertEqual(info["CFBundleShortVersionString"] as? String, v.name)
         XCTAssertEqual(info["CFBundleVersion"] as? String, String(v.code))
