@@ -204,7 +204,7 @@ git push origin server-v0.4.5
 
 - `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes.
 - `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`.
-- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play internal testing.
+- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play testing (the track is the repository variable `PLAY_TRACK`, `internal` by default).
 
 ---
 

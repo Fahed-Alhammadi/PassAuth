@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="paper">#0A1120</color>
+    <color name="paper">#000000</color>
     <style name="Theme.PassAuth" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/paper</item>
         <item name="android:windowSplashScreenBackground">@color/paper</item>

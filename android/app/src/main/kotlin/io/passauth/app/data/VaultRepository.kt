@@ -62,6 +62,8 @@ data class AppState(
     val biometricEnabled: Boolean = false,
     val settings: Settings = Settings(),
     val lastSync: Long = 0,
+    val onboarding: Onboarding = Onboarding(),
+    val showPermissionsIntro: Boolean = false,
 )
 
 /** A decrypted item of the active account. */
@@ -158,6 +160,8 @@ class VaultRepository(
             biometricEnabled = a?.biometric != null,
             settings = s.settings,
             lastSync = a?.lastSync ?: 0,
+            onboarding = s.onboarding,
+            showPermissionsIntro = s.showPermissionsIntro,
         )
     }
 
@@ -555,6 +559,10 @@ class VaultRepository(
     }
 
     // ----------------------------------------------------------- settings
+
+    suspend fun updateOnboarding(transform: (Onboarding) -> Onboarding) {
+        store.update { it.copy(onboarding = transform(it.onboarding)) }
+    }
 
     suspend fun updateSettings(transform: (Settings) -> Settings) {
         val before = store.get().settings

@@ -76,6 +76,19 @@ data class AccountData(
     val persistedKeys: String? = null,
 )
 
+/**
+ * First-launch "Set up PassAuth" (permissions) screen, shared by all accounts.
+ * [cameraAsked] tells "not asked yet" from "denied for good" (Android reports
+ * neither as needing a rationale). [offerBiometric]: the user chose fingerprint /
+ * face unlock there, so it's offered once after the next sign-in or unlock.
+ */
+@Serializable
+data class Onboarding(
+    val permissionsShown: Boolean = false,
+    val cameraAsked: Boolean = false,
+    val offerBiometric: Boolean = false,
+)
+
 /** Everything the app keeps on disk; the whole file is encrypted with a Keystore key. */
 @Serializable
 data class Stored(
@@ -87,6 +100,14 @@ data class Stored(
     /** Secret Keys typed at sign-in, keyed by `email`. */
     val secretKeys: Map<String, String> = emptyMap(),
     val settings: Settings = Settings(),
+    val onboarding: Onboarding = Onboarding(),
 ) {
     val active: AccountData? get() = accounts[activeId]
+
+    /**
+     * Show the permissions screen: only on a first launch (never shown, and no server
+     * connected yet — people who already use the app find it in Settings → Permissions).
+     */
+    val showPermissionsIntro: Boolean
+        get() = !onboarding.permissionsShown && accounts.values.none { it.server.isNotEmpty() }
 }

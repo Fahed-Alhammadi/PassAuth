@@ -46,6 +46,8 @@ import io.passauth.app.data.copiedNote
 import io.passauth.app.ui.auth.LoginScreen
 import io.passauth.app.ui.auth.SetupScreen
 import io.passauth.app.ui.auth.UnlockScreen
+import io.passauth.app.ui.permissions.BiometricOffer
+import io.passauth.app.ui.permissions.PermissionsIntroScreen
 import io.passauth.app.ui.settings.SettingsScreen
 import io.passauth.app.ui.vault.EditScreen
 import io.passauth.app.ui.vault.ItemScreen
@@ -148,11 +150,11 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
             activity.requestedRoute.value = null
         }
     }
-    // Light status bar icons over the navy header (unlocked screens) and in dark mode.
+    // Dark status bar icons on the light page colour, light ones in dark mode.
     val dark = io.passauth.app.ui.theme.isDark(state.settings.theme)
     androidx.compose.runtime.SideEffect {
         androidx.core.view.WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
-            isAppearanceLightStatusBars = !dark && state.status != Status.Unlocked
+            isAppearanceLightStatusBars = !dark
             isAppearanceLightNavigationBars = !dark
         }
     }
@@ -196,12 +198,13 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
             // Keyed by account so switching accounts starts each screen fresh.
             key(state.activeId) {
                 when (state.status) {
-                    Status.Setup -> SetupScreen(ctx)
+                    Status.Setup -> if (state.showPermissionsIntro) PermissionsIntroScreen(ctx) else SetupScreen(ctx)
                     Status.LoggedOut -> LoginScreen(ctx)
                     Status.Locked -> UnlockScreen(ctx)
                     Status.Unlocked -> {
                         SecureWindow()
                         Main(ctx, route) { route = it }
+                        BiometricOffer(ctx)
                     }
                 }
             }

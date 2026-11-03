@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -56,7 +57,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.passauth.app.BuildConfig
-import io.passauth.app.data.Keystore
 import io.passauth.app.data.Settings
 import io.passauth.app.data.ThemeMode
 import io.passauth.app.data.TimeoutAction
@@ -65,7 +65,8 @@ import io.passauth.app.data.VaultTimeout
 import io.passauth.app.data.secondsLabel
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
-import io.passauth.app.ui.authenticate
+import io.passauth.app.ui.permissions.PermissionsSettings
+import io.passauth.app.ui.permissions.turnOnBiometricUnlock
 import io.passauth.app.ui.biometricsAvailable
 import io.passauth.app.ui.components.AccountMenu
 import io.passauth.app.ui.components.Alert
@@ -114,6 +115,7 @@ private data class Section(val key: String, val title: String, val icon: ImageVe
 private val SECTIONS = listOf(
     Section("security", "Account security", Icons.Outlined.Lock),
     Section("autofill", "Autofill", Icons.Outlined.AutoFixHigh),
+    Section("permissions", "Permissions", Icons.Outlined.VerifiedUser),
     Section("vault", "Vault options", Icons.Outlined.Inventory2),
     Section("appearance", "Appearance", Icons.Outlined.Palette),
     Section("about", "About", Icons.Outlined.Info),
@@ -155,6 +157,7 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
                     when (open.key) {
                         "security" -> Security(ctx)
                         "autofill" -> Autofill(ctx)
+                        "permissions" -> PermissionsSettings(ctx)
                         "vault" -> VaultOptions(ctx)
                         "appearance" -> Appearance(ctx)
                         else -> About(ctx)
@@ -193,15 +196,8 @@ private fun ColumnScope.Security(ctx: UiCtx) {
         { on ->
             if (!on) {
                 ctx.launch { ctx.repo.disableBiometric(); ctx.notify("Biometric unlock is off.") }
-            } else if (!available) {
-                ctx.notify("Set up a fingerprint or face unlock in Android settings first.")
             } else {
-                ctx.launch {
-                    val cipher = Keystore.biometricCipher(Keystore.newBiometricKey(ctx.state.activeId))
-                    val ok = ctx.activity.authenticate(cipher, "Turn on biometric unlock", ctx.state.email) ?: return@launch
-                    ctx.repo.enableBiometric(ok)
-                    ctx.notify("Biometric unlock is on.")
-                }
+                ctx.turnOnBiometricUnlock()
             }
         },
         help = if (available) {

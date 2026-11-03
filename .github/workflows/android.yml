@@ -2,20 +2,24 @@ name: Android
 
 # Builds the signed Android App Bundle.
 # - Push a tag android-vX.Y.Z (scripts/release.sh android X.Y.Z; version in android/VERSION):
-#   uploads it to Google Play's
-#   internal testing track, once the repository variable PLAY_UPLOAD_ENABLED is "true"
+#   uploads it to Google Play, once the repository variable PLAY_UPLOAD_ENABLED is "true"
 #   (Play only accepts API uploads after the app's first bundle was uploaded by hand).
+#   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing).
 # - "Run workflow" (manual): builds the bundle as a downloadable artifact; tick "upload"
-#   to also send it to internal testing (e.g. to re-send a release after a CI fix).
+#   to also send it to Play (e.g. to re-send a release after a CI fix), on the chosen track.
 on:
   push:
     tags: ["android-v*.*.*"]
   workflow_dispatch:
     inputs:
       upload:
-        description: Also upload to Google Play internal testing
+        description: Also upload to Google Play
         type: boolean
         default: false
+      track:
+        description: Play track (empty = repository variable PLAY_TRACK, else internal; alpha = closed testing)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -79,12 +83,12 @@ jobs:
           path: ${{ runner.temp }}/passauth-*.aab
           if-no-files-found: error
 
-      - name: Upload to Google Play (internal testing)
+      - name: Upload to Google Play (${{ inputs.track || vars.PLAY_TRACK || 'internal' }})
         if: (startsWith(github.ref, 'refs/tags/') || inputs.upload) && vars.PLAY_UPLOAD_ENABLED == 'true'
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: io.passauth.app
           releaseFiles: ${{ runner.temp }}/passauth-*.aab
-          track: internal
+          track: ${{ inputs.track || vars.PLAY_TRACK || 'internal' }}
           status: completed

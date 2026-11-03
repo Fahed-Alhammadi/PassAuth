@@ -22,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -134,7 +135,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
     Scaffold(
         topBar = {
             PageBar(if (entry != null) "Edit $label" else "New $label", onBack = { done(entry?.id) }) {
-                TextButton(onClick = ::save, enabled = !busy) { Text("Save", color = PassAuthTheme.colors.onHeader) }
+                TextButton(onClick = ::save, enabled = !busy) { Text("Save", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold) }
             }
         },
     ) { padding ->
