@@ -61,5 +61,5 @@ jobs:
           scripts/release-notes.sh "$GITHUB_REF_NAME" \
             extension web/src crates/core crates/core-wasm > notes.md
           gh release create "$GITHUB_REF_NAME" --notes-file notes.md \
-            --title "PassAuth extension $v" \
+            --title "PassAuth extension v$v" \
             "passauth-extension-$v.zip" "${pre[@]}"

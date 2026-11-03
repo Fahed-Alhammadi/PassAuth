@@ -92,5 +92,5 @@ jobs:
           pre=()
           [[ "$v" == *-* ]] && pre=(--prerelease)
           gh release create "$GITHUB_REF_NAME" --latest=false \
-            --title "PassAuth server $v" --notes-file notes.md "${pre[@]}"
+            --title "PassAuth server v$v" --notes-file notes.md "${pre[@]}"
 
