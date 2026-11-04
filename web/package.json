@@ -5,7 +5,7 @@
   "version": "0.4.5",
   "type": "module",
   "scripts": {
-    "wasm": "../scripts/build-wasm.sh src/wasm",
+    "wasm": "../scripts/build-wasm.sh web/src/wasm",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",

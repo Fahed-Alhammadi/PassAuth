@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ItemEditor } from "../components/ItemEditor";
 import { CopyButton, ErrorText, Icon, Modal, SiteIcon, TotpView, toast } from "../components/ui";
 import { errorMessage } from "../lib/api";
-import { createItem, purgeItem, restoreItem, trashItem, updateItem, useVault, writableVaults } from "../lib/vault";
+import { createItem, defaultVaultId, purgeItem, restoreItem, trashItem, updateItem, useVault, writableVaults } from "../lib/vault";
 import { useShowIcons } from "../lib/prefs";
-import { emptyItem, KIND_LABEL, kindOf, siteHost, type Item, type ItemKind, type VaultEntry } from "../lib/types";
-import { filterPath } from "./Shell";
+import { emptyItem, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type VaultEntry } from "../lib/types";
+import { FilterSelect, filterPath, Notices } from "./Shell";
 
 function matches(e: VaultEntry, filter: string): boolean {
   if (filter === "trash") return !!e.deletedAt;
@@ -42,10 +42,12 @@ export function VaultPage() {
   const nav = useNavigate();
   const { items } = useVault();
   const [query, setQuery] = useState("");
+  // Filtering thousands of items on every keystroke would make typing lag: let React render it in the background.
+  const deferredQuery = useDeferredValue(query);
   const [creating, setCreating] = useState(false);
 
   const list = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = deferredQuery.trim().toLowerCase();
     return items.filter(
       (e) =>
         matches(e, filter) &&
@@ -55,12 +57,13 @@ export function VaultPage() {
           e.item.login?.urls.some((u) => u.url.toLowerCase().includes(q)) ||
           e.item.tags.some((t) => t.toLowerCase().includes(q))),
     );
-  }, [items, filter, query]);
+  }, [items, filter, deferredQuery]);
 
   const selected = items.find((e) => e.id === itemId);
   const newKind = itemId?.startsWith("new-") ? (itemId.slice(4) as ItemKind) : null;
   const open = (id: string) => nav(`${filterPath(filter)}/${id}`);
   const close = () => nav(filterPath(filter));
+  useNarrowFocus(itemId);
 
   return (
     <>
@@ -74,6 +77,8 @@ export function VaultPage() {
               </button>
             )}
           </div>
+          <FilterSelect filter={filter} />
+          <Notices />
           <div className="input-group">
             <span className="row" style={{ paddingLeft: 10, color: "var(--ink-3)" }}>
               <Icon name="search" />
@@ -104,7 +109,7 @@ export function VaultPage() {
             </div>
           ) : (
             list.map((e) => (
-              <button key={e.id} className="list-item" aria-current={e.id === itemId} onClick={() => open(e.id)}>
+              <button key={e.id} className="list-item" data-item={e.id} aria-current={e.id === itemId} onClick={() => open(e.id)}>
                 <SiteIcon host={siteHost(e.item)} name={e.item.name} enabled={showIcons} />
                 <span className="grow">
                   <span className="title" style={{ display: "block" }}>
@@ -125,7 +130,8 @@ export function VaultPage() {
         {newKind ? (
           <Editor key={itemId} kind={newKind} onDone={(id) => (id ? open(id) : close())} />
         ) : selected ? (
-          <Detail key={selected.id + selected.revision} entry={selected} onClose={close} />
+          // Keyed by id only: a sync that changes the item must not throw away an edit in progress.
+          <Detail key={selected.id} entry={selected} onClose={close} />
         ) : (
           <div className="empty" style={{ height: "100%", justifyContent: "center" }}>
             <p>Select an item to see its details.</p>
@@ -155,6 +161,23 @@ export function VaultPage() {
       <ShellDetailFlag active={!!(selected || newKind)} />
     </>
   );
+}
+
+/**
+ * Narrow screens show either the list or the item, so the focused element disappears when switching:
+ * move focus to the item's heading when it opens, and back to its row when returning to the list.
+ */
+function useNarrowFocus(itemId: string | undefined) {
+  const last = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!window.matchMedia("(max-width: 820px)").matches) {
+      last.current = itemId;
+      return;
+    }
+    if (itemId) document.querySelector<HTMLElement>(".detail-pane h1")?.focus();
+    else if (last.current) document.querySelector<HTMLElement>(`[data-item="${CSS.escape(last.current)}"]`)?.focus();
+    last.current = itemId;
+  }, [itemId]);
 }
 
 /** Mobile: show the detail pane instead of the list while an item is open. */
@@ -199,6 +222,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
   const canWrite = vault && vault.role !== "read";
 
   if (editing) return <Editor entry={entry} kind={kindOf(i)} onDone={() => setEditing(false)} />;
+  const href = (url: string) => safeHref(url);
 
   const run = async (fn: () => Promise<void>, msg: string, then?: () => void) => {
     setBusy(true);
@@ -222,7 +246,9 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
       <header className="detail-head">
         <SiteIcon host={siteHost(i)} name={i.name} enabled={showIcons} />
         <div className="grow">
-          <h1 style={{ overflowWrap: "anywhere" }}>{i.name || "Untitled"}</h1>
+          <h1 tabIndex={-1} style={{ overflowWrap: "anywhere" }}>
+            {i.name || "Untitled"}
+          </h1>
           <p className="muted small">
             {KIND_LABEL[kindOf(i)]} in {vault?.name ?? "a vault"}
             {i.folder ? `, folder ${i.folder}` : ""}
@@ -275,9 +301,13 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
             .filter((u) => u.url)
             .map((u, n) => (
               <Row key={n} label={n === 0 ? "Website" : `Website ${n + 1}`} value={u.url}>
-                <a href={u.url.includes("://") ? u.url : `https://${u.url}`} target="_blank" rel="noopener noreferrer">
-                  {u.url}
-                </a>
+                {href(u.url) && u.match !== "regex" ? (
+                  <a href={href(u.url)!} target="_blank" rel="noopener noreferrer">
+                    {u.url}
+                  </a>
+                ) : (
+                  u.url
+                )}
               </Row>
             ))}
         </dl>
@@ -382,25 +412,47 @@ function Editor({ entry, kind, onDone }: { entry?: VaultEntry; kind: ItemKind; o
   const writable = writableVaults();
   const { items } = useVault();
   const folders = [...new Set(items.map((e) => e.item.folder).filter(Boolean))] as string[];
+  // The version the edit started from. Saving sends its revision, so the server refuses to overwrite a
+  // change made elsewhere in the meantime; the user then decides which version wins.
+  const [base, setBase] = useState(entry);
+  const [initial] = useState(() => (entry ? structuredClone(entry.item) : emptyItem(kind)));
+  const changed = !!(entry && base && entry.revision !== base.revision);
   return (
-    <ItemEditor
-      initial={entry ? structuredClone(entry.item) : emptyItem(kind)}
-      isNew={!entry}
-      vaults={writable}
-      defaultVault={entry?.vaultId ?? writable[0]?.id ?? ""}
-      folders={folders}
-      onCancel={() => onDone(entry?.id)}
-      onSave={async (item, vaultId) => {
-        if (entry) {
-          await updateItem(entry, item, vaultId);
-          toast("Changes saved");
-          onDone(entry.id);
-        } else {
-          const id = await createItem(vaultId, item);
-          toast("Item saved");
-          onDone(id);
-        }
-      }}
-    />
+    <>
+      {changed && (
+        <div className="alert alert-warn small notice" role="alert" style={{ margin: "24px 32px 0" }}>
+          <div className="grow">
+            <span>This item was changed on another device or by someone you share the vault with. Saving now would fail.</span>
+            <div className="row">
+              <button type="button" className="link" onClick={() => setBase(entry)}>
+                Keep my changes (overwrite)
+              </button>
+              <button type="button" className="link" onClick={() => onDone(entry?.id)}>
+                Discard my changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <ItemEditor
+        initial={initial}
+        isNew={!entry}
+        vaults={writable}
+        defaultVault={entry?.vaultId ?? defaultVaultId()}
+        folders={folders}
+        onCancel={() => onDone(entry?.id)}
+        onSave={async (item, vaultId) => {
+          if (base) {
+            await updateItem(base, item, vaultId);
+            toast("Changes saved");
+            onDone(base.id);
+          } else {
+            const id = await createItem(vaultId, item);
+            toast("Item saved");
+            onDone(id);
+          }
+        }}
+      />
+    </>
   );
 }

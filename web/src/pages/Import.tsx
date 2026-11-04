@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type RefObject } from "react";
 import { Link } from "react-router";
-import { ErrorText, Icon, PasswordInput } from "../components/ui";
+import { ErrorText, Icon, PasswordField } from "../components/ui";
 import { errorMessage } from "../lib/api";
 import { kindOf, type Item, type ItemKind } from "../lib/types";
 import { importFile, importItems, useVault, writableVaults } from "../lib/vault";
@@ -276,10 +276,7 @@ export function ImportPage() {
               <p className="muted">
                 This export is protected with a password. Enter the password you set when exporting it, or the KeePass database password.
               </p>
-              <label className="field">
-                <span>Export or database password</span>
-                <PasswordInput id="import-password" value={password} onChange={setPassword} autoComplete="off" autoFocus />
-              </label>
+              <PasswordField id="import-password" label="Export or database password" value={password} onChange={setPassword} autoComplete="off" autoFocus />
               <ErrorText error={error} />
               <div className="row">
                 <button type="submit" className="btn btn-accent">

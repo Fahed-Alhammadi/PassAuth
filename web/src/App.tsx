@@ -1,7 +1,8 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
+import { LogoMark } from "./components/Logo";
 import { ToastHost } from "./components/ui";
-import { lock, useVault } from "./lib/vault";
+import { boot, lock, logout, useVault } from "./lib/vault";
 import { AdminPage } from "./pages/Admin";
 import { ExportPage } from "./pages/Export";
 import { ImportPage } from "./pages/Import";
@@ -23,18 +24,61 @@ function RequireUnlocked() {
   useAutoLock(status === "unlocked");
   if (status === "logged-out") return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   if (status === "locked") return <UnlockPage />;
-  if (status === "loading") return null;
+  if (status === "unreachable") return <Unreachable />;
+  if (status === "loading")
+    return (
+      <div className="splash" role="status">
+        <LogoMark size={56} />
+        <span>Loading PassAuth…</span>
+      </div>
+    );
   return <Outlet />;
 }
 
-/** Lock after 15 minutes without interaction. */
+/** The server couldn't be reached at startup: keep the session and offer a retry. */
+function Unreachable() {
+  const [busy, setBusy] = useState(false);
+  return (
+    <main className="auth">
+      <div className="auth-card">
+        <div className="auth-head">
+          <LogoMark size={56} />
+          <h1>Can't reach your PassAuth server</h1>
+          <p className="muted">
+            {location.host} isn't answering. Check your connection or VPN, or wait for the server to finish restarting. You're still signed in.
+          </p>
+        </div>
+        <div className="auth-panel stack">
+          <button
+            type="button"
+            className="btn btn-accent btn-block"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await boot();
+              setBusy(false);
+            }}
+          >
+            {busy ? "Trying again…" : "Try again"}
+          </button>
+          <button type="button" className="btn btn-ghost" onClick={logout}>
+            Sign out
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+/** Lock after 15 minutes without interaction (this tab only). */
 function useAutoLock(active: boolean) {
   useEffect(() => {
     if (!active) return;
-    let timer = window.setTimeout(lock, AUTO_LOCK_MS);
+    const idleLock = () => lock(false);
+    let timer = window.setTimeout(idleLock, AUTO_LOCK_MS);
     const reset = () => {
       clearTimeout(timer);
-      timer = window.setTimeout(lock, AUTO_LOCK_MS);
+      timer = window.setTimeout(idleLock, AUTO_LOCK_MS);
     };
     const events = ["pointerdown", "keydown", "wheel", "touchstart"];
     events.forEach((e) => window.addEventListener(e, reset, { passive: true }));

@@ -19,7 +19,7 @@
 .dropzone strong { color: var(--ink); font-weight: 600; }
 
 .privacy-note { display: flex; gap: 12px; align-items: flex-start; }
-.privacy-note svg { flex: none; margin-top: 2px; color: var(--patina); }
+.privacy-note svg { flex: none; margin-top: 2px; color: var(--ok); }
 
 .help-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 0.9rem; }
 .help-list li { color: var(--ink-2); }
@@ -52,7 +52,7 @@
   padding: 20px; border-radius: var(--radius-m); background: var(--surface-2); color: var(--ink);
   word-break: break-all; min-height: 84px; display: flex; align-items: center; user-select: all;
 }
-.gen-output .d { color: var(--patina); }
+.gen-output .d { color: var(--ok); }
 .gen-output .s { color: var(--accent-ink); }
 
 .range-row { display: flex; align-items: center; gap: 14px; }

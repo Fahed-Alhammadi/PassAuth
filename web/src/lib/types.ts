@@ -146,13 +146,108 @@ export interface VaultEntry {
 }
 
 export type Role = "owner" | "admin" | "write" | "read";
+export type KeyKind = "account" | "sealed";
+
+// ------------------------------------------------------------ API shapes
+
+/** Encrypted account bundle (opaque to the UI except for these fields). */
+export interface Bundle {
+  account_id: string;
+  kdf: unknown;
+  secret_key_enabled: boolean;
+  [k: string]: unknown;
+}
+
+export interface SyncVaultRow {
+  id: string;
+  meta: string;
+  role: Role;
+  wrapped_key: string;
+  key_kind: KeyKind;
+}
+
+export interface SyncItemRow {
+  id: string;
+  vault_id: string;
+  item_key: string;
+  data: string;
+  revision: number;
+  deleted_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SyncResponse {
+  revision: number;
+  user: { id: string; email: string; name: string; email_verified: boolean };
+  bundle: Bundle;
+  vaults: SyncVaultRow[];
+  items: SyncItemRow[];
+}
+
+export interface PreloginResponse {
+  account_id: string;
+  kdf: unknown;
+  secret_key_required: boolean;
+}
+
+export interface LoginFinishResponse {
+  user_id: string;
+  email: string;
+  access_token: string;
+  refresh_token: string;
+  bundle: Bundle;
+  remember_token?: string;
+  two_factor_required?: boolean;
+  two_factor_token?: string;
+  providers?: string[];
+  reauth_token?: string;
+}
+
+export interface MemberRow {
+  user_id: string;
+  email: string;
+  name: string;
+  role: Role;
+  public_key: string;
+}
+
+/** Runtime check of the /sync shape, so a server/client mismatch fails loudly instead of half-loading. */
+export function isSyncResponse(v: unknown): v is SyncResponse {
+  const s = v as SyncResponse | null;
+  return (
+    !!s &&
+    typeof s.revision === "number" &&
+    !!s.user &&
+    typeof s.user.id === "string" &&
+    !!s.bundle &&
+    typeof s.bundle.account_id === "string" &&
+    Array.isArray(s.vaults) &&
+    Array.isArray(s.items)
+  );
+}
+
+/** Safe href for a stored website: only http(s) links are clickable. */
+export function safeHref(url: string): string | null {
+  const t = url.trim();
+  const full = t.includes("://") ? t : `https://${t}`;
+  if (!/^https?:\/\//i.test(full)) return null;
+  try {
+    const u = new URL(full);
+    return /^https?:$/.test(u.protocol) ? u.href : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Host of the first website (patterns excluded), for site icons. */
 export function siteHost(item: Item): string {
   for (const u of item.login?.urls ?? []) {
     if (u.match === "regex" || !u.url) continue;
     try {
-      const p = new URL(u.url.includes("://") ? u.url : `https://${u.url}`);
+      const href = safeHref(u.url);
+      if (!href) continue;
+      const p = new URL(href);
       if (/^https?:$/.test(p.protocol)) return p.hostname;
     } catch {
       /* not a URL */

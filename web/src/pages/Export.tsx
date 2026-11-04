@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
-import { ErrorText, Icon, PasswordInput, toast } from "../components/ui";
-import { errorMessage } from "../lib/api";
+import { ErrorText, Icon, PasswordField, toast } from "../components/ui";
+import { friendlyError } from "../lib/api";
+import { downloadFile } from "../lib/kit";
 import { exportVaultCsv, exportVaultEncrypted, exportVaultJson, reauth, useVault } from "../lib/vault";
 import "../styles/tools.css";
 
@@ -12,12 +13,7 @@ const FORMATS: { value: Format; title: string; text: string }[] = [
   { value: "csv", title: "CSV", text: "Logins and secure notes only, unencrypted. Opens in spreadsheets and most password managers." },
 ];
 
-function save(name: string, text: string, type: string) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = Object.assign(document.createElement("a"), { href: url, download: name });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+const save = (name: string, text: string, type: string) => downloadFile(name, text, type);
 
 /** Export the vault to a file. Runs in the browser; nothing new is sent to the server. */
 export function ExportPage() {
@@ -51,7 +47,7 @@ export function ExportPage() {
       setExportPassword("");
       setConfirm("");
     } catch (err) {
-      setError(errorMessage(err));
+      setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
@@ -80,15 +76,13 @@ export function ExportPage() {
           </fieldset>
 
           {format === "encrypted" ? (
-            <div className="row">
-              <label className="field grow">
-                <span>Export password</span>
-                <PasswordInput value={exportPassword} onChange={setExportPassword} autoComplete="new-password" />
-              </label>
-              <label className="field grow">
-                <span>Confirm export password</span>
-                <PasswordInput value={confirm} onChange={setConfirm} autoComplete="new-password" />
-              </label>
+            <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-start" }}>
+              <div className="grow" style={{ minWidth: 200 }}>
+                <PasswordField label="Export password" value={exportPassword} onChange={setExportPassword} autoComplete="new-password" />
+              </div>
+              <div className="grow" style={{ minWidth: 200 }}>
+                <PasswordField label="Confirm export password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
+              </div>
             </div>
           ) : (
             <div className="alert alert-error" role="note">
@@ -96,10 +90,7 @@ export function ExportPage() {
             </div>
           )}
 
-          <label className="field">
-            <span>Master password</span>
-            <PasswordInput value={master} onChange={setMaster} autoComplete="current-password" />
-          </label>
+          <PasswordField label="Master password" value={master} onChange={setMaster} autoComplete="current-password" />
 
           <ErrorText error={error} />
           <div className="row">

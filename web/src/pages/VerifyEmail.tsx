@@ -1,19 +1,27 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { LogoMark } from "../components/Logo";
-import { api, errorMessage } from "../lib/api";
+import { api, friendlyError } from "../lib/api";
+
+const requests = new Map<string, Promise<unknown>>();
+function verifyOnce(token: string) {
+  let p = requests.get(token);
+  if (!p) requests.set(token, (p = api("/auth/verify-email", { body: { token }, auth: false })));
+  return p;
+}
 
 export function VerifyEmailPage() {
   const [params] = useSearchParams();
   const [state, setState] = useState<"working" | "ok" | string>("working");
 
+  const token = params.get("token");
   useEffect(() => {
-    const token = params.get("token");
     if (!token) return setState("This link is incomplete. Open the link from your email again.");
-    api("/auth/verify-email", { body: { token }, auth: false })
+    // The token works once: send it once per page load, even when React runs the effect twice.
+    verifyOnce(token)
       .then(() => setState("ok"))
-      .catch((e) => setState(errorMessage(e)));
-  }, [params]);
+      .catch((e) => setState(friendlyError(e)));
+  }, [token]);
 
   return (
     <main className="auth">

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
-import { ApiError, api, errorMessage } from "../lib/api";
+import { ApiError, api, friendlyError } from "../lib/api";
+import { downloadEmergencyKit, downloadFile, printEmergencyKit } from "../lib/kit";
 import type { Role } from "../lib/types";
 import {
   changeKeys,
@@ -15,8 +16,10 @@ import {
   logout,
   lookupUser,
   reauth,
+  rememberedSecretKey,
   removeMember,
   renameVault,
+  rotateVaultKey,
   shareVault,
   sync,
   useVault,
@@ -71,36 +74,8 @@ const MIN_PASSWORD = 10;
 // ---------------------------------------------------------------- helpers
 
 /** Turn server and crypto errors into a sentence that says how to fix it. */
-function friendly(e: unknown): string {
-  if (e instanceof ApiError && e.status === 429) return "Too many attempts. Wait a minute, then try again.";
-  const m = errorMessage(e);
-  switch (m) {
-    case "secret_key_required":
-      return "This browser doesn't have your Secret Key saved. Sign out, sign in again with your Secret Key, then retry.";
-    case "Wrong email, master password or Secret Key.":
-    case "Wrong master password or Secret Key.":
-      return "That master password is wrong. Check it and try again.";
-    case "invalid code":
-      return "That code didn't work. Enter the code that's showing now and try again.";
-    case "start setup first":
-      return "The setup expired. Cancel and start setup again.";
-    case "reauth_required":
-      return "Your confirmation expired. Enter your master password again.";
-  }
-  const s = m.charAt(0).toUpperCase() + m.slice(1);
-  return /[.!?]$/.test(s) ? s : `${s}.`;
-}
-
-function download(filename: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+const friendly = friendlyError;
+const download = (filename: string, text: string) => downloadFile(filename, text);
 
 function formatDate(ts: number) {
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -168,7 +143,12 @@ export function SettingsPage() {
     <div className="page">
       <div className="page-inner">
         <div className="settings-head">
-          <h1>Settings</h1>
+          <div className="row-between">
+            <h1>Settings</h1>
+            <button type="button" className="btn btn-ghost" onClick={logout}>
+              <Icon name="logout" /> Sign out
+            </button>
+          </div>
           <nav className="settings-tabs" aria-label="Settings sections">
             {TABS.map((t) => (
               <Link key={t.key} to={`/settings/${t.key}`} aria-current={t.key === current ? "page" : undefined}>
@@ -236,7 +216,7 @@ function ConfirmPassword({
           <button type="button" className="btn btn-ghost" onClick={close} disabled={busy}>
             Cancel
           </button>
-          <button type="submit" className={`btn ${danger ? "btn-danger" : "btn-primary"}`} disabled={busy}>
+          <button type="submit" className={`btn ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy}>
             {busy ? "Working…" : action}
           </button>
         </div>
@@ -250,17 +230,23 @@ function ConfirmDialog({
   title,
   children,
   action,
+  confirmText,
   onConfirm,
   onClose,
 }: {
   title: string;
   children: ReactNode;
   action: string;
+  /** When set, the user must type this (e.g. the vault name) before the action is enabled. */
+  confirmText?: string;
   onConfirm: () => Promise<void>;
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [typed, setTyped] = useState("");
+  const typedId = useId();
+  const ready = !confirmText || typed.trim() === confirmText.trim();
   const close = useCallback(() => {
     if (!busy) onClose();
   }, [busy, onClose]);
@@ -280,12 +266,19 @@ function ConfirmDialog({
     <Modal title={title} onClose={close}>
       <div className="stack">
         {children}
+        {confirmText && (
+          <div className="field">
+            <label htmlFor={typedId}>Type {confirmText} to confirm</label>
+            <input id={typedId} className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
+          </div>
+        )}
         <ErrorText error={error} />
         <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy}>
+          {/* Cancel gets the initial focus: a stray Enter must never confirm a destructive action. */}
+          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy} data-autofocus={confirmText ? undefined : ""}>
             Cancel
           </button>
-          <button type="button" className="btn btn-danger" onClick={confirm} disabled={busy} autoFocus>
+          <button type="button" className="btn btn-danger-solid" onClick={confirm} disabled={busy || !ready}>
             {busy ? "Working…" : action}
           </button>
         </div>
@@ -424,6 +417,7 @@ function SecurityTab() {
   const [error, setError] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const [newSecretKey, setNewSecretKey] = useState<string | null>(null);
+  const savedKey = rememberedSecretKey(email);
 
   async function changePassword(e: FormEvent) {
     e.preventDefault();
@@ -505,16 +499,29 @@ function SecurityTab() {
         </p>
         {skOn ? (
           <p className="small muted">
-            This browser remembers your Secret Key. Keep your Emergency Kit somewhere safe: you need it to sign in on any other device.
+            {savedKey
+              ? "This browser remembers your Secret Key. Keep your Emergency Kit somewhere safe: you need it to sign in on any other device."
+              : "This browser doesn't have your Secret Key saved. Use the Emergency Kit you saved when you turned it on."}
           </p>
         ) : (
           <p className="small muted">When you turn it on, you'll get a Secret Key to save in an Emergency Kit.</p>
         )}
-        <div>
+        <div className="row" style={{ flexWrap: "wrap" }}>
           <button type="button" className={skOn ? "btn" : "btn btn-primary"} onClick={() => setToggling(true)}>
             <Icon name="key" />
             {skOn ? "Turn off Secret Key" : "Turn on Secret Key"}
           </button>
+          {(!skOn || savedKey) && (
+            <>
+              <button type="button" className="btn" onClick={() => downloadEmergencyKit({ email, secretKey: skOn ? savedKey : null })}>
+                <Icon name="download" />
+                Download Emergency Kit
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={() => printEmergencyKit({ email, secretKey: skOn ? savedKey : null })}>
+                Print kit
+              </button>
+            </>
+          )}
         </div>
       </section>
 
@@ -545,24 +552,7 @@ function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; emai
     if (saved) onClose();
   }, [saved, onClose]);
 
-  function downloadKit() {
-    const kit = [
-      "PassAuth Emergency Kit",
-      "",
-      "Keep this somewhere safe and offline, such as printed in a drawer.",
-      "To sign in on a new device you need your master password and this Secret Key.",
-      "",
-      `Server: ${location.origin}`,
-      `Email: ${email}`,
-      `Secret Key: ${secretKey}`,
-      "",
-      "Master password: ________________________________________",
-      "",
-      `Created: ${new Date().toLocaleString()}`,
-      "",
-    ].join("\n");
-    download("PassAuth Emergency Kit.txt", kit);
-  }
+  const kit = { email, secretKey };
 
   return (
     <Modal title="Save your new Secret Key" onClose={close}>
@@ -574,9 +564,12 @@ function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; emai
         {secretKey}
       </div>
       <div className="row" style={{ flexWrap: "wrap" }}>
-        <button type="button" className="btn btn-accent" onClick={downloadKit}>
-          <Icon name="upload" />
+        <button type="button" className="btn btn-accent" onClick={() => downloadEmergencyKit(kit)} data-autofocus="">
+          <Icon name="download" />
           Download Emergency Kit
+        </button>
+        <button type="button" className="btn" onClick={() => printEmergencyKit(kit)}>
+          Print
         </button>
         <button type="button" className="btn" onClick={() => copySecret(secretKey, "Secret Key copied")}>
           <Icon name="copy" />
@@ -910,8 +903,13 @@ function EmailCard({
 
 function RecoveryCodesModal({ codes, onClose }: { codes: string[]; onClose: () => void }) {
   const text = codes.join("\n");
+  const [saved, setSaved] = useState(false);
+  // They're shown only once: Escape or a click outside must not throw them away.
+  const close = useCallback(() => {
+    if (saved) onClose();
+  }, [saved, onClose]);
   return (
-    <Modal title="Save your recovery codes" onClose={onClose}>
+    <Modal title="Save your recovery codes" onClose={close}>
       <p className="card-text">
         If you lose your phone or can't get email, a recovery code lets you sign in. Each code works once. This is the only time PassAuth shows them.
       </p>
@@ -930,12 +928,16 @@ function RecoveryCodesModal({ codes, onClose }: { codes: string[]; onClose: () =
           className="btn"
           onClick={() => download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${location.origin}\n\nEach code works once.\n\n${text}\n`)}
         >
-          <Icon name="upload" />
+          <Icon name="download" />
           Download
         </button>
       </div>
+      <label className="check">
+        <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+        <span>I saved my recovery codes</span>
+      </label>
       <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn btn-primary" onClick={onClose}>
+        <button type="button" className="btn btn-primary" disabled={!saved} onClick={onClose}>
           Done
         </button>
       </div>
@@ -1050,7 +1052,23 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
 }
 
 function VaultManager({ vault, count }: { vault: Vault; count: number }) {
-  const { userId } = useVault();
+  const { userId, pendingRotations } = useVault();
+  const [securing, setSecuring] = useState(false);
+  const [secureError, setSecureError] = useState<string | null>(null);
+  const needsRotation = pendingRotations.includes(vault.id);
+
+  async function secure() {
+    setSecuring(true);
+    setSecureError(null);
+    try {
+      await rotateVaultKey(vault.id);
+      toast("Vault key replaced");
+    } catch (e) {
+      setSecureError(friendly(e));
+    } finally {
+      setSecuring(false);
+    }
+  }
   const [name, setName] = useState(vault.name);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -1104,6 +1122,21 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
 
   return (
     <div className="vault-manage">
+      {needsRotation && (
+        <div className="alert alert-warn stack-s" role="alert">
+          <strong>Finish securing this vault</strong>
+          <span>
+            Someone was removed, but the vault key wasn't replaced yet, so they could still read items added from now on. Replace the key to re-encrypt
+            every item for the remaining members.
+          </span>
+          <ErrorText error={secureError} />
+          <div>
+            <button type="button" className="btn btn-primary" onClick={secure} disabled={securing}>
+              {securing ? "Replacing the key…" : "Replace vault key"}
+            </button>
+          </div>
+        </div>
+      )}
       <form className="inline-form" onSubmit={rename}>
         <label className="field">
           <span>Vault name</span>
@@ -1171,7 +1204,7 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
           <div>
             <button type="button" className="btn btn-danger" onClick={() => setDeleting(true)}>
               <Icon name="trash" />
-              Delete vault
+              Delete vault…
             </button>
           </div>
         </div>
@@ -1187,7 +1220,7 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
       )}
 
       {deleting && (
-        <ConfirmDialog title={`Delete "${vault.name}"`} action="Delete vault" onConfirm={destroy} onClose={() => setDeleting(false)}>
+        <ConfirmDialog title={`Delete "${vault.name}"`} action="Delete vault" confirmText={vault.name} onConfirm={destroy} onClose={() => setDeleting(false)}>
           <p className="card-text">
             This permanently deletes the vault and its {count} {count === 1 ? "item" : "items"} for everyone who has access. You can't undo this.
           </p>

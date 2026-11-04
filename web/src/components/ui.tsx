@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { estimateBits, generatePassword, totpCode } from "../lib/vault";
 
 // ------------------------------------------------------------------ icons
@@ -59,6 +59,7 @@ export function toast(msg: string) {
   showToast(msg);
 }
 
+/** The live region stays mounted so screen readers announce each message; only its text changes. */
 export function ToastHost() {
   const [msg, setMsg] = useState<string | null>(null);
   useEffect(() => {
@@ -66,28 +67,61 @@ export function ToastHost() {
     showToast = (m) => {
       setMsg(m);
       clearTimeout(t);
-      t = window.setTimeout(() => setMsg(null), 2200);
+      t = window.setTimeout(() => setMsg(null), Math.max(4000, m.length * 60));
     };
     return () => clearTimeout(t);
   }, []);
-  return msg ? (
-    <div className="toast" role="status">
-      {msg}
+  return (
+    <div className="toast-region" role="status" aria-live="polite">
+      {msg && <div className="toast">{msg}</div>}
     </div>
-  ) : null;
+  );
 }
 
-/** Copy and clear the clipboard after 30 s if it still holds the secret. */
-export async function copySecret(value: string, label = "Copied") {
-  await navigator.clipboard.writeText(value);
-  toast(`${label}. Clipboard clears in 30 seconds.`);
-  setTimeout(async () => {
+/** Copy without the async Clipboard API (missing on plain-http servers). */
+function legacyCopy(value: string): boolean {
+  const ta = document.createElement("textarea");
+  ta.value = value;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+  const active = document.activeElement as HTMLElement | null;
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  active?.focus?.();
+  return ok;
+}
+
+/** Copy and clear the clipboard after 30 s if it still holds the secret. Never throws. */
+export async function copySecret(value: string, label = "Copied"): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
     try {
-      if ((await navigator.clipboard.readText()) === value) await navigator.clipboard.writeText("");
+      await navigator.clipboard.writeText(value);
+      toast(`${label}. Clipboard clears in 30 seconds.`);
+      setTimeout(async () => {
+        try {
+          if ((await navigator.clipboard.readText()) === value) await navigator.clipboard.writeText("");
+        } catch {
+          /* clipboard read not permitted; leave it */
+        }
+      }, 30_000);
+      return true;
     } catch {
-      /* clipboard read not permitted; leave it */
+      /* fall back below */
     }
-  }, 30_000);
+  }
+  if (legacyCopy(value)) {
+    toast(`${label}. Clear your clipboard when you're done: this connection doesn't allow PassAuth to do it.`);
+    return true;
+  }
+  toast("Copying isn't available on this connection. Select the text and copy it yourself.");
+  return false;
 }
 
 /** Website icon from the server's icon service, falling back to the item's initial. */
@@ -151,6 +185,7 @@ export function PasswordInput({
         onChange={(e) => onChange(e.target.value)}
         autoComplete={autoComplete}
         autoFocus={autoFocus}
+        data-autofocus={autoFocus ? "" : undefined}
         spellCheck={false}
         placeholder={placeholder}
       />
@@ -166,17 +201,41 @@ export function PasswordInput({
   );
 }
 
+/** Bits below which sign-up and password changes warn that a master password is easy to guess. */
+export const WEAK_BITS = 50;
+
+/** Strength label shared by the meter and the sign-up check, so they never disagree. */
+export function strength(bits: number): { label: string; color: string; pct: number } {
+  if (bits < WEAK_BITS) return { label: "Weak", color: "var(--danger)", pct: 25 };
+  if (bits < 65) return { label: "Fair", color: "var(--warn)", pct: 50 };
+  if (bits < 80) return { label: "Good", color: "var(--ok)", pct: 75 };
+  return { label: "Strong", color: "var(--ok)", pct: 100 };
+}
+
 export function StrengthMeter({ password }: { password: string }) {
   if (!password) return null;
-  const bits = estimateBits(password);
-  const [label, color, pct] =
-    bits < 40 ? ["Weak", "var(--danger)", 25] : bits < 60 ? ["Fair", "var(--accent)", 50] : bits < 80 ? ["Good", "var(--patina)", 75] : ["Strong", "var(--patina)", 100];
+  const { label, color, pct } = strength(estimateBits(password));
   return (
     <div className="stack-s">
       <div className="meter" aria-hidden="true">
         <i style={{ width: `${pct}%`, background: color }} />
       </div>
-      <span className="small muted">Strength: {label}</span>
+      <span className="small muted" role="status">
+        Strength: {label}
+      </span>
+    </div>
+  );
+}
+
+/** A labelled password input (label outside the input group, so the buttons don't become part of its name). */
+export function PasswordField({ label, hint, ...props }: { label: string; hint?: ReactNode } & Parameters<typeof PasswordInput>[0]) {
+  const auto = useId();
+  const id = props.id ?? `pw-${auto}`;
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      <PasswordInput {...props} id={id} />
+      {hint}
     </div>
   );
 }
@@ -204,9 +263,7 @@ export function TotpView({ secret }: { secret: string }) {
         <circle className="track" cx="18" cy="18" r={r} />
         <circle className="arc" cx="18" cy="18" r={r} strokeDasharray={c} strokeDashoffset={c * (1 - code.remaining / code.period)} />
       </svg>
-      <span className="totp-code" aria-live="polite">
-        {pretty}
-      </span>
+      <span className="totp-code">{pretty}</span>
       <span className="small muted">{code.remaining}s</span>
       <CopyButton value={code.code} label="Copy code" />
     </div>
@@ -215,19 +272,59 @@ export function TotpView({ secret }: { secret: string }) {
 
 // ----------------------------------------------------------------- modal
 
+/**
+ * Modal dialog on the native <dialog>: focus is trapped inside, the page behind is inert, and focus
+ * returns to the opener on close. Mark the control to focus first with `data-autofocus` (or autoFocus
+ * on PasswordInput); otherwise the first field gets focus.
+ */
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const opener = document.activeElement as HTMLElement | null;
+    let mounted = true;
+    if (!el.open) el.showModal();
+    const first =
+      el.querySelector<HTMLElement>("[data-autofocus]") ??
+      el.querySelector<HTMLElement>("input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])");
+    first?.focus();
+    // The browser can close a dialog on its own (e.g. repeated Escape): keep it open while it's rendered.
+    const reopen = () => mounted && !el.open && el.isConnected && el.showModal();
+    el.addEventListener("close", reopen);
+    return () => {
+      mounted = false;
+      el.removeEventListener("close", reopen);
+      if (el.open) el.close();
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
+
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <h2>{title}</h2>
+    <dialog
+      ref={ref}
+      className="modal"
+      aria-labelledby={titleId}
+      onCancel={(e) => {
+        e.preventDefault();
+        closeRef.current();
+      }}
+      onMouseDown={(e) => {
+        // A press on the backdrop lands on the <dialog> itself, outside its box.
+        if (e.target !== e.currentTarget) return;
+        const r = e.currentTarget.getBoundingClientRect();
+        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) closeRef.current();
+      }}
+    >
+      <div className="modal-body">
+        <h2 id={titleId}>{title}</h2>
         {children}
       </div>
-    </div>
+    </dialog>
   );
 }
 

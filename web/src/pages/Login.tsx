@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { LogoMark } from "../components/Logo";
-import { ErrorText, PasswordInput } from "../components/ui";
-import { errorMessage, usePublicConfig } from "../lib/api";
-import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor } from "../lib/vault";
+import { ErrorText, PasswordField } from "../components/ui";
+import { errorMessage, friendlyError, usePublicConfig } from "../lib/api";
+import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor, WRONG_CREDENTIALS } from "../lib/vault";
 
 const PROVIDER_LABEL: Record<string, string> = {
   totp: "Authenticator app",
@@ -36,9 +36,10 @@ export function LoginPage() {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    const typed = secretKey.trim();
+    const remembered = typed ? null : rememberedSecretKey(email);
     try {
-      const sk = secretKey.trim() || rememberedSecretKey(email);
-      const r = await login(email, password, sk);
+      const r = await login(email, password, typed || remembered);
       if (r.done) nav(next, { replace: true });
       else {
         setTwoFactor({ token: r.twoFactorToken, providers: r.providers });
@@ -51,7 +52,11 @@ export function LoginPage() {
         setError("This account uses a Secret Key. Enter it from your Emergency Kit.");
       } else if (msg === "email_not_verified") {
         setError("Confirm your email address first. Check your inbox for the verification link.");
-      } else setError(msg);
+      } else if (msg === WRONG_CREDENTIALS && remembered) {
+        // The Secret Key saved in this browser may be an old one (it changes with the master password).
+        setNeedSecretKey(true);
+        setError("Wrong master password or Secret Key. If your Secret Key changed on another device, enter the new one from your Emergency Kit.");
+      } else setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
@@ -66,7 +71,7 @@ export function LoginPage() {
       await verifyTwoFactor(twoFactor.token, provider, code, remember);
       nav(next, { replace: true });
     } catch (err) {
-      setError(errorMessage(err));
+      setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
@@ -78,7 +83,7 @@ export function LoginPage() {
       await sendTwoFactorEmail(twoFactor.token);
       setNotice(`We sent a code to ${email}.`);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(friendlyError(err));
     }
   }
 
@@ -96,19 +101,25 @@ export function LoginPage() {
               <span>Email</span>
               <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus={!email} />
             </label>
-            <label className="field">
-              <span>Master password</span>
-              <PasswordInput value={password} onChange={setPassword} autoFocus={!!email} />
-            </label>
+            <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus={!!email} />
             {needSecretKey && (
               <label className="field">
                 <span>Secret Key</span>
-                <input className="input mono" value={secretKey} onChange={(e) => setSecretKey(e.target.value)} placeholder="PA1-XXXXXX-…" spellCheck={false} autoComplete="off" required />
+                <input
+                  className="input mono"
+                  value={secretKey}
+                  onChange={(e) => setSecretKey(e.target.value)}
+                  placeholder="PA1-XXXXXX-…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  required
+                />
               </label>
             )}
             <ErrorText error={error} />
             <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
-              {busy ? "Unlocking…" : "Sign in"}
+              {busy ? "Signing in…" : "Sign in"}
             </button>
           </form>
         ) : (

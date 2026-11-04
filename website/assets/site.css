@@ -1,13 +1,19 @@
 /* PassAuth website: navy shield, signal blue, cyan highlight (from the logo). */
+/* IBM Plex (SIL Open Font License 1.1), served from this site: no third-party requests. */
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/ibm-plex-mono-latin-400-normal.woff2") format("woff2"); }
 :root {
   --navy: #082052;
   --ink: #0b1a3a;
   --ink-2: #3a4a68;
-  --ink-3: #64748f;
+  --ink-3: #5a6a85;
   --paper: #f4f7fc;
   --surface: #ffffff;
   --line: #d6dfec;
   --blue: #0866ed;
+  /* Behind white text: keeps 4.9:1 in both themes. */
+  --blue-fill: #0866ed;
   --blue-ink: #0650c4;
   --cyan: #23d5f4;
   --soft: #e3eeff;
@@ -49,8 +55,8 @@ a:focus-visible, button:focus-visible { outline: 3px solid var(--blue); outline-
 .hero .popup { border: 0; }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; }
 .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 10px; font-weight: 600; text-decoration: none; border: 1px solid transparent; }
-.btn-primary { background: var(--blue); color: #fff; }
-.btn-primary:hover { background: #2a7bff; }
+.btn-primary { background: var(--blue-fill); color: #fff; }
+.btn-primary:hover { background: #0650c4; }
 .btn-line { border-color: #3a4a68; color: #fff; }
 .btn-line:hover { border-color: #8090ab; }
 
