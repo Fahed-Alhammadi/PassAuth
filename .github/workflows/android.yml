@@ -93,6 +93,8 @@ jobs:
           packageName: io.passauth.app
           releaseFiles: ${{ runner.temp }}/passauth-*.aab
           track: ${{ inputs.track || vars.PLAY_TRACK || 'internal' }}
+          # Release notes ("What's new"): android/whatsnew/whatsnew-en-US (max 500 characters).
+          whatsNewDirectory: android/whatsnew
           # "draft" while the app has never been published (Play refuses anything else then);
           # the draft is rolled out in Play Console. Unset = completed.
           status: ${{ vars.PLAY_RELEASE_STATUS || 'completed' }}
