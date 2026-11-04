@@ -22,8 +22,9 @@ function write(text: string) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
-  // Every extension page hears runtime messages; answer only our own.
-  if (msg?.target !== "offscreen" || sender.id !== chrome.runtime.id) return false;
+  // Every extension page hears runtime messages. Only the service worker may
+  // write the clipboard (content scripts also have this extension's id).
+  if (msg?.target !== "offscreen" || sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("background.js")) return false;
   write(msg.text);
   clearTimeout(clearTimer);
   if (msg.clearAfter > 0) clearTimer = setTimeout(() => write(""), msg.clearAfter * 1000);

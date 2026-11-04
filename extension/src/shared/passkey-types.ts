@@ -117,7 +117,9 @@ export type PasskeyKind = "create" | "get";
 /** page -> bridge, via window.postMessage. */
 export type PageToBridgeMessage =
   | { source: "passauth-page"; id: string; kind: "create"; options: CreateRequest }
-  | { source: "passauth-page"; id: string; kind: "get"; options: GetRequest };
+  | { source: "passauth-page"; id: string; kind: "get"; options: GetRequest }
+  /** The page's request was aborted or timed out: close PassAuth's confirmation. */
+  | { source: "passauth-page"; id: string; kind: "cancel" };
 
 /**
  * bridge -> page, via window.postMessage. Exactly one of `ack`, `result`,
@@ -137,8 +139,9 @@ export interface BridgeToPageMessage {
 
 /** bridge -> background, via chrome.runtime.sendMessage. `origin` is computed by the bridge from its own frame. */
 export type PasskeyRuntimeMessage =
-  | { type: "passkey:create"; options: CreateRequest; origin: string; topLevel: boolean }
-  | { type: "passkey:get"; options: GetRequest; origin: string; topLevel: boolean };
+  | { type: "passkey:create"; options: CreateRequest; origin: string; topLevel: boolean; bridgeId: string }
+  | { type: "passkey:get"; options: GetRequest; origin: string; topLevel: boolean; bridgeId: string }
+  | { type: "passkey:cancel"; bridgeId: string };
 
 /** background -> bridge reply. */
 export type PasskeyRuntimeReply =

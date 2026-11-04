@@ -4,8 +4,13 @@
  *   MAX_ACCOUNTS accounts, each with its own server, tokens and unlock state;
  *   one is active. `local.get()` returns the active account's fields merged
  *   with the shared ones, so most code needn't know about accounts.
- * - session: unlocked keys per account; memory-only, extension-private, wiped
- *   when the browser closes. Content scripts cannot read it (TRUSTED_CONTEXTS default).
+ * - session: unlocked keys per account and short-lived pending state (inline
+ *   menus, save prompts); memory-only, extension-private, wiped when the
+ *   browser closes. Content scripts cannot read it (TRUSTED_CONTEXTS default).
+ * - syncCache: the last /sync response per account (server ciphertext only),
+ *   in the extension origin's IndexedDB, so the vault opens offline and after
+ *   a service-worker restart without downloading everything again. Content
+ *   scripts can't reach the extension's IndexedDB.
  */
 import type { Settings } from "../shared/messages";
 
@@ -64,8 +69,11 @@ const serial = <T>(fn: () => Promise<T>): Promise<T> => {
   return next;
 };
 
+// Only these keys are read (not get(null)), so other data in storage never slows down every request.
+const LOCAL_KEYS = ["accounts", "active", "deviceId", "rememberTokens", "secretKeys", "settings", "neverSave", "autoLockMinutes", ...ACCOUNT_FIELDS] as const;
+
 async function load(): Promise<{ raw: Stored; accounts: Record<string, AccountData>; active: string }> {
-  const raw = (await chrome.storage.local.get(null)) as Stored;
+  const raw = (await chrome.storage.local.get([...LOCAL_KEYS])) as Stored;
   let accounts = raw.accounts;
   let active = raw.active ?? "";
   if (!accounts) {
@@ -135,7 +143,7 @@ export const local = {
     serial(async () => {
       const { accounts } = await load();
       const signedIn = Object.values(accounts).filter((a) => a.server);
-      if (signedIn.length >= MAX_ACCOUNTS) throw new Error(`PassAuth supports up to ${MAX_ACCOUNTS} accounts. Log out of one first.`);
+      if (signedIn.length >= MAX_ACCOUNTS) throw new Error(`PassAuth supports up to ${MAX_ACCOUNTS} accounts. Sign out of one first.`);
       const id = crypto.randomUUID();
       // Drop other unfinished records (no server yet).
       const kept = Object.fromEntries(Object.entries(accounts).filter(([, a]) => a.server));
@@ -153,7 +161,15 @@ export const local = {
       const next = active === id ? (Object.keys(rest).find((k) => rest[k].tokens) ?? Object.keys(rest)[0] ?? "") : active;
       await chrome.storage.local.set({ accounts: rest, active: next });
       await chrome.storage.session.remove(`unlocked:${id}`);
+      await syncCache.clear(id);
     }),
+
+  /** One account's record without reading everything else (hot path: every API request). */
+  async account(id?: string): Promise<{ id: string; data: AccountData | undefined }> {
+    const raw = (await chrome.storage.local.get(["accounts", "active"])) as Stored;
+    const key = id ?? raw.active ?? "";
+    return { id: key, data: raw.accounts?.[key] };
+  },
 };
 
 export async function getSettings(): Promise<Settings> {
@@ -166,7 +182,7 @@ export interface SessionData {
   bundle: unknown;
 }
 
-async function activeId() {
+export async function activeId() {
   return ((await chrome.storage.local.get("active")).active as string | undefined) ?? "";
 }
 
@@ -182,4 +198,48 @@ export const session = {
   async clear(id?: string) {
     await chrome.storage.session.remove(`unlocked:${id ?? (await activeId())}`);
   },
+};
+
+/** Short-lived state that must survive a service-worker restart (extension-private, memory-only). */
+export const scratch = {
+  async get<T>(key: string): Promise<T | undefined> {
+    return (await chrome.storage.session.get(key))[key] as T | undefined;
+  },
+  set: (key: string, value: unknown) => chrome.storage.session.set({ [key]: value }),
+  remove: (key: string) => chrome.storage.session.remove(key),
+};
+
+// ------------------------------------------------------------- sync cache
+
+const DB = "passauth";
+const STORE = "sync";
+
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+async function tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  const db = await openDb();
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      const t = db.transaction(STORE, mode);
+      const req = fn(t.objectStore(STORE));
+      t.oncomplete = () => resolve(req.result);
+      t.onerror = t.onabort = () => reject(t.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Last /sync response per account (encrypted vault data as the server returned it). */
+export const syncCache = {
+  get: (accountId: string) => tx<unknown>("readonly", (s) => s.get(accountId)).catch(() => undefined) as Promise<any>,
+  set: (accountId: string, data: unknown) => tx("readwrite", (s) => s.put(data, accountId)).then(() => {}).catch(() => {}),
+  clear: (accountId: string) => tx("readwrite", (s) => s.delete(accountId)).then(() => {}).catch(() => {}),
 };

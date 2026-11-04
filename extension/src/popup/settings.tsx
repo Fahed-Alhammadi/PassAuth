@@ -179,7 +179,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
           <span>Timeout action</span>
           <select className="select" value={settings.timeoutAction} onChange={(e) => update({ timeoutAction: e.target.value as Settings["timeoutAction"] })}>
             <option value="lock">Lock</option>
-            <option value="logout">Log out</option>
+            <option value="logout">Sign out</option>
           </select>
         </label>
         <p className="small muted">
@@ -352,9 +352,9 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
         </div>
         <Field label="Signed in as">{state.email}</Field>
         <Field label="Server">{state.server}</Field>
-        <p className="small muted">To use another PassAuth server, log out and choose "Change server" on the sign-in screen.</p>
+        <p className="small muted">To use another PassAuth server, sign out and choose "Change server" on the sign-in screen.</p>
         <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(ctx.reload)}>
-          Log out
+          Sign out
         </button>
         </>
       ),

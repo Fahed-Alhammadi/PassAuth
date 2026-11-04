@@ -1,5 +1,5 @@
 /** Messages between popup, content scripts and the background service worker. */
-import type { Item, ItemKind, UrlMatch } from "@web/lib/types";
+import type { Item, ItemKind, LoginUrl, UrlMatch } from "@web/lib/types";
 
 export type Status = "setup" | "logged-out" | "locked" | "unlocked";
 
@@ -97,14 +97,28 @@ export type Request =
   | { type: "inline:fill"; nonce: string; id: string }
   | { type: "inline:close"; nonce: string }
   | { type: "passkey:pending"; requestId: string }
-  | { type: "passkey:decide"; requestId: string; accept: boolean; credentialId?: string; fallback?: boolean }
+  /** `password`: master password, when the site requires user verification and PassAuth wasn't unlocked recently. */
+  | { type: "passkey:decide"; requestId: string; accept: boolean; credentialId?: string; fallback?: boolean; password?: string }
   // content script → background
-  | { type: "page:submitted"; url: string; username: string; password: string }
+  | { type: "page:submitted"; username: string; password: string }
+  /** First step of an identifier-first login (username only). */
+  | { type: "page:identifier"; username: string }
+  /** The submitted login form disappeared without a page load. */
+  | { type: "page:formDone" }
   | { type: "page:pendingSave" }
-  | { type: "page:save"; accept: "save" | "never" | "dismiss" }
-  | { type: "page:fillRequest" }
+  | { type: "page:save"; accept: "save" | "never" | "dismiss"; nonce: string }
+  /** This frame has a login form for a fill offer. */
+  | { type: "page:fillClaim"; token: string }
   | { type: "page:inlineInfo" }
   | { type: "page:inlineOpen" };
+
+/** A save prompt to show: `nonce` must come back with the answer. */
+export interface SaveOffer {
+  host: string;
+  update: boolean;
+  username: string;
+  nonce: string;
+}
 
 export interface InlineInfo {
   mode: Settings["inlineMenu"];
@@ -122,12 +136,17 @@ export interface InlineItems {
 
 /** background → content script (chrome.tabs.sendMessage). */
 export type ContentCommand =
-  /** `site`: base domain of the verified top page; only same-site frames fill. */
-  | { type: "fill"; username: string; password: string; totp?: string; site: string }
+  /**
+   * Sent to one frame only. `site`: base domain of the verified top page;
+   * `urls`: the item's websites, checked again against the frame's own URL.
+   * `focused`: fill the field the inline menu was opened on.
+   */
+  | { type: "fill"; username: string; password: string; totp?: string; site: string; urls: LoginUrl[]; defaultMatch: Exclude<UrlMatch, "default">; focused: boolean }
+  /** No secrets: frames with a matching login form answer with page:fillClaim. */
+  | { type: "fill:offer"; token: string; site: string; urls: LoginUrl[]; defaultMatch: Exclude<UrlMatch, "default"> }
   | { type: "toast"; text: string }
   | { type: "inline:close" }
-  | { type: "showSave"; host: string; update: boolean }
-  | { type: "probe" };
+  | ({ type: "showSave" } & SaveOffer);
 
 export type Reply<T = unknown> = { ok: true; data: T } | { ok: false; error: string };
 

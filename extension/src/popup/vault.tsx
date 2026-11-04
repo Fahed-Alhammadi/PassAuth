@@ -499,7 +499,7 @@ export function EditPage({ id, kind, ctx }: { id?: string; kind?: ItemKind; ctx:
   const done = (to?: string) => ctx.go(to ? { tab: "vault", page: "item", id: to } : { tab: "vault", page: "list" });
   useEffect(() => {
     (async () => {
-      const info = await send<{ vaults: { id: string; name: string }[]; folders: string[] }>({ type: "editorInfo" });
+      const info = await send<{ vaults: { id: string; name: string }[]; defaultVault: string; folders: string[] }>({ type: "editorInfo" });
       if (id) {
         const r = await send<{ item: Item; vaultId: string }>({ type: "item", id });
         return setInit({ item: structuredClone(r.item), vaults: [], vaultId: r.vaultId, folders: info.folders });
@@ -511,7 +511,7 @@ export function EditPage({ id, kind, ctx }: { id?: string; kind?: ItemKind; ctx:
         item.name = u.hostname.replace(/^www\./, "");
         item.login.urls = [{ url: u.origin, match: "default" }];
       }
-      setInit({ item, vaults: info.vaults, vaultId: info.vaults[0]?.id ?? "", folders: info.folders });
+      setInit({ item, vaults: info.vaults, vaultId: info.defaultVault, folders: info.folders });
     })().catch((e) => ctx.notify(msg(e)));
   }, [id, kind, ctx]);
   const label = KIND_LABEL[init ? kindOf(init.item) : (kind ?? "login")].toLowerCase();

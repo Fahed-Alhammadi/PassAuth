@@ -3,10 +3,16 @@
  * for this site (or is locked), a PassAuth icon appears inside the field.
  * The list itself is an extension page in an iframe (inline-menu.html), so the
  * website can't read the names and usernames shown in it.
+ *
+ * Clickjacking: the list opens by itself only right after the user clicked or
+ * tabbed into the field (never on a focus() call from the page), closes when
+ * the page makes it transparent or clips it, and the menu frame ignores
+ * clicks until it has been fully visible for a moment.
  */
 import type { InlineInfo } from "../shared/messages";
 import { logoSvg } from "./brand";
-import { isLoginField } from "./fields";
+import { deepActiveElement, isLoginField } from "./fields";
+import { tampered } from "./guard";
 
 const ROW = 52;
 let info: { value: InlineInfo | null; at: number } = { value: null, at: 0 };
@@ -15,6 +21,12 @@ let icon: HTMLElement | null = null;
 let menu: HTMLElement | null = null;
 let suppressUntil = 0;
 let frame = 0;
+/** Last trusted pointer or key press anywhere in this frame. */
+let lastInput = 0;
+let resize: ResizeObserver | null = null;
+
+/** The login field the icon/menu belongs to (the inline fill target). */
+export const currentField = () => field;
 
 async function getInfo(): Promise<InlineInfo | null> {
   if (Date.now() - info.at < 3000) return info.value;
@@ -40,12 +52,15 @@ function hideAll() {
   icon?.remove();
   icon = null;
   field = null;
+  resize?.disconnect();
+  resize = null;
 }
 
 function host(tag: string, css: string) {
   const el = document.createElement(tag);
   const shadow = el.attachShadow({ mode: "closed" });
-  shadow.innerHTML = `<style>:host { all: initial; position: fixed; z-index: 2147483647; } ${css}</style>`;
+  shadow.innerHTML = `<style>:host { all: initial; position: fixed !important; z-index: 2147483647 !important; opacity: 1 !important;
+    filter: none !important; clip-path: none !important; visibility: visible !important; } ${css}</style>`;
   (document.body ?? document.documentElement).appendChild(el);
   return { el, shadow };
 }
@@ -54,6 +69,9 @@ function place() {
   frame = 0;
   if (!field) return;
   if (!field.isConnected || !field.getClientRects().length) return hideAll();
+  // The page restyled our UI to hide it: close the list rather than let it be clicked blind.
+  if (menu && tampered(menu)) closeInlineMenu();
+  if (icon && tampered(icon)) return hideAll();
   const r = field.getBoundingClientRect();
   if (icon) {
     const size = Math.max(14, Math.min(20, r.height - 8));
@@ -69,12 +87,18 @@ function place() {
       width: `${width}px`,
       height: `${height}px`,
     });
+    // Follow layout changes (error messages, animations) while the list is open.
+    schedule();
   }
 }
 const schedule = () => (frame ||= requestAnimationFrame(place));
 
 function showIcon(target: HTMLInputElement, i: InlineInfo) {
   field = target;
+  resize?.disconnect();
+  resize = new ResizeObserver(schedule);
+  resize.observe(target);
+  if (target.form) resize.observe(target.form);
   if (!icon) {
     const { el, shadow } = host(
       "passauth-inline-icon",
@@ -89,7 +113,11 @@ function showIcon(target: HTMLInputElement, i: InlineInfo) {
     btn.innerHTML = logoSvg(20);
     // Keep focus in the field while clicking the icon.
     btn.addEventListener("pointerdown", (e) => e.preventDefault());
-    btn.addEventListener("click", () => (menu ? closeInlineMenu() : void openMenu(i)));
+    btn.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
+      if (menu) closeInlineMenu();
+      else void openMenu(i);
+    });
     shadow.append(btn);
     icon = el;
   }
@@ -118,20 +146,27 @@ async function openMenu(i: InlineInfo) {
 async function onFocus(e: FocusEvent) {
   const target = e.composedPath()[0];
   if (Date.now() < suppressUntil || target === field || !isLoginField(target)) return;
+  // Opens by itself only when the user just clicked or pressed a key (Tab), not on a script's focus().
+  const byUser = Date.now() - lastInput < 1000;
   const i = await getInfo();
   if (!i || i.mode === "off" || (i.status === "unlocked" && i.count === 0)) return hideAll();
   closeInlineMenu();
   showIcon(target, i);
-  if (i.mode === "focus") await openMenu(i);
+  if (i.mode === "focus" && byUser) await openMenu(i);
 }
 
 export function installInlineMenu() {
+  const noteInput = (e: Event) => {
+    if (e.isTrusted) lastInput = Date.now();
+  };
+  document.addEventListener("pointerdown", noteInput, true);
+  document.addEventListener("keydown", noteInput, true);
   document.addEventListener("focusin", (e) => void onFocus(e), true);
   document.addEventListener(
     "focusout",
     () =>
       setTimeout(() => {
-        const active = document.activeElement;
+        const active = deepActiveElement();
         if (field && active !== field && active !== menu && active !== icon) hideAll();
       }, 200),
     true,
@@ -142,7 +177,7 @@ export function installInlineMenu() {
       const t = e.composedPath()[0];
       if (menu && t !== field && t !== menu && t !== icon) closeInlineMenu();
       // Clicking the field again reopens a list closed with Esc.
-      else if (!menu && t === field && info.value?.mode === "focus") void openMenu(info.value);
+      else if (!menu && t === field && e.isTrusted && info.value?.mode === "focus") void openMenu(info.value);
     },
     true,
   );
@@ -151,7 +186,7 @@ export function installInlineMenu() {
     (e) => {
       if (e.key === "Escape" && menu) closeInlineMenu();
       // Typing hides the list so it doesn't cover what the user is doing.
-      else if (menu && e.target === field && e.key.length === 1) closeInlineMenu();
+      else if (menu && e.composedPath()[0] === field && e.key.length === 1) closeInlineMenu();
     },
     true,
   );

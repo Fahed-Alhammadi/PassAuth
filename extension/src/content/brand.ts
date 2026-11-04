@@ -8,7 +8,7 @@ export const logoSvg = (size: number) => `
 </svg>`;
 
 export const panelCss = `
-  .b { font: 14px/1.45 system-ui, sans-serif; background: #0b1a3a; color: #e7edf7; border-radius: 12px;
+  .b { font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif; background: #0b1a3a; color: #e7edf7; border-radius: 12px;
        box-shadow: 0 12px 32px rgb(0 0 0 / .3); padding: 16px; display: grid; gap: 12px; }
   .t { display: flex; gap: 10px; align-items: center; font-weight: 600; }
   .t svg { flex: none; }

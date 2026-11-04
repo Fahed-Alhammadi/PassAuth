@@ -217,12 +217,16 @@ import type {
         if (timer !== undefined) clearTimer(timer);
         signal?.removeEventListener("abort", onAbort);
       };
+      const targetOrigin = w.location.origin === "null" ? "*" : w.location.origin;
+      // Tell PassAuth to close its confirmation window: the site no longer waits for it.
+      const cancel = (): void => post({ source: "passauth-page", id, kind: "cancel" }, targetOrigin);
       const fallback = (): void => {
         finish();
         callNative().then(resolve, reject);
       };
       function onAbort(): void {
         finish();
+        cancel();
         reject(abortReason(signal!));
       }
 
@@ -251,10 +255,10 @@ import type {
       ackTimer = setTimer(fallback, ACK_TIMEOUT_MS);
       timer = setTimer(() => {
         finish();
+        cancel();
         reject(new DOMException("The operation either timed out or was not allowed.", "NotAllowedError"));
       }, timeoutFor(publicKey));
 
-      const targetOrigin = w.location.origin === "null" ? "*" : w.location.origin;
       post({ source: "passauth-page", id, kind, options: serialized }, targetOrigin);
     });
   }

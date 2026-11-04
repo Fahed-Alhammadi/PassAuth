@@ -236,7 +236,7 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
         {busy ? "Unlocking…" : "Unlock"}
       </button>
       <button type="button" className="btn btn-ghost" onClick={() => send({ type: "logout" }).then(onDone)}>
-        Log out
+        Sign out
       </button>
     </form>
   );

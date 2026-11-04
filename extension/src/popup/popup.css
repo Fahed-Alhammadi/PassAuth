@@ -3,6 +3,11 @@
  * tab bar (or an item's footer) stay put; the body scrolls.
  * One bold element: the verification-code ring in the shield gradient.
  */
+/* Warning text: 5.6:1 on white, 9:1 on the dark surface (the web vault's app.css may define the same token). */
+:root { --warn: #965a00; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --warn: #ffb340; } }
+:root[data-theme="dark"] { --warn: #ffb340; }
+
 html, body { width: 380px; margin: 0; }
 html.popout, html.popout body { width: 100%; }
 body { background: var(--paper); }
@@ -20,7 +25,7 @@ html.popout .pop { height: 100vh; }
 .btn.danger, .btn-icon.danger { color: var(--danger); }
 
 .btn-new { height: 34px; padding: 0 14px 0 10px; border-radius: 999px; gap: 4px; font-size: 0.9rem; }
-.avatar-btn { all: unset; cursor: pointer; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; margin-left: 2px; }
+.avatar-btn { all: unset; cursor: pointer; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-fill, #0866ed); color: #fff; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; margin-left: 2px; }
 .avatar-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* --------------------------------------------------------------- menus */
@@ -29,6 +34,7 @@ html.popout .pop { height: 100vh; }
 .menu.up { top: auto; bottom: calc(100% + 6px); }
 .menu button { all: unset; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 0.9rem; color: var(--ink); }
 .menu button:hover, .menu button:focus-visible { background: var(--surface-2); }
+.menu button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .menu button.danger { color: var(--danger); }
 .menu-head { display: grid; padding: 8px 10px 10px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
 .menu-head .title { font-weight: 600; font-size: 0.9rem; overflow-wrap: anywhere; }
@@ -79,7 +85,7 @@ html.popout .pop { height: 100vh; }
 .item-row .sub { font-size: 0.82rem; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-row .btn-icon { width: 32px; height: 32px; color: var(--ink-2); }
 .btn-fill { height: 30px; padding: 0 12px; font-size: 0.84rem; font-weight: 600; background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
-.btn-fill:hover { background: var(--accent); color: #fff; }
+.btn-fill:hover { background: var(--accent-fill, #0866ed); color: #fff; }
 
 /* item page */
 .item-head { padding: 14px; display: grid; gap: 12px; }
@@ -99,7 +105,7 @@ html.popout .pop { height: 100vh; }
 .kv .grow { min-width: 0; }
 .clip { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .totp { font-family: var(--mono); font-size: 1.3rem; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
-.warn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -6px 0 10px; font-size: 0.82rem; color: #d9a23a; }
+.warn { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: -6px 0 10px; font-size: 0.82rem; color: var(--warn); }
 .notes { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .history { margin: 10px 0; display: grid; gap: 2px; font-size: 0.82rem; color: var(--ink-3); }
 
@@ -118,7 +124,7 @@ html.popout .pop { height: 100vh; }
 
 /* ------------------------------------------------------------- tab bar */
 .tabbar { flex: none; display: flex; border-top: 1px solid var(--line); background: var(--paper); padding: 6px 4px 8px; }
-.tabbar button { flex: 1; border: 0; background: none; color: var(--ink-3); cursor: pointer; display: grid; justify-items: center; gap: 3px; font: inherit; font-size: 0.74rem; padding: 0; }
+.tabbar button { flex: 1; border: 0; background: none; color: var(--ink-3); cursor: pointer; display: grid; justify-items: center; gap: 3px; font: inherit; font-size: 0.78rem; padding: 0; }
 .tabbar .ic { display: grid; place-items: center; width: 52px; height: 28px; border-radius: 999px; }
 .tabbar button[aria-current="page"] { color: var(--ink); font-weight: 600; }
 .tabbar button[aria-current="page"] .ic { background: var(--accent-soft); color: var(--accent); }

@@ -11,7 +11,17 @@ import { PasskeyConfirm } from "./Passkey";
 import { loadTheme } from "./theme";
 
 // Lets the background run the "Immediately" vault timeout when the popup closes.
-chrome.runtime.connect({ name: "popup" });
+// The heartbeat keeps the service worker awake while a PassAuth window is open
+// (e.g. a passkey confirmation); if the worker was stopped anyway, reconnect.
+function keepAlive() {
+  const port = chrome.runtime.connect({ name: "popup" });
+  const beat = setInterval(() => port.postMessage("beat"), 20_000);
+  port.onDisconnect.addListener(() => {
+    clearInterval(beat);
+    setTimeout(keepAlive, 100);
+  });
+}
+keepAlive();
 
 const passkey = location.hash.match(/^#passkey=(.+)$/)?.[1];
 if (new URLSearchParams(location.search).has("popout")) document.documentElement.classList.add("popout");

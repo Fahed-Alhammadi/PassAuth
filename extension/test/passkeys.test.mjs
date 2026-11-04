@@ -15,6 +15,7 @@ import {
   getAssertion,
   matchingPasskeys,
   rawSignatureToDer,
+  uvRequired,
 } from "../src/background/passkeys.ts";
 
 // ------------------------------------------------------------------ tiny runner
@@ -342,6 +343,19 @@ test("rawSignatureToDer: minimal INTEGER encoding edge cases", () => {
   assert.equal(der[4 + 33 + 1], 29);
   const zero = rawSignatureToDer(new Uint8Array(64));
   assert.deepEqual([...zero], [0x30, 6, 0x02, 1, 0, 0x02, 1, 0]);
+});
+
+test("user verification: UV flag only when verified; uvRequired reads both request shapes", async () => {
+  const { passkey } = created;
+  const req = { challenge: "AAAA", rpId: "example.com" };
+  const noUv = parseAuthData(fromB64u((await getAssertion(req, ORIGIN, passkey, { uv: false })).response.response.authenticatorData));
+  assert.equal(noUv.flags, 0x01 | 0x08 | 0x10, "flags UP|BE|BS without UV");
+  const reg = await createPasskey(createReq(), ORIGIN, { uv: false });
+  assert.equal(parseAuthData(fromB64u(reg.response.response.authenticatorData)).flags, 0x01 | 0x08 | 0x10 | 0x40, "create without UV");
+  assert.equal(uvRequired("get", { userVerification: "required" }), true);
+  assert.equal(uvRequired("get", { userVerification: "preferred" }), false);
+  assert.equal(uvRequired("create", { authenticatorSelection: { userVerification: "required" } }), true);
+  assert.equal(uvRequired("create", {}), false);
 });
 
 test("base64url round trip", () => {

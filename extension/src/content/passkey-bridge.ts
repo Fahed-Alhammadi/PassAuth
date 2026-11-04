@@ -63,6 +63,10 @@ export function installPasskeyBridge(): void {
     if (!isObj(data) || data.source !== "passauth-page") return;
     const { id, kind, options } = data;
     if (typeof id !== "string" || id.length === 0 || id.length > 100) return;
+    if (kind === "cancel") {
+      void chrome.runtime.sendMessage({ type: "passkey:cancel", bridgeId: id } satisfies PasskeyRuntimeMessage).catch(() => {});
+      return;
+    }
     if (kind !== "create" && kind !== "get") return;
 
     const targetOrigin = location.origin === "null" ? "*" : location.origin;
@@ -79,11 +83,18 @@ export function installPasskeyBridge(): void {
       return;
     }
     // Options are passed through as-is; background/passkeys.ts validates them.
+    // Creating a passkey needs a recent click or key press on the page (read in
+    // this isolated world, which the page can't tamper with), so a page can't
+    // pop PassAuth windows up on its own.
+    if (kind === "create" && !navigator.userActivation?.isActive) {
+      reply({ fallback: true });
+      return;
+    }
     const topLevel = window.top === window;
     const message: PasskeyRuntimeMessage =
       kind === "create"
-        ? { type: "passkey:create", options: options as unknown as CreateRequest, origin, topLevel }
-        : { type: "passkey:get", options: options as unknown as GetRequest, origin, topLevel };
+        ? { type: "passkey:create", options: options as unknown as CreateRequest, origin, topLevel, bridgeId: id }
+        : { type: "passkey:get", options: options as unknown as GetRequest, origin, topLevel, bridgeId: id };
     void forward(message).then(reply);
   });
 }

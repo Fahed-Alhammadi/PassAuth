@@ -6,8 +6,8 @@
 import init, * as core from "../wasm/passauth_core";
 import type { EncryptedItem, Item, Role } from "@web/lib/types";
 import { kindOf, siteHost } from "@web/lib/types";
-import { api, logoutRemote, setSessionLostHandler } from "./api";
-import { local, session, type AccountData, type SessionData } from "./storage";
+import { api, logoutRemote, setSessionLostHandler, timeoutSignal } from "./api";
+import { activeId, local, scratch, session, syncCache, type AccountData, type SessionData } from "./storage";
 import type { AccountSummary, ItemSummary, PopupState, Status, TwoFactorChallenge } from "../shared/messages";
 
 export interface Entry {
@@ -22,11 +22,23 @@ interface Vault {
   id: string;
   name: string;
   role: Role;
+  /** "account": wrapped with this account's own key (the user's vaults); "sealed": shared by someone else. */
+  kind: string;
   key: core.VaultKey;
 }
 
 let ready: Promise<unknown> | null = null;
 let account: core.Account | null = null;
+/** Local id of the account whose keys are loaded (`account`, `vaults`, `entries`). */
+let currentId = "";
+/**
+ * Bumped whenever the loaded keys are dropped (lock, sign-out, account switch).
+ * Async work captures it first and discards its result when it changed, so a
+ * sync that finishes after a lock or switch can't resurrect or mix accounts.
+ */
+let generation = 0;
+/** Single-flight restore after a service-worker restart. */
+let restoring: { id: string; p: Promise<boolean> } | null = null;
 let bundle: any = null;
 let vaults: Vault[] = [];
 let entries: Entry[] = [];
@@ -46,9 +58,14 @@ export function initWasm() {
 }
 
 setSessionLostHandler(async (id) => {
-  if (id === (await local.get()).activeId) await clearUnlocked();
-  else await session.clear(id);
+  await clearUnlocked(id);
 });
+
+/** Set by the service worker: runs the "Immediately" vault timeout if the popup closed while the worker was asleep. */
+let lockCheck: () => Promise<void> = async () => {};
+export function setLockCheck(fn: () => Promise<void>) {
+  lockCheck = fn;
+}
 
 // ------------------------------------------------------------------ state
 
@@ -61,7 +78,7 @@ async function statusOf(a: AccountData | undefined, id: string, neverTimeout: bo
 export async function state(): Promise<PopupState> {
   const l = await local.get();
   const s = await session.get();
-  const status = !l.server ? "setup" : !l.tokens ? "logged-out" : s || account ? "unlocked" : "locked";
+  const status = !l.server ? "setup" : !l.tokens ? "logged-out" : s || (account && currentId === l.activeId) ? "unlocked" : "locked";
   const never = l.settings.vaultTimeout === "never";
   const accounts: AccountSummary[] = [];
   for (const [id, a] of Object.entries(l.accounts)) {
@@ -75,7 +92,7 @@ export async function state(): Promise<PopupState> {
     name: l.name,
     server: l.server,
     email: l.email,
-    secretKeyRequired: !!(bundle ?? s?.bundle as any)?.secret_key_enabled,
+    secretKeyRequired: !!((currentId === l.activeId ? bundle : null) ?? s?.bundle ?? (await syncCache.get(l.activeId))?.bundle)?.secret_key_enabled,
     secretKeyStored: !!l.secretKeys[l.email],
     settings: l.settings,
     lastSync: l.lastSync,
@@ -90,7 +107,7 @@ export async function setServer(url: string) {
     throw new Error("Use an https:// address. Plain http is only allowed for localhost.");
   }
   const origin = u.origin + u.pathname.replace(/\/+$/, "");
-  const r = await fetch(`${origin}/api/config`).catch(() => null);
+  const r = await fetch(`${origin}/api/config`, { signal: timeoutSignal() }).catch(() => null);
   const cfg = r?.ok ? await r.json().catch(() => null) : null;
   if (cfg?.name !== "PassAuth") throw new Error("No PassAuth server answered at that address.");
   await clearUnlocked();
@@ -153,100 +170,197 @@ export const sendTwoFactorEmail = (token: string) => api("/auth/2fa/email", { bo
 async function finishLogin(master: core.MasterKeys, result: any) {
   try {
     await local.set({ tokens: { access: result.access_token, refresh: result.refresh_token }, email: result.email });
+    const id = await activeId();
+    const acct = master.unlock(result.bundle);
+    unload();
+    account = acct;
     bundle = result.bundle;
-    account = master.unlock(bundle);
+    currentId = id;
   } finally {
     master.free();
   }
   await persistUnlocked();
+  await markVerified();
   await sync();
 }
 
-export async function unlock(password: string, secretKey?: string) {
-  await initWasm();
-  const l = await local.get();
-  if (!bundle) bundle = (await api("/sync")).bundle;
-  const sk = secretKey?.trim() || l.secretKeys[l.email];
-  const master = core.deriveMasterKeys(password, sk, bundle.account_id, bundle.kdf, bundle.secret_key_enabled);
+/** Derive the master keys and open the account bundle (throws a user-facing error). */
+function openBundle(b: any, password: string, sk: string | undefined): core.Account {
+  const master = core.deriveMasterKeys(password, sk, b.account_id, b.kdf, b.secret_key_enabled);
   try {
-    account = master.unlock(bundle);
+    return master.unlock(b);
   } catch {
-    throw new Error(bundle.secret_key_enabled && !sk ? "secret_key_required" : "Wrong master password or Secret Key.");
+    throw new Error(b.secret_key_enabled && !sk ? "secret_key_required" : "Wrong master password or Secret Key.");
   } finally {
     master.free();
   }
+}
+
+/**
+ * Unlock with the master password. The bundle (wrapped account keys) comes
+ * from the offline copy when there is one, so unlocking works without the
+ * server; if that bundle is out of date (password changed on another device)
+ * a fresh one is fetched and tried.
+ */
+export async function unlock(password: string, secretKey?: string) {
+  await initWasm();
+  const l = await local.get();
+  const id = l.activeId;
+  const cached = await syncCache.get(id);
+  let fresh: any = null;
+  let b = cached?.bundle;
+  if (!b) {
+    fresh = await api("/sync", { accountId: id });
+    b = fresh.bundle;
+  }
+  const sk = secretKey?.trim() || l.secretKeys[l.email];
+  let acct: core.Account;
+  try {
+    acct = openBundle(b, password, sk);
+  } catch (e) {
+    if (fresh) throw e;
+    fresh = await api("/sync", { accountId: id }).catch(() => null);
+    if (!fresh || JSON.stringify(fresh.bundle) === JSON.stringify(b)) throw e;
+    b = fresh.bundle;
+    acct = openBundle(b, password, sk);
+  }
+  unload();
+  account = acct;
+  bundle = b;
+  currentId = id;
   if (secretKey?.trim()) await local.set({ secretKeys: { ...l.secretKeys, [l.email]: secretKey.trim() } });
   await persistUnlocked();
-  await sync();
+  await markVerified();
+  if (fresh) await applyAndStore(fresh, id);
+  else if (cached) {
+    apply(cached);
+    void refreshIfStale().catch(() => {});
+  } else await sync();
 }
 
 async function persistUnlocked() {
   if (!account) return;
   const data: SessionData = { accountId: bundle.account_id, keys: b64(account.toSessionBytes()), bundle };
-  await session.set(data);
-  await persistForNever(data);
+  await session.set(data, currentId);
+  await persistForNever();
 }
 
-/** Vault timeout "never": keep the unlocked keys on disk so a browser restart stays unlocked. */
-export async function persistForNever(data?: SessionData | null) {
-  const { settings } = await local.get();
-  if (settings.vaultTimeout !== "never") return local.set({ persistedKeys: null });
-  data ??= await session.get();
-  if (data) await local.set({ persistedKeys: data });
+/** Vault timeout "never": keep unlocked keys on disk so a browser restart stays unlocked; otherwise remove them for every account. */
+export async function persistForNever() {
+  const { settings, accounts } = await local.get();
+  for (const id of Object.keys(accounts)) {
+    if (settings.vaultTimeout !== "never") {
+      if (accounts[id].persistedKeys) await local.set({ persistedKeys: null }, id);
+      continue;
+    }
+    const data = await session.get(id);
+    if (data) await local.set({ persistedKeys: data }, id);
+  }
 }
 
-/** Restore keys after a service-worker restart. Returns false when locked. */
+// ------------------------------------------------------- user verification
+
+const verifiedKey = (id: string) => `verified:${id}`;
+
+/** The user just proved they know the master password (unlock, sign-in, or a passkey prompt). */
+async function markVerified() {
+  if (currentId) await scratch.set(verifiedKey(currentId), Date.now());
+}
+
+/** Whether the master password was entered for the active account within `ms`. */
+export async function recentlyVerified(ms: number) {
+  const at = currentId ? await scratch.get<number>(verifiedKey(currentId)) : undefined;
+  return !!at && Date.now() - at < ms;
+}
+
+/** Check the master password again (passkey user verification); throws a user-facing error. */
+export async function verifyMasterPassword(password: string) {
+  if (!account || !bundle) throw new Error("locked");
+  await initWasm();
+  const l = await local.get();
+  openBundle(bundle, password, l.secretKeys[l.email]).free();
+  await markVerified();
+}
+
+// ------------------------------------------------------------- restore
+
+/** Restore keys after a service-worker restart (single-flight per account). Returns false when locked. */
 export async function ensureUnlocked(): Promise<boolean> {
-  if (account) {
-    if (!loaded) await sync();
+  await lockCheck();
+  const id = await activeId();
+  if (!id) return false;
+  if (account && currentId === id) {
+    if (!loaded) await openVault(id);
     return true;
   }
-  let s = await session.get();
+  if (restoring?.id === id) return restoring.p;
+  const p = restore(id).finally(() => {
+    if (restoring?.p === p) restoring = null;
+  });
+  restoring = { id, p };
+  return p;
+}
+
+async function restore(id: string): Promise<boolean> {
+  let s = await session.get(id);
   if (!s) {
     const l = await local.get();
-    if (l.settings.vaultTimeout !== "never" || !l.persistedKeys || !l.tokens) return false;
+    if (l.activeId !== id || l.settings.vaultTimeout !== "never" || !l.persistedKeys || !l.tokens) return false;
     s = l.persistedKeys;
-    await session.set(s);
+    await session.set(s, id);
   }
   await initWasm();
-  bundle = s.bundle;
+  if ((await activeId()) !== id) return false;
+  unload();
   account = core.accountFromSessionBytes(s.accountId, unb64(s.keys));
-  await sync();
+  bundle = s.bundle;
+  currentId = id;
+  await openVault(id);
   return true;
 }
 
-async function clearUnlocked() {
-  vaults.forEach((v) => v.key.free());
-  vaults = [];
-  entries = [];
-  revision = 0;
-  loaded = false;
-  account?.free();
-  account = null;
-  await session.clear();
-  await local.set({ persistedKeys: null });
+/** Show the offline copy straight away and refresh in the background; without one, sync now. */
+async function openVault(id: string) {
+  const gen = generation;
+  const cached = await syncCache.get(id);
+  if (gen !== generation || currentId !== id) return;
+  if (cached && !loaded) {
+    apply(cached);
+    void refreshIfStale().catch(() => {});
+    return;
+  }
+  await sync();
+}
+
+/** Drop the keys of `id` (default: the active account), in memory, in the session and on disk. */
+async function clearUnlocked(id?: string) {
+  const aid = id ?? (await activeId());
+  if (!id || aid === currentId) unload();
+  await session.clear(aid);
+  await local.set({ persistedKeys: null }, aid);
 }
 
 export async function lock() {
   await clearUnlocked();
 }
 
-/** Log out of the active account. With other accounts present it's removed from the list and the next one becomes active. */
+/** Sign out of the active account. With other accounts present it's removed from the list and the next one becomes active. */
 export async function logout() {
   try {
     await api("/auth/logout", { method: "POST" });
   } catch {
     /* already signed out */
   }
-  await clearUnlocked();
-  bundle = null;
-  const { activeId, accounts } = await local.get();
-  if (Object.values(accounts).filter((a) => a.server).length > 1) await local.removeAccount(activeId);
-  else await local.set({ tokens: null });
+  const { activeId: id, accounts } = await local.get();
+  await clearUnlocked(id);
+  await syncCache.clear(id);
+  if (Object.values(accounts).filter((a) => a.server).length > 1) await local.removeAccount(id);
+  else await local.set({ tokens: null }, id);
 }
 
-/** Forget the active account's keys in memory only (its session stays, so switching back is instant). */
+/** Forget the loaded keys in memory only (the session stays, so switching back is instant). */
 function unload() {
+  generation++;
   vaults.forEach((v) => v.key.free());
   vaults = [];
   entries = [];
@@ -254,6 +368,7 @@ function unload() {
   loaded = false;
   account?.free();
   account = null;
+  currentId = "";
   bundle = null;
   pendingMaster?.free();
   pendingMaster = null;
@@ -288,11 +403,20 @@ export async function lockAll() {
   for (const [id, a] of Object.entries(accounts)) if (a.persistedKeys) await local.set({ persistedKeys: null }, id);
 }
 
-/** Vault timeout with the "log out" action: sign every account out (they stay listed). */
+/** Whether any account is unlocked right now (keys in memory or in the session). */
+export async function anyUnlocked() {
+  if (account) return true;
+  const { accounts } = await local.get();
+  for (const id of Object.keys(accounts)) if (await session.get(id)) return true;
+  return false;
+}
+
+/** Vault timeout with the "sign out" action: sign every account out (they stay listed) and forget their offline copies. */
 export async function logoutAll() {
   const { accounts } = await local.get();
   await lockAll();
   for (const [id, a] of Object.entries(accounts)) {
+    await syncCache.clear(id);
     if (!a.tokens) continue;
     await logoutRemote(a.server, a.tokens);
     await local.set({ tokens: null }, id);
@@ -303,8 +427,25 @@ export async function logoutAll() {
 
 export async function sync() {
   if (!account) return;
-  const data = await api("/sync");
-  bundle = data.bundle;
+  const id = currentId;
+  const gen = generation;
+  const data = await api("/sync", { accountId: id });
+  // Locked, signed out or switched meanwhile, or an older response than what's shown.
+  if (gen !== generation || !account || currentId !== id) return;
+  if (loaded && data.revision < revision) return;
+  await applyAndStore(data, id);
+}
+
+async function applyAndStore(data: any, id: string) {
+  apply(data);
+  await syncCache.set(id, data);
+  await local.set({ lastSync: Date.now(), name: data.user?.name ?? "" }, id);
+}
+
+/** Decrypt a /sync response (fresh or the offline copy) into vaults and entries. */
+function apply(data: any) {
+  if (!account) return;
+  if (data.bundle) bundle = data.bundle;
   const next: Vault[] = [];
   for (const v of data.vaults) {
     try {
@@ -315,7 +456,7 @@ export async function sync() {
       } catch {
         /* keep default name */
       }
-      next.push({ id: v.id, name, role: v.role, key });
+      next.push({ id: v.id, name, role: v.role, kind: v.key_kind, key });
     } catch {
       /* vault key unavailable (rotated); skip */
     }
@@ -338,14 +479,14 @@ export async function sync() {
   entries = list;
   revision = data.revision;
   loaded = true;
-  await local.set({ lastSync: Date.now(), name: data.user?.name ?? "" });
 }
 
 /** Re-sync if the server has newer data (cheap revision check). */
 export async function refreshIfStale() {
   if (!account) return;
-  const r = await api("/sync/revision").catch(() => null);
-  if (r && r.revision > revision) await sync();
+  const id = currentId;
+  const r = await api("/sync/revision", { accountId: id }).catch(() => null);
+  if (r && currentId === id && r.revision > revision) await sync();
 }
 
 // ------------------------------------------------------------------- items
@@ -381,14 +522,23 @@ export function summarize(e: Entry): ItemSummary {
   };
 }
 
-function writableVault(): Vault {
-  const v = vaults.find((x) => x.role === "owner") ?? vaults.find((x) => x.role !== "read");
-  if (!v) throw new Error("You don't have a vault you can save to.");
+/**
+ * Where new items go when no vault is chosen (save prompts, passkeys): the
+ * user's own vault, whose key is wrapped with their account key. A vault
+ * shared by someone else ("sealed") is never picked automatically, so nobody
+ * who adds you to their vault — nor the server — can collect your new logins.
+ */
+function personalVault(): Vault {
+  const own = vaults.filter((x) => x.kind === "account" && x.role !== "read");
+  const v = own.find((x) => x.role === "owner") ?? own[0];
+  if (!v) throw new Error("PassAuth couldn't find your own vault to save to. Add the item in the PassAuth popup and choose a vault.");
   return v;
 }
 
 export async function createItem(item: Item, vaultId?: string): Promise<string> {
-  const vault = vaultId ? vaults.find((v) => v.id === vaultId)! : writableVault();
+  const chosen = vaultId ? vaults.find((v) => v.id === vaultId) : undefined;
+  if (vaultId && (!chosen || chosen.role === "read")) throw new Error("You can't add items to that vault.");
+  const vault = chosen ?? personalVault();
   const id = core.newId();
   const now = Math.floor(Date.now() / 1000);
   const enc = vault.key.encryptItem({ ...item, created_at: now, updated_at: now }, id, vault.id);
@@ -404,7 +554,8 @@ export async function updateItem(entry: Entry, item: Item) {
   const now = Math.floor(Date.now() / 1000);
   const next = { ...item, updated_at: now };
   const old = entry.item.login?.password;
-  if (next.login && old && old !== next.login.password && next.password_history === entry.item.password_history) {
+  // Compare by content: items from the popup arrive as structured clones, never the same object.
+  if (next.login && old && old !== next.login.password && next.password_history[0]?.password !== old) {
     next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
   }
   const enc = vault.key.updateItem(entry.enc, next);
@@ -420,8 +571,19 @@ export async function trashItem(entry: Entry) {
 
 /** Vaults the user can add items to, and folder names in use (for the item editor). */
 export function editorInfo() {
+  // The user's own vault first: the editor preselects the first one.
+  let own: Vault | undefined;
+  try {
+    own = personalVault();
+  } catch {
+    own = undefined;
+  }
+  const writable = vaults.filter((v) => v.role !== "read");
+  const ordered = own ? [own, ...writable.filter((v) => v !== own)] : writable;
   return {
-    vaults: vaults.filter((v) => v.role !== "read").map((v) => ({ id: v.id, name: v.name })),
+    vaults: ordered.map((v) => ({ id: v.id, name: v.name })),
+    /** Preselected only when it's the user's own vault; shared vaults are never picked for them. */
+    defaultVault: own?.id ?? "",
     folders: [...new Set(entries.map((e) => e.item.folder).filter(Boolean))] as string[],
   };
 }

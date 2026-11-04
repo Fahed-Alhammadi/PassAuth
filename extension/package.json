@@ -5,9 +5,9 @@
   "version": "0.4.5",
   "type": "module",
   "scripts": {
-    "wasm": "../scripts/build-wasm.sh src/wasm",
+    "wasm": "../scripts/build-wasm.sh extension/src/wasm",
     "build": "tsc --noEmit && node build.mjs",
-    "test": "node test/passkeys.test.mjs",
+    "test": "node test/passkeys.test.mjs && node test/urls.test.mjs",
     "package": "node build.mjs && cd dist && zip -qr ../passauth-extension.zip ."
   },
   "dependencies": {

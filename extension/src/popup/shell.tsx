@@ -44,22 +44,42 @@ export function Menu({ label, trigger, className = "btn btn-icon", children }: {
   const [open, setOpen] = useState(false);
   const [up, setUp] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const id = useId();
+  const items = () => [...(listRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
   useEffect(() => {
     if (!open) return;
-    const close = (e: Event) => {
-      if (e instanceof KeyboardEvent ? e.key === "Escape" : !ref.current?.contains(e.target as Node)) setOpen(false);
+    // Menu keyboard pattern: focus the first item, arrows/Home/End move, Escape returns to the button.
+    items()[0]?.focus();
+    const onPointer = (e: Event) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
     };
-    document.addEventListener("pointerdown", close);
-    document.addEventListener("keydown", close);
+    const onKey = (e: KeyboardEvent) => {
+      const list = items();
+      const i = list.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        list[(i + (e.key === "ArrowDown" ? 1 : list.length - 1)) % list.length]?.focus();
+      } else if (e.key === "Home") list[0]?.focus();
+      else if (e.key === "End") list.at(-1)?.focus();
+      else if (e.key === "Tab") setOpen(false);
+      else return;
+      if (e.key !== "Tab") e.preventDefault();
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("pointerdown", close);
-      document.removeEventListener("keydown", close);
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
     };
   }, [open]);
   return (
     <div className="menu-wrap" ref={ref}>
       <button
+        ref={triggerRef}
         className={className}
         aria-label={label}
         title={label}
@@ -75,7 +95,7 @@ export function Menu({ label, trigger, className = "btn btn-icon", children }: {
         {trigger}
       </button>
       {open && (
-        <div id={id} className={`menu${up ? " up" : ""}`} role="menu" onClick={() => setOpen(false)}>
+        <div id={id} ref={listRef} className={`menu${up ? " up" : ""}`} role="menu" aria-label={label} onClick={() => setOpen(false)}>
           {children}
         </div>
       )}
@@ -119,9 +139,9 @@ export function initials(name: string, email: string) {
   return ((parts.length > 1 ? parts[0][0] + parts[1][0] : parts[0]?.slice(0, 2)) || "?").toUpperCase();
 }
 
-const STATUS_LABEL: Record<Status, string> = { unlocked: "Unlocked", locked: "Locked", "logged-out": "Logged out", setup: "" };
+const STATUS_LABEL: Record<Status, string> = { unlocked: "Unlocked", locked: "Locked", "logged-out": "Signed out", setup: "" };
 
-/** Account menu: who is signed in, other accounts to switch to, add account, lock, web vault, log out. */
+/** Account menu: who is signed in, other accounts to switch to, add account, lock, web vault, sign out. */
 export function Account({ state, onChange }: { state: PopupState; onChange: () => void }) {
   const others = state.accounts.filter((a) => a.id !== state.activeId);
   return (
@@ -156,7 +176,7 @@ export function Account({ state, onChange }: { state: PopupState; onChange: () =
         Open web vault
       </MenuItem>
       <MenuItem icon="logout" danger onClick={() => send({ type: "logout" }).then(onChange)}>
-        Log out
+        Sign out
       </MenuItem>
     </Menu>
   );
