@@ -208,7 +208,7 @@ async fn totp_setup(State(state): State<AppState>, user: AuthUser) -> ApiResult<
     })))
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => {
@@ -394,14 +394,26 @@ async fn delete_account(
     Ok(Json(json!({ "deleted": true })))
 }
 
-/// Remove a user and every vault they own (shared members lose access too).
+/// Remove a user. Vaults they own are deleted with their items unless another
+/// owner remains (then only the membership goes); everyone who shared a vault
+/// with them is told to re-sync.
 pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
     let owned: Vec<String> = sqlx::query_scalar(
-        "SELECT vault_id FROM vault_members WHERE user_id = $1 AND role = 'owner'",
+        "SELECT m.vault_id FROM vault_members m WHERE m.user_id = $1 AND m.role = 'owner'
+         AND NOT EXISTS (SELECT 1 FROM vault_members o WHERE o.vault_id = m.vault_id
+                         AND o.role = 'owner' AND o.user_id <> $1)",
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+    let mut affected: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT o.user_id FROM vault_members m JOIN vault_members o ON o.vault_id = m.vault_id
+         WHERE m.user_id = $1 AND o.user_id <> $1",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+    affected.sort_unstable();
     let mut tx = state.db.begin().await?;
     for v in &owned {
         for stmt in [
@@ -417,12 +429,14 @@ pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
         "DELETE FROM sessions WHERE user_id = $1",
         "DELETE FROM devices WHERE user_id = $1",
         "DELETE FROM two_factor WHERE user_id = $1",
+        "DELETE FROM two_factor_failures WHERE user_id = $1",
         "DELETE FROM email_tokens WHERE user_id = $1",
         "DELETE FROM users WHERE id = $1",
     ] {
         sqlx::query(stmt).bind(user_id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
+    crate::vault::touch_users(state, &affected, user_id).await?;
     tracing::info!(user = %user_id, "account deleted");
     Ok(())
 }

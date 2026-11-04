@@ -116,6 +116,10 @@ Tell PassAuth which header carries each visitor's real address, so rate limits w
 - Caddy: `IP_HEADER=X-Forwarded-For`
 - nginx: add `proxy_set_header X-Real-IP $remote_addr;` and set `IP_HEADER=X-Real-IP`
 
+PassAuth believes that header only from proxies on the same machine or a private network (loopback, `10.x`, `172.16–31.x`, `192.168.x`, IPv6 ULA). If your proxy connects from another address, list it in `TRUSTED_PROXIES`.
+
+When the proxy runs on the same host, publish PassAuth on loopback only so nobody can reach it around the proxy (Docker's published ports bypass host firewalls): set `PASSAUTH_PORT=127.0.0.1:8080` in `.env`.
+
 ---
 
 ## Update
@@ -153,6 +157,7 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 | `SIGNUPS_DOMAINS_WHITELIST` | any | Only these email domains may sign up, e.g. `example.com,example.org`. |
 | `SIGNUPS_VERIFY` | on when email is set up | Require email verification before the first sign-in. |
 | `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |
+| `TRUSTED_PROXIES` | loopback + private networks | Proxies whose `IP_HEADER` is believed, as IPs or CIDRs, e.g. `10.0.0.5,fd00::/8`. |
 | `ICON_SERVICE` | `internal` | `off` stops the server fetching website icons. |
 | `LOG_LEVEL` / `LOG_FORMAT` | `info` / text | Logging detail; `json` for structured logs. |
 | `SMTP_*` | off | Email delivery (see step 5). |
@@ -215,5 +220,5 @@ PassAuth is released under the [MIT License](LICENSE). © 2026 Fahed Alhammadi
 Third-party components keep their own licenses:
 
 - The passphrase word list is the [EFF Large Wordlist](https://www.eff.org/dice) by the Electronic Frontier Foundation, licensed under [CC BY 3.0 US](https://creativecommons.org/licenses/by/3.0/us/).
-- The web vault and extension use the [IBM Plex](https://github.com/IBM/plex) fonts, licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
+- The web vault, extension and website use the [IBM Plex](https://github.com/IBM/plex) fonts, licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
 - Rust and JavaScript dependencies are under their own licenses (mostly MIT or Apache-2.0); see `Cargo.lock` and the `pnpm-lock.yaml` files.

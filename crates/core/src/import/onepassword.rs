@@ -11,11 +11,23 @@ use crate::item::{Card, Field, FieldType, Identity, Item, PasswordHistory, SshKe
 pub fn parse_1pux(data: &[u8]) -> Result<ImportResult> {
     let mut zip =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|_| err("not a valid .1pux archive"))?;
+    // A zip bomb would otherwise expand without limit in the browser or app.
+    const MAX_EXPORT_DATA: u64 = 256 * 1024 * 1024;
+    let too_big = || err("export.data is too large to import");
+    let entry = zip
+        .by_name("export.data")
+        .map_err(|_| err(".1pux archive has no export.data"))?;
+    if entry.size() > MAX_EXPORT_DATA {
+        return Err(too_big());
+    }
     let mut json = String::new();
-    zip.by_name("export.data")
-        .map_err(|_| err(".1pux archive has no export.data"))?
+    entry
+        .take(MAX_EXPORT_DATA + 1)
         .read_to_string(&mut json)
         .map_err(|_| err("could not read export.data"))?;
+    if json.len() as u64 > MAX_EXPORT_DATA {
+        return Err(too_big());
+    }
     let v: Value = serde_json::from_str(&json).map_err(|_| err("export.data is not valid JSON"))?;
 
     let mut items = Vec::new();
@@ -84,6 +96,7 @@ fn convert(it: &Value, vault: &str, warnings: &mut Vec<String>) -> Item {
                         FieldType::Text
                     };
                     fields.push(Field {
+                        extra: Default::default(),
                         name: s(&lf["name"]),
                         value,
                         field_type,
@@ -110,6 +123,7 @@ fn convert(it: &Value, vault: &str, warnings: &mut Vec<String>) -> Item {
             by_id.insert(id.to_ascii_lowercase(), value.clone());
             let name = Some(s(&f["title"])).filter(|t| !t.is_empty()).unwrap_or(id);
             fields.push(Field {
+                extra: Default::default(),
                 name,
                 value,
                 field_type: if hidden {
@@ -145,6 +159,7 @@ fn convert(it: &Value, vault: &str, warnings: &mut Vec<String>) -> Item {
         .into_iter()
         .flatten()
         .map(|h| PasswordHistory {
+            extra: Default::default(),
             password: s(&h["value"]),
             changed_at: h["time"].as_i64().unwrap_or(0),
         })
@@ -155,6 +170,7 @@ fn convert(it: &Value, vault: &str, warnings: &mut Vec<String>) -> Item {
         "002" => {
             let expiry = get(&["expiry"]);
             item.card = Some(Card {
+                extra: Default::default(),
                 cardholder_name: get(&["cardholder"]),
                 brand: get(&["type"]),
                 number: get(&["ccnum", "number"]),
@@ -219,6 +235,7 @@ fn ssh_key(d: &Value) -> Option<SshKey> {
                 .find_map(|f| {
                     let k = &f["value"]["sshKey"];
                     k.is_object().then(|| SshKey {
+                        extra: Default::default(),
                         private_key: s(&k["privateKey"]),
                         public_key: s(&k["metadata"]["publicKey"]),
                         fingerprint: s(&k["metadata"]["fingerprint"]),

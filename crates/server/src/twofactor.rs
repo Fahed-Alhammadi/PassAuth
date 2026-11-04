@@ -13,6 +13,12 @@ pub const EMAIL: &str = "email";
 pub const RECOVERY: &str = "recovery";
 const EMAIL_CODE_TTL: i64 = 10 * 60;
 const EMAIL_CODE_ATTEMPTS: i64 = 5;
+/// Wrong codes allowed per account within [`FAILURE_WINDOW`] before two-step
+/// sign-in is paused for [`LOCKOUT`]. Each password login issues a fresh
+/// two-factor token, so the per-token limit alone doesn't bound guessing.
+const MAX_FAILURES: i64 = 10;
+const FAILURE_WINDOW: i64 = 3600;
+const LOCKOUT: i64 = 3600;
 
 #[derive(Serialize, Deserialize)]
 pub struct TotpData {
@@ -59,12 +65,15 @@ async fn verify_totp(db: &Db, user_id: &str, code: &str) -> ApiResult<bool> {
     let Some(step) = check_totp(&data.secret, code, last_used) else {
         return Ok(false);
     };
-    sqlx::query("UPDATE two_factor SET last_used = $1 WHERE user_id = $2 AND provider = 'totp'")
-        .bind(step)
-        .bind(user_id)
-        .execute(db)
-        .await?;
-    Ok(true)
+    // Conditional, so two concurrent requests can't both use the same code.
+    let done = sqlx::query(
+        "UPDATE two_factor SET last_used = $1 WHERE user_id = $2 AND provider = 'totp' AND last_used < $1",
+    )
+    .bind(step)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Accept the current step ±1, rejecting any step at or before `last_step`
@@ -109,10 +118,11 @@ fn data_encoding_base32(bytes: &[u8]) -> String {
 pub async fn issue_email_code(db: &Db, user_id: &str, purpose: &str) -> ApiResult<String> {
     let n = u32::from_le_bytes(random_bytes::<4>()?) % 1_000_000;
     let code = format!("{n:06}");
+    let mut tx = db.begin().await?;
     sqlx::query("DELETE FROM email_tokens WHERE user_id = $1 AND purpose = $2")
         .bind(user_id)
         .bind(purpose)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(
         "INSERT INTO email_tokens (id, user_id, purpose, token_hash, attempts, expires_at) VALUES ($1, $2, $3, $4, 0, $5)",
@@ -122,8 +132,9 @@ pub async fn issue_email_code(db: &Db, user_id: &str, purpose: &str) -> ApiResul
     .bind(purpose)
     .bind(hash_token(&code))
     .bind(now() + EMAIL_CODE_TTL)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(code)
 }
 
@@ -221,16 +232,60 @@ pub async fn upsert(
     data: &str,
     enabled: bool,
 ) -> ApiResult<()> {
-    sqlx::query("DELETE FROM two_factor WHERE user_id = $1 AND provider = $2")
+    // One statement: a failure can't leave the user without their old codes.
+    sqlx::query(
+        "INSERT INTO two_factor (user_id, provider, data, enabled, last_used) VALUES ($1, $2, $3, $4, 0)
+         ON CONFLICT (user_id, provider) DO UPDATE SET data = excluded.data, enabled = excluded.enabled, last_used = 0",
+    )
+    .bind(user_id)
+    .bind(provider)
+    .bind(data)
+    .bind(enabled as i64)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Whether two-step sign-in is paused for this account after wrong codes.
+pub async fn locked_out(db: &Db, user_id: &str) -> ApiResult<bool> {
+    let until: Option<i64> =
+        sqlx::query_scalar("SELECT locked_until FROM two_factor_failures WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(until.is_some_and(|u| u > now()))
+}
+
+/// Count a wrong code. Returns true when this failure starts a lockout.
+pub async fn record_failure(db: &Db, user_id: &str) -> ApiResult<bool> {
+    let t = now();
+    sqlx::query(
+        "INSERT INTO two_factor_failures (user_id, failures, window_start, locked_until) VALUES ($1, 1, $2, 0)
+         ON CONFLICT (user_id) DO UPDATE SET
+           failures = CASE WHEN two_factor_failures.window_start <= $3 THEN 1 ELSE two_factor_failures.failures + 1 END,
+           window_start = CASE WHEN two_factor_failures.window_start <= $3 THEN $2 ELSE two_factor_failures.window_start END",
+    )
+    .bind(user_id)
+    .bind(t)
+    .bind(t - FAILURE_WINDOW)
+    .execute(db)
+    .await?;
+    let locked = sqlx::query(
+        "UPDATE two_factor_failures SET locked_until = $1, failures = 0, window_start = $2
+         WHERE user_id = $3 AND failures >= $4",
+    )
+    .bind(t + LOCKOUT)
+    .bind(t)
+    .bind(user_id)
+    .bind(MAX_FAILURES)
+    .execute(db)
+    .await?;
+    Ok(locked.rows_affected() == 1)
+}
+
+pub async fn clear_failures(db: &Db, user_id: &str) -> ApiResult<()> {
+    sqlx::query("DELETE FROM two_factor_failures WHERE user_id = $1")
         .bind(user_id)
-        .bind(provider)
-        .execute(db)
-        .await?;
-    sqlx::query("INSERT INTO two_factor (user_id, provider, data, enabled, last_used) VALUES ($1, $2, $3, $4, 0)")
-        .bind(user_id)
-        .bind(provider)
-        .bind(data)
-        .bind(enabled as i64)
         .execute(db)
         .await?;
     Ok(())

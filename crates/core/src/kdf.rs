@@ -2,7 +2,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::crypto::{SymmetricKey, hkdf_key, random_bytes};
 use crate::{Error, Result};
@@ -49,6 +49,7 @@ impl KdfParams {
 }
 
 /// A 128-bit Secret Key, formatted `PA1-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XX`.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretKey([u8; 16]);
 
 impl SecretKey {
@@ -73,13 +74,31 @@ impl SecretKey {
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .collect();
+        let cleaned = Zeroizing::new(cleaned);
         let body = cleaned
             .strip_prefix(SECRET_KEY_PREFIX)
             .ok_or(Error::InvalidSecretKey)?;
-        let bytes = data_encoding::BASE32_NOPAD
-            .decode(body.as_bytes())
+        // The key alphabet is A-Z and 2-7; 0, 1 and 8 are look-alikes typed from paper.
+        let body: Zeroizing<String> = Zeroizing::new(
+            body.chars()
+                .map(|c| match c {
+                    '0' => 'O',
+                    '1' => 'I',
+                    '8' => 'B',
+                    c => c,
+                })
+                .collect(),
+        );
+        let bytes = Zeroizing::new(
+            data_encoding::BASE32_NOPAD
+                .decode(body.as_bytes())
+                .map_err(|_| Error::InvalidSecretKey)?,
+        );
+        let raw: [u8; 16] = bytes
+            .as_slice()
+            .try_into()
             .map_err(|_| Error::InvalidSecretKey)?;
-        Ok(Self(bytes.try_into().map_err(|_| Error::InvalidSecretKey)?))
+        Ok(Self(raw))
     }
 }
 
@@ -161,6 +180,12 @@ mod tests {
         assert!(s.starts_with("PA1-"));
         assert_eq!(SecretKey::parse(&s.to_lowercase()).unwrap().0, sk.0);
         assert!(SecretKey::parse("PA1-ABC").is_err());
+        // Look-alikes typed from a printed kit: 0/O, 1/I and 8/B.
+        let typo = format!(
+            "PA1{}",
+            s[3..].replace('O', "0").replace('I', "1").replace('B', "8")
+        );
+        assert_eq!(SecretKey::parse(&typo).unwrap().0, sk.0);
     }
 
     #[test]

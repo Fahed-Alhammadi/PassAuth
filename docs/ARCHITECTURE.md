@@ -26,9 +26,11 @@ PassAuth is a self-hosted, zero-knowledge password manager. The server stores on
 ```
 master password ─┐
                  ├─ Argon2id (m=128 MiB, t=3, p=1, salt=random 16 B per account)
-secret key (optional per user, 128-bit, in Emergency Kit) ─ HKDF ─ XOR ─► Account Unlock Key (AUK)
+secret key (optional per user, 128-bit, in Emergency Kit) ─ HKDF ─ XOR ─► stretched key
+stretched key ─ HKDF("passauth/auk/v1") ─► Account Unlock Key (AUK)
+stretched key ─ HKDF("passauth/opaque-password/v1") ─► OPAQUE password input
 AUK ─► decrypts Account Key (random 256-bit)
-Account Key ─► decrypts X25519 keypair (sharing) + Ed25519 keypair (signing)
+Account Key ─► decrypts X25519 keypair (sharing)
 Vault Key (random 256-bit per vault) ─ wrapped by Account Key, or sealed to each member's X25519 key
 Item Key (random 256-bit per item) ─ wrapped by Vault Key ─► encrypts item JSON
 ```
@@ -36,17 +38,20 @@ Item Key (random 256-bit per item) ─ wrapped by Vault Key ─► encrypts item
 - Cipher: **XChaCha20-Poly1305** everywhere. No unauthenticated modes, no legacy fallbacks.
 - AEAD associated data binds `{format_version, item_id, vault_id}`, so ciphertexts cannot be swapped between items or fields.
 - The whole item (name, URLs, username, password, TOTP, passkeys, notes, fields) is one encrypted blob. Plaintext on the server is limited to IDs, type, timestamps, and sizes.
+- Unknown item fields are kept (`extra` on every item struct) and a `format` above the client's own is never stamped down, so an older client editing an item written by a newer one doesn't erase the newer fields. Unknown enum values (e.g. a new URL match type) still fail to decode; add those behind a format bump.
 - Item JSON carries a `format` number (`ITEM_FORMAT` in `crates/core/src/item.rs`). Clients upgrade older items when they decrypt them and stamp the current format when they encrypt. The server can't read items, so schema changes never need a server migration. Format 2 (0.2.1): a website's URL match `default` follows the client's "Default URI match detection" setting; older items, saved when `domain` was the implicit default, read as `default`.
 - KDF parameters are authenticated: clients enforce minimums and refuse to log in with weaker parameters than they already know.
 
 ### Authentication: OPAQUE (`opaque-ke`)
 - The server never receives the password or a hash it could crack offline.
-- OPAQUE's export key and the Secret Key together derive the AUK, so login and decryption keys stay independent.
-- Sessions: access JWT (15 min) plus a **rotating** refresh token bound to the device, with reuse detection that revokes the device.
-- 2FA: TOTP, email OTP, WebAuthn security keys, recovery codes. New-device login sends an email alert.
+- The AUK and the OPAQUE password input are two HKDF outputs of the same Argon2id result (domain-separated), so the server's OPAQUE record never yields the AUK. The OPAQUE export key is not used. Consequence: a leak of the `users.bundle` column alone allows offline guessing at Argon2id cost when the Secret Key is off, which is why the Secret Key is recommended.
+- Sessions: opaque random access token (15 min) plus a **rotating** refresh token bound to the device, both stored SHA-256-hashed. Rotation is conditional on the presented token; presenting an already-rotated token revokes the session. Tokens go in the `Authorization` header; only `/api/ws` also accepts `?access_token=`, and a socket closes when its session is gone.
+- 2FA: TOTP, email OTP, recovery codes. Wrong codes are counted per account (10 per hour, then a 1-hour pause and an email alert), not only per sign-in attempt. New-device login sends an email alert.
+- Rate limits key on the TCP peer, or on `IP_HEADER` when the peer is a trusted proxy (`TRUSTED_PROXIES`, default loopback and private networks), using the right-most untrusted hop; IPv6 is bucketed by /64.
 
 ### Sharing (organizations)
-- Vault keys are sealed to members' X25519 public keys.
+- Vault keys are sealed to members' X25519 public keys. Sealed boxes are anonymous (not signed by the sharer); clients must therefore never pick a shared (`key_kind = sealed`) vault as the default save target, only the user's own `account` vault.
+- Ownership comes only from creating a vault: `add_member` refuses `owner`, and nobody can change or remove a member at or above their own role. Membership changes, item writes and key rotation lock the vault row, and rotation re-checks members and items inside its transaction (each item exactly once).
 - Public keys are shown as fingerprints for out-of-band verification, so a malicious server cannot silently substitute keys.
 - Removing a member rotates the vault key, and items are re-encrypted lazily.
 

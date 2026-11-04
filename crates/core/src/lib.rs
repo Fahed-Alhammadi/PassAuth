@@ -4,6 +4,10 @@
 //! mobile via UniFFI). The server never links it for decryption — it only
 //! stores the opaque ciphertexts produced here.
 
+// The fast test KDF must never reach a release build of any client or server.
+#[cfg(all(feature = "insecure-test-kdf", not(debug_assertions)))]
+compile_error!("the `insecure-test-kdf` feature is for debug test builds only");
+
 pub mod crypto;
 pub mod error;
 pub mod export;

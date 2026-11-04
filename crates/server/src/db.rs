@@ -129,11 +129,24 @@ pub async fn connect(url: &str) -> Result<Db> {
 }
 
 /// Schema changes in order; each runs once, in one transaction, when the stored version is lower.
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const MIGRATIONS: &[(i64, &[&str])] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
 const SCHEMA_V2: &[&str] =
     &["CREATE TABLE IF NOT EXISTS server_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)"];
+
+/// Indexes for hot lookups and the sweeper, plus per-account two-factor failure counting.
+const SCHEMA_V3: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS sessions_prev_refresh ON sessions (prev_refresh_hash)",
+    "CREATE INDEX IF NOT EXISTS sessions_refresh_expires ON sessions (refresh_expires)",
+    "CREATE INDEX IF NOT EXISTS email_tokens_user ON email_tokens (user_id, purpose)",
+    "CREATE INDEX IF NOT EXISTS email_tokens_expires ON email_tokens (expires_at)",
+    "CREATE TABLE IF NOT EXISTS two_factor_failures (
+        user_id TEXT PRIMARY KEY,
+        failures BIGINT NOT NULL,
+        window_start BIGINT NOT NULL,
+        locked_until BIGINT NOT NULL)",
+];
 
 async fn migrate(db: &Db) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")
@@ -188,13 +201,20 @@ pub async fn server_secret(db: &Db, name: &str, init: impl FnOnce() -> String) -
     {
         return Ok(v);
     }
-    let value = init();
-    sqlx::query("INSERT INTO server_secrets (name, value) VALUES ($1, $2)")
-        .bind(name)
-        .bind(&value)
-        .execute(db)
-        .await?;
-    Ok(value)
+    // Two instances starting at once: the first insert wins and both read it back.
+    sqlx::query(
+        "INSERT INTO server_secrets (name, value) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+    )
+    .bind(name)
+    .bind(init())
+    .execute(db)
+    .await?;
+    Ok(
+        sqlx::query_scalar("SELECT value FROM server_secrets WHERE name = $1")
+            .bind(name)
+            .fetch_one(db)
+            .await?,
+    )
 }
 
 /// Read an admin-changed server setting (None = use the env default).
@@ -208,16 +228,18 @@ pub async fn setting(db: &Db, name: &str) -> Result<Option<String>> {
 }
 
 pub async fn set_setting(db: &Db, name: &str, value: &str) -> Result<()> {
-    let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM server_settings WHERE name = $1")
-        .bind(name)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO server_settings (name, value) VALUES ($1, $2)")
-        .bind(name)
-        .bind(value)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    sqlx::query(
+        "INSERT INTO server_settings (name, value) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+    )
+    .bind(name)
+    .bind(value)
+    .execute(db)
+    .await?;
     Ok(())
+}
+
+/// Whether the database is PostgreSQL (else SQLite).
+pub fn is_postgres(url: &str) -> bool {
+    url.starts_with("postgres")
 }

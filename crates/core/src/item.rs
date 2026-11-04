@@ -36,6 +36,9 @@ pub enum ItemType {
 /// - 2: URL match "default" follows the client setting; "domain" is an explicit choice.
 pub const ITEM_FORMAT: u32 = 2;
 
+/// Unknown JSON fields of an item (see the `extra` field of each item struct).
+pub type Extra = serde_json::Map<String, serde_json::Value>;
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Item {
@@ -55,6 +58,9 @@ pub struct Item {
     /// Unix seconds.
     pub created_at: i64,
     pub updated_at: i64,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 impl Item {
@@ -68,7 +74,8 @@ impl Item {
                 }
             }
         }
-        self.format = ITEM_FORMAT;
+        // Never stamp a newer client's format down: its extra fields are kept as they are.
+        self.format = self.format.max(ITEM_FORMAT);
     }
 
     pub fn item_type(&self) -> ItemType {
@@ -95,6 +102,9 @@ pub struct Login {
     /// `otpauth://` URI or bare base32 secret.
     pub totp: Option<String>,
     pub passkeys: Vec<Passkey>,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +129,9 @@ pub struct LoginUrl {
     pub url: String,
     #[serde(rename = "match")]
     pub match_type: UrlMatch,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// A WebAuthn credential stored by PassAuth acting as an authenticator.
@@ -140,6 +153,9 @@ pub struct Passkey {
     pub counter: u32,
     pub discoverable: bool,
     pub created_at: i64,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -151,6 +167,9 @@ pub struct Card {
     pub exp_month: String,
     pub exp_year: String,
     pub code: String,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -173,6 +192,9 @@ pub struct Identity {
     pub ssn: String,
     pub passport_number: String,
     pub license_number: String,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -181,6 +203,9 @@ pub struct SshKey {
     pub private_key: String,
     pub public_key: String,
     pub fingerprint: String,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +224,9 @@ pub struct Field {
     pub value: String,
     #[serde(rename = "type")]
     pub field_type: FieldType,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -206,6 +234,9 @@ pub struct Field {
 pub struct PasswordHistory {
     pub password: String,
     pub changed_at: i64,
+    /// Fields from newer clients, kept so they survive an edit by an older one.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// What the server stores for an item.
@@ -245,7 +276,7 @@ impl EncryptedItem {
         vault_key: &SymmetricKey,
         item_key: &SymmetricKey,
     ) -> Result<Self> {
-        let mut json = if item.format == ITEM_FORMAT {
+        let mut json = if item.format >= ITEM_FORMAT {
             serde_json::to_vec(item)?
         } else {
             let mut item = item.clone();
@@ -307,6 +338,7 @@ mod tests {
             format: ITEM_FORMAT,
             name: "GitHub".into(),
             login: Some(Login {
+                extra: Default::default(),
                 username: "octo".into(),
                 password: "s3cret".into(),
                 urls: vec![LoginUrl {
@@ -351,12 +383,60 @@ mod tests {
         assert!(moved.decrypt(&vk).is_err());
     }
 
+    /// An item written by a newer client keeps its unknown fields and format
+    /// when an older client decrypts, edits and re-encrypts it.
+    #[test]
+    fn newer_fields_and_format_survive_an_edit() {
+        let vk = SymmetricKey::generate().unwrap();
+        let newer = serde_json::json!({
+            "format": ITEM_FORMAT + 1,
+            "name": "GitHub",
+            "future_top": { "a": 1 },
+            "login": {
+                "username": "octo",
+                "password": "s3cret",
+                "future_login": [1, 2, 3],
+                "urls": [{ "url": "https://github.com", "match": "host", "future_url": true }],
+                "passkeys": [{ "credential_id": "c", "future_passkey": "x" }]
+            },
+            "fields": [{ "name": "n", "value": "v", "type": "text", "future_field": 7 }],
+            "password_history": [{ "password": "old", "changed_at": 1, "future_ph": null }]
+        });
+        let item: Item = serde_json::from_value(newer.clone()).unwrap();
+        let enc = EncryptedItem::encrypt(&item, "i1", "v1", &vk).unwrap();
+        let mut edited = enc.decrypt(&vk).unwrap();
+        assert_eq!(edited.format, ITEM_FORMAT + 1, "format is never downgraded");
+        edited.name = "GitHub (work)".into();
+        let back = enc.update(&edited, &vk).unwrap().decrypt(&vk).unwrap();
+        let json = serde_json::to_value(&back).unwrap();
+        assert_eq!(json["format"], ITEM_FORMAT + 1);
+        assert_eq!(json["name"], "GitHub (work)");
+        assert_eq!(json["future_top"], newer["future_top"]);
+        assert_eq!(
+            json["login"]["future_login"],
+            newer["login"]["future_login"]
+        );
+        assert_eq!(json["login"]["urls"][0]["future_url"], true);
+        assert_eq!(json["login"]["urls"][0]["match"], "host");
+        assert_eq!(json["login"]["passkeys"][0]["future_passkey"], "x");
+        assert_eq!(json["fields"][0]["future_field"], 7);
+        assert!(
+            json["password_history"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("future_ph")
+        );
+        // Known fields are not duplicated into `extra`.
+        assert!(back.extra.get("name").is_none());
+    }
+
     #[test]
     fn legacy_domain_match_becomes_default() {
         let key = SymmetricKey::generate().unwrap();
         let mut legacy = sample();
         legacy.login.as_mut().unwrap().urls[0].match_type = UrlMatch::Domain;
         legacy.login.as_mut().unwrap().urls.push(LoginUrl {
+            extra: Default::default(),
             url: "https://x.io".into(),
             match_type: UrlMatch::Exact,
         });

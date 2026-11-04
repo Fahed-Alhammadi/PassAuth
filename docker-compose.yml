@@ -17,6 +17,9 @@ services:
     user: "${PUID:-1000}:${PGID:-1000}"
     env_file: .env
     ports:
+      # Behind a reverse proxy on the same host, publish on loopback only so
+      # nobody can reach the server around the proxy (Docker's port rules
+      # bypass host firewalls): set PASSAUTH_PORT=127.0.0.1:8080 in .env.
       - "${PASSAUTH_PORT:-8080}:8080"
     volumes:
       - ./data:/data

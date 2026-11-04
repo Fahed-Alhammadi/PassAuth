@@ -29,6 +29,18 @@ impl ApiError {
     pub fn bad(msg: impl Into<String>) -> Self {
         Self::BadRequest(msg.into())
     }
+
+    /// `msg` as a 409 when `e` is a unique-constraint violation; any other
+    /// database error (busy, disconnected…) stays an internal error.
+    pub fn conflict_on_unique(e: sqlx::Error, msg: &str) -> Self {
+        if e.as_database_error()
+            .is_some_and(|d| d.is_unique_violation())
+        {
+            Self::Conflict(msg.into())
+        } else {
+            e.into()
+        }
+    }
 }
 
 impl From<sqlx::Error> for ApiError {

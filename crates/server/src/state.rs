@@ -16,6 +16,9 @@ use crate::mail::Mailer;
 
 pub type AppState = Arc<App>;
 
+/// Live-sync sockets one account may hold open at once.
+pub const MAX_SOCKETS_PER_USER: usize = 20;
+
 pub struct App {
     pub config: Config,
     pub db: Db,
@@ -32,6 +35,11 @@ pub struct App {
     pub icons: IconService,
     /// Effective sign-up policy (env defaults, overridden from the admin page).
     pub signups: std::sync::RwLock<SignupPolicy>,
+    /// Bounds concurrent Argon2 checks of the admin token (each takes ~19 MiB).
+    pub admin_verify: tokio::sync::Semaphore,
+    /// SHA-256 of the last admin token that passed the Argon2 check, with its
+    /// expiry, so an open admin page doesn't re-run Argon2 on every request.
+    pub admin_verified: std::sync::Mutex<Option<(String, i64)>>,
 }
 
 pub struct PendingRegistration {
@@ -99,15 +107,16 @@ impl App {
             reauth: Expiring::default(),
             limiter: RateLimiter::default(),
             notify: DashMap::new(),
+            admin_verify: tokio::sync::Semaphore::new(2),
+            admin_verified: std::sync::Mutex::new(None),
         }))
     }
 
-    /// Tell every connected client of these users to re-sync.
-    pub fn notify_sync(&self, user_ids: &[String], revision: i64) {
-        let msg = format!(r#"{{"type":"sync","revision":{revision}}}"#);
-        for id in user_ids {
+    /// Tell every connected client of these users to re-sync to their new revision.
+    pub fn notify_sync(&self, revisions: &[(String, i64)]) {
+        for (id, revision) in revisions {
             if let Some(tx) = self.notify.get(id) {
-                let _ = tx.send(msg.clone());
+                let _ = tx.send(format!(r#"{{"type":"sync","revision":{revision}}}"#));
             }
         }
     }
@@ -118,11 +127,14 @@ impl App {
         }
     }
 
-    pub fn subscribe(&self, user_id: &str) -> broadcast::Receiver<String> {
-        self.notify
+    /// Live-sync subscription for `user_id`, or `None` when the user already
+    /// has [`MAX_SOCKETS_PER_USER`] open sockets.
+    pub fn subscribe(&self, user_id: &str) -> Option<broadcast::Receiver<String>> {
+        let tx = self
+            .notify
             .entry(user_id.to_owned())
-            .or_insert_with(|| broadcast::channel(32).0)
-            .subscribe()
+            .or_insert_with(|| broadcast::channel(32).0);
+        (tx.receiver_count() < MAX_SOCKETS_PER_USER).then(|| tx.subscribe())
     }
 
     /// Drop expired entries. Called periodically from main.

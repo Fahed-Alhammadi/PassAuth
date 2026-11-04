@@ -1,7 +1,9 @@
 //! WebAssembly bindings for the web vault and browser extension.
 //!
 //! Keys stay inside WASM memory: JavaScript only holds opaque handles
-//! (`MasterKeys`, `Account`, `VaultKey`) and never sees raw key bytes.
+//! (`MasterKeys`, `Account`, `VaultKey`). The one exception is
+//! `toSessionBytes`, which hands the unlocked account key to the extension so
+//! it can keep the vault unlocked across service-worker restarts.
 
 use passauth_core::crypto::SymmetricKey;
 use passauth_core::item::{EncryptedItem, Item, unb64};

@@ -26,12 +26,31 @@ fn fast_kdf() -> KdfParams {
     }
 }
 
+/// Test configuration. With `PASSAUTH_TEST_DATABASE_URL=postgres://…` every
+/// test gets its own fresh PostgreSQL database; otherwise in-memory SQLite.
+async fn test_config() -> Config {
+    let mut config = Config::for_tests();
+    if let Ok(base) = std::env::var("PASSAUTH_TEST_DATABASE_URL") {
+        use sqlx::Connection;
+        sqlx::any::install_default_drivers();
+        let name = format!("passauth_test_{}", uuid::Uuid::new_v4().simple());
+        let mut admin = sqlx::AnyConnection::connect(&base).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let (prefix, _) = base.rsplit_once('/').expect("database URL ends in /<db>");
+        config.database_url = format!("{prefix}/{name}");
+    }
+    config
+}
+
 async fn app() -> Router {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_env_filter("warn")
         .try_init();
-    crate::router(App::new(Config::for_tests()).await.unwrap())
+    crate::router(App::new(test_config().await).await.unwrap())
 }
 
 async fn call(
@@ -462,7 +481,12 @@ async fn admin_requires_token() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["config"]["database"], "sqlite");
+    let expected = if std::env::var("PASSAUTH_TEST_DATABASE_URL").is_ok() {
+        "postgresql"
+    } else {
+        "sqlite"
+    };
+    assert_eq!(v["config"]["database"], expected);
 }
 
 async fn get_raw(app: &Router, path: &str) -> axum::response::Response {
@@ -476,7 +500,7 @@ async fn get_raw(app: &Router, path: &str) -> axum::response::Response {
 async fn icons_off_returns_404() {
     let config = Config {
         icon_service: false,
-        ..Config::for_tests()
+        ..test_config().await
     };
     let app = crate::router(App::new(config).await.unwrap());
     let resp = get_raw(&app, "/api/icons/github.com").await;
@@ -511,7 +535,7 @@ async fn icons_reject_invalid_hosts_without_fetching() {
 #[tokio::test]
 async fn icons_serve_cached_entries() {
     use crate::icons::{Icon, ImageKind};
-    let state = App::new(Config::for_tests()).await.unwrap();
+    let state = App::new(test_config().await).await.unwrap();
     let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     let icon = Icon {
         bytes: png.clone().into(),
@@ -595,4 +619,482 @@ async fn unknown_api_path_is_404() {
     let app = app().await;
     let (s, _) = call(&app, Method::GET, "/api/nope", None, json!(null)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+async fn app_with_state() -> (Router, crate::state::AppState) {
+    let state = App::new(test_config().await).await.unwrap();
+    (crate::router(state.clone()), state)
+}
+
+/// Shares `owner`'s first vault with `email` at `role`; returns the status.
+async fn share(
+    app: &Router,
+    owner: &Client,
+    owner_token: &str,
+    email: &str,
+    role: &str,
+) -> (StatusCode, Value) {
+    let (_, found) = call(
+        app,
+        Method::GET,
+        &format!("/api/users/lookup?email={email}"),
+        Some(owner_token),
+        json!(null),
+    )
+    .await;
+    let sealed = share_vault_key(
+        &owner.vault_id,
+        &owner.vault_key,
+        found["public_key"].as_str().unwrap(),
+    )
+    .unwrap();
+    call(
+        app,
+        Method::POST,
+        &format!("/api/vaults/{}/members", owner.vault_id),
+        Some(owner_token),
+        json!({ "user_id": found["user_id"], "role": role, "sealed_key": sealed }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ownership_cannot_be_granted_or_taken() {
+    let app = app().await;
+    let alice = register(&app, "own-a@example.com", "pw-alice-1").await;
+    let bob = register(&app, "own-b@example.com", "pw-bobby-1").await;
+    register(&app, "own-c@example.com", "pw-carol-1").await;
+    let ta = token(&app, "own-a@example.com", "pw-alice-1").await;
+    let tb = token(&app, "own-b@example.com", "pw-bobby-1").await;
+
+    let (s, v) = share(&app, &alice, &ta, "own-b@example.com", "owner").await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "owner can't be granted: {v}");
+    let (s, v) = share(&app, &alice, &ta, "own-b@example.com", "admin").await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    // Bob (admin) can't demote or overwrite the owner's key…
+    let (_, me) = call(&app, Method::GET, "/api/account", Some(&ta), json!(null)).await;
+    let alice_id = me["user_id"].as_str().unwrap();
+    let path = format!("/api/vaults/{}/members", alice.vault_id);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &path,
+        Some(&tb),
+        json!({ "user_id": alice_id, "role": "read", "sealed_key": "junk" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // …nor remove the owner, nor share to someone who doesn't exist.
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{path}/{alice_id}"),
+        Some(&tb),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let ghost = uuid::Uuid::new_v4().to_string();
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &path,
+        Some(&tb),
+        json!({ "user_id": ghost, "role": "read", "sealed_key": "junk" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    // An admin can't share with a higher role than their own either.
+    let (s, _) = share(&app, &alice, &tb, "own-c@example.com", "write").await;
+    assert_eq!(s, StatusCode::OK);
+    let _ = bob;
+}
+
+fn encrypted(c: &Client, name: &str) -> (String, EncryptedItem) {
+    let item = Item {
+        format: ITEM_FORMAT,
+        name: name.into(),
+        ..Default::default()
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let enc = EncryptedItem::encrypt(&item, &id, &c.vault_id, &c.vault_key).unwrap();
+    (id, enc)
+}
+
+#[tokio::test]
+async fn concurrent_edits_conflict_instead_of_overwriting() {
+    let app = app().await;
+    let c = register(&app, "race@example.com", "pw-race-123").await;
+    let t = token(&app, "race@example.com", "pw-race-123").await;
+    let (id, enc) = encrypted(&c, "A");
+    let body = json!({ "id": id, "vault_id": c.vault_id, "key": enc.key, "data": enc.data });
+    let (s, created) = call(&app, Method::POST, "/api/items", Some(&t), body).await;
+    assert_eq!(s, StatusCode::OK, "{created}");
+    let (_, sync) = call(&app, Method::GET, "/api/sync", Some(&t), json!(null)).await;
+    let r0 = sync["items"][0]["revision"].as_i64().unwrap();
+
+    // Two devices edit from the same revision: the second one must get 409.
+    let edit = |rev: i64| json!({ "id": id, "vault_id": c.vault_id, "key": enc.key, "data": enc.data, "revision": rev });
+    let path = format!("/api/items/{id}");
+    let (s, first) = call(&app, Method::PUT, &path, Some(&t), edit(r0)).await;
+    assert_eq!(s, StatusCode::OK, "{first}");
+    let (s, _) = call(&app, Method::PUT, &path, Some(&t), edit(r0)).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    // Trash with a stale revision is refused too; with the current one it works.
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{path}?revision={r0}"),
+        Some(&t),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let r1 = first["revision"].as_i64().unwrap();
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("{path}?revision={r1}"),
+        Some(&t),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Revisions keep increasing for the client.
+    let (_, after) = call(
+        &app,
+        Method::GET,
+        "/api/sync/revision",
+        Some(&t),
+        json!(null),
+    )
+    .await;
+    assert!(after["revision"].as_i64().unwrap() > sync["revision"].as_i64().unwrap());
+}
+
+#[tokio::test]
+async fn revision_never_goes_backwards() {
+    let (app, state) = app_with_state().await;
+    register(&app, "clock@example.com", "pw-clock-12").await;
+    let t = token(&app, "clock@example.com", "pw-clock-12").await;
+    let future = crate::db::now_ms() + 3_600_000;
+    sqlx::query("UPDATE users SET revision = $1 WHERE email = 'clock@example.com'")
+        .bind(future)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let vault =
+        json!({ "id": uuid::Uuid::new_v4().to_string(), "meta": "bWV0YQ", "wrapped_key": "a2V5" });
+    let (s, v) = call(&app, Method::POST, "/api/vaults", Some(&t), vault).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["revision"].as_i64().unwrap(), future + 1);
+}
+
+#[tokio::test]
+async fn rotation_rejects_duplicates_and_foreign_account_keys() {
+    let app = app().await;
+    let alice = register(&app, "rot-a@example.com", "pw-alice-1").await;
+    register(&app, "rot-b@example.com", "pw-bobby-1").await;
+    let ta = token(&app, "rot-a@example.com", "pw-alice-1").await;
+    let (s, _) = share(&app, &alice, &ta, "rot-b@example.com", "read").await;
+    assert_eq!(s, StatusCode::OK);
+    let mut ids = Vec::new();
+    for name in ["x", "y"] {
+        let (id, enc) = encrypted(&alice, name);
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            "/api/items",
+            Some(&ta),
+            json!({ "id": id, "vault_id": alice.vault_id, "key": enc.key, "data": enc.data }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        ids.push((id, enc));
+    }
+    let path = format!("/api/vaults/{}/members", alice.vault_id);
+    let (_, m) = call(&app, Method::GET, &path, Some(&ta), json!(null)).await;
+    let members: Vec<String> = m["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["user_id"].as_str().unwrap().to_owned())
+        .collect();
+    let (_, me) = call(&app, Method::GET, "/api/account", Some(&ta), json!(null)).await;
+    let me = me["user_id"].as_str().unwrap().to_owned();
+    let keys = |other_kind: &str| -> Vec<Value> {
+        members
+            .iter()
+            .map(|u| {
+                json!({
+                    "user_id": u, "wrapped_key": "a2V5",
+                    "key_kind": if *u == me { "account" } else { other_kind },
+                })
+            })
+            .collect()
+    };
+    let item = |(id, enc): &(String, EncryptedItem)| json!({ "id": id, "vault_id": alice.vault_id, "key": enc.key, "data": enc.data });
+    let rotate = format!("/api/vaults/{}/rotate", alice.vault_id);
+
+    // Item x twice, y missing: the count matches but y would be left on the old key.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &rotate,
+        Some(&ta),
+        json!({ "keys": keys("sealed"), "items": [item(&ids[0]), item(&ids[0])] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &rotate,
+        Some(&ta),
+        json!({ "keys": keys("account"), "items": [item(&ids[0]), item(&ids[1])] }),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "only the member can wrap with their account key"
+    );
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &rotate,
+        Some(&ta),
+        json!({ "keys": keys("sealed"), "items": [item(&ids[0]), item(&ids[1])], "meta": "bmV3" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, sync) = call(&app, Method::GET, "/api/sync", Some(&ta), json!(null)).await;
+    assert_eq!(
+        sync["vaults"][0]["meta"], "bmV3",
+        "meta is stored with the rotation"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_account_keeps_vaults_with_another_owner() {
+    let (app, state) = app_with_state().await;
+    let alice = register(&app, "del-a@example.com", "pw-alice-1").await;
+    register(&app, "del-b@example.com", "pw-bobby-1").await;
+    let ta = token(&app, "del-a@example.com", "pw-alice-1").await;
+    let tb = token(&app, "del-b@example.com", "pw-bobby-1").await;
+    let (s, _) = share(&app, &alice, &ta, "del-b@example.com", "admin").await;
+    assert_eq!(s, StatusCode::OK);
+    let (id, enc) = encrypted(&alice, "shared");
+    call(
+        &app,
+        Method::POST,
+        "/api/items",
+        Some(&ta),
+        json!({ "id": id, "vault_id": alice.vault_id, "key": enc.key, "data": enc.data }),
+    )
+    .await;
+    // A co-owner from before ownership grants were removed.
+    sqlx::query("UPDATE vault_members SET role = 'owner' WHERE vault_id = $1")
+        .bind(&alice.vault_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (_, before) = call(
+        &app,
+        Method::GET,
+        "/api/sync/revision",
+        Some(&tb),
+        json!(null),
+    )
+    .await;
+    let (_, me) = call(&app, Method::GET, "/api/account", Some(&ta), json!(null)).await;
+    let (s, _) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/admin/users/{}", me["user_id"].as_str().unwrap()),
+        Some("test-admin"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (_, sync) = call(&app, Method::GET, "/api/sync", Some(&tb), json!(null)).await;
+    let kept = sync["vaults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["id"] == alice.vault_id.as_str());
+    assert!(kept, "the co-owned vault survives");
+    assert_eq!(sync["items"].as_array().unwrap().len(), 1);
+    assert!(
+        sync["revision"].as_i64() > before["revision"].as_i64(),
+        "the co-owner is told to re-sync"
+    );
+}
+
+#[tokio::test]
+async fn two_factor_guessing_locks_the_account() {
+    let app = app().await;
+    register(&app, "lock@example.com", "pw-lock-123").await;
+    let t = token(&app, "lock@example.com", "pw-lock-123").await;
+    let (_, setup) = call(
+        &app,
+        Method::POST,
+        "/api/account/2fa/totp/setup",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    let totp = Totp::parse(setup["uri"].as_str().unwrap()).unwrap();
+    let now = crate::db::now() as u64;
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/account/2fa/totp/enable",
+        Some(&t),
+        json!({ "code": totp.generate(now) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let wrong = if totp.generate(now + 30) == "000000" {
+        "111111"
+    } else {
+        "000000"
+    };
+    let mut locked = false;
+    for _attempt in 0..4 {
+        let (_, l) = login(&app, "lock@example.com", "pw-lock-123", "d-lock").await;
+        let tf = l["two_factor_token"].clone();
+        for _ in 0..5 {
+            let (s, _) = call(
+                &app,
+                Method::POST,
+                "/api/auth/2fa/verify",
+                None,
+                json!({ "two_factor_token": tf, "provider": "totp", "code": wrong }),
+            )
+            .await;
+            if s == StatusCode::TOO_MANY_REQUESTS {
+                locked = true;
+                break;
+            }
+        }
+        if locked {
+            break;
+        }
+    }
+    assert!(
+        locked,
+        "fresh tokens per login must not reset the per-account limit"
+    );
+    let (_, l) = login(&app, "lock@example.com", "pw-lock-123", "d-lock").await;
+    let (s, _) = call(&app, Method::POST, "/api/auth/2fa/verify", None,
+        json!({ "two_factor_token": l["two_factor_token"], "provider": "totp", "code": totp.generate(now + 30) })).await;
+    assert_eq!(
+        s,
+        StatusCode::TOO_MANY_REQUESTS,
+        "even the right code waits out the lockout"
+    );
+}
+
+#[tokio::test]
+async fn api_errors_are_json_and_tokens_stay_out_of_urls() {
+    let app = app().await;
+    register(&app, "json@example.com", "pw-json-123").await;
+    let t = token(&app, "json@example.com", "pw-json-123").await;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/auth/prelogin")
+                .header("content-type", "application/json")
+                .body(Body::from("{not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.headers()["content-type"], "application/json");
+    let body: Value =
+        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["error"], "bad_request");
+
+    let big = "x".repeat(100 * 1024);
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/auth/prelogin",
+        None,
+        json!({ "email": big }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(v["error"], "too_large");
+
+    // Item routes still take a full-size encrypted item.
+    let (_, sync) = call(&app, Method::GET, "/api/sync", Some(&t), json!(null)).await;
+    let vault = sync["vaults"][0]["id"].as_str().unwrap();
+    let blob = "A".repeat(1024 * 1024);
+    let item = json!({
+        "id": uuid::Uuid::new_v4().to_string(), "vault_id": vault, "key": "k", "data": blob,
+    });
+    let (s, v) = call(&app, Method::POST, "/api/items", Some(&t), item).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        &format!("/api/sync?access_token={t}"),
+        None,
+        json!(null),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "query tokens only work for /api/ws"
+    );
+}
+
+#[test]
+fn client_ip_trusts_only_proxies() {
+    use axum::http::{HeaderMap, HeaderValue};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let state = rt
+        .block_on(async {
+            App::new(Config {
+                ip_header: Some("x-forwarded-for".into()),
+                ..test_config().await
+            })
+            .await
+        })
+        .unwrap();
+    let ip = |peer: &str, xff: &str| {
+        let mut h = HeaderMap::new();
+        h.insert(
+            crate::auth::PEER_IP_HEADER,
+            HeaderValue::from_str(peer).unwrap(),
+        );
+        h.insert("x-forwarded-for", HeaderValue::from_str(xff).unwrap());
+        crate::auth::client_ip(&state, &h)
+    };
+    // Behind a local proxy: the right-most untrusted hop, not the client-written first entry.
+    assert_eq!(ip("172.18.0.2", "6.6.6.6, 203.0.113.9"), "203.0.113.9");
+    assert_eq!(ip("127.0.0.1", "203.0.113.9, 10.0.0.5"), "203.0.113.9");
+    // A direct connection from the internet can't pick its own address.
+    assert_eq!(ip("198.51.100.7", "1.2.3.4"), "198.51.100.7");
+    // IPv6 is bucketed by /64.
+    assert_eq!(ip("2001:db8:1:2:aaaa::1", "x"), "2001:db8:1:2::/64");
+    assert_eq!(ip("::ffff:198.51.100.7", "1.2.3.4"), "198.51.100.7");
+}
+
+#[test]
+fn healthcheck_connects_to_the_bound_address() {
+    use crate::healthcheck_target as t;
+    assert_eq!(t(None).to_string(), "127.0.0.1:8080");
+    assert_eq!(t(Some("0.0.0.0:9000")).to_string(), "127.0.0.1:9000");
+    assert_eq!(t(Some("[::]:8080")).to_string(), "[::1]:8080");
+    assert_eq!(t(Some("10.0.0.4:8080")).to_string(), "10.0.0.4:8080");
 }

@@ -88,6 +88,7 @@ fn parse_plain(v: &Value) -> Result<ImportResult> {
             .into_iter()
             .flatten()
             .map(|h| PasswordHistory {
+                extra: Default::default(),
                 password: s(&h["password"]),
                 changed_at: 0,
             })
@@ -98,6 +99,7 @@ fn parse_plain(v: &Value) -> Result<ImportResult> {
             Some(3) => {
                 let c = &it["card"];
                 item.card = Some(Card {
+                    extra: Default::default(),
                     cardholder_name: s(&c["cardholderName"]),
                     brand: s(&c["brand"]),
                     number: s(&c["number"]),
@@ -110,6 +112,7 @@ fn parse_plain(v: &Value) -> Result<ImportResult> {
             Some(5) => {
                 let k = &it["sshKey"];
                 item.ssh_key = Some(SshKey {
+                    extra: Default::default(),
                     private_key: s(&k["privateKey"]),
                     public_key: s(&k["publicKey"]),
                     fingerprint: s(&k["keyFingerprint"]),
@@ -128,6 +131,7 @@ fn parse_plain(v: &Value) -> Result<ImportResult> {
                             for (fk, fv) in inner {
                                 if !s(fv).is_empty() {
                                     item.fields.push(Field {
+                                        extra: Default::default(),
                                         name: fk.clone(),
                                         value: s(fv),
                                         field_type: FieldType::Text,
@@ -161,6 +165,7 @@ fn field(f: &Value) -> Option<Field> {
         _ => FieldType::Text,
     };
     Some(Field {
+        extra: Default::default(),
         name: s(&f["name"]),
         value: s(&f["value"]),
         field_type,
@@ -173,6 +178,7 @@ fn login(l: &Value) -> Login {
         .into_iter()
         .flatten()
         .map(|u| LoginUrl {
+            extra: Default::default(),
             url: s(&u["uri"]),
             match_type: match u["match"].as_i64() {
                 Some(1) => UrlMatch::Host,
@@ -193,6 +199,7 @@ fn login(l: &Value) -> Login {
         .filter_map(passkey)
         .collect();
     Login {
+        extra: Default::default(),
         username: s(&l["username"]),
         password: s(&l["password"]),
         urls,
@@ -211,6 +218,7 @@ fn passkey(p: &Value) -> Option<Passkey> {
         None => URL_SAFE_NO_PAD.encode(uuid::Uuid::parse_str(&raw_id).ok()?.as_bytes()),
     };
     Some(Passkey {
+        extra: Default::default(),
         credential_id,
         rp_id: s(&p["rpId"]),
         rp_name: s(&p["rpName"]),
@@ -227,6 +235,7 @@ fn passkey(p: &Value) -> Option<Passkey> {
 
 fn identity(i: &Value) -> Identity {
     Identity {
+        extra: Default::default(),
         title: s(&i["title"]),
         first_name: s(&i["firstName"]),
         middle_name: s(&i["middleName"]),

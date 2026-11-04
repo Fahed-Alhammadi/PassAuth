@@ -172,6 +172,7 @@ fn parse_bitwarden_fields(cell: &str) -> Vec<Field> {
         .map(|l| {
             let (name, value) = l.rsplit_once(": ").unwrap_or((l, ""));
             Field {
+                extra: Default::default(),
                 name: name.to_owned(),
                 value: value.to_owned(),
                 field_type: FieldType::Text,

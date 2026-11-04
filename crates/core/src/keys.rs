@@ -109,12 +109,16 @@ impl AccountBundle {
         let id = &self.account_id;
         let account_key =
             auk.unwrap_key(&unb64(&self.wrapped_account_key)?, &aad("account-key", id))?;
-        let secret =
-            account_key.decrypt(&unb64(&self.wrapped_private_key)?, &aad("private-key", id))?;
-        let secret: [u8; 32] = secret
-            .try_into()
-            .map_err(|_| Error::Malformed("private key"))?;
-        let keypair = KeyPair::from_secret_bytes(secret);
+        let secret = zeroize::Zeroizing::new(
+            account_key.decrypt(&unb64(&self.wrapped_private_key)?, &aad("private-key", id))?,
+        );
+        let secret: zeroize::Zeroizing<[u8; 32]> = zeroize::Zeroizing::new(
+            secret
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Malformed("private key"))?,
+        );
+        let keypair = KeyPair::from_secret_bytes(*secret);
         if b64(&keypair.public_bytes()) != self.public_key {
             return Err(Error::Malformed("public key does not match private key"));
         }
@@ -189,9 +193,10 @@ impl UnlockedAccount {
 
     /// Open a vault key that another member sealed to this account's public key.
     pub fn open_shared_vault_key(&self, vault_id: &str, sealed: &str) -> Result<SymmetricKey> {
-        let raw = self
-            .keypair
-            .open(&unb64(sealed)?, &aad("shared-vault-key", vault_id))?;
+        let raw = zeroize::Zeroizing::new(
+            self.keypair
+                .open(&unb64(sealed)?, &aad("shared-vault-key", vault_id))?,
+        );
         SymmetricKey::from_slice(&raw)
     }
 }

@@ -1,7 +1,7 @@
 //! Configuration from environment variables. Any variable can also be read
 //! from a file by setting `<NAME>_FILE` (Docker secrets).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result, bail};
 
@@ -38,6 +38,9 @@ pub struct Config {
     pub web_vault_dir: Option<String>,
     /// Header holding the client IP when behind a reverse proxy.
     pub ip_header: Option<String>,
+    /// Proxies whose `ip_header` is believed (`TRUSTED_PROXIES`, IPs or CIDRs).
+    /// `None` = loopback and private-network peers, the usual reverse-proxy setups.
+    pub trusted_proxies: Option<Vec<IpNet>>,
     pub log_json: bool,
     /// `ICON_SERVICE=internal` (default) serves `/api/icons/{host}`; `off` disables it.
     pub icon_service: bool,
@@ -155,6 +158,15 @@ impl Config {
                 None
             },
             ip_header: var("IP_HEADER")?,
+            trusted_proxies: var("TRUSTED_PROXIES")?
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(|p| IpNet::parse(p).with_context(|| format!("TRUSTED_PROXIES: {p:?}")))
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?,
             log_json: var("LOG_FORMAT")?.as_deref() == Some("json"),
             icon_service,
             icon_cache_dir,
@@ -184,6 +196,7 @@ impl Config {
             smtp: None,
             web_vault_dir: None,
             ip_header: None,
+            trusted_proxies: None,
             log_json: false,
             icon_service: true,
             icon_cache_dir: None,
@@ -208,5 +221,78 @@ impl SignupPolicy {
                 || email
                     .rsplit_once('@')
                     .is_some_and(|(_, d)| self.domains.iter().any(|w| w == d)))
+    }
+}
+
+/// An IP network (`10.0.0.0/8`, `fd00::/8`) or a single address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpNet {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl IpNet {
+    pub fn parse(s: &str) -> Result<Self> {
+        let (ip, prefix) = match s.split_once('/') {
+            Some((ip, p)) => (ip, Some(p.parse::<u8>().context("prefix length")?)),
+            None => (s, None),
+        };
+        let addr: IpAddr = ip.parse().context("IP address")?;
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix.unwrap_or(max);
+        if prefix > max {
+            bail!("prefix /{prefix} is too long");
+        }
+        Ok(Self { addr, prefix })
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.addr, canonical(ip)) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                prefix_eq(&net.octets(), &ip.octets(), self.prefix)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                prefix_eq(&net.octets(), &ip.octets(), self.prefix)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// IPv4-mapped IPv6 addresses (`::ffff:1.2.3.4`) as plain IPv4.
+pub fn canonical(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        v4 => v4,
+    }
+}
+
+fn prefix_eq(a: &[u8], b: &[u8], prefix: u8) -> bool {
+    let (full, rest) = ((prefix / 8) as usize, prefix % 8);
+    if a[..full] != b[..full] {
+        return false;
+    }
+    rest == 0 || (a[full] ^ b[full]) >> (8 - rest) == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ip_networks() {
+        let net = IpNet::parse("10.1.0.0/16").unwrap();
+        assert!(net.contains("10.1.200.3".parse().unwrap()));
+        assert!(net.contains("::ffff:10.1.0.9".parse().unwrap()));
+        assert!(!net.contains("10.2.0.1".parse().unwrap()));
+        let one = IpNet::parse("2001:db8::1").unwrap();
+        assert!(one.contains("2001:db8::1".parse().unwrap()));
+        assert!(!one.contains("2001:db8::2".parse().unwrap()));
+        assert!(IpNet::parse("10.0.0.0/33").is_err());
+        assert!(
+            IpNet::parse("172.16.0.0/12")
+                .unwrap()
+                .contains("172.31.255.1".parse().unwrap())
+        );
     }
 }

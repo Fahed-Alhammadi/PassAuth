@@ -5,10 +5,10 @@
 # - Runtime is distroless (no shell, no package manager) and never runs as root:
 #   default uid/gid 1000, overridable at run time (compose `user: ${PUID}:${PGID}`).
 
-ARG RUST_VERSION=1.99
+# Base images are pinned by digest (Dependabot keeps them current).
 
 # ------------------------------------------------- core crypto → WebAssembly
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS wasm
+FROM --platform=$BUILDPLATFORM rust:1.99-slim-bookworm@sha256:ed2c95ca377d6571b124b05e75e01207973ded639dce7d5542eb7bcd797e32aa AS wasm
 RUN rustup target add wasm32-unknown-unknown
 WORKDIR /src
 COPY Cargo.lock ./
@@ -24,16 +24,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     scripts/build-wasm.sh /wasm-out
 
 # ---------------------------------------------------------------- web vault
-FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS web
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS web
 WORKDIR /web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
 COPY --from=wasm /wasm-out ./src/wasm
 RUN pnpm build
+# Pre-compressed copies next to each text asset; the server sends them to
+# browsers that accept br/gzip (the WASM shrinks from ~2 MB to ~0.7 MB).
+RUN apt-get update && apt-get install -y --no-install-recommends brotli && rm -rf /var/lib/apt/lists/* && \
+    find dist -type f -size +1k \( -name '*.js' -o -name '*.css' -o -name '*.wasm' -o -name '*.html' \
+      -o -name '*.svg' -o -name '*.json' -o -name '*.txt' -o -name '*.webmanifest' \) \
+      -exec gzip -9 -k {} + -exec brotli -q 11 -k {} +
 
 # ------------------------------------------------------------------- server
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.99-slim-bookworm@sha256:ed2c95ca377d6571b124b05e75e01207973ded639dce7d5542eb7bcd797e32aa AS builder
 ARG TARGETARCH
 ARG BUILDARCH
 RUN set -eux; \
@@ -69,7 +75,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 RUN mkdir -p /rootfs/data /rootfs/tmp && chmod 1777 /rootfs/tmp
 
 # ------------------------------------------------------------------ runtime
-FROM gcr.io/distroless/cc-debian12
+FROM gcr.io/distroless/cc-debian12@sha256:e5d81ddde149641e2a9ba55be4545bc125c67de07508b03ba4c22e6eb0ded5aa
 
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="PassAuth" \

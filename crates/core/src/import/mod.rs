@@ -127,6 +127,7 @@ pub(crate) fn login_item(
         name,
         notes: notes.to_owned(),
         login: Some(Login {
+            extra: Default::default(),
             username: username.to_owned(),
             password: password.to_owned(),
             urls,

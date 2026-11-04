@@ -4,6 +4,8 @@
 //! deterministic fake prelogin answer and the OPAQUE exchange runs against a
 //! fake record, failing only at the final step like a wrong password.
 
+use std::net::IpAddr;
+
 use axum::extract::{FromRequestParts, State};
 use axum::http::{HeaderMap, request::Parts};
 use axum::routing::post;
@@ -21,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::config::canonical;
 use crate::db::{now, now_ms};
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
@@ -63,17 +66,8 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
-        let token = bearer(&parts.headers)
-            .or_else(|| {
-                // WebSocket clients cannot set headers; accept ?access_token=.
-                parts
-                    .uri
-                    .query()?
-                    .split('&')
-                    .find_map(|kv| kv.strip_prefix("access_token="))
-                    .map(str::to_owned)
-            })
-            .ok_or(ApiError::Unauthorized)?;
+        // Header only: `?access_token=` is accepted on the WebSocket route alone (`ws::WsUser`).
+        let token = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;
         authenticate(state, &token).await
     }
 }
@@ -107,23 +101,68 @@ pub fn bearer(headers: &HeaderMap) -> Option<String> {
 /// Internal header set by the server from the TCP peer address (see `main::peer_ip`).
 pub const PEER_IP_HEADER: &str = "x-passauth-peer-ip";
 
-/// Client address for rate limiting: the configured proxy header, else the TCP peer.
+/// Client address for rate limiting.
+///
+/// The `IP_HEADER` value is believed only when the TCP peer is a trusted proxy
+/// (`TRUSTED_PROXIES`, default loopback and private networks), and then the
+/// right-most address that isn't itself a trusted proxy is used: entries to
+/// its left were written by the client and can be anything. IPv6 addresses
+/// are bucketed by /64, since one host usually controls a whole /64.
 pub fn client_ip(state: &AppState, headers: &HeaderMap) -> String {
-    let header = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty())
+    let peer: Option<IpAddr> = headers
+        .get(PEER_IP_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let trusted = |ip: IpAddr| match &state.config.trusted_proxies {
+        Some(nets) => nets.iter().any(|n| n.contains(ip)),
+        None => is_private(ip),
     };
-    state
+    let forwarded = state
         .config
         .ip_header
         .as_deref()
-        .and_then(header)
-        .or_else(|| header(PEER_IP_HEADER))
-        .unwrap_or_else(|| "direct".into())
+        .filter(|_| peer.is_some_and(trusted))
+        .and_then(|name| headers.get(name))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            let hops: Vec<IpAddr> = v.split(',').filter_map(|h| parse_hop(h.trim())).collect();
+            hops.iter()
+                .rev()
+                .find(|ip| !trusted(**ip))
+                .or(hops.first())
+                .copied()
+        });
+    forwarded.or(peer).map_or_else(|| "direct".into(), rate_key)
+}
+
+/// An address from a forwarding header: `1.2.3.4`, `1.2.3.4:567`, `[::1]:80` or `::1`.
+fn parse_hop(h: &str) -> Option<IpAddr> {
+    h.parse()
+        .ok()
+        .or_else(|| h.parse::<std::net::SocketAddr>().ok().map(|a| a.ip()))
+        .or_else(|| h.trim_start_matches('[').trim_end_matches(']').parse().ok())
+}
+
+fn is_private(ip: IpAddr) -> bool {
+    match canonical(ip) {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Rate-limit bucket for an address (IPv6 by /64).
+fn rate_key(ip: IpAddr) -> String {
+    match canonical(ip) {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
 }
 
 fn limit(state: &AppState, key: String, n: u32, window: i64) -> ApiResult<()> {
@@ -313,6 +352,10 @@ async fn register_finish(
         return Err(ApiError::bad("bundle does not match registration"));
     }
     b.bundle.kdf.validate()?;
+    let name = b.name.trim();
+    if name.chars().count() > 100 {
+        return Err(ApiError::bad("name too long"));
+    }
     let upload = RegistrationUpload::<Suite>::deserialize(&unb64(&b.upload)?)
         .map_err(|_| ApiError::bad("bad upload"))?;
     let record = b64(&ServerRegistration::<Suite>::finish(upload).serialize());
@@ -325,7 +368,7 @@ async fn register_finish(
     )
     .bind(&pending.account_id)
     .bind(&pending.email)
-    .bind(b.name.trim())
+    .bind(name)
     .bind(verified as i64)
     .bind(&record)
     .bind(serde_json::to_string(&b.bundle).map_err(anyhow::Error::from)?)
@@ -334,7 +377,7 @@ async fn register_finish(
     .bind(t)
     .execute(&mut *tx)
     .await
-    .map_err(|_| ApiError::Conflict("an account with this email already exists".into()))?;
+    .map_err(|e| ApiError::conflict_on_unique(e, "an account with this email already exists"))?;
     crate::vault::insert_vault(&mut tx, &pending.account_id, &b.vault, "owner", "account").await?;
     sqlx::query("DELETE FROM invites WHERE email = $1")
         .bind(&pending.email)
@@ -449,7 +492,11 @@ async fn login_start(
         30,
         60,
     )?;
-    limit(&state, format!("login-email:{email}"), 10, 300)?;
+    // Per (email, address), so nobody can lock an account out from elsewhere;
+    // the higher per-email ceiling still slows a distributed guesser.
+    let ip = client_ip(&state, &headers);
+    limit(&state, format!("login-email:{email}:{ip}"), 10, 300)?;
+    limit(&state, format!("login-email:{email}"), 100, 300)?;
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT id, opaque_record FROM users WHERE email = $1")
             .bind(&email)
@@ -496,6 +543,43 @@ pub struct DeviceBody {
 
 fn default_kind() -> String {
     "web".into()
+}
+
+impl DeviceBody {
+    /// Bounded, printable device details (they appear in emails and the session list).
+    fn validated(self) -> ApiResult<DeviceInfo> {
+        let clean = |s: &str, max: usize| -> String {
+            s.chars()
+                .filter(|c| !c.is_control())
+                .take(max)
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        };
+        let id = self.id.trim();
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))
+        {
+            return Err(ApiError::bad("invalid device id"));
+        }
+        let kind = self.kind.trim().to_ascii_lowercase();
+        if kind.is_empty()
+            || kind.len() > 32
+            || !kind
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+        {
+            return Err(ApiError::bad("invalid device kind"));
+        }
+        Ok(DeviceInfo {
+            id: id.to_owned(),
+            name: clean(&self.name, 100),
+            kind,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -556,11 +640,7 @@ async fn login_finish(
         return Err(ApiError::Forbidden("email_not_verified".into()));
     }
 
-    let device = DeviceInfo {
-        id: b.device.id,
-        name: b.device.name,
-        kind: b.device.kind,
-    };
+    let device = b.device.validated()?;
     let providers = twofactor::enabled_providers(&state.db, &user_id).await?;
     let remembered = match &b.remember_token {
         Some(t) => device_remembered(&state, &user_id, &device.id, t).await?,
@@ -617,17 +697,45 @@ async fn two_factor_verify(
         .two_factor
         .take(&b.two_factor_token)
         .ok_or(ApiError::bad("sign-in expired, start again"))?;
+    if twofactor::locked_out(&state.db, &pending.user_id).await? {
+        return Err(ApiError::TooManyRequests);
+    }
     if !twofactor::verify(&state.db, &pending.user_id, &b.provider, &b.code).await? {
+        if twofactor::record_failure(&state.db, &pending.user_id).await? {
+            alert_two_factor_lockout(&state, &pending.user_id).await?;
+            return Err(ApiError::TooManyRequests);
+        }
         pending.attempts += 1;
         if pending.attempts < 5 {
             state.two_factor.put_back(b.two_factor_token, pending, exp);
         }
         return Err(ApiError::bad("invalid two-factor code"));
     }
+    twofactor::clear_failures(&state.db, &pending.user_id).await?;
     let remember = b.remember.then(random_token);
     Ok(Json(
         issue_session(&state, &pending.user_id, &pending.device, remember).await?,
     ))
+}
+
+/// Tell the owner that someone with their password is guessing two-factor codes.
+async fn alert_two_factor_lockout(state: &AppState, user_id: &str) -> ApiResult<()> {
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    tracing::warn!(user = %user_id, "two-factor sign-in locked after repeated wrong codes");
+    state.mailer.send_later(
+        email,
+        Email {
+            subject: "PassAuth sign-in paused after wrong codes".into(),
+            heading: "Too many wrong two-step codes".into(),
+            body: "Someone entered your master password correctly but then the wrong two-step login code many times. Two-step sign-in is paused for an hour. If this wasn't you, change your master password now.".into(),
+            action: Some(("Review sessions".into(), format!("{}/settings/security", state.config.domain))),
+            code: None,
+        },
+    );
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -684,24 +792,18 @@ async fn issue_session(
         .bind(user_id)
         .fetch_one(&state.db)
         .await?;
-    if known == 0 {
-        sqlx::query("INSERT INTO devices (user_id, id, name, kind, created_at, last_seen) VALUES ($1, $2, $3, $4, $5, $5)")
-            .bind(user_id)
-            .bind(&device.id)
-            .bind(&device.name)
-            .bind(&device.kind)
-            .bind(t)
-            .execute(&state.db)
-            .await?;
-    } else {
-        sqlx::query("UPDATE devices SET name = $1, last_seen = $2 WHERE user_id = $3 AND id = $4")
-            .bind(&device.name)
-            .bind(t)
-            .bind(user_id)
-            .bind(&device.id)
-            .execute(&state.db)
-            .await?;
-    }
+    // Upsert: two sign-ins from one device at once must not hit the primary key.
+    sqlx::query(
+        "INSERT INTO devices (user_id, id, name, kind, created_at, last_seen) VALUES ($1, $2, $3, $4, $5, $5)
+         ON CONFLICT (user_id, id) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen",
+    )
+    .bind(user_id)
+    .bind(&device.id)
+    .bind(&device.name)
+    .bind(&device.kind)
+    .bind(t)
+    .execute(&state.db)
+    .await?;
     if let Some(r) = &remember {
         sqlx::query("UPDATE devices SET remember_hash = $1, remember_expires = $2 WHERE user_id = $3 AND id = $4")
             .bind(hash_token(r))
@@ -797,9 +899,12 @@ async fn refresh(
     .await?;
     let (id, _) = row.ok_or(ApiError::Unauthorized)?;
     let (access, refresh) = (random_token(), random_token());
-    sqlx::query(
+    // Conditional on the token presented: of two concurrent refreshes with the
+    // same token only one rotates; the other gets 401 instead of silently
+    // replacing the first one's tokens.
+    let done = sqlx::query(
         "UPDATE sessions SET access_hash = $1, access_expires = $2, prev_refresh_hash = refresh_hash,
-         refresh_hash = $3, refresh_expires = $4, last_used = $5 WHERE id = $6",
+         refresh_hash = $3, refresh_expires = $4, last_used = $5 WHERE id = $6 AND refresh_hash = $7",
     )
     .bind(hash_token(&access))
     .bind(t + ACCESS_TTL)
@@ -807,8 +912,12 @@ async fn refresh(
     .bind(t + REFRESH_TTL)
     .bind(t)
     .bind(&id)
+    .bind(&h)
     .execute(&state.db)
     .await?;
+    if done.rows_affected() != 1 {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(Json(
         json!({ "access_token": access, "refresh_token": refresh, "expires_in": ACCESS_TTL }),
     ))

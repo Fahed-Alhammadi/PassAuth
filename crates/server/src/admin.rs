@@ -15,7 +15,7 @@ use crate::config::SignupPolicy;
 use crate::db::{self, now};
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
-use crate::state::{AppState, ct_eq, normalize_email};
+use crate::state::{AppState, ct_eq, hash_token, normalize_email};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -42,16 +42,38 @@ impl FromRequestParts<AppState> for Admin {
             .admin_token
             .as_deref()
             .ok_or(ApiError::NotFound)?;
+        let given = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;
+        let digest = hash_token(&given);
+        // A token that passed the Argon2 check recently is accepted by its
+        // SHA-256, so the admin page doesn't run Argon2 on every request.
+        let cached = state
+            .admin_verified
+            .lock()
+            .expect("admin cache lock")
+            .as_ref()
+            .is_some_and(|(h, exp)| *exp > now() && ct_eq(h, &digest));
+        if cached {
+            return Ok(Admin);
+        }
         let ip = client_ip(state, &parts.headers);
-        if !state.limiter.check(&format!("admin:{ip}"), 120, 60) {
+        if !state.limiter.check(&format!("admin:{ip}"), 30, 60) {
             return Err(ApiError::TooManyRequests);
         }
-        let given = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;
-        if verify_token(configured, &given) {
-            Ok(Admin)
-        } else {
-            Err(ApiError::Unauthorized)
+        // At most two Argon2 checks at once (each allocates ~19 MiB), off the async threads.
+        let _permit = state
+            .admin_verify
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let (configured, token) = (configured.to_owned(), given);
+        let ok = tokio::task::spawn_blocking(move || verify_token(&configured, &token))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if !ok {
+            return Err(ApiError::Unauthorized);
         }
+        *state.admin_verified.lock().expect("admin cache lock") = Some((digest, now() + 600));
+        Ok(Admin)
     }
 }
 
@@ -209,27 +231,26 @@ async fn invite(
     Json(b): Json<InviteBody>,
 ) -> ApiResult<Json<Value>> {
     let email = normalize_email(&b.email);
-    if !email.contains('@') {
+    if !email.contains('@') || email.len() > 254 || email.chars().any(char::is_control) {
         return Err(ApiError::bad("invalid email address"));
     }
     let t = now();
-    sqlx::query("DELETE FROM invites WHERE email = $1")
-        .bind(&email)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("INSERT INTO invites (email, created_at, expires_at) VALUES ($1, $2, $3)")
-        .bind(&email)
-        .bind(t)
-        .bind(t + 7 * 24 * 3600)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "INSERT INTO invites (email, created_at, expires_at) VALUES ($1, $2, $3)
+         ON CONFLICT (email) DO UPDATE SET created_at = excluded.created_at, expires_at = excluded.expires_at",
+    )
+    .bind(&email)
+    .bind(t)
+    .bind(t + 7 * 24 * 3600)
+    .execute(&state.db)
+    .await?;
     state.mailer.send_later(
         email.clone(),
         Email {
             subject: "You're invited to PassAuth".into(),
             heading: "You've been invited to PassAuth".into(),
             body: "An administrator invited you to create a PassAuth account, a private, end-to-end encrypted password manager. The invitation is valid for 7 days.".into(),
-            action: Some(("Create your account".into(), format!("{}/register?email={}", state.config.domain, email))),
+            action: Some(("Create your account".into(), format!("{}/register?email={}", state.config.domain, crate::account::urlencode(&email)))),
             code: None,
         },
     );

@@ -178,9 +178,11 @@ mod tests {
                 folder: Some("Work".into()),
                 favorite: true,
                 login: Some(Login {
+                    extra: Default::default(),
                     username: "octo".into(),
                     password: "p, \"quoted\"".into(),
                     urls: vec![LoginUrl {
+                        extra: Default::default(),
                         url: "https://github.com".into(),
                         match_type: UrlMatch::Default,
                     }],

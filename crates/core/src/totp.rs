@@ -69,7 +69,8 @@ impl Totp {
         let offset = (mac[mac.len() - 1] & 0x0f) as usize;
         let bin =
             u32::from_be_bytes(mac[offset..offset + 4].try_into().expect("4 bytes")) & 0x7fff_ffff;
-        let code = bin % 10u32.pow(self.digits);
+        // u64: 10^10 (digits = 10) does not fit in a u32.
+        let code = u64::from(bin) % 10u64.pow(self.digits);
         format!("{code:0width$}", width = self.digits as usize)
     }
 
@@ -149,5 +150,15 @@ mod tests {
         assert_eq!(bare.secret, b"Hello!\xde\xad\xbe\xef");
         assert_eq!(bare.generate(0).len(), 6);
         assert!(Totp::parse("not base32 !!").is_err());
+    }
+
+    #[test]
+    fn ten_digits_do_not_overflow() {
+        let t = Totp::parse("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=10").unwrap();
+        for time in [0, 59, 1_111_111_109, 2_000_000_000] {
+            let code = t.generate(time);
+            assert_eq!(code.len(), 10);
+            assert!(code.chars().all(|c| c.is_ascii_digit()));
+        }
     }
 }
