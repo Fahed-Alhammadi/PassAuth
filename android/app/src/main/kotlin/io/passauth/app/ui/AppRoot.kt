@@ -223,6 +223,7 @@ private fun Main(ctx: UiCtx, route: Route, go: (Route) -> Unit) {
                 is Route.Settings -> when (route.section) {
                     null -> Route.Vault
                     "export" -> Route.Settings("vault")
+                    "password", "two-step" -> Route.Settings("security")
                     else -> Route.Settings()
                 }
                 else -> Route.Vault

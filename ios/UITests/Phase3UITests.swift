@@ -176,14 +176,13 @@ final class Phase3UITests: UITestBase {
 
         // Web vault shortcuts open the server in Safari with path routes.
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
-        for (page, title, path) in [("security", "Two-step login", "/settings/two-step"), ("security", "Change master password", "/settings/security"),
-                                    ("vault", "Vaults & sharing", "/settings/vaults"), ("vault", "Import items", "/import"), ("vault", "Open web vault", "/vault")] {
+        for (page, title, path) in [("vault", "Vaults & sharing", "/settings/vaults"), ("vault", "Import items", "/import"), ("vault", "Open web vault", "/vault")] {
             settingsPage(page)
             let link = app.buttons.containing(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch
             scrollTo(link)
             wait(link).tap()
             XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 20), "Safari opened for \(path)")
-            if path == "/settings/two-step" {
+            if path == "/settings/vaults" {
                 sleep(3)
                 shot("p3-14-web-vault-safari")
             }

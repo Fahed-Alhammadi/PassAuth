@@ -114,7 +114,7 @@ public struct Registered: Sendable {
 }
 
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
-private final class Session {
+final class Session {
     let accountId: String
     let account: Account
     init(accountId: String, account: Account) {
@@ -155,8 +155,8 @@ public final class VaultRepository {
     public let store: SecureStore
     public let api: ApiClient
 
-    @ObservationIgnored private let lock = AsyncLock()
-    @ObservationIgnored private var sessions: [String: Session] = [:]
+    @ObservationIgnored let lock = AsyncLock()
+    @ObservationIgnored var sessions: [String: Session] = [:]
     private var sessionIds: Set<String> = []
     @ObservationIgnored private var vaultKeys: [String: VaultKey] = [:]
     @ObservationIgnored private var pendingMaster: MasterKeys?
@@ -214,7 +214,7 @@ public final class VaultRepository {
         return st
     }
 
-    private var activeId: String { store.get().activeId }
+    var activeId: String { store.get().activeId }
 
     /// Read the stored state and, with the vault timeout "never", reopen the kept keys.
     public func start() async {
@@ -265,7 +265,7 @@ public final class VaultRepository {
 
     // MARK: Login
 
-    private var deviceInfo: JSON {
+    var deviceInfo: JSON {
         ["id": .string(store.get().file.deviceId), "name": .string("PassAuth for iOS (\(UIDevice.current.model))"), "kind": "mobile"]
     }
 
@@ -505,7 +505,7 @@ public final class VaultRepository {
         }
     }
 
-    private func openSession(_ id: String, _ session: Session) {
+    func openSession(_ id: String, _ session: Session) {
         sessions[id] = session
         sessionIds = Set(sessions.keys)
         persistForNever(id)
@@ -688,7 +688,7 @@ public final class VaultRepository {
     /// straight away: in the app the server sync then runs in the background (unlocking doesn't
     /// wait for a slow or unreachable server); the AutoFill extension (`preferCache`) shows it
     /// as offline and syncs only when needed.
-    private func syncLocked(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
+    func syncLocked(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
         let id = activeId
         guard let session = sessions[id] else { return }
         var data: Data
@@ -756,7 +756,7 @@ public final class VaultRepository {
 
     /// After a write the server already has the change: a failed follow-up sync must not report
     /// the save as failed (a retry would duplicate it). The next revision check syncs again.
-    private func syncAfterWrite() async {
+    func syncAfterWrite() async {
         do {
             try await syncLocked()
         } catch {
@@ -954,7 +954,7 @@ public final class VaultRepository {
     /// A fresh proof of the master password from the server: an OPAQUE login with
     /// `purpose: "reauth"` on the signed-in session (the web vault's `reauth`). The token is
     /// good for one sensitive request within five minutes.
-    private func reauthToken(_ id: String, password: String, secretKey: String?) async throws -> String {
+    func reauthToken(_ id: String, password: String, secretKey: String?) async throws -> String {
         let s = store.get()
         guard let a = s.file.accounts[id], s.tokens(id) != nil else { throw UserError("Sign in first.") }
         let typed = secretKey?.trimmingCharacters(in: .whitespacesAndNewlines)

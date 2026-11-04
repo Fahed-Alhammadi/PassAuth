@@ -7,6 +7,12 @@ public struct ApiError: Error, LocalizedError, Sendable {
     public let code: String
     public let message: String
     public var errorDescription: String? { message }
+
+    public init(status: Int, code: String, message: String) {
+        self.status = status
+        self.code = code
+        self.message = message
+    }
 }
 
 /// A user-facing error from the app itself (shown as is).

@@ -227,12 +227,16 @@ private struct SecurityPage: View {
         }
         .paRow()
         Section {
-            WebLink(title: "Two-step login", help: "Authenticator app, email codes and recovery codes.", path: "/settings/two-step")
-            WebLink(title: "Change master password", help: "Also turns the Secret Key on or off.", path: "/settings/security")
+            NavigationLink { ChangePasswordPage() } label: {
+                PageRow(title: "Change master password", help: "Also turns the Secret Key on or off.", symbol: "key")
+            }
+            .accessibilityIdentifier("settings.changePassword")
+            NavigationLink { TwoStepPage() } label: {
+                PageRow(title: "Two-step login", help: "Authenticator app, email codes and recovery codes.", symbol: "lock.rotation")
+            }
+            .accessibilityIdentifier("settings.twoStep")
         } header: {
-            Text("In the web vault")
-        } footer: {
-            Text("These open your web vault in the browser. Sign in there if it asks.")
+            Text("Master password and sign-in")
         }
         .paRow()
     }
@@ -251,6 +255,24 @@ private struct SecurityPage: View {
             guard await BiometryKind.confirm(reason: "Turn on \(bio.name) unlock for PassAuth") else { return }
             try await model.repo.enableBiometric()
             model.notify("\(bio.name) unlock is on.")
+        }
+    }
+}
+
+/// A settings row that opens a page: icon, title and a line of help.
+private struct PageRow: View {
+    let title: String
+    let help: String
+    let symbol: String
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(Color.paInk)
+                Text(help).font(.footnote).foregroundStyle(Color.paMuted)
+            }
+        } icon: {
+            Image(systemName: symbol).foregroundStyle(Color.paAccent)
         }
     }
 }

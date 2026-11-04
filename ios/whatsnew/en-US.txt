@@ -1,0 +1,5 @@
+New in 0.5.1
+• Change your master password in the app: Settings → Account security → Master password. You can also turn your Secret Key on or off there. A new Secret Key is shown once, with an Emergency Kit to save.
+• Set up two-step login in the app: an authenticator app (QR code or setup key) or email codes. Recovery codes are shown once to save.
+• Make new recovery codes or turn a method off after confirming your master password.
+Please test: change the password, then lock and unlock (including Face ID), and AutoFill. Turn on the authenticator app, then sign out and sign in again with a code.

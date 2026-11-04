@@ -827,35 +827,82 @@ class VaultRepository(
         val s = store.get()
         val a = s.accounts[id]?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
         val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
-        val pre = api.call(id, "/auth/prelogin", body = buildJsonObject { put("email", a.email) }, auth = false).jsonObject
-        val skRequired = pre.bool("secret_key_required")
-        if (skRequired && sk == null) throw UserException(SECRET_KEY_REQUIRED)
-        val master = core { deriveMasterKeys(password, if (skRequired) sk else null, pre.str("account_id"), pre["kdf"].toString(), skRequired) }
-        try {
-            val start = core { opaqueLoginStart(master) }
-            val resp = api.call(
-                id, "/auth/login/start", auth = false,
-                body = buildJsonObject { put("email", a.email); put("message", start.message) },
-            ).jsonObject
-            val fin = try {
-                core { opaqueLoginFinish(start.state, master, resp.str("message")) }
-            } catch (_: CoreException) {
-                throw UserException("Wrong master password or Secret Key.")
-            }
-            val result = api.call(
-                id, "/auth/login/finish",
-                body = buildJsonObject {
-                    put("login_id", resp.str("login_id"))
-                    put("message", fin)
-                    put("device", deviceInfo())
-                    put("purpose", "reauth")
-                },
-            ).jsonObject
-            return result.strOrNull("reauth_token") ?: throw UserException("Your server didn't confirm the master password. Try again.")
-        } finally {
-            master.destroy()
+        return withContext(Dispatchers.Default) { security(id).reauth(a.email, password, sk) }
+    }
+
+    /** Account security requests of account [id]; [account] (unlocked) is needed only to re-wrap its key. */
+    private suspend fun security(id: String, account: Account? = null) = AccountSecurity(
+        { path, body, method, auth, headers -> api.call(id, path, body, method, auth, headers) },
+        CoreSecurityCrypto(account),
+        deviceInfo(),
+    )
+
+    private fun requireOnlineFor(what: String) {
+        if (_vault.value?.offline == true) throw UserException("You're offline. $what needs your server.")
+    }
+
+    /**
+     * Change the master password and/or the Secret Key setting of the active account
+     * (the web vault's `changeKeys`). Returns a newly created Secret Key (show it once).
+     *
+     * Afterwards this device keeps working with the new password: the stored bundle and
+     * Secret Key are replaced at once (see [afterKeyChange]), so the next unlock — here,
+     * in autofill and in the passkey provider — uses them. The unlocked session, biometric
+     * unlock and "never" keys hold the account key, which a re-wrap doesn't change, so they
+     * stay valid. A sync then refreshes the offline copy (it carries the bundle too).
+     * The server signs out every other device.
+     */
+    suspend fun changeMasterPassword(current: String, new: String, choice: SecretKeyChoice, secretKey: String?): String? = mutex.withLock {
+        val s = store.get()
+        val id = s.activeId
+        val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+        val session = sessions[id] ?: throw UserException("Unlock your vault first.")
+        requireOnlineFor("Changing your master password")
+        val bundle = a.bundle ?: throw UserException("Sync your vault first.")
+        val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        val change = withContext(Dispatchers.Default) {
+            security(id, session.account).changeKeys(a.email, bundle, current, new, choice, sk)
+        }
+        // First thing after the server accepted it: the old bundle no longer matches the server.
+        store.update { it.afterKeyChange(id, change) }
+        persistForNever(id)
+        syncAfterWrite()
+        change.secretKey
+    }
+
+    /** Two-step login methods and recovery codes of the active account (GET /account). */
+    suspend fun securityStatus(): SecurityStatus = security(activeId()).status()
+
+    suspend fun totpSetup(): TotpSetup = security(activeId()).totpSetup()
+
+    suspend fun totpEnable(code: String): List<String>? = security(activeId()).totpEnable(code)
+
+    suspend fun emailTwoFactorSetup() = security(activeId()).emailSetup()
+
+    suspend fun emailTwoFactorEnable(code: String): List<String>? = security(activeId()).emailEnable(code)
+
+    /** New recovery codes after re-authentication (the current ones stop working). */
+    suspend fun regenerateRecoveryCodes(password: String, secretKey: String?): List<String> = mutex.withLock {
+        val s = store.get()
+        val id = s.activeId
+        val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+        val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        withContext(Dispatchers.Default) { security(id).regenerateRecoveryCodes(a.email, password, sk) }
+    }
+
+    /** Turn off a two-step method after re-authentication. */
+    suspend fun disableTwoFactor(provider: String, password: String, secretKey: String?) {
+        mutex.withLock {
+            val s = store.get()
+            val id = s.activeId
+            val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+            val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+            withContext(Dispatchers.Default) { security(id).disable(provider, a.email, password, sk) }
         }
     }
+
+    /** The active account's Secret Key kept on this device (for its Emergency Kit), if any. */
+    suspend fun storedSecretKey(): String? = store.get().let { s -> s.active?.let { s.secretKeys[it.email.lowercase()] } }
 
     /**
      * Delete the active account on the server (with every vault it owns), after
@@ -867,7 +914,7 @@ class VaultRepository(
             val s = store.get()
             val id = s.activeId
             val a = s.active ?: throw UserException("Sign in first.")
-            if (_vault.value?.offline == true) throw UserException("You're offline. Deleting your account needs your server.")
+            requireOnlineFor("Deleting your account")
             val token = reauthToken(id, password, secretKey)
             api.call(id, "/account", method = "DELETE", headers = mapOf("x-reauth-token" to token))
             // The server has ended every session of this account: no remote logout.

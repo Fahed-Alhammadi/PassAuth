@@ -375,7 +375,7 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
         TextInput(email, { email = it }, "Email", keyboardType = KeyboardType.Email)
         TextInput(name, { name = it }, "Your name")
         PasswordField(password, { password = it; hint = false }, "Master password", imeAction = ImeAction.Next)
-        StrengthMeter(password)
+        StrengthMeter(password, master = true)
         PasswordField(confirm, { confirm = it }, "Confirm master password", imeAction = ImeAction.Next)
         Alert("Your master password can't be reset. If you forget it, the data in your vault can't be recovered by anyone, including the server administrator.")
         CheckRow(
@@ -408,16 +408,24 @@ private fun emergencyKit(server: String, email: String, secretKey: String) = lis
     "",
 ).joinToString("\n")
 
-/** Password strength from the core's estimate (bits of entropy), same thresholds as the web vault's meter. */
+/**
+ * Password strength from the core's estimate (bits of entropy). [master]: the web vault's
+ * master password meter (Weak below 50 bits, Fair 50–64, Good 65–79, Strong from 80);
+ * otherwise the generator's (Weak below 40, Fair below 60).
+ */
 @Composable
-fun StrengthMeter(password: String) {
+fun StrengthMeter(password: String, master: Boolean = false) {
     if (password.isEmpty()) return
     val bits = remember(password) { estimateBits(password) }
-    val (label, level) = when {
-        bits < 40 -> "Weak" to 1
-        bits < 60 -> "Fair" to 2
-        bits < 80 -> "Good" to 3
-        else -> "Strong" to 4
+    val (label, level) = if (master) {
+        io.passauth.app.data.MasterPasswordRules.strength(bits).let { it.label to it.level }
+    } else {
+        when {
+            bits < 40 -> "Weak" to 1
+            bits < 60 -> "Fair" to 2
+            bits < 80 -> "Good" to 3
+            else -> "Strong" to 4
+        }
     }
     val color = when (level) {
         1 -> MaterialTheme.colorScheme.error
