@@ -9,16 +9,19 @@ import java.util.Locale
  * "exact" and "starts with").
  */
 object UrlMatcher {
-    // Common multi-label public suffixes. Not the full Public Suffix List: for hosts
-    // under other multi-label suffixes "domain" matching falls back to the last two
-    // labels, which can over-match. Use "host" matching on such items.
-    private val MULTI = setOf(
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp",
-        "com.br", "com.cn", "com.hk", "com.sg", "com.tr", "com.mx", "com.ar", "co.in", "co.za", "co.kr",
-        "com.sa", "net.sa", "gov.sa", "co.ae", "gov.ae", "com.eg", "com.qa", "com.kw", "com.bh", "com.om",
-        "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "herokuapp.com", "azurewebsites.net",
-        "cloudfront.net", "appspot.com", "web.app", "firebaseapp.com",
-    )
+    // "domain" matching uses the shared suffix list in [PublicSuffixes]. It is not the full
+    // Public Suffix List: hosts under an unlisted multi-label suffix fall back to the last
+    // two labels, which can over-match. Use "host" matching on such items.
+
+    /** Longest regex pattern PassAuth evaluates (patterns come from shared vaults too). */
+    const val MAX_REGEX_LENGTH = 300
+
+    /**
+     * Patterns likely to backtrack catastrophically: a quantified group that itself
+     * contains a quantifier, e.g. "(a+)+" or "(.*a){10}". They are not evaluated.
+     */
+    fun unsafeRegex(pattern: String): Boolean =
+        pattern.length > MAX_REGEX_LENGTH || Regex("""\([^)]*[+*}][^)]*\)\s*[+*{]""").containsMatchIn(pattern)
 
     private val DEFAULT_PORTS = mapOf("http" to 80, "https" to 443, "ws" to 80, "wss" to 443, "ftp" to 21)
 
@@ -64,9 +67,11 @@ object UrlMatcher {
         val h = host.lowercase(Locale.ROOT).removeSuffix(".")
         if (h.all { it.isDigit() || it == '.' } || h.contains(':') || !h.contains('.')) return h
         val labels = h.split('.')
-        val last2 = labels.takeLast(2).joinToString(".")
-        if (last2 in MULTI && labels.size >= 3) return labels.takeLast(3).joinToString(".")
-        return last2
+        val suffix = PublicSuffixes.suffixOf(h)
+        if (suffix.isEmpty()) return labels.takeLast(2).joinToString(".")
+        // One label more than the public suffix ("home.duckdns.org"); a bare suffix stays as it is.
+        val n = suffix.count { it == '.' } + 2
+        return labels.takeLast(minOf(n, labels.size)).joinToString(".")
     }
 
     /** Does the page URL match a saved website? `fallback` resolves "default" (the user's setting). */
@@ -76,8 +81,11 @@ object UrlMatcher {
         val match = if (item.match == UrlMatch.Default) fallback else item.match
         if (match == UrlMatch.Never || match == UrlMatch.Default) return false
         if (match == UrlMatch.Regex) {
+            if (unsafeRegex(item.url)) return false
+            // Only the page's origin and path (no query or fragment, so "?bank.com" can't satisfy it).
+            val path = runCatching { URI(p.href).rawPath }.getOrNull()?.ifEmpty { "/" } ?: "/"
             return try {
-                Regex(item.url, RegexOption.IGNORE_CASE).containsMatchIn(page)
+                Regex(item.url, RegexOption.IGNORE_CASE).containsMatchIn((p.origin + path).take(2048))
             } catch (_: Exception) {
                 false
             }

@@ -212,8 +212,10 @@ class CredentialActivity : ServiceActivity() {
 
     private suspend fun assert(option: GetPublicKeyCredentialOption, options: GetOptions, checked: CheckedOrigin, p: Passkey) {
         val cdj = passkeyClientDataJson("webauthn.get", options.challenge, checked.origin)
-        // Browsers send the hash of their own clientDataJSON; apps don't, so it's built here.
-        val hash = option.clientDataHash ?: sha256(cdj.encodeToByteArray())
+        // Privileged browsers send the hash of their own clientDataJSON (with the web origin they vouch for).
+        // An app's hash is never trusted: it could cover a clientDataJSON claiming a web origin, so the
+        // signature always covers ours, with the checked `android:apk-key-hash:` origin.
+        val hash = option.clientDataHash?.takeIf { !checked.app } ?: sha256(cdj.encodeToByteArray())
         val a = withContext(Dispatchers.Default) { passkeyAssert(B64Url.decode(p.privateKey), checked.rpId, hash) }
         val json = WebAuthn.authenticationResponse(p, cdj, a.authenticatorData, a.signature)
         val r = Intent()

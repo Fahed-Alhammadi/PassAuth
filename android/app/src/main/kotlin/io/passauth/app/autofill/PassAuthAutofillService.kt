@@ -1,6 +1,7 @@
 package io.passauth.app.autofill
 
 import android.os.CancellationSignal
+import android.os.SystemClock
 import android.service.autofill.AutofillService
 import android.service.autofill.FillCallback
 import android.service.autofill.FillRequest
@@ -15,6 +16,7 @@ import io.passauth.app.graph
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Android autofill service: fills logins of the active account into apps and
@@ -30,9 +32,11 @@ class PassAuthAutofillService : AutofillService() {
 
     override fun onFillRequest(request: FillRequest, cancellationSignal: CancellationSignal, callback: FillCallback) {
         val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess(null)
+        val started = SystemClock.elapsedRealtime()
         val job: Job = graph.scope.launch {
             try {
-                callback.onSuccess(respond(request, StructureParser.parse(structure)))
+                // Android drops replies after about 5 s: answer in time, even if only with "PassAuth is locked".
+                callback.onSuccess(withTimeoutOrNull(HARD_LIMIT_MS) { respond(request, StructureParser.parse(structure), started) })
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -43,7 +47,7 @@ class PassAuthAutofillService : AutofillService() {
         cancellationSignal.setOnCancelListener { job.cancel() }
     }
 
-    private suspend fun respond(request: FillRequest, parsed: ParsedStructure): FillResponse? {
+    private suspend fun respond(request: FillRequest, parsed: ParsedStructure, started: Long): FillResponse? {
         val form = parsed.form
         if (form.isEmpty) return null
         val target = engine.target(parsed) ?: return null
@@ -57,7 +61,10 @@ class PassAuthAutofillService : AutofillService() {
             null
         }
         val ui = AutofillResponses(this, request.inlineSuggestionsRequest)
-        val vault = graph.awaitVault()
+        // Whatever is left of the time budget; if the vault isn't ready by then, offer the unlock entry
+        // (its activity returns the logins straight away when the vault turns out to be unlocked).
+        val left = (VAULT_DEADLINE_MS - (SystemClock.elapsedRealtime() - started)).coerceAtLeast(MIN_VAULT_WAIT_MS)
+        val vault = withTimeoutOrNull(left) { graph.awaitVault() }
         val b = FillResponse.Builder()
         if (vault == null) {
             // Locked: the user unlocks in PassAuth, which then returns the matching logins.
@@ -106,5 +113,8 @@ class PassAuthAutofillService : AutofillService() {
 
     private companion object {
         const val TAG = "PassAuthAutofill"
+        const val VAULT_DEADLINE_MS = 3_500L
+        const val MIN_VAULT_WAIT_MS = 250L
+        const val HARD_LIMIT_MS = 4_500L
     }
 }

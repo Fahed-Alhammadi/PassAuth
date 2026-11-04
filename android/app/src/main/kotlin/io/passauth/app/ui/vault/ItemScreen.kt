@@ -354,7 +354,7 @@ private fun MoveDialog(ctx: UiCtx, entry: Entry, from: String, targets: List<Vau
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(t.name, style = MaterialTheme.typography.bodyLarge)
-                            Text(roleLabel(t.role), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+                            Text(roleLabel(t), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
                         }
                     }
                 }
@@ -383,8 +383,8 @@ private fun MoveDialog(ctx: UiCtx, entry: Entry, from: String, targets: List<Vau
     )
 }
 
-private fun roleLabel(r: Role) = when (r) {
-    Role.Owner -> "Your vault"
+private fun roleLabel(v: io.passauth.app.data.VaultInfo) = when (v.role) {
+    Role.Owner -> if (v.personal) "Your vault" else "Shared with you · you own it"
     Role.Admin -> "Shared with you · you manage it"
     Role.Write -> "Shared with you · you can edit"
     Role.Read -> "Shared with you · view only"

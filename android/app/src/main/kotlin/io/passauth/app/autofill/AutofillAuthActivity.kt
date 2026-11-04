@@ -105,7 +105,12 @@ class AutofillAuthActivity : ServiceActivity() {
     }
 
     private suspend fun save(vault: VaultData) {
-        val p = intent.getStringExtra(EXTRA_KEY)?.let(AutofillEngine::takePendingSave) ?: return cancel()
+        val p = intent.getStringExtra(EXTRA_KEY)?.let(AutofillEngine::takePendingSave)
+        if (p == null) {
+            // The login waited in memory only (never in the intent) and is gone: the app restarted or it expired.
+            toast("PassAuth couldn't save this login. Sign in again to save it.")
+            return cancel()
+        }
         try {
             engine.save(vault, p.target, p.username, p.password, p.appLabel)?.let(::toast)
         } catch (e: Exception) {

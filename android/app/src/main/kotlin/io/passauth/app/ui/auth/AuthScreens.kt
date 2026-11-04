@@ -26,6 +26,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Fingerprint
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -490,6 +491,7 @@ fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth", embedded: Boolea
         }
     }
     LaunchedEffect(Unit) { if (canBio) biometric() }
+    var confirmLogout by remember { mutableStateOf(false) }
 
     AuthFrame(title, state.email) {
         PasswordField(
@@ -509,8 +511,28 @@ fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth", embedded: Boolea
             }
         }
         // Started from autofill or a passkey request: no logging out here.
-        if (!embedded) TextButton(onClick = { ctx.launch { ctx.repo.logout() } }) { Text("Log out") }
+        if (!embedded) TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
         OtherAccounts(ctx)
+    }
+    if (confirmLogout) {
+        val many = state.accounts.size > 1
+        AlertDialog(
+            onDismissRequest = { confirmLogout = false },
+            title = { Text("Log out of ${state.email}?") },
+            text = {
+                Text(
+                    if (many) "This account, its offline copy and biometric unlock are removed from this device. Your vault stays on your server."
+                    else "You'll need your master password to sign in again. Your vault stays on your server.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLogout = false
+                    ctx.launch { ctx.repo.logout() }
+                }) { Text("Log out", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
+        )
     }
 }
 

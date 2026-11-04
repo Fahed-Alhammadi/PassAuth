@@ -77,7 +77,26 @@ data class Entry(
 
 enum class Role { Owner, Admin, Write, Read }
 
-data class VaultInfo(val id: String, val name: String, val role: Role)
+/**
+ * A vault the active account can open. [keyKind] is `account` for a vault key
+ * wrapped with this account's own key (only this account can have made it) and
+ * `sealed` for a key someone shared with it.
+ */
+data class VaultInfo(val id: String, val name: String, val role: Role, val keyKind: String = KEY_KIND_ACCOUNT) {
+    val personal: Boolean get() = keyKind == KEY_KIND_ACCOUNT
+
+    companion object {
+        const val KEY_KIND_ACCOUNT = "account"
+
+        /**
+         * Where new items go when the user didn't pick a vault (autofill saves, passkeys,
+         * the editor's default): the account's own vault, never a vault someone else shared,
+         * so another user (or the server) can't make itself the place new logins land.
+         */
+        fun defaultSaveVault(vaults: List<VaultInfo>): VaultInfo? =
+            vaults.firstOrNull { it.personal && it.role == Role.Owner } ?: vaults.firstOrNull { it.personal && it.role != Role.Read }
+    }
+}
 
 /** The unlocked vault of the active account. */
 data class VaultData(
@@ -92,6 +111,7 @@ data class VaultData(
     fun vaultName(id: String) = vaults.firstOrNull { it.id == id }?.name ?: "Vault"
     fun canWrite(e: Entry) = vaults.firstOrNull { it.id == e.vaultId }?.role != Role.Read
     val writable: List<VaultInfo> get() = vaults.filter { it.role != Role.Read }
+    val defaultVault: VaultInfo? get() = VaultInfo.defaultSaveVault(vaults)
 }
 
 sealed interface LoginResult {
@@ -375,7 +395,7 @@ class VaultRepository(
                 store.update { it.copy(secretKeys = it.secretKeys + (a.email.lowercase() to sk)) }
             }
             openSession(id, Session(b.str("account_id"), account))
-            syncLocked(fallbackToCache = true)
+            syncLocked(fallbackToCache = true, cacheFirst = true)
         }
     }
 
@@ -414,7 +434,7 @@ class VaultRepository(
                 bytes.fill(0)
             }
             openSession(id, Session(bundleAccountId(bundle), account))
-            syncLocked(fallbackToCache = true)
+            syncLocked(fallbackToCache = true, cacheFirst = true)
         }
     }
 
@@ -435,7 +455,7 @@ class VaultRepository(
                 restored = true
             }
         }
-        if (restored && sessions.containsKey(s.activeId)) syncLocked(fallbackToCache = true)
+        if (restored && sessions.containsKey(s.activeId)) syncLocked(fallbackToCache = true, cacheFirst = true)
         restored
     }
 
@@ -528,7 +548,7 @@ class VaultRepository(
         // Drop an unfinished "add account" record.
         val unfinished = s.active?.let { !isListed(it) } ?: false
         store.update { st -> st.copy(activeId = id, accounts = if (unfinished) st.accounts - st.activeId else st.accounts) }
-        if (sessions.containsKey(id)) syncLocked(fallbackToCache = true)
+        if (sessions.containsKey(id)) syncLocked(fallbackToCache = true, cacheFirst = true)
     }
 
     private fun isListed(a: AccountData) = a.server.isNotEmpty() && a.email.isNotEmpty()
@@ -593,13 +613,28 @@ class VaultRepository(
     /** Ask the server whether this session still exists: an ended one signs the account out (refresh fails). */
     suspend fun checkSession() = refreshIfStale()
 
-    private suspend fun syncLocked(fallbackToCache: Boolean = false) {
+    /**
+     * Fetch and decrypt the active account's vault. With [fallbackToCache] an
+     * unreachable server shows the on-device copy (offline). With [cacheFirst]
+     * the on-device copy is shown straight away and the server is asked in the
+     * background, so unlocking doesn't wait for a slow or unreachable server.
+     */
+    private suspend fun syncLocked(fallbackToCache: Boolean = false, cacheFirst: Boolean = false) {
         val id = activeId()
         val session = sessions[id] ?: return
+        if (cacheFirst) {
+            val cached = withContext(Dispatchers.IO) { store.readCache(id) }
+            if (cached != null && runCatching { publish(id, session, cached, fromServer = false, offline = false) }.isSuccess) {
+                scope.launch { backgroundSync(id, session) }
+                return
+            }
+        }
         val (json, offline) = try {
-            api.call(id, "/sync").toString() to false
+            api.callText(id, "/sync") to false
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            val cached = if (fallbackToCache) store.readCache(id) else null
+            val cached = if (fallbackToCache) withContext(Dispatchers.IO) { store.readCache(id) } else null
             if (cached == null) {
                 if (fallbackToCache && e !is ApiException) {
                     _vault.value = VaultData(offline = true)
@@ -609,11 +644,35 @@ class VaultRepository(
             }
             cached to true
         }
+        publish(id, session, json, fromServer = !offline, offline = offline)
+    }
+
+    /** The server sync after a cache-first unlock; an unreachable server leaves the copy marked offline. */
+    private suspend fun backgroundSync(id: String, session: Session) = mutex.withLock {
+        if (sessions[id] !== session || activeId() != id) return@withLock
+        try {
+            syncLocked()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            if (sessions[id] === session && activeId() == id) _vault.value = _vault.value?.copy(offline = true)
+        }
+    }
+
+    /** Parse, decrypt and show a `/sync` response (off the main thread); a server response also refreshes the cache. */
+    private suspend fun publish(id: String, session: Session, json: String, fromServer: Boolean, offline: Boolean) {
         if (sessions[id] !== session) return
-        val data = AppJson.parseToJsonElement(json).jsonObject
-        val (next, keys) = core { decryptVault(session.account, data) }
-        if (!offline) {
-            store.writeCache(id, json)
+        val (data, decrypted) = core {
+            val data = AppJson.parseToJsonElement(json).jsonObject
+            data to decryptVault(session.account, data)
+        }
+        val (next, keys) = decrypted
+        if (sessions[id] !== session) {
+            keys.values.forEach { it.destroy() }
+            return
+        }
+        if (fromServer) {
+            withContext(Dispatchers.IO) { store.writeCache(id, json) }
             store.updateAccount(id) {
                 it.copy(
                     lastSync = System.currentTimeMillis(),
@@ -625,6 +684,20 @@ class VaultRepository(
         vaultKeys.values.forEach { it.destroy() }
         vaultKeys = keys
         _vault.value = next.copy(offline = offline)
+    }
+
+    /**
+     * After a write the server already has the change: a failed follow-up sync must not
+     * report the save as failed (a retry would duplicate it). The next revision check syncs.
+     */
+    private suspend fun syncAfterWrite() {
+        try {
+            syncLocked()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _vault.value = _vault.value?.copy(offline = true)
+        }
     }
 
     private fun decryptVault(account: Account, data: JsonObject): Pair<VaultData, Map<String, VaultKey>> {
@@ -647,7 +720,7 @@ class VaultRepository(
                 else -> Role.Read
             }
             keys[vid] = key
-            vaults += VaultInfo(vid, name, role)
+            vaults += VaultInfo(vid, name, role, o.str("key_kind").ifEmpty { VaultInfo.KEY_KIND_ACCOUNT })
         }
         val entries = mutableListOf<Entry>()
         for (row in (data["items"] as? JsonArray).orEmpty()) {
@@ -671,8 +744,7 @@ class VaultRepository(
     private fun now() = System.currentTimeMillis() / 1000
 
     private fun writableVault(v: VaultData): VaultInfo =
-        v.vaults.firstOrNull { it.role == Role.Owner } ?: v.vaults.firstOrNull { it.role != Role.Read }
-            ?: throw UserException("You don't have a vault you can save to.")
+        v.defaultVault ?: throw UserException("Your own vault isn't available. Choose a vault to save to.")
 
     private fun requireVault() = _vault.value ?: throw UserException("Your vault is locked.")
 
@@ -689,7 +761,7 @@ class VaultRepository(
         val id = core { newId() }
         val enc = core { key.encryptItem(ItemCodec.encode(item.copy(createdAt = t, updatedAt = t)), id, target.id) }
         api.call(activeId(), "/items", body = enc.toJson())
-        syncLocked()
+        syncAfterWrite()
         id
     }
 
@@ -719,10 +791,10 @@ class VaultRepository(
             try {
                 api.call(activeId(), "/items/${entry.id}", body = body, method = "PUT")
             } catch (e: ApiException) {
-                if (e.status == 409) throw UserException("This item was changed on another device. Sync and try again.")
+                if (e.status == 409) throw ConflictException()
                 throw e
             }
-            syncLocked()
+            syncAfterWrite()
         }
     }
 
@@ -740,7 +812,7 @@ class VaultRepository(
             requireOnline(v)
             if (!v.canWrite(entry)) throw UserException("You can only view items in this vault.")
             api.call(activeId(), "/items/${entry.id}", method = "DELETE")
-            syncLocked()
+            syncAfterWrite()
         }
     }
 

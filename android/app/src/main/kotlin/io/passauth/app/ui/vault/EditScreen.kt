@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -28,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,6 +41,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.data.Card
+import io.passauth.app.data.ConflictException
+import io.passauth.app.data.UserException
 import io.passauth.app.data.Field
 import io.passauth.app.data.FieldType
 import io.passauth.app.data.Identity
@@ -86,20 +90,34 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
     val current = id?.let { v.get(it) }
     val entry = remember(id, current == null) { current }
     val done = { to: String? -> ctx.go(if (to != null) Route.ItemView(to) else Route.Vault) }
-    if (id != null && (current == null || entry == null)) return run { done(null) }
+    // Live sync can remove the item while it's open: say so instead of closing silently.
+    val gone = id != null && (current == null || entry == null)
+    LaunchedEffect(gone) {
+        if (gone) {
+            ctx.notify("This item was deleted on another device.")
+            done(null)
+        }
+    }
+    if (gone) return
 
     // Saved as JSON so edits survive rotation.
     var json by rememberSaveable { mutableStateOf(ItemCodec.encode(entry?.item ?: Item.empty(kind ?: ItemKind.Login))) }
     val item = remember(json) { ItemCodec.decode(json) }
-    fun set(next: Item) { json = ItemCodec.encode(next) }
+    fun set(next: Item) {
+        json = ItemCodec.encode(next)
+        // Typing doesn't reach onUserInteraction: count it as activity for the vault timeout.
+        ctx.graph.lock.touch()
+    }
     fun login(f: (Login) -> Login) = set(item.copy(login = f(item.login!!)))
     fun card(f: (Card) -> Card) = set(item.copy(card = f(item.card!!)))
     fun identity(f: (Identity) -> Identity) = set(item.copy(identity = f(item.identity!!)))
     fun ssh(f: (SshKey) -> SshKey) = set(item.copy(sshKey = f(item.sshKey!!)))
 
     val writable = v.writable
-    var vaultId by rememberSaveable { mutableStateOf(entry?.vaultId ?: writable.firstOrNull()?.id.orEmpty()) }
+    // New items go to the account's own vault unless the user picks another one.
+    var vaultId by rememberSaveable { mutableStateOf(entry?.vaultId ?: v.defaultVault?.id.orEmpty()) }
     var busy by remember { mutableStateOf(false) }
+    var conflict by remember { mutableStateOf<Item?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     val label = item.kind.label.lowercase()
 
@@ -107,7 +125,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
         if (busy) return
         error = null
         if (item.name.isBlank()) return run { error = "Give this item a name." }
-        if (vaultId.isEmpty()) return run { error = "You don't have a vault you can write to." }
+        if (vaultId.isEmpty()) return run { error = if (writable.isEmpty()) "You don't have a vault you can write to." else "Choose a vault for this item." }
         val clean = item.copy(
             name = item.name.trim(),
             folder = item.folder?.trim()?.ifEmpty { null },
@@ -125,11 +143,52 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                     ctx.notify("Item saved.")
                     done(newId)
                 }
+            } catch (e: ConflictException) {
+                conflict = clean
+                busy = false
             } catch (e: Exception) {
                 error = errorMessage(e)
                 busy = false
             }
         }
+    }
+
+    /** "Keep mine": save these edits over the newer version (after fetching it, for its revision). */
+    fun keepMine(mine: Item) {
+        val original = entry ?: return
+        conflict = null
+        busy = true
+        ctx.scope.launch {
+            try {
+                ctx.repo.sync()
+                val latest = ctx.repo.vault.value?.get(original.id) ?: throw UserException("This item was deleted on another device.")
+                ctx.repo.updateItem(latest, mine.copy(passwordHistory = latest.item.passwordHistory))
+                ctx.notify("Changes saved.")
+                done(original.id)
+            } catch (e: ConflictException) {
+                conflict = mine
+                busy = false
+            } catch (e: Exception) {
+                error = errorMessage(e)
+                busy = false
+            }
+        }
+    }
+
+    conflict?.let { mine ->
+        AlertDialog(
+            onDismissRequest = { conflict = null },
+            title = { Text("This item changed on another device") },
+            text = { Text("Keep your changes to replace the other version, or discard them and use the other version.") },
+            confirmButton = { TextButton(onClick = { keepMine(mine) }) { Text("Keep my version") } },
+            dismissButton = {
+                TextButton(onClick = {
+                    conflict = null
+                    ctx.launch { ctx.repo.sync() }
+                    done(entry?.id)
+                }) { Text("Use the other version") }
+            },
+        )
     }
 
     Scaffold(
@@ -277,7 +336,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                         suggestions.take(8).forEach { f -> AssistChip(onClick = { set(item.copy(folder = f)) }, label = { Text(f) }) }
                     }
                 }
-                if (entry == null && writable.size > 1) {
+                if (entry == null && (writable.size > 1 || vaultId.isEmpty() && writable.isNotEmpty())) {
                     SelectField("Vault", writable.map { it.id to it.name }, vaultId, { vaultId = it })
                 }
                 ToggleRow("Favorite", item.favorite, { set(item.copy(favorite = it)) })

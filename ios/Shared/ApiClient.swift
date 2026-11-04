@@ -50,7 +50,11 @@ public final class ApiClient {
     /// An API call (`path` below `/api`) as JSON.
     public func call(_ accountId: String, _ path: String, body: JSON? = nil, method: String? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> JSON {
         let data = try await callData(accountId, path, body: body, method: method, auth: auth, headers: headers)
-        return data.isEmpty ? .null : try JSON.parse(data)
+        if data.isEmpty { return .null }
+        guard let j = try? JSON.parse(data) else {
+            throw ApiError(status: 200, code: "not_passauth", message: "That address doesn't look like a PassAuth server.")
+        }
+        return j
     }
 
     /// An API call returning the raw response body (`/sync` is cached as received).
@@ -154,11 +158,10 @@ public final class ApiClient {
         }
     }
 
+    /// Success bodies are returned as received: [call] parses them once, and `/sync` (often
+    /// megabytes) is decoded off the main thread by the repository instead of being parsed here too.
     private func check(_ data: Data, _ res: HTTPURLResponse) throws -> Data {
         if (200..<300).contains(res.statusCode) {
-            if !data.isEmpty, (try? JSON.parse(data)) == nil {
-                throw ApiError(status: res.statusCode, code: "not_passauth", message: "That address doesn't look like a PassAuth server.")
-            }
             return data
         }
         let j = try? JSON.parse(data)

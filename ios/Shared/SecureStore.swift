@@ -60,21 +60,50 @@ public final class SecureStore {
             persist(file: true, secrets: true)
             return
         }
-        var s = readDisk() ?? Stored()
+        var s: Stored
+        switch readState() {
+        case .ok(let disk): s = disk
+        case .unavailable:
+            // The Keychain or the file can't be read right now (not "empty"): stay unloaded and
+            // retry later ([reload] on the next activation), instead of starting from an empty
+            // state that the next change would write over the real one.
+            loaded = false
+            return
+        case .corrupt: s = Stored()
+        }
         if s.file.deviceId.isEmpty { s.file.deviceId = UUID().uuidString.lowercased() }
         stored = s
     }
 
-    /// The state as currently on disk (nil if the state file can't be read).
-    private func readDisk() -> Stored? {
-        guard let blob = try? Data(contentsOf: stateURL), let plain = open(blob, aad: "state"),
-              let f = try? JSONDecoder().decode(StoredFile.self, from: plain) else { return nil }
+    private enum DiskRead {
+        case ok(Stored)
+        /// Can't be read now (Keychain refused, file protected): try again later.
+        case unavailable
+        /// Readable but not decodable with this device's key.
+        case corrupt
+    }
+
+    private func readState() -> DiskRead {
+        guard let blob = try? Data(contentsOf: stateURL) else { return .unavailable }
+        guard let k = storeKey() else { return .unavailable }
+        guard let plain = open(blob, aad: "state", key: k),
+              let f = try? JSONDecoder().decode(StoredFile.self, from: plain) else { return .corrupt }
         var s = Stored()
         s.file = f
-        if let d = Keychain.read("secrets"), let sec = try? JSONDecoder().decode(Secrets.self, from: d) {
+        switch Keychain.lookup("secrets") {
+        case .found(let d):
+            guard let sec = try? JSONDecoder().decode(Secrets.self, from: d) else { return .corrupt }
             s.secrets = sec
+        case .notFound: break
+        case .failed: return .unavailable
         }
-        return s
+        return .ok(s)
+    }
+
+    /// The state as currently on disk (nil if it can't be read completely right now).
+    private func readDisk() -> Stored? {
+        if case .ok(let s) = readState() { return s }
+        return nil
     }
 
     /// Pick up changes the other process (app or extension) made, e.g. rotated tokens.
@@ -90,8 +119,10 @@ public final class SecureStore {
     /// Change the stored state; writes only the parts that changed.
     @discardableResult
     public func update(_ transform: (inout Stored) -> Void) -> Stored {
-        // Nothing to write to before the app has set up its state.
+        // Nothing to write to before the app has set up its state, and never before it was
+        // read: an unread (empty) state would replace the real one.
         guard role == .app || exists else { return stored }
+        guard loaded || !exists else { return stored }
         // Read-modify-write under the cross-process lock. Without the lock (timeout) the
         // change is still made from the freshest state read.
         let lock = FileLock.acquireSync(lockURL)
@@ -146,6 +177,33 @@ public final class SecureStore {
         return open(blob, aad: "vault:\(id)")
     }
 
+    /// [writeCache] off the main thread (sealing and writing a large `/sync` copy takes a while).
+    public func writeCacheInBackground(_ id: String, _ json: Data) async {
+        guard let k = storeKey() else { return }
+        let keyData = k.withUnsafeBytes { Data($0) }
+        let url = cacheURL(id), dir = cacheDir, aad = Data("vault:\(id)".utf8)
+        await Task.detached(priority: .utility) {
+            guard let blob = try? ChaChaPoly.seal(json, using: SymmetricKey(data: keyData), authenticating: aad).combined else { return }
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+            try? blob.write(to: url, options: [.atomic, .completeFileProtection])
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var u = url
+            try? u.setResourceValues(values)
+        }.value
+    }
+
+    /// [readCache] off the main thread.
+    public func readCacheInBackground(_ id: String) async -> Data? {
+        guard let k = storeKey() else { return nil }
+        let keyData = k.withUnsafeBytes { Data($0) }
+        let url = cacheURL(id), aad = Data("vault:\(id)".utf8)
+        return await Task.detached(priority: .userInitiated) { () -> Data? in
+            guard let blob = try? Data(contentsOf: url), let box = try? ChaChaPoly.SealedBox(combined: blob) else { return nil }
+            return try? ChaChaPoly.open(box, using: SymmetricKey(data: keyData), authenticating: aad)
+        }.value
+    }
+
     public func deleteCache(_ id: String) {
         try? FileManager.default.removeItem(at: cacheURL(id))
     }
@@ -154,9 +212,16 @@ public final class SecureStore {
 
     private func storeKey() -> SymmetricKey? {
         if let key { return key }
-        if let d = Keychain.read("storeKey"), d.count == 32 {
+        switch Keychain.lookup("storeKey") {
+        case .found(let d) where d.count == 32:
             key = SymmetricKey(data: d)
-        } else if role == .appExtension {
+            return key
+        case .failed:
+            // Couldn't read it now: never replace it (a new key would make every file unreadable).
+            return nil
+        default: break
+        }
+        if role == .appExtension {
             // Only the app creates the key (a new one would make the app's files unreadable).
             return nil
         } else {
@@ -173,8 +238,8 @@ public final class SecureStore {
         return try? ChaChaPoly.seal(plain, using: k, authenticating: Data(aad.utf8)).combined
     }
 
-    private func open(_ blob: Data, aad: String) -> Data? {
-        guard let k = storeKey(), let box = try? ChaChaPoly.SealedBox(combined: blob) else { return nil }
+    private func open(_ blob: Data, aad: String, key k: SymmetricKey? = nil) -> Data? {
+        guard let k = k ?? storeKey(), let box = try? ChaChaPoly.SealedBox(combined: blob) else { return nil }
         return try? ChaChaPoly.open(box, using: k, authenticating: Data(aad.utf8))
     }
 

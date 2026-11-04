@@ -69,7 +69,8 @@ private val LightScheme = lightColorScheme(
 
 private val DarkScheme = darkColorScheme(
     primary = Color(0xFF3B8CFA),
-    onPrimary = Color.White,
+    // Dark text on the bright accent: white on #3B8CFA is only 3.3:1, this is 5.7:1.
+    onPrimary = Color(0xFF0A1120),
     primaryContainer = Color(0xFF1C2633),
     onPrimaryContainer = Color(0xFF8EC2FF),
     secondary = Color(0xFF8EC2FF),

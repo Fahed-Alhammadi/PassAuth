@@ -52,8 +52,10 @@ class AppGraph(app: Application) {
      */
     suspend fun awaitVault(): VaultData? {
         withTimeoutOrNull(3_000) { restoreJob?.join() }
-        val state = withTimeoutOrNull(3_000) { repo.state.first { it.loaded } } ?: return null
-        if (state.status != Status.Unlocked) return null
+        val loaded = withTimeoutOrNull(3_000) { repo.state.first { it.loaded } } ?: return null
+        if (loaded.status != Status.Unlocked) return null
+        // The vault timeout may have passed while the device slept.
+        if (lock.enforce()) return null
         return repo.vault.value ?: withTimeoutOrNull(5_000) { repo.vault.filterNotNull().first() }
     }
 }
@@ -66,6 +68,7 @@ class PassAuthApp : Application() {
         super.onCreate()
         graph = AppGraph(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(graph.lock)
+        graph.lock.watchScreen(this)
         // Vault timeout "never": stay unlocked across app restarts.
         graph.restoreJob = graph.scope.launch { runCatching { graph.repo.restorePersisted() } }
     }

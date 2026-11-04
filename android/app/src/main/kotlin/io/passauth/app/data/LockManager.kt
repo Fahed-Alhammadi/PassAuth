@@ -1,22 +1,65 @@
 package io.passauth.app.data
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.SystemClock
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
  * Vault timeout, like the extension: lock (or log out) every account after the
  * chosen minutes without use, as soon as the app leaves the screen
  * ("Immediately"), only when the app process restarts, or never.
+ *
+ * The coroutine timer uses a clock that stops while the device sleeps, so it is
+ * only a convenience: [enforce] (elapsed real time, sleep included) is checked
+ * whenever the vault is used (app start, autofill and passkey services) and when
+ * the screen turns on.
  */
 class LockManager(private val repo: VaultRepository, private val scope: CoroutineScope) : DefaultLifecycleObserver {
     private var lastActivity = SystemClock.elapsedRealtime()
     private var timer: Job? = null
     private var systemScreenUntil = 0L
+
+    init {
+        // Unlocking counts as activity (e.g. from an autofill unlock screen, long after the last touch).
+        scope.launch {
+            repo.state.map { it.status == Status.Unlocked }.distinctUntilChanged().collect { if (it) touch() }
+        }
+    }
+
+    /** Check the timeout when the screen turns on (the device may have slept past it). */
+    fun watchScreen(context: Context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                scope.launch { enforce() }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    /**
+     * Lock (or log out) now if the vault timeout has passed, before the caller
+     * reads the vault. Uses elapsed real time, which keeps counting in deep sleep.
+     */
+    suspend fun enforce(): Boolean {
+        if (!expired()) return false
+        timer?.cancel()
+        lockNow()
+        return true
+    }
 
     /** Call on user interaction. */
     fun touch() {
@@ -74,12 +117,14 @@ class LockManager(private val repo: VaultRepository, private val scope: Coroutin
 
     private fun fire() {
         timer?.cancel()
+        scope.launch { lockNow() }
+    }
+
+    private suspend fun lockNow() {
         val s = repo.state.value
         if (s.accounts.none { it.status == Status.Unlocked } && s.status != Status.Unlocked) return
-        scope.launch {
-            runCatching {
-                if (s.settings.timeoutAction == TimeoutAction.Logout) repo.logoutAll() else repo.lockAll()
-            }
+        runCatching {
+            if (s.settings.timeoutAction == TimeoutAction.Logout) repo.logoutAll() else repo.lockAll()
         }
     }
 }

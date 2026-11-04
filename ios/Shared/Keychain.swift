@@ -51,13 +51,34 @@ public enum Keychain {
         return q
     }
 
-    public static func read(_ account: String) -> Data? {
+    /// The outcome of a Keychain read: "not there" and "couldn't read it now" are different
+    /// things (a failed read must never be treated as an empty item and written back).
+    public enum ReadResult: Sendable, Equatable {
+        case found(Data)
+        case notFound
+        /// The Keychain refused the read (e.g. errSecInteractionNotAllowed while the device is locked).
+        case failed(OSStatus)
+    }
+
+    public static func lookup(_ account: String) -> ReadResult {
         var q = base(service, account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
-        return out as? Data
+        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        switch status {
+        case errSecSuccess:
+            guard let d = out as? Data else { return .failed(errSecDecode) }
+            return .found(d)
+        case errSecItemNotFound: return .notFound
+        default: return .failed(status)
+        }
+    }
+
+    /// The item's data, or nil if it's missing or can't be read (use [lookup] to tell them apart).
+    public static func read(_ account: String) -> Data? {
+        if case .found(let d) = lookup(account) { return d }
+        return nil
     }
 
     @discardableResult
@@ -126,7 +147,8 @@ public enum Keychain {
         case errSecSuccess:
             guard let d = out as? Data else { return .failed("Biometric unlock failed.") }
             return .ok(d)
-        case errSecUserCanceled: return .cancelled
+        // The prompt can't be shown right now (the app isn't on screen): nothing to report, try again later.
+        case errSecUserCanceled, errSecInteractionNotAllowed: return .cancelled
         case errSecItemNotFound: return .invalidated
         case errSecAuthFailed: return .failed("Biometric unlock failed. Unlock with your master password.")
         default: return .failed("Biometric unlock failed (error \(status)).")

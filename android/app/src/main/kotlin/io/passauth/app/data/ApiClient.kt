@@ -27,7 +27,20 @@ import okhttp3.Response
 class ApiException(val status: Int, val code: String, message: String) : Exception(message)
 
 /** A user-facing error from the app itself (shown as is). */
-class UserException(message: String) : Exception(message)
+open class UserException(message: String) : Exception(message)
+
+/** An item update was rejected because the item changed elsewhere (HTTP 409 on a revision check). */
+class ConflictException : UserException("This item was changed on another device.")
+
+/** Outcome of a refresh-token rotation. Only [Rejected] ends the session. */
+enum class RefreshResult { Refreshed, Rejected, Unavailable }
+
+/** Classifies a refresh response status: the server only rejects a refresh token with 400/401/403. */
+fun refreshOutcome(status: Int): RefreshResult = when {
+    status in 200..299 -> RefreshResult.Refreshed
+    status == 400 || status == 401 || status == 403 -> RefreshResult.Rejected
+    else -> RefreshResult.Unavailable
+}
 
 /**
  * HTTP client for PassAuth servers: bearer auth, refresh-token rotation on 401
@@ -44,7 +57,7 @@ class ApiClient(private val store: SecureStore) {
     /** Called when an account's session can't be refreshed (it is signed out). */
     var onSessionLost: suspend (accountId: String) -> Unit = {}
 
-    private val refreshing = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val refreshing = ConcurrentHashMap<String, CompletableDeferred<RefreshResult>>()
     private val jsonType = "application/json".toMediaType()
 
     suspend fun call(
@@ -54,7 +67,26 @@ class ApiClient(private val store: SecureStore) {
         method: String = if (body == null) "GET" else "POST",
         auth: Boolean = true,
         headers: Map<String, String> = emptyMap(),
-    ): JsonElement {
+    ): JsonElement = parse(respond(accountId, path, body, method, auth, headers))
+
+    /**
+     * Like [call] for a large GET response kept as text (`/sync`, which is cached as is):
+     * the body isn't parsed here, so it's parsed only once, by the caller, off the main thread.
+     */
+    suspend fun callText(accountId: String, path: String): String {
+        val res = respond(accountId, path, null, "GET", true, emptyMap())
+        if (!res.isSuccessful) parse(res) // throws the server's error
+        return withContext(Dispatchers.IO) { res.use { it.body.string() } }
+    }
+
+    private suspend fun respond(
+        accountId: String,
+        path: String,
+        body: JsonElement?,
+        method: String,
+        auth: Boolean,
+        headers: Map<String, String>,
+    ): Response {
         suspend fun send(): Response {
             val a = store.get().accounts[accountId]
             val server = a?.server?.takeIf { it.isNotEmpty() } ?: throw UserException("Set your PassAuth server address first.")
@@ -70,53 +102,64 @@ class ApiClient(private val store: SecureStore) {
         var res = send()
         if (res.code == 401 && auth) {
             res.close()
-            if (refresh(accountId)) {
-                res = send()
-            } else {
-                store.updateAccount(accountId) { it.copy(tokens = null) }
-                onSessionLost(accountId)
-                throw ApiException(401, "unauthorized", "Your session ended. Sign in again.")
+            when (refresh(accountId)) {
+                RefreshResult.Refreshed -> res = send()
+                RefreshResult.Rejected -> {
+                    store.updateAccount(accountId) { it.copy(tokens = null) }
+                    onSessionLost(accountId)
+                    throw ApiException(401, "unauthorized", "Your session ended. Sign in again.")
+                }
+                // Network error, 5xx or 429: keep the tokens, the next request retries.
+                RefreshResult.Unavailable -> throw UserException(UNREACHABLE)
             }
         }
-        return parse(res)
+        return res
     }
 
     /** Request against a server URL directly (server setup check). */
     suspend fun get(url: String): Response = execute(Request.Builder().url(url).build())
 
-    private suspend fun refresh(accountId: String): Boolean {
-        val mine = CompletableDeferred<Boolean>()
+    private suspend fun refresh(accountId: String): RefreshResult {
+        val mine = CompletableDeferred<RefreshResult>()
         val running = refreshing.putIfAbsent(accountId, mine)
         if (running != null) return running.await()
-        val ok = try {
+        val result = try {
             val a = store.get().accounts[accountId]
             val tokens = a?.tokens
             if (a == null || tokens == null) {
-                false
+                RefreshResult.Rejected
             } else {
                 val body = buildJsonObject { put("refresh_token", tokens.refresh) }
                 val res = execute(
                     Request.Builder().url("${a.server}/api/auth/refresh")
                         .post(body.toString().toRequestBody(jsonType)).build(),
                 )
-                if (!res.isSuccessful) {
-                    res.close()
-                    false
-                } else {
-                    val j = parse(res).jsonObject
-                    store.updateAccount(accountId) {
-                        it.copy(tokens = Tokens(j.str("access_token"), j.str("refresh_token")))
+                when (val outcome = refreshOutcome(res.code)) {
+                    RefreshResult.Refreshed -> {
+                        val j = parse(res).jsonObject
+                        store.updateAccount(accountId) {
+                            it.copy(tokens = Tokens(j.str("access_token"), j.str("refresh_token")))
+                        }
+                        outcome
                     }
-                    true
+                    else -> {
+                        res.close()
+                        outcome
+                    }
                 }
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Don't sign anyone out because this caller was cancelled; waiters retry later.
+            refreshing.remove(accountId)
+            mine.complete(RefreshResult.Unavailable)
+            throw e
         } catch (_: Exception) {
-            false
+            RefreshResult.Unavailable
         } finally {
             refreshing.remove(accountId)
         }
-        mine.complete(ok)
-        return ok
+        mine.complete(result)
+        return result
     }
 
     /** Best-effort sign-out with an account's own server and token. */
@@ -134,7 +177,7 @@ class ApiClient(private val store: SecureStore) {
     private suspend fun execute(req: Request): Response = try {
         http.newCall(req).await()
     } catch (e: IOException) {
-        throw UserException("Can't reach your PassAuth server. Check the server address and your connection.")
+        throw UserException(UNREACHABLE)
     }
 
     private suspend fun parse(res: Response): JsonElement = withContext(Dispatchers.IO) {
@@ -157,6 +200,8 @@ class ApiClient(private val store: SecureStore) {
         }
     }
 }
+
+const val UNREACHABLE = "Can't reach your PassAuth server. Check the server address and your connection."
 
 private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
     enqueue(object : Callback {

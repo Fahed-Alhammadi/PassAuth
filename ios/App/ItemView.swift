@@ -258,7 +258,9 @@ private struct TotpRow: View {
                     Text("Verification code").font(.caption).foregroundStyle(Color.paMuted)
                     if let c {
                         Text(c.code.count == 6 ? "\(c.code.prefix(3)) \(c.code.suffix(3))" : c.code)
-                            .font(.system(size: 26, weight: .semibold, design: .monospaced))
+                            .speechSpellsOutCharacters()
+                            // Scales with Dynamic Type (the code matters most at large text sizes).
+                            .font(.system(.title, design: .monospaced, weight: .semibold))
                             .foregroundStyle(Color.paAccent)
                             .accessibilityIdentifier("totpCode")
                     } else {
@@ -415,7 +417,7 @@ private struct MoveSheet: View {
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(t.name).foregroundStyle(Color.paInk)
-                                    Text(roleLabel(t.role)).font(.footnote).foregroundStyle(Color.paMuted)
+                                    Text(roleLabel(t)).font(.footnote).foregroundStyle(Color.paMuted)
                                 }
                                 Spacer()
                                 if t.id == selected { Image(systemName: "checkmark").foregroundStyle(Color.paAccent).fontWeight(.semibold) }
@@ -473,9 +475,9 @@ private struct MoveSheet: View {
     }
 }
 
-func roleLabel(_ r: Role) -> String {
-    switch r {
-    case .owner: "Your vault"
+func roleLabel(_ v: VaultInfo) -> String {
+    switch v.role {
+    case .owner: v.personal ? "Your vault" : "Shared with you · you own it"
     case .admin: "Shared with you · you manage it"
     case .write: "Shared with you · you can edit"
     case .read: "Shared with you · view only"

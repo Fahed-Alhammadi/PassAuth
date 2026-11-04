@@ -4,16 +4,18 @@ import Foundation
 /// Android app's `UrlMatcher`), with the same semantics, including WHATWG-style URL
 /// normalisation for "exact" and "starts with".
 public enum UrlMatcher {
-    // Common multi-label public suffixes. Not the full Public Suffix List: for hosts under
-    // other multi-label suffixes "domain" matching falls back to the last two labels, which
-    // can over-match. Use "host" matching on such items.
-    static let multi: Set<String> = [
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "ne.jp", "or.jp",
-        "com.br", "com.cn", "com.hk", "com.sg", "com.tr", "com.mx", "com.ar", "co.in", "co.za", "co.kr",
-        "com.sa", "net.sa", "gov.sa", "co.ae", "gov.ae", "com.eg", "com.qa", "com.kw", "com.bh", "com.om",
-        "github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "herokuapp.com", "azurewebsites.net",
-        "cloudfront.net", "appspot.com", "web.app", "firebaseapp.com",
-    ]
+    // "domain" matching uses the shared suffix list in [PublicSuffixes]. It is not the full
+    // Public Suffix List: hosts under an unlisted multi-label suffix fall back to the last two
+    // labels, which can over-match. Use "host" matching on such items.
+
+    /// Longest regex pattern PassAuth evaluates (patterns come from shared vaults too).
+    public static let maxRegexLength = 300
+
+    /// Patterns likely to backtrack catastrophically: a quantified group that itself contains a
+    /// quantifier, e.g. "(a+)+" or "(.*a){10}". They are not evaluated.
+    public static func unsafeRegex(_ pattern: String) -> Bool {
+        pattern.count > maxRegexLength || pattern.range(of: #"\([^)]*[+*}][^)]*\)\s*[+*{]"#, options: .regularExpression) != nil
+    }
 
     static let defaultPorts: [String: Int] = ["http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21]
 
@@ -101,9 +103,11 @@ public enum UrlMatcher {
         if h.hasSuffix(".") { h.removeLast() }
         if h.allSatisfy({ $0.isNumber || $0 == "." }) || h.contains(":") || !h.contains(".") { return h }
         let labels = h.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        let last2 = labels.suffix(2).joined(separator: ".")
-        if multi.contains(last2) && labels.count >= 3 { return labels.suffix(3).joined(separator: ".") }
-        return last2
+        let suffix = PublicSuffixes.suffix(of: h)
+        if suffix.isEmpty { return labels.suffix(2).joined(separator: ".") }
+        // One label more than the public suffix ("home.duckdns.org"); a bare suffix stays as it is.
+        let n = suffix.split(separator: ".").count + 1
+        return labels.suffix(min(n, labels.count)).joined(separator: ".")
     }
 
     /// Does the page URL match a saved website? `fallback` resolves "default" (the user's setting).
@@ -112,8 +116,10 @@ public enum UrlMatcher {
         let match = item.match == .default ? fallback : item.match
         if match == .never || match == .default { return false }
         if match == .regex {
-            guard let re = try? NSRegularExpression(pattern: item.url, options: [.caseInsensitive]) else { return false }
-            return re.firstMatch(in: page, range: NSRange(page.startIndex..., in: page)) != nil
+            guard !unsafeRegex(item.url), let re = try? NSRegularExpression(pattern: item.url, options: [.caseInsensitive]) else { return false }
+            // Only the page's origin and path (no query or fragment, so "?bank.com" can't satisfy it).
+            let target = String((p.origin + (p.path.isEmpty ? "/" : p.path)).prefix(2048))
+            return re.firstMatch(in: target, range: NSRange(target.startIndex..., in: target)) != nil
         }
         guard let u = parse(item.url) else { return false }
         switch match {

@@ -25,6 +25,7 @@ struct SetupView: View {
     @State private var url = ""
     @State private var busy = false
     @State private var error: String?
+    @State private var lanHost: String?
 
     var body: some View {
         AuthFrame(title: "Connect to your PassAuth server") {
@@ -37,14 +38,26 @@ struct SetupView: View {
             OtherAccounts()
         }
         .onAppear { if url.isEmpty { url = initial } }
+        .alert("Use plain http?", isPresented: Binding(get: { lanHost != nil }, set: { if !$0 { lanHost = nil } })) {
+            Button("Connect anyway", role: .destructive) { connect(allowLanHttp: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(lanHost ?? "This server") isn't using https. Anyone on this network could read your sign-in and change what the server sends. Only continue on a network you trust, such as a test server at home.")
+        }
     }
 
-    private func submit() {
+    private func submit() { connect(allowLanHttp: false) }
+
+    private func connect(allowLanHttp: Bool) {
         guard !busy, !url.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         busy = true
         error = nil
         Task {
-            do { try await model.repo.setServer(url) } catch { self.error = errorMessage(error) }
+            do {
+                try await model.repo.setServer(url, allowLanHttp: allowLanHttp)
+            } catch let e as PlainHttpConfirmation {
+                lanHost = e.host
+            } catch { self.error = errorMessage(error) }
             busy = false
         }
     }
@@ -320,6 +333,8 @@ struct RegisterView: View {
 
 struct UnlockView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var confirmLogout = false
     @State private var password = ""
     @State private var secretKey = ""
     @State private var busy = false
@@ -342,16 +357,26 @@ struct UnlockView: View {
                 }
                 .buttonStyle(.bordered).controlSize(.large).disabled(busy)
             }
-            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Log out", role: .destructive) { confirmLogout = true }
             OtherAccounts()
         }
-        .task {
-            // Offer Face ID / Touch ID right away, once.
-            if canBio && !triedBiometric {
-                triedBiometric = true
-                try? await Task.sleep(for: .milliseconds(350))
-                biometric()
-            }
+        .confirmationDialog("Log out of \(state.email)?", isPresented: $confirmLogout, titleVisibility: .visible) {
+            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(state.accounts.count > 1
+                ? "This account, its offline copy and Face ID unlock are removed from this device. Your vault stays on your server."
+                : "You'll need your master password to sign in again. Your vault stays on your server.")
+        }
+        // Offer Face ID / Touch ID right away, once, and only while the app is on screen (with
+        // "Immediately" the vault locks as the app goes to the background, where the Keychain
+        // refuses the biometric read).
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active, canBio, !triedBiometric else { return }
+            triedBiometric = true
+            try? await Task.sleep(for: .milliseconds(350))
+            guard scenePhase == .active else { triedBiometric = false; return }
+            biometric(auto: true)
         }
     }
 
@@ -369,13 +394,17 @@ struct UnlockView: View {
         }
     }
 
-    private func biometric() {
+    private func biometric() { biometric(auto: false) }
+
+    private func biometric(auto: Bool) {
         guard !busy else { return }
         busy = true
         error = nil
         Task {
             do {
-                _ = try await model.repo.unlockWithBiometric(reason: "Unlock PassAuth")
+                let done = try await model.repo.unlockWithBiometric(reason: "Unlock PassAuth")
+                // Not shown (the app left the screen meanwhile): offer it again when it's back.
+                if !done && auto && scenePhase != .active { triedBiometric = false }
             } catch { self.error = errorMessage(error) }
             busy = false
         }

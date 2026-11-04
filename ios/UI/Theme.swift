@@ -13,6 +13,9 @@ extension Color {
     }
 
     static let paAccent = dyn(0x0866ED, 0x3B8CFA)
+    /// Fill behind white text (filled buttons): the brand blue in both modes, since white on the
+    /// lighter dark-mode accent is only 3.3:1 (this is 4.9:1).
+    static let paAccentFill = Color(uiColor: UIColor(hex: 0x0866ED))
     static let paAccentInk = dyn(0x0553C9, 0x8EC2FF)
     static let paAccentSoft = dyn(0xE7F0FE, 0x1C2633)
     static let paBackground = dyn(0xF2F2F7, 0x000000)
@@ -349,7 +352,7 @@ struct PrimaryButton: View {
             .frame(maxWidth: .infinity, minHeight: 30)
         }
         .buttonStyle(.borderedProminent)
-        .tint(Color.paAccent)
+        .tint(Color.paAccentFill)
         .controlSize(.large)
         .disabled(!enabled || busy)
     }

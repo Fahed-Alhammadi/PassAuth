@@ -317,7 +317,8 @@ private struct GenerateScreen: View {
                 .accessibilityIdentifier("generateType")
             }
             Text(current?.value ?? "")
-                .font(.system(size: 20, design: .monospaced))
+                .speechSpellsOutCharacters()
+                .font(.system(.title3, design: .monospaced))
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .padding(14)

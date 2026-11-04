@@ -91,7 +91,7 @@ struct EditView: View {
                                 .padding(.bottom, 6)
                         }
                     }
-                    if entry == nil, let writable = v?.writable, writable.count > 1 {
+                    if entry == nil, let writable = v?.writable, writable.count > 1 || (vaultId.isEmpty && !writable.isEmpty) {
                         Picker("Vault", selection: $vaultId) {
                             ForEach(writable) { Text($0.name).tag($0.id) }
                         }
@@ -133,8 +133,12 @@ struct EditView: View {
                 Text("Saving now would overwrite those changes. Keep your version, or discard your edits and use the version from the other device.")
             }
             .onAppear {
-                if vaultId.isEmpty { vaultId = v?.writable.first(where: { $0.role == .owner })?.id ?? v?.writable.first?.id ?? "" }
+                // New items go to the account's own vault unless the user picks another one.
+                if vaultId.isEmpty { vaultId = v?.defaultVault?.id ?? "" }
             }
+            // Typing happens in the keyboard's window, which the activity recognizer doesn't see:
+            // count edits as activity for the vault timeout.
+            .onChange(of: item) { model.lockManager.touch() }
         }
     }
 
@@ -278,7 +282,10 @@ struct EditView: View {
         guard !busy else { return }
         error = nil
         if item.name.trimmingCharacters(in: .whitespaces).isEmpty { error = "Give this item a name."; return }
-        if entry == nil && vaultId.isEmpty { error = "You don't have a vault you can write to."; return }
+        if entry == nil && vaultId.isEmpty {
+            error = (model.repo.vault?.writable.isEmpty ?? true) ? "You don't have a vault you can write to." : "Choose a vault for this item."
+            return
+        }
         let clean = cleaned()
         busy = true
         Task {

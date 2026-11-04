@@ -55,14 +55,29 @@ public struct Entry: Identifiable, Sendable {
 public enum Role: String, Sendable { case owner, admin, write, read }
 
 public struct VaultInfo: Identifiable, Equatable, Sendable {
+    public static let accountKeyKind = "account"
+
     public let id: String
     public let name: String
     public let role: Role
+    /// `account`: the vault key is wrapped with this account's own key (only this account can
+    /// have made it). `sealed`: someone shared the vault with this account.
+    public let keyKind: String
 
-    public init(id: String, name: String, role: Role) {
+    public init(id: String, name: String, role: Role, keyKind: String = VaultInfo.accountKeyKind) {
         self.id = id
         self.name = name
         self.role = role
+        self.keyKind = keyKind
+    }
+
+    public var personal: Bool { keyKind == Self.accountKeyKind }
+
+    /// Where new items go when the user didn't pick a vault (AutoFill saves, passkeys, the
+    /// editor's default): the account's own vault, never one someone else shared, so another
+    /// user (or the server) can't make itself the place new logins land.
+    public static func defaultSaveVault(_ vaults: [VaultInfo]) -> VaultInfo? {
+        vaults.first { $0.personal && $0.role == .owner } ?? vaults.first { $0.personal && $0.role != .read }
     }
 }
 
@@ -83,6 +98,7 @@ public struct VaultData: Sendable {
 
     public func get(_ id: String) -> Entry? { entries.first { $0.id == id } ?? trash.first { $0.id == id } }
     public func vaultName(_ id: String) -> String { vaults.first { $0.id == id }?.name ?? "Vault" }
+    public var defaultVault: VaultInfo? { VaultInfo.defaultSaveVault(vaults) }
     public func canWrite(_ e: Entry) -> Bool { vaults.first { $0.id == e.vaultId }.map { $0.role != .read } ?? false }
     public var writable: [VaultInfo] { vaults.filter { $0.role != .read } }
 }
@@ -209,8 +225,13 @@ public final class VaultRepository {
     // MARK: Server
 
     /// Connect the active account record (created if needed) to a server.
-    public func setServer(_ url: String) async throws {
+    /// `allowLanHttp`: the user confirmed plain http to a local-network address (only loopback
+    /// is accepted without asking, as anyone on the network could read or change the traffic).
+    public func setServer(_ url: String, allowLanHttp: Bool = false) async throws {
         let origin = try Self.normalizeServer(url)
+        if !allowLanHttp, Self.plainHttpOnNetwork(origin), let host = UrlMatcher.parse(origin)?.hostname {
+            throw PlainHttpConfirmation(host: host)
+        }
         guard let config = URL(string: origin + "/api/config") else { throw UserError("That isn't a valid server address.") }
         let ok: Bool
         do {
@@ -410,7 +431,7 @@ public final class VaultRepository {
                 store.update { $0.secrets.secretKeys[a.email.lowercased()] = sk }
             }
             openSession(id, Session(accountId: accountId, account: account))
-            try await syncLocked(fallbackToCache: true, cacheFirst: preferCache)
+            try await syncLocked(fallbackToCache: true, cacheFirst: true)
         }
     }
 
@@ -456,7 +477,7 @@ public final class VaultRepository {
                 let copy = bytes
                 let account = try await core { try accountFromSessionBytes(accountId: accountId, bytes: copy) }
                 openSession(id, Session(accountId: accountId, account: account))
-                try await syncLocked(fallbackToCache: true, cacheFirst: preferCache)
+                try await syncLocked(fallbackToCache: true, cacheFirst: true)
                 return true
             }
         }
@@ -479,7 +500,7 @@ public final class VaultRepository {
                     restored = true
                 }
             }
-            if restored && sessions[s.activeId] != nil { try? await syncLocked(fallbackToCache: true, cacheFirst: preferCache) }
+            if restored && sessions[s.activeId] != nil { try? await syncLocked(fallbackToCache: true, cacheFirst: true) }
             return restored
         }
     }
@@ -595,7 +616,7 @@ public final class VaultRepository {
                 if unfinished { st.file.accounts[st.file.activeId] = nil }
                 st.file.activeId = id
             }
-            if sessions[id] != nil { try? await syncLocked(fallbackToCache: true) }
+            if sessions[id] != nil { try? await syncLocked(fallbackToCache: true, cacheFirst: true) }
             refreshIdentities()
         }
     }
@@ -662,20 +683,27 @@ public final class VaultRepository {
         if r > current.revision || current.offline { await lock.run { try? await syncLocked() } }
     }
 
+    /// Fetch and decrypt the active account's vault. With `fallbackToCache` an unreachable
+    /// server shows the on-device copy (offline). With `cacheFirst` the on-device copy is shown
+    /// straight away: in the app the server sync then runs in the background (unlocking doesn't
+    /// wait for a slow or unreachable server); the AutoFill extension (`preferCache`) shows it
+    /// as offline and syncs only when needed.
     private func syncLocked(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
         let id = activeId
         guard let session = sessions[id] else { return }
         var data: Data
         var offline = false
+        var fromServer = true
         do {
-            if cacheFirst, let cached = store.readCache(id) {
+            if cacheFirst, let cached = await store.readCacheInBackground(id) {
                 data = cached
-                offline = true
+                offline = preferCache
+                fromServer = false
             } else {
                 data = try await api.callData(id, "/sync")
             }
         } catch {
-            guard fallbackToCache, let cached = store.readCache(id) else {
+            guard fallbackToCache, let cached = await store.readCacheInBackground(id) else {
                 if fallbackToCache && !(error is ApiError) {
                     var empty = VaultData()
                     empty.offline = true
@@ -686,25 +714,54 @@ public final class VaultRepository {
             }
             data = cached
             offline = true
+            fromServer = false
         }
         guard sessions[id] === session else { return }
         let account = session.account
         let raw = data
         let (next, keys, user, bundle) = try await core { try Self.decryptVault(account, raw) }
         guard sessions[id] === session, activeId == id else { return }
-        if !offline {
-            store.writeCache(id, data)
+        if fromServer {
+            await store.writeCacheInBackground(id, data)
             store.updateAccount(id) { a in
                 a.lastSync = Date().timeIntervalSince1970
                 if let user { a.name = user }
                 if let bundle { a.bundle = bundle }
             }
         }
+        guard sessions[id] === session, activeId == id else { return }
         vaultKeys = keys
         var v = next
         v.offline = offline
         vault = v
         refreshIdentities()
+        if cacheFirst && !fromServer && !offline {
+            // Queued behind the current operation (the lock is first in, first out), so a change
+            // the user makes next runs after this sync.
+            Task { @MainActor [weak self] in await self?.backgroundSync(id, session) }
+        }
+    }
+
+    /// The server sync after a cache-first unlock; an unreachable server leaves the copy marked offline.
+    private func backgroundSync(_ id: String, _ session: Session) async {
+        await lock.run {
+            guard sessions[id] === session, activeId == id else { return }
+            do {
+                try await syncLocked()
+            } catch {
+                if sessions[id] === session, activeId == id { vault?.offline = true }
+            }
+        }
+    }
+
+    /// After a write the server already has the change: a failed follow-up sync must not report
+    /// the save as failed (a retry would duplicate it). The next revision check syncs again.
+    private func syncAfterWrite() async {
+        do {
+            try await syncLocked()
+        } catch {
+            vault?.offline = true
+        }
     }
 
     /// Write the active account's logins to the AutoFill identity store (or empty it when the
@@ -748,7 +805,8 @@ public final class VaultRepository {
             guard let key = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrapped_key, kind: v.key_kind) else { continue }
             let name = (try? key.decryptMeta(vaultId: v.id, meta: v.meta)).flatMap { try? JSON.parse($0) }?.str("name") ?? ""
             keys[v.id] = key
-            out.vaults.append(VaultInfo(id: v.id, name: name.isEmpty ? "Vault" : name, role: Role(rawValue: v.role) ?? .read))
+            out.vaults.append(VaultInfo(id: v.id, name: name.isEmpty ? "Vault" : name, role: Role(rawValue: v.role) ?? .read,
+                                        keyKind: v.key_kind.isEmpty ? VaultInfo.accountKeyKind : v.key_kind))
         }
         for row in res.items ?? [] {
             guard let key = keys[row.vault_id] else { continue }
@@ -783,8 +841,8 @@ public final class VaultRepository {
     }
 
     private func writableVault(_ v: VaultData) throws -> VaultInfo {
-        if let o = v.vaults.first(where: { $0.role == .owner }) ?? v.vaults.first(where: { $0.role != .read }) { return o }
-        throw UserError("You don't have a vault you can save to.")
+        if let o = v.defaultVault { return o }
+        throw UserError("Your own vault isn't available. Choose a vault to save to.")
     }
 
     @discardableResult
@@ -803,7 +861,7 @@ public final class VaultRepository {
                 return (id, try key.encryptItem(itemJson: json, id: id, vaultId: targetId))
             }
             _ = try await api.call(activeId, "/items", body: Self.json(enc))
-            try await syncLocked()
+            await syncAfterWrite()
             return id
         }
     }
@@ -841,7 +899,7 @@ public final class VaultRepository {
             } catch let e as ApiError where e.status == 409 {
                 throw ConflictError(itemId: entry.id)
             }
-            try await syncLocked()
+            await syncAfterWrite()
         }
     }
 
@@ -856,7 +914,7 @@ public final class VaultRepository {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
             _ = try await api.call(activeId, "/items/\(entry.id)", method: "DELETE")
-            try await syncLocked()
+            await syncAfterWrite()
         }
     }
 
@@ -865,7 +923,7 @@ public final class VaultRepository {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
             _ = try await api.call(activeId, "/items/\(entry.id)/restore", method: "POST")
-            try await syncLocked()
+            await syncAfterWrite()
         }
     }
 
@@ -875,7 +933,7 @@ public final class VaultRepository {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
             _ = try await api.call(activeId, "/items/\(entry.id)/permanent", method: "DELETE")
-            try await syncLocked()
+            await syncAfterWrite()
         }
     }
 
@@ -1062,6 +1120,20 @@ public final class VaultRepository {
     }
 
     /// Hosts where plain http is allowed: this device and local-network addresses (test servers).
+    /// This device only (no network involved).
+    nonisolated public static func isLoopback(_ host: String) -> Bool {
+        let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if h == "localhost" || h == "::1" || h.hasSuffix(".localhost") { return true }
+        let parts = h.split(separator: ".")
+        return parts.count == 4 && parts.first == "127" && parts.allSatisfy { Int($0).map { (0...255).contains($0) } ?? false }
+    }
+
+    /// A plain http address that travels over the network (allowed only after the user confirms).
+    nonisolated public static func plainHttpOnNetwork(_ origin: String) -> Bool {
+        guard let p = UrlMatcher.parse(origin), p.scheme == "http" else { return false }
+        return !isLoopback(p.hostname)
+    }
+
     nonisolated public static func isLocalHost(_ host: String) -> Bool {
         let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         if h == "localhost" || h == "::1" || h.hasSuffix(".local") || h.hasSuffix(".localhost") { return true }
@@ -1087,6 +1159,11 @@ public final class VaultRepository {
         while path.hasSuffix("/") { path.removeLast() }
         return p.origin + path
     }
+}
+
+/// Thrown by `setServer` for plain http to a local-network address: ask the user first.
+public struct PlainHttpConfirmation: Error, Sendable {
+    public let host: String
 }
 
 extension Data {

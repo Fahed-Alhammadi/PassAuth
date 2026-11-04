@@ -51,7 +51,8 @@ struct GeneratorTab: View {
                 }
                 Section {
                     Text(value)
-                        .font(.system(size: 21, design: .monospaced))
+                        .speechSpellsOutCharacters()
+                        .font(.system(.title2, design: .monospaced))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
