@@ -126,6 +126,9 @@ jobs:
         with:
           node-version: 26
       - run: scripts/build-wasm.sh web/src/wasm
+      # The desktop app imports web/src, whose imports resolve from web/node_modules.
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
       - run: pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
         working-directory: desktop
       # The Rust shell embeds the built frontend, so it is checked after `pnpm build`.

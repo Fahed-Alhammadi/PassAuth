@@ -121,6 +121,9 @@ jobs:
 
       - name: Build the core for the browser
         run: scripts/build-wasm.sh web/src/wasm
+      # The desktop app imports web/src, whose imports resolve from web/node_modules.
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
       - run: pnpm install --frozen-lockfile
         working-directory: desktop
 

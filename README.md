@@ -98,7 +98,7 @@ The Rust core (crypto and importers) is shared by every client: compiled to WebA
 cargo test --workspace                       # crypto, importers and server API tests
 scripts/build-wasm.sh web/src/wasm && (cd web && pnpm install && pnpm build)
 scripts/build-wasm.sh extension/src/wasm && (cd extension && pnpm install && pnpm build)
-scripts/build-wasm.sh web/src/wasm && (cd desktop && pnpm install && pnpm tauri dev)   # desktop app
+scripts/build-wasm.sh web/src/wasm && (cd web && pnpm install) && (cd desktop && pnpm install && pnpm tauri dev)   # desktop app
 docker compose up -d --build                 # build and run the image locally
 ```
 
