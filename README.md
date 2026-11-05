@@ -5,7 +5,7 @@
 <p align="center">A password manager you host yourself.<br>Logins, verification codes and passkeys, encrypted on your devices and synced through your own server.</p>
 
 <p align="center">
-  <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest"><img src="https://img.shields.io/github/v/release/Fahed-Alhammadi/PassAuth?label=server&color=0866ED" alt="Latest server release"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/github/v/tag/Fahed-Alhammadi/PassAuth?filter=server-*&label=latest&color=0866ED" alt="Latest server version"></a>
   <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan"><img src="https://img.shields.io/chrome-web-store/v/pnofinkalfnjjgofaikljeikjaoogaan?label=Chrome%20Web%20Store&color=0866ED" alt="Chrome Web Store"></a>
   <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-082052" alt="MIT License"></a>
@@ -51,7 +51,7 @@ docker compose up -d
 
 Put it behind HTTPS (the apps require it), open your domain and create your account. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: the admin token, email, HTTPS with a reverse proxy, updates, backups and all settings.
 
-To update: `docker compose pull && docker compose up -d`. Database changes apply on start.
+To update: `docker compose pull && docker compose up -d`. Database changes apply on start. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 
@@ -90,7 +90,7 @@ Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-
 
 To try an extension build, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose `extension/dist`.
 
-The server, the extension and the mobile apps each have their own version. Server releases are published as Docker images (`ghcr.io/fahed-alhammadi/passauth`) and [GitHub releases](https://github.com/Fahed-Alhammadi/PassAuth/releases); the extension and apps are published through their stores.
+The server, the extension and the mobile apps each have their own version. Server versions are published as the Docker image `ghcr.io/fahed-alhammadi/passauth`, with their changes in [CHANGELOG.md](CHANGELOG.md); the extension and apps are published through their stores.
 
 ## Support
 

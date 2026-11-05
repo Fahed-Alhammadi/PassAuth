@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Bump one part's version, commit only its version files, and tag it locally.
 #
-#   scripts/release.sh server    X.Y.Z   Cargo.toml (+ Cargo.lock) + web/package.json  -> server-X.Y.Z    (GHCR X.Y.Z + latest)
-#   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-X.Y.Z (GitHub release with the zip)
+#   scripts/release.sh server    X.Y.Z   Cargo.toml (+ Cargo.lock) + web/package.json  -> server-X.Y.Z    (GHCR X.Y.Z + latest; notes added to CHANGELOG.md)
+#   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-X.Y.Z (Chrome Web Store)
 #   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-X.Y.Z       (TestFlight)
 #   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-X.Y.Z   (Play internal testing)
 #
@@ -63,7 +63,8 @@ if [ -n "$notes" ]; then
     exit 1
   fi
 fi
-if ! git diff --quiet -- "${files[@]}" || ! git diff --cached --quiet; then
+[ "$part" != server ] || grep -q '^<!-- scripts/release.sh' CHANGELOG.md || { echo "CHANGELOG.md has no insertion marker" >&2; exit 1; }
+if ! git diff --quiet -- "${files[@]}" CHANGELOG.md || ! git diff --cached --quiet; then
   echo "commit or stash changes to ${files[*]} (and anything staged) first" >&2
   exit 1
 fi
@@ -84,5 +85,23 @@ esac
 git add -- "${files[@]}"
 git commit -q -m "Release $part $version"
 git tag "$tag"
+
+# Server: add this version's changes (commits since the previous server tag touching server
+# paths) to CHANGELOG.md, in the same release commit.
+if [ "$part" = server ]; then
+  entry=$(mktemp)
+  {
+    echo "## $version ($(date -u +%F))"
+    echo
+    scripts/release-notes.sh "$tag" crates web Dockerfile Cargo.toml Cargo.lock .cargo docker-compose.yml |
+      sed '1,2d; s/^\*\*Full changelog:\*\* \(.*\)$/[All changes](\1)/'
+  } > "$entry"
+  awk -v f="$entry" '{ print } /^<!-- scripts\/release.sh/ { print ""; while ((getline l < f) > 0) print l }' CHANGELOG.md > CHANGELOG.md.tmp
+  mv CHANGELOG.md.tmp CHANGELOG.md
+  rm -f "$entry"
+  git add CHANGELOG.md
+  git commit -q --amend --no-edit
+  git tag -f "$tag" >/dev/null
+fi
 echo "Committed and tagged $tag ($part $current -> $version)."
 echo "Next: git push origin main, wait for CI, then: git push origin $tag"
