@@ -208,9 +208,9 @@ git push origin main                # wait for CI to pass
 git push origin server-v0.4.5
 ```
 
-- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes.
-- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`, and the zip is submitted to the Chrome Web Store (live after Google's review) when the repository variable `CWS_UPLOAD_ENABLED` is `true`.
-- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play testing (the track is the repository variable `PLAY_TRACK`, `internal` by default).
+- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes, marked **Latest**.
+- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip` (never marked Latest: users install from the store), and the zip is submitted to the Chrome Web Store (live after Google's review) when the repository variable `CWS_UPLOAD_ENABLED` is `true`.
+- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play testing (the track is the repository variable `PLAY_TRACK`, `internal` by default). No GitHub release.
 
 ---
 
