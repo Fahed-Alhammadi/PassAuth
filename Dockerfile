@@ -24,10 +24,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     scripts/build-wasm.sh /wasm-out
 
 # ---------------------------------------------------------------- web vault
-FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS web
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim@sha256:bc0a2afd3b74ce12222fc8bab99271e66257f021078f5f4a5d687a77d280c1d9 AS web
 WORKDIR /web
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+# Node 25+ no longer ships corepack, so install pnpm with npm (same major as CI).
+RUN npm install -g pnpm@10.34.9 && pnpm install --frozen-lockfile
 COPY web/ ./
 COPY --from=wasm /wasm-out ./src/wasm
 RUN pnpm build
