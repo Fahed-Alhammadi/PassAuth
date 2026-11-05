@@ -1,6 +1,6 @@
 name: Extension release
 
-# Push a tag like extension-v1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
+# Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
 # extension, publish passauth-extension-1.2.3.zip as a GitHub release and submit it to the
 # Chrome Web Store. The version comes from extension/package.json and
 # extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
@@ -9,7 +9,7 @@ name: Extension release
 # connection: it signs in and prints the store status; nothing is built or uploaded.
 on:
   push:
-    tags: ["extension-v*.*.*"]
+    tags: ["extension-[0-9]*.*.*"]
   workflow_dispatch:
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
 
       - name: Check versions match the tag
         run: |
-          tag="${GITHUB_REF_NAME#extension-v}"
+          tag="${GITHUB_REF_NAME#extension-}"
           pkg="$(node -p "require('./extension/package.json').version")"
           manifest="$(node -p "require('./extension/public/manifest.json').version")"
           [ "${tag%%-*}" = "$pkg" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match extension/package.json $pkg"; exit 1; }
@@ -68,12 +68,12 @@ jobs:
           cd extension
           pnpm install --frozen-lockfile
           pnpm package
-          mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME#extension-v}.zip"
+          mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME#extension-}.zip"
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v="${GITHUB_REF_NAME#extension-v}"
+          v="${GITHUB_REF_NAME#extension-}"
           pre=()
           [[ "$v" == *-* ]] && pre=(--prerelease)
           # Own notes: --generate-notes would diff against the newest release of any part.
@@ -92,7 +92,7 @@ jobs:
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
           CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
         run: |
-          # Check the version, not the tag: every tag contains "-" (extension-v...).
-          v="${GITHUB_REF_NAME#extension-v}"
+          # Check the version, not the tag: every tag contains "-" (extension-...).
+          v="${GITHUB_REF_NAME#extension-}"
           if [[ "$v" == *-* ]]; then echo "Pre-release $v: not sent to the Web Store"; exit 0; fi
           scripts/cws-publish.sh "passauth-extension-$v.zip"

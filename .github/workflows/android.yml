@@ -1,7 +1,7 @@
 name: Android
 
 # Builds the signed Android App Bundle.
-# - Push a tag android-vX.Y.Z (scripts/release.sh android X.Y.Z; version in android/VERSION):
+# - Push a tag android-X.Y.Z (scripts/release.sh android X.Y.Z; version in android/VERSION):
 #   uploads it to Google Play, once the repository variable PLAY_UPLOAD_ENABLED is "true"
 #   (Play only accepts API uploads after the app's first bundle was uploaded by hand).
 #   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing),
@@ -10,7 +10,7 @@ name: Android
 #   to also send it to Play (e.g. to re-send a release after a CI fix), on the chosen track.
 on:
   push:
-    tags: ["android-v*.*.*"]
+    tags: ["android-[0-9]*.*.*"]
   workflow_dispatch:
     inputs:
       upload:
@@ -38,7 +38,7 @@ jobs:
       - name: Check android/VERSION matches the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          tag="${GITHUB_REF_NAME#android-v}"
+          tag="${GITHUB_REF_NAME#android-}"
           app="$(tr -d '[:space:]' < android/VERSION)"
           [ "$tag" = "$app" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match android/VERSION $app"; exit 1; }
 

@@ -1,7 +1,7 @@
 name: iOS
 
 # Builds the signed iOS app and uploads it to App Store Connect (TestFlight).
-# - Push a tag ios-vX.Y.Z (scripts/release.sh ios X.Y.Z; version in ios/VERSION): archives and uploads.
+# - Push a tag ios-X.Y.Z (scripts/release.sh ios X.Y.Z; version in ios/VERSION): archives and uploads.
 # - "Run workflow" (manual): archives only; tick "upload" to also send it to TestFlight.
 # Signing is automatic with the App Store Connect API key in
 # APP_STORE_CONNECT_API_KEY_ID / _ISSUER_ID / _KEY_P8 (an Admin key: Xcode manages the
@@ -11,7 +11,7 @@ name: iOS
 # (team limit). The upload is re-signed with the cloud-managed distribution certificate.
 on:
   push:
-    tags: ["ios-v*.*.*"]
+    tags: ["ios-[0-9]*.*.*"]
   workflow_dispatch:
     inputs:
       upload:
@@ -35,7 +35,7 @@ jobs:
       - name: Check ios/VERSION matches the tag
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          tag="${GITHUB_REF_NAME#ios-v}"
+          tag="${GITHUB_REF_NAME#ios-}"
           app="$(tr -d '[:space:]' < ios/VERSION)"
           [ "$tag" = "$app" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match ios/VERSION $app"; exit 1; }
 

@@ -1,14 +1,14 @@
 name: Server release
 
-# Push a tag like server-v1.2.3 (scripts/release.sh server 1.2.3) to publish the server +
+# Push a tag like server-1.2.3 (scripts/release.sh server 1.2.3) to publish the server +
 # web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
 # Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
-# always gets the newest version. Pre-release tags (server-v1.2.3-rc.1) don't move :latest.
+# always gets the newest version. Pre-release tags (server-1.2.3-rc.1) don't move :latest.
 # Then creates a GitHub release with the server changes, marked Latest (pre-releases aren't).
 # The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
 on:
   push:
-    tags: ["server-v*.*.*"]
+    tags: ["server-[0-9]*.*.*"]
 
 permissions:
   contents: read
@@ -25,7 +25,7 @@ jobs:
       - name: Check versions match the tag
         id: v
         run: |
-          tag="${GITHUB_REF_NAME#server-v}"
+          tag="${GITHUB_REF_NAME#server-}"
           crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           web="$(node -p "require('./web/package.json').version")"
           [ "${tag%%-*}" = "$crate" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1; }
@@ -76,7 +76,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v="${GITHUB_REF_NAME#server-v}"
+          v="${GITHUB_REF_NAME#server-}"
           scripts/release-notes.sh "$GITHUB_REF_NAME" \
             crates web Dockerfile Cargo.toml Cargo.lock .cargo docker-compose.yml > notes.md
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/passauth"

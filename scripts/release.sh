@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Bump one part's version, commit only its version files, and tag it locally.
 #
-#   scripts/release.sh server    X.Y.Z   Cargo.toml (+ Cargo.lock) + web/package.json  -> server-vX.Y.Z    (GHCR X.Y.Z + latest)
-#   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-vX.Y.Z (GitHub release with the zip)
-#   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-vX.Y.Z       (TestFlight)
-#   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-vX.Y.Z   (Play internal testing)
+#   scripts/release.sh server    X.Y.Z   Cargo.toml (+ Cargo.lock) + web/package.json  -> server-X.Y.Z    (GHCR X.Y.Z + latest)
+#   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-X.Y.Z (GitHub release with the zip)
+#   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-X.Y.Z       (TestFlight)
+#   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-X.Y.Z   (Play internal testing)
 #
 # ios/android also need updated "What's new" notes, committed before running this:
 # ios/whatsnew/en-US.txt (TestFlight "What to Test", ≤4000 chars) and
@@ -42,7 +42,7 @@ if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$versi
   echo "$part is at $current; the new version must be higher (got $version)" >&2
   exit 1
 fi
-tag="$part-v$version"
+tag="$part-$version"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists" >&2; exit 1; }
 
 # Mobile releases carry "What's new" notes (TestFlight "What to Test", Play release notes):
@@ -57,7 +57,7 @@ if [ -n "$notes" ]; then
   len=$(LC_ALL=en_US.UTF-8 wc -m < "$notes" | tr -d ' ')
   [ "$len" -le "$max" ] || { echo "$notes is $len characters; the store limit is $max" >&2; exit 1; }
   git diff --quiet HEAD -- "$notes" || { echo "commit $notes first" >&2; exit 1; }
-  prev=$(git tag -l "$part-v*" | sort -V | tail -1)
+  prev=$(scripts/release-notes.sh --tags "$part" | tail -1)
   if [ -n "$prev" ] && git cat-file -e "$prev:$notes" 2>/dev/null && git diff --quiet "$prev" HEAD -- "$notes"; then
     echo "$notes is unchanged since $prev: update it for $version" >&2
     exit 1
