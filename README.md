@@ -8,7 +8,7 @@ PassAuth is a self-hosted password manager. You run the server; your passwords, 
 
 - **Server**: one small container with the web vault built in. SQLite by default, PostgreSQL optional.
 - **Web vault**: manage items, share vaults with other people, import from other password managers, two-step login, admin page.
-- **Chrome extension**: fills logins and verification codes, saves new logins, works as a passkey provider, supports several accounts.
+- **Chrome extension** ([Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan)): fills logins and verification codes, saves new logins, works as a passkey provider, supports several accounts.
 - **Mobile apps** (iOS and Android): coming next.
 
 The server never sees your master password (sign-in uses the OPAQUE protocol) and stores only encrypted data, including item names and website addresses.
@@ -166,9 +166,10 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 
 ## Chrome extension
 
-1. Download `passauth-extension-X.Y.Z.zip` from the latest [GitHub release](https://github.com/Fahed-Alhammadi/PassAuth/releases) and unzip it.
-2. In Chrome open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the unzipped folder.
-3. Pin PassAuth, open it, enter your server address and sign in.
+1. Install PassAuth from the [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) and click **Add to Chrome**. Chrome keeps it up to date.
+2. Pin PassAuth, open it, enter your server address and sign in.
+
+Without the Web Store (e.g. to try a version before it's approved): download `passauth-extension-X.Y.Z.zip` from a [GitHub release](https://github.com/Fahed-Alhammadi/PassAuth/releases), unzip it, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the folder. Chrome doesn't update an extension loaded this way.
 
 The extension needs an `https://` server address; plain `http` is allowed only for `localhost`.
 
@@ -208,7 +209,7 @@ git push origin server-v0.4.5
 ```
 
 - `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes.
-- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`.
+- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip`, and the zip is submitted to the Chrome Web Store (live after Google's review) when the repository variable `CWS_UPLOAD_ENABLED` is `true`.
 - `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play testing (the track is the repository variable `PLAY_TRACK`, `internal` by default).
 
 ---
