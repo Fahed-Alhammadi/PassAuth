@@ -1,8 +1,8 @@
 name: Extension release
 
 # Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
-# extension, publish passauth-extension-1.2.3.zip as a GitHub release and submit it to the
-# Chrome Web Store. The version comes from extension/package.json and
+# extension and submit it to the Chrome Web Store. There is no GitHub release: the zip
+# (passauth-extension-1.2.3.zip) is kept as a download on the workflow run for 90 days. The version comes from extension/package.json and
 # extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
 # manifest version for every upload).
 # Run it by hand (Actions → Extension release → Run workflow) to only check the Web Store
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   store-check:
@@ -30,7 +30,7 @@ jobs:
           CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
         run: scripts/cws-publish.sh --check
 
-  github-release:
+  release:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -69,22 +69,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm package
           mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME#extension-}.zip"
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          v="${GITHUB_REF_NAME#extension-}"
-          pre=()
-          [[ "$v" == *-* ]] && pre=(--prerelease)
-          # Own notes: --generate-notes would diff against the newest release of any part.
-          # Never "Latest": that badge belongs to the server release; users install from the store.
-          scripts/release-notes.sh "$GITHUB_REF_NAME" \
-            extension web/src crates/core crates/core-wasm > notes.md
-          gh release create "$GITHUB_REF_NAME" --latest=false --notes-file notes.md \
-            --title "PassAuth extension v$v" \
-            "passauth-extension-$v.zip" "${pre[@]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: passauth-extension-${{ github.ref_name }}
+          path: passauth-extension-*.zip
+          if-no-files-found: error
       # Off until repo variable CWS_UPLOAD_ENABLED=true (plus CWS_PUBLISHER_ID, CWS_ITEM_ID and
-      # secret CWS_SERVICE_ACCOUNT_JSON). Pre-releases (X.Y.Z-beta) stay on GitHub only.
+      # secret CWS_SERVICE_ACCOUNT_JSON). Pre-releases (X.Y.Z-beta) are only built (zip on the run).
       - name: Submit to the Chrome Web Store
         if: vars.CWS_UPLOAD_ENABLED == 'true'
         env:

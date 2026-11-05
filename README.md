@@ -169,7 +169,7 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 1. Install PassAuth from the [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) and click **Add to Chrome**. Chrome keeps it up to date.
 2. Pin PassAuth, open it, enter your server address and sign in.
 
-Without the Web Store (e.g. to try a version before it's approved): download `passauth-extension-X.Y.Z.zip` from a [GitHub release](https://github.com/Fahed-Alhammadi/PassAuth/releases), unzip it, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the folder. Chrome doesn't update an extension loaded this way.
+Without the Web Store (e.g. to try a version before it's approved): build it (`scripts/build-wasm.sh web/src/wasm && scripts/build-wasm.sh extension/src/wasm && cd extension && pnpm install && pnpm build`), then open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose `extension/dist`. Chrome doesn't update an extension loaded this way.
 
 The extension needs an `https://` server address; plain `http` is allowed only for `localhost`.
 
