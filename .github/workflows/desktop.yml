@@ -183,7 +183,7 @@ jobs:
           projectPath: desktop
           args: ${{ matrix.args }}
           tagName: ${{ github.event_name == 'push' && github.ref_name || '' }}
-          releaseName: ${{ github.event_name == 'push' && format('PassAuth {0}', steps.v.outputs.version) || '' }}
+          releaseName: ${{ github.event_name == 'push' && github.ref_name || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
