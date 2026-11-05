@@ -1,5 +1,7 @@
 /** PassAuth HTTP client: bearer auth, automatic refresh-token rotation shared by every open tab. */
 import { useEffect, useState } from "react";
+import { clientName, isDesktop, secretStore } from "./platform";
+import { server } from "./server";
 
 export class ApiError extends Error {
   constructor(
@@ -20,32 +22,28 @@ export class UnreachableError extends Error {
 
 export type Tokens = { access: string; refresh: string };
 
-const SESSION_KEY = "pa.session";
-let tokens: Tokens | null = load();
+export const SESSION_KEY = "pa.session";
+let tokens: Tokens | null = null;
 let refreshing: Promise<RefreshResult> | null = null;
 const listeners = new Set<() => void>();
 
 function load(): Tokens | null {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
+    const raw = secretStore.get(SESSION_KEY);
     return raw ? (JSON.parse(raw) as Tokens) : null;
   } catch {
     return null;
   }
 }
 
+/** Read lazily while signed out, so a session stored after start-up (desktop keychain, another server) is seen. */
 export function getTokens() {
-  return tokens;
+  return (tokens ??= load());
 }
 
 export function setTokens(t: Tokens | null) {
   tokens = t;
-  try {
-    if (t) localStorage.setItem(SESSION_KEY, JSON.stringify(t));
-    else localStorage.removeItem(SESSION_KEY);
-  } catch {
-    /* storage unavailable: session lasts for this tab only */
-  }
+  secretStore.set(SESSION_KEY, t ? JSON.stringify(t) : null);
 }
 
 /** Called when the session is gone (refresh rejected, revoked, or signed out in another tab). */
@@ -94,7 +92,8 @@ export function deviceInfo() {
   const ua = navigator.userAgent;
   const browser = /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "Browser";
   const os = /Mac OS X/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "";
-  return { id: deviceId(), name: `${browser}${os ? ` on ${os}` : ""}`, kind: "web" };
+  const client = isDesktop() ? "PassAuth desktop" : browser;
+  return { id: deviceId(), name: `${client}${os ? ` on ${os}` : ""}`, kind: "web" };
 }
 
 type RefreshResult = "refreshed" | "rejected" | "unavailable";
@@ -112,8 +111,8 @@ async function withTabLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
  * would treat as token theft and revoke the session.
  */
 async function refresh(): Promise<RefreshResult> {
-  if (!tokens) return "rejected";
-  const used = tokens.refresh;
+  if (!getTokens()) return "rejected";
+  const used = tokens!.refresh;
   refreshing ??= withTabLock("pa.refresh", async (): Promise<RefreshResult> => {
     const stored = load();
     if (stored && stored.refresh !== used) {
@@ -122,7 +121,7 @@ async function refresh(): Promise<RefreshResult> {
     }
     if (!tokens) return "rejected";
     try {
-      const r = await fetch("/api/auth/refresh", {
+      const r = await server.fetch(server.apiUrl("/auth/refresh"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ refresh_token: tokens.refresh }),
@@ -157,11 +156,11 @@ export async function api<T = unknown>(path: string, opts: Options = {}): Promis
   const { method = opts.body === undefined ? "GET" : "POST", body, auth = true, headers = {} } = opts;
   const send = async () => {
     try {
-      return await fetch(`/api${path}`, {
+      return await server.fetch(server.apiUrl(path), {
         method,
         headers: {
           ...(body !== undefined ? { "content-type": "application/json" } : {}),
-          ...(auth && tokens ? { authorization: `Bearer ${tokens.access}` } : {}),
+          ...(auth && getTokens() ? { authorization: `Bearer ${tokens!.access}` } : {}),
           ...headers,
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -172,7 +171,7 @@ export async function api<T = unknown>(path: string, opts: Options = {}): Promis
   };
 
   let res = await send();
-  if (res.status === 401 && auth && tokens) {
+  if (res.status === 401 && auth && getTokens()) {
     const r = await refresh();
     if (r === "refreshed") res = await send();
     else if (r === "unavailable") throw new UnreachableError();
@@ -197,7 +196,7 @@ const unexpectedResponse = (status: number) =>
 
 /** Human-readable message for any thrown value. */
 export function errorMessage(e: unknown): string {
-  if (e instanceof UnreachableError) return `Can't reach your PassAuth server at ${location.host}. Check your connection, then try again.`;
+  if (e instanceof UnreachableError) return `Can't reach your PassAuth server at ${server.host()}. Check your connection, then try again.`;
   if (e instanceof ApiError) return e.message;
   if (e instanceof Error) {
     if (e.message === "decrypt_failed") return "Wrong master password or Secret Key.";
@@ -213,7 +212,7 @@ export function friendlyError(e: unknown): string {
   const m = errorMessage(e);
   switch (m) {
     case "secret_key_required":
-      return "This browser doesn't have your Secret Key saved. Sign out, sign in again with your Secret Key, then retry.";
+      return `${clientName(true)} doesn't have your Secret Key saved. Sign out, sign in again with your Secret Key, then retry.`;
     case "Wrong email, master password or Secret Key.":
     case "Wrong master password or Secret Key.":
       return "That master password is wrong. Check it and try again.";

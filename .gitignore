@@ -50,6 +50,9 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Desktop app: Tauri-generated schemas
+desktop/src-tauri/gen/
+
 # Generated WASM bindings (scripts/build-wasm.sh)
 web/src/wasm/
 extension/src/wasm/

@@ -1,0 +1,8 @@
+/* Desktop-only additions to the web vault's styles (app.css). */
+
+/* A native window has no page to scroll; the vault's own panes scroll. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+
+.update-bar { width: 100%; height: 8px; accent-color: var(--accent); }
+.update-detail summary { cursor: pointer; }
+.update-detail pre { margin: 8px 0 0; padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-s); white-space: pre-wrap; word-break: break-word; }

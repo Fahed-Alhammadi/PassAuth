@@ -4,6 +4,7 @@ import { LogoMark } from "../components/Logo";
 import { CopyButton, ErrorText, Icon, PasswordField, StrengthMeter, WEAK_BITS } from "../components/ui";
 import { friendlyError, usePublicConfig } from "../lib/api";
 import { downloadEmergencyKit, printEmergencyKit } from "../lib/kit";
+import { isDesktop } from "../lib/platform";
 import { estimateBits, login, register } from "../lib/vault";
 
 export function RegisterPage() {
@@ -99,7 +100,7 @@ export function RegisterPage() {
                   setKitSaved(true);
                 }}
               >
-                Print
+                {isDesktop() ? "Save kit" : "Print"}
               </button>
               {done.secretKey && <CopyButton value={done.secretKey} label="Copy Secret Key" />}
             </div>

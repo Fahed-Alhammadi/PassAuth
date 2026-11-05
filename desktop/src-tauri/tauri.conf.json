@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PassAuth",
+  "identifier": "io.passauth.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*; connect-src 'self' ipc: http://ipc.localhost wss: ws://localhost:* ws://127.0.0.1:*; font-src 'self'; frame-src 'self' about: blob:; object-src 'none'; base-uri 'self'",
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "appimage", "deb", "rpm"],
+    "createUpdaterArtifacts": true,
+    "category": "Utility",
+    "shortDescription": "Self-hosted password manager",
+    "longDescription": "PassAuth keeps your passwords, passkeys and notes encrypted on your own server. This app opens your vault on your computer.",
+    "copyright": "© Fahed Alhammadi",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCNzYzNTkzQjlGOTA0RjAKUldUd0JQbTVrelYySzl1QVhMOHM4MFlzSFN5RzE2UGw2UjRGRXcvanZUWlFEYnh2MVl6UHNrdXMK",
+      "endpoints": ["https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

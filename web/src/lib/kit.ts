@@ -1,7 +1,14 @@
 /** Emergency Kit (what a user needs to sign in on a new device) and the file download helper. */
+import { getDesktop } from "./platform";
+import { server } from "./server";
 
 /** Save `content` as a file. The link is attached to the page and revoked later, which every browser needs to start the download. */
 export function downloadFile(filename: string, content: string, type = "text/plain;charset=utf-8") {
+  const desktop = getDesktop();
+  if (desktop) {
+    desktop.saveFile(filename, content).catch(() => {});
+    return;
+  }
   const url = URL.createObjectURL(new Blob([content], { type }));
   const a = document.createElement("a");
   a.href = url;
@@ -21,7 +28,7 @@ export interface KitInfo {
 }
 
 /** A printable page: server, email, Secret Key (if any) and a line to write the master password on. */
-export function emergencyKitHtml({ email, secretKey, server = location.origin }: KitInfo): string {
+export function emergencyKitHtml({ email, secretKey, server: origin = server.origin() }: KitInfo): string {
   const created = new Date().toLocaleDateString(undefined, { dateStyle: "long" });
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -49,7 +56,7 @@ export function emergencyKitHtml({ email, secretKey, server = location.origin }:
   <p class="muted">Created ${esc(created)}</p>
   <p>Print this page or keep it somewhere safe and offline, such as a drawer or a safe. You need it to sign in on a new device. Nobody, not even your server administrator, can recover your master password${secretKey ? " or Secret Key" : ""} for you.</p>
   <dl>
-    <div><dt>Server</dt><dd class="mono">${esc(server)}</dd></div>
+    <div><dt>Server</dt><dd class="mono">${esc(origin)}</dd></div>
     <div><dt>Email</dt><dd>${esc(email)}</dd></div>
     ${
       secretKey
@@ -67,8 +74,9 @@ export function downloadEmergencyKit(info: KitInfo) {
   downloadFile("PassAuth Emergency Kit.html", emergencyKitHtml(info), "text/html;charset=utf-8");
 }
 
-/** Open the print dialog for the kit, without leaving the vault (a hidden frame holds the page). */
+/** Open the print dialog for the kit, without leaving the vault (a hidden frame holds the page). The desktop WebView can't print: it saves the kit instead. */
 export function printEmergencyKit(info: KitInfo) {
+  if (getDesktop()) return downloadEmergencyKit(info);
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;

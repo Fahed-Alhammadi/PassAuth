@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { clientName } from "../lib/platform";
 import { copySecret, ErrorText, Icon } from "../components/ui";
 import { errorMessage } from "../lib/api";
 import { estimateBits, generatePassphrase, generatePassword } from "../lib/vault";
@@ -99,7 +100,7 @@ export function GeneratorPage() {
       <div className="page-inner">
         <header className="page-head">
           <h1>Generator</h1>
-          <p>Create a strong password or an easy-to-type passphrase. Everything is generated in this browser.</p>
+          <p>Create a strong password or an easy-to-type passphrase. Everything is generated in {clientName()}.</p>
         </header>
 
         <div className="segmented" role="group" aria-label="What to generate">

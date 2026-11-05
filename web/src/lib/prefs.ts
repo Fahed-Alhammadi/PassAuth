@@ -39,10 +39,17 @@ export function getTheme(): Theme {
   }
 }
 
+let themeHook: ((theme: Theme) => void) | null = null;
+/** Desktop app: follow the page theme with the native window (title bar, dialogs). */
+export function onThemeChange(fn: (theme: Theme) => void) {
+  themeHook = fn;
+}
+
 /** Apply the theme to the page (html[data-theme]); "system" follows the OS. */
 export function applyTheme(theme: Theme = getTheme()) {
   if (theme === "system") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = theme;
+  themeHook?.(theme);
 }
 
 export function setTheme(theme: Theme) {

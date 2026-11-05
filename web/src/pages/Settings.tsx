@@ -3,8 +3,10 @@ import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../l
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
-import { ApiError, api, friendlyError } from "../lib/api";
+import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
 import { downloadEmergencyKit, downloadFile, printEmergencyKit } from "../lib/kit";
+import { clientName, getDesktop, isDesktop, type DesktopHooks } from "../lib/platform";
+import { server } from "../lib/server";
 import type { Role } from "../lib/types";
 import {
   changeKeys,
@@ -297,6 +299,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   const fp = account.fingerprint ?? getAccount()?.fingerprint() ?? null;
   const showIcons = useShowIcons();
   const theme = useTheme();
+  const desktop = getDesktop();
 
   async function saveName(e: FormEvent) {
     e.preventDefault();
@@ -391,10 +394,12 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           <input type="checkbox" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />
           <span>
             Show website icons
-            <span className="small muted block">Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to this browser.</span>
+            <span className="small muted block">Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to {clientName()}.</span>
           </span>
         </label>
       </section>
+
+      {desktop && <AboutDesktop desktop={desktop} />}
 
       {deleting && (
         <ConfirmPassword title="Delete your account" action="Delete account" danger onConfirm={deleteAccount} onClose={() => setDeleting(false)}>
@@ -402,6 +407,68 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
         </ConfirmPassword>
       )}
     </>
+  );
+}
+
+/** Desktop app only: app and server versions, update check, change server. */
+const LICENSE_URL = "https://github.com/Fahed-Alhammadi/PassAuth/blob/main/LICENSE";
+
+function AboutDesktop({ desktop }: { desktop: DesktopHooks }) {
+  const config = usePublicConfig();
+  const [check, setCheck] = useState<{ busy?: boolean; version?: string | null; failed?: boolean }>({});
+
+  async function checkNow() {
+    setCheck({ busy: true });
+    try {
+      setCheck({ version: await desktop.checkForUpdates(false) });
+    } catch {
+      setCheck({ failed: true });
+    }
+  }
+
+  return (
+    <section className="card" aria-labelledby="about-title">
+      <h2 id="about-title">About</h2>
+      <dl className="fields">
+        <div>
+          <div className="grow">
+            <dt>App</dt>
+            <dd>PassAuth for desktop {desktop.version}</dd>
+            {check.failed && <dd className="small muted">Couldn't check for updates</dd>}
+            {check.version === null && <dd className="small muted">Up to date · checked just now</dd>}
+            {check.version && (
+              <dd className="small muted">
+                {check.version} available ·{" "}
+                <button type="button" className="link" onClick={() => desktop.installUpdate()}>
+                  Install and restart
+                </button>
+              </dd>
+            )}
+          </div>
+          <button type="button" className="btn" disabled={check.busy} onClick={checkNow}>
+            {check.busy ? "Checking…" : "Check for updates"}
+          </button>
+        </div>
+        <div>
+          <div className="grow">
+            <dt>Server</dt>
+            <dd>
+              <span className="mono">{server.host()}</span>
+              {config?.version && <span className="muted"> · PassAuth server {config.version}</span>}
+            </dd>
+          </div>
+          <button type="button" className="btn" onClick={() => desktop.changeServer()}>
+            Change server…
+          </button>
+        </div>
+      </dl>
+      <p className="small muted">
+        © Fahed Alhammadi ·{" "}
+        <button type="button" className="link" onClick={() => desktop.openUrl(LICENSE_URL)}>
+          MIT License
+        </button>
+      </p>
+    </section>
   );
 }
 
@@ -500,8 +567,8 @@ function SecurityTab() {
         {skOn ? (
           <p className="small muted">
             {savedKey
-              ? "This browser remembers your Secret Key. Keep your Emergency Kit somewhere safe: you need it to sign in on any other device."
-              : "This browser doesn't have your Secret Key saved. Use the Emergency Kit you saved when you turned it on."}
+              ? `${clientName(true)} remembers your Secret Key. Keep your Emergency Kit somewhere safe: you need it to sign in on any other device.`
+              : `${clientName(true)} doesn't have your Secret Key saved. Use the Emergency Kit you saved when you turned it on.`}
           </p>
         ) : (
           <p className="small muted">When you turn it on, you'll get a Secret Key to save in an Emergency Kit.</p>
@@ -518,7 +585,7 @@ function SecurityTab() {
                 Download Emergency Kit
               </button>
               <button type="button" className="btn btn-ghost" onClick={() => printEmergencyKit({ email, secretKey: skOn ? savedKey : null })}>
-                Print kit
+                {isDesktop() ? "Save kit" : "Print kit"}
               </button>
             </>
           )}
@@ -569,7 +636,7 @@ function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; emai
           Download Emergency Kit
         </button>
         <button type="button" className="btn" onClick={() => printEmergencyKit(kit)}>
-          Print
+          {isDesktop() ? "Save kit" : "Print"}
         </button>
         <button type="button" className="btn" onClick={() => copySecret(secretKey, "Secret Key copied")}>
           <Icon name="copy" />
@@ -926,7 +993,7 @@ function RecoveryCodesModal({ codes, onClose }: { codes: string[]; onClose: () =
         <button
           type="button"
           className="btn"
-          onClick={() => download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${location.origin}\n\nEach code works once.\n\n${text}\n`)}
+          onClick={() => download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${server.origin()}\n\nEach code works once.\n\n${text}\n`)}
         >
           <Icon name="download" />
           Download

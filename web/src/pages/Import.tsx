@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type RefObject } from "react";
+import { clientName } from "../lib/platform";
 import { Link } from "react-router";
 import { ErrorText, Icon, PasswordField } from "../components/ui";
 import { errorMessage } from "../lib/api";
@@ -214,7 +215,7 @@ export function ImportPage() {
         <div className="alert privacy-note">
           <Icon name="shield" />
           <span>
-            Your file is read and encrypted in this browser. Its contents are never uploaded unencrypted; only the encrypted items reach the server.
+            Your file is read and encrypted in {clientName()}. Its contents are never uploaded unencrypted; only the encrypted items reach the server.
           </span>
         </div>
 

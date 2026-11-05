@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
 import { LogoMark } from "./components/Logo";
 import { ToastHost } from "./components/ui";
+import { server } from "./lib/server";
 import { boot, lock, logout, useVault } from "./lib/vault";
 import { AdminPage } from "./pages/Admin";
 import { ExportPage } from "./pages/Export";
@@ -45,7 +46,7 @@ function Unreachable() {
           <LogoMark size={56} />
           <h1>Can't reach your PassAuth server</h1>
           <p className="muted">
-            {location.host} isn't answering. Check your connection or VPN, or wait for the server to finish restarting. You're still signed in.
+            {server.host()} isn't answering. Check your connection or VPN, or wait for the server to finish restarting. You're still signed in.
           </p>
         </div>
         <div className="auth-panel stack">

@@ -3,6 +3,8 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, PasswordField } from "../components/ui";
 import { errorMessage, friendlyError, usePublicConfig } from "../lib/api";
+import { getDesktop } from "../lib/platform";
+import { server } from "../lib/server";
 import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor, WRONG_CREDENTIALS } from "../lib/vault";
 
 const PROVIDER_LABEL: Record<string, string> = {
@@ -29,6 +31,7 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const desktop = getDesktop();
 
   if (status === "unlocked") return <Navigate to={next} replace />;
 
@@ -171,6 +174,14 @@ export function LoginPage() {
         {config?.signups_allowed !== false && (
           <p className="auth-foot">
             New to this server? <Link to="/register">Create an account</Link>
+          </p>
+        )}
+        {desktop && (
+          <p className="auth-foot">
+            Connected to <span className="mono">{server.host()}</span>.{" "}
+            <button type="button" className="link" onClick={() => desktop.changeServer()}>
+              Change server
+            </button>
           </p>
         )}
       </div>

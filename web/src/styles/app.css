@@ -205,6 +205,7 @@ kbd { font-family: var(--mono); font-size: 0.85em; padding: 1px 6px; border: 1px
 .nav a.active { background: rgb(74 163 255 / 0.16); color: #fff; box-shadow: inset 3px 0 0 #4aa3ff; }
 .nav .count { margin-left: auto; font-size: 0.8rem; color: #8b99ad; }
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; }
+.nav-kbd { margin-left: auto; color: #8b99ad; background: none; border-color: rgb(255 255 255 / 0.18); }
 
 .list-pane { border-right: 1px solid var(--line); background: var(--surface); display: flex; flex-direction: column; min-height: 0; }
 .list-head { padding: 16px; display: flex; flex-direction: column; gap: 12px; border-bottom: 1px solid var(--line); }

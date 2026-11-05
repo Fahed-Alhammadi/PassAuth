@@ -1,4 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { getDesktop } from "../lib/platform";
+import { server as serverConfig } from "../lib/server";
 import { estimateBits, generatePassword, totpCode } from "../lib/vault";
 
 // ------------------------------------------------------------------ icons
@@ -100,6 +102,18 @@ function legacyCopy(value: string): boolean {
 
 /** Copy and clear the clipboard after 30 s if it still holds the secret. Never throws. */
 export async function copySecret(value: string, label = "Copied"): Promise<boolean> {
+  label = label[0].toUpperCase() + label.slice(1);
+  const desktop = getDesktop();
+  if (desktop) {
+    try {
+      await desktop.copySecret(value);
+      toast(`${label}. Clipboard clears in 30 seconds.`);
+      return true;
+    } catch {
+      toast("Copying failed. Select the text and copy it yourself.");
+      return false;
+    }
+  }
   if (navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(value);
@@ -125,7 +139,7 @@ export async function copySecret(value: string, label = "Copied"): Promise<boole
 }
 
 /** Website icon from the server's icon service, falling back to the item's initial. */
-export function SiteIcon({ host, name, server = "", enabled = true }: { host: string; name: string; server?: string; enabled?: boolean }) {
+export function SiteIcon({ host, name, server = serverConfig.base, enabled = true }: { host: string; name: string; server?: string; enabled?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => setLoaded(false), [host]);
   return (

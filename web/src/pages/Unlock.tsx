@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { clientName } from "../lib/platform";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, PasswordField } from "../components/ui";
 import { friendlyError } from "../lib/api";
@@ -43,7 +44,7 @@ export function UnlockPage() {
           <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus />
           {askKey && (
             <label className="field">
-              <span>Secret Key{stored ? " (leave empty to use the one saved in this browser)" : ""}</span>
+              <span>Secret Key{stored ? ` (leave empty to use the one saved in ${clientName()})` : ""}</span>
               <input
                 className="input mono"
                 value={secretKey}

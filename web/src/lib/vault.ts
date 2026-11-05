@@ -8,6 +8,8 @@
 import { useSyncExternalStore } from "react";
 import * as core from "../wasm/passauth_core";
 import { ApiError, UnreachableError, api, deviceInfo, getTokens, onSessionLost, setTokens } from "./api";
+import { secretStore } from "./platform";
+import { server } from "./server";
 import {
   isSyncResponse,
   type Bundle,
@@ -114,15 +116,19 @@ function read(key: string): string | null {
 
 // ------------------------------------------------------------- Secret Key
 
-const skKey = (email: string) => `pa.sk.${email.trim().toLowerCase()}`;
+/** Keys of the secrets kept per account (see `secretStore`); the desktop app preloads them from its keychain. */
+export const EMAIL_KEY = "pa.email";
+export const secretKeyKey = (email: string) => `pa.sk.${email.trim().toLowerCase()}`;
+export const rememberKey = (email: string) => `pa.remember.${email.trim().toLowerCase()}`;
+
 export function rememberedSecretKey(email: string): string | null {
-  return read(skKey(email));
+  return secretStore.get(secretKeyKey(email));
 }
 export function rememberSecretKey(email: string, sk: string | null) {
-  store(skKey(email), sk);
+  secretStore.set(secretKeyKey(email), sk);
 }
 export function lastEmail(): string {
-  return read("pa.email") ?? "";
+  return secretStore.get(EMAIL_KEY) ?? "";
 }
 
 /**
@@ -269,17 +275,16 @@ export async function sendTwoFactorEmail(token: string) {
   await api("/auth/2fa/email", { body: { two_factor_token: token }, auth: false });
 }
 
-const rememberKey = (email: string) => `pa.remember.${email.trim().toLowerCase()}`;
 function rememberToken(email: string) {
-  return read(rememberKey(email)) ?? undefined;
+  return secretStore.get(rememberKey(email)) ?? undefined;
 }
 
 async function finishLogin(master: core.MasterKeys, result: LoginFinishResponse) {
   dropKeys();
   try {
     setTokens({ access: result.access_token, refresh: result.refresh_token });
-    if (result.remember_token) store(rememberKey(result.email), result.remember_token);
-    store("pa.email", result.email);
+    if (result.remember_token) secretStore.set(rememberKey(result.email), result.remember_token);
+    secretStore.set(EMAIL_KEY, result.email);
     bundle = result.bundle;
     account = master.unlock(bundle);
   } finally {
@@ -429,8 +434,7 @@ function connectSocket() {
   socket?.close();
   const t = getTokens();
   if (!t) return;
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/api/ws?access_token=${encodeURIComponent(t.access)}`);
+  const ws = new WebSocket(server.wsUrl(`/ws?access_token=${encodeURIComponent(t.access)}`));
   socket = ws;
   ws.onmessage = (e) => {
     let msg: { type?: string; revision?: number };
