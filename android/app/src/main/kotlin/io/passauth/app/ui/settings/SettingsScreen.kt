@@ -125,6 +125,8 @@ private val SECTIONS = listOf(
 @Composable
 fun SettingsScreen(ctx: UiCtx, section: String?) {
     if (section == "export") return ExportScreen(ctx)
+    if (section == "password") return ChangePasswordScreen(ctx)
+    if (section == "two-step") return TwoStepScreen(ctx)
     val open = SECTIONS.firstOrNull { it.key == section }
     if (open == null) {
         Scaffold(topBar = { PageBar("Settings", brand = true) { AccountMenu(ctx) } }) { padding ->
@@ -212,10 +214,7 @@ private fun ColumnScope.Security(ctx: UiCtx) {
         Text("Lock now")
     }
     HorizontalDivider(color = PassAuthTheme.colors.line)
-    Text("In the web vault", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
-    WebLink(ctx, "Two-step login", "Authenticator app, email codes and recovery codes.", "/settings/two-step")
-    WebLink(ctx, "Change master password", "Also turns the Secret Key on or off.", "/settings/security")
-    Muted("These open your web vault in the browser. Sign in there if it asks.")
+    AccountSecurityLinks(ctx)
 }
 
 /** A shortcut to a page of the account's web vault (path routes). */

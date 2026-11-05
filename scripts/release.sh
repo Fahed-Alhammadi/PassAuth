@@ -6,6 +6,10 @@
 #   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-vX.Y.Z       (TestFlight)
 #   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-vX.Y.Z   (Play internal testing)
 #
+# ios/android also need updated "What's new" notes, committed before running this:
+# ios/whatsnew/en-US.txt (TestFlight "What to Test", ≤4000 chars) and
+# android/whatsnew/whatsnew-en-US (Play release notes, ≤500 chars).
+#
 # Then: git push origin main, wait for CI, git push origin <tag>.
 # The new version must be higher than the current one (stores reject lower build numbers).
 set -euo pipefail
@@ -40,6 +44,25 @@ if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$versi
 fi
 tag="$part-v$version"
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists" >&2; exit 1; }
+
+# Mobile releases carry "What's new" notes (TestFlight "What to Test", Play release notes):
+# committed, non-empty, within the store limit, and changed since the previous release.
+case "$part" in
+  ios) notes=ios/whatsnew/en-US.txt max=4000 ;;
+  android) notes=android/whatsnew/whatsnew-en-US max=500 ;;
+  *) notes="" ;;
+esac
+if [ -n "$notes" ]; then
+  [ -s "$notes" ] || { echo "write the release notes in $notes first" >&2; exit 1; }
+  len=$(LC_ALL=en_US.UTF-8 wc -m < "$notes" | tr -d ' ')
+  [ "$len" -le "$max" ] || { echo "$notes is $len characters; the store limit is $max" >&2; exit 1; }
+  git diff --quiet HEAD -- "$notes" || { echo "commit $notes first" >&2; exit 1; }
+  prev=$(git tag -l "$part-v*" | sort -V | tail -1)
+  if [ -n "$prev" ] && git cat-file -e "$prev:$notes" 2>/dev/null && git diff --quiet "$prev" HEAD -- "$notes"; then
+    echo "$notes is unchanged since $prev: update it for $version" >&2
+    exit 1
+  fi
+fi
 if ! git diff --quiet -- "${files[@]}" || ! git diff --cached --quiet; then
   echo "commit or stash changes to ${files[*]} (and anything staged) first" >&2
   exit 1

@@ -181,11 +181,23 @@ struct TotpRing: View {
     }
 }
 
+/// Strength scales of the web vault: master passwords (`ui.tsx` `strength`: Weak < 50 bits,
+/// Fair < 65, Good < 80, else Strong) and generated / item passwords (the generator's scale).
+enum StrengthScale {
+    case masterPassword, generated
+
+    func level(_ bits: Double) -> (label: String, level: Int) {
+        let (fair, good, strong): (Double, Double, Double) = self == .masterPassword ? (AccountSecurityLogic.weakBits, 65, 80) : (40, 60, 80)
+        return bits < fair ? ("Weak", 1) : bits < good ? ("Fair", 2) : bits < strong ? ("Good", 3) : ("Strong", 4)
+    }
+}
+
 /// Password strength from the core's estimate (bits of entropy), same thresholds as the web vault.
 struct StrengthMeter: View {
     let password: String
     /// Keep the meter's height while empty (the layout doesn't jump on the first key).
     var reserveSpace = false
+    var scale = StrengthScale.generated
 
     var body: some View {
         if password.isEmpty && reserveSpace {
@@ -195,9 +207,8 @@ struct StrengthMeter: View {
             }
             .accessibilityHidden(true)
         } else if !password.isEmpty {
-            let bits = estimateBits(password: password)
-            let (label, level): (String, Int) = bits < 40 ? ("Weak", 1) : bits < 60 ? ("Fair", 2) : bits < 80 ? ("Good", 3) : ("Strong", 4)
-            let color: Color = level == 1 ? .paDanger : level == 2 ? .paAccent : .paOk
+            let (label, level) = scale.level(estimateBits(password: password))
+            let color: Color = level == 1 ? .paDanger : level == 2 ? (scale == .masterPassword ? .paWarn : .paAccent) : .paOk
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     ForEach(0..<4, id: \.self) { i in

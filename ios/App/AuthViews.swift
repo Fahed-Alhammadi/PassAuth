@@ -216,19 +216,6 @@ struct TextFile: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: Data(text.utf8)) }
 }
 
-private func emergencyKit(server: String, email: String, secretKey: String) -> String {
-    [
-        "PassAuth Emergency Kit", "",
-        "Server:      \(server)",
-        "Email:       \(email)",
-        "Secret Key:  \(secretKey)", "",
-        "Master password: ______________________________", "",
-        "Keep this kit somewhere safe and offline, such as a printed copy in a drawer",
-        "or safe. You need the Secret Key and your master password to sign in on a new",
-        "device. PassAuth cannot recover either of them for you.", "",
-    ].joined(separator: "\n")
-}
-
 /// Create an account (the web vault's Register). `onSignIn(email, password?, secretKey?)`.
 struct RegisterView: View {
     @Environment(AppModel.self) private var model
@@ -279,7 +266,7 @@ struct RegisterView: View {
             }
             .onAppear { model.showsSecret = d.secretKey != nil }
             .onDisappear { model.showsSecret = false }
-            .fileExporter(isPresented: $exporting, document: TextFile(text: emergencyKit(server: model.state.server, email: email, secretKey: d.secretKey ?? "")),
+            .fileExporter(isPresented: $exporting, document: TextFile(text: EmergencyKit.text(server: model.state.server, email: email, secretKey: d.secretKey ?? "")),
                           contentType: .plainText, defaultFilename: "PassAuth-Emergency-Kit.txt") { result in
                 if case .success = result { model.notify("Emergency Kit saved.") }
             }
@@ -291,7 +278,7 @@ struct RegisterView: View {
                 AuthField(label: "Email", text: $email, keyboard: .emailAddress, content: .username)
                 AuthField(label: "Your name", text: $name, content: .name)
                 AuthField(label: "Master password", text: Binding(get: { password }, set: { password = $0; hinted = false }), secure: true)
-                StrengthMeter(password: password, reserveSpace: true)
+                StrengthMeter(password: password, reserveSpace: true, scale: .masterPassword)
                 AuthField(label: "Confirm master password", text: $confirm, secure: true)
                 Notice(text: "Your master password can't be reset. If you forget it, the data in your vault can't be recovered by anyone, including the server administrator.")
                 Toggle(isOn: $withSecretKey) {
@@ -314,7 +301,7 @@ struct RegisterView: View {
         error = nil
         if password.count < 10 { error = "Use at least 10 characters for your master password."; return }
         if password != confirm { error = "The two passwords don't match."; return }
-        if estimateBits(password: password) < 50 && !hinted {
+        if estimateBits(password: password) < AccountSecurityLogic.weakBits && !hinted {
             hinted = true
             error = "This password is easy to guess. Choose a longer one, or select Create account again to use it anyway."
             return
