@@ -7,9 +7,11 @@
 <meta name="description" content="Get help with PassAuth: setup, sign-in, deleting your account and reporting problems.">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/ibm-plex-sans-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="27" height="30"><span>Pass<b>Auth</b></span></a>
@@ -17,7 +19,7 @@
   </div>
 </header>
 
-<main class="doc">
+<main class="doc" id="main">
   <div class="wrap">
     <h1>Support</h1>
     <p class="updated">Help with PassAuth apps, the browser extension and the server.</p>
@@ -34,7 +36,7 @@
     </ul>
 
     <h2>I forgot my master password</h2>
-    <p>Nobody can recover it, not even the server's administrator: your vault is encrypted with keys only your master password (and Secret Key, if you use one) can unlock. If you still have a device where PassAuth is unlocked, you can change the master password in the web vault under Settings → Security. Otherwise the account can only be deleted and created again.</p>
+    <p>Nobody can recover it, not even the server's administrator: your vault is encrypted with keys only your master password (and Secret Key, if you use one) can unlock. The account can only be deleted and created again. Write your master password down in your Emergency Kit and keep it somewhere safe.</p>
 
     <h2>I lost my Secret Key</h2>
     <p>Your Secret Key is in the Emergency Kit you saved when you created the account, and on every device where you've signed in. Without it you can't sign in on a new device.</p>

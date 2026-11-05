@@ -51,6 +51,7 @@ a:focus-visible, button:focus-visible { outline: 3px solid var(--blue); outline-
 code, pre { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.9em; }
 svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .wrap { width: min(1120px, 100% - 40px); margin-inline: auto; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .skip { position: absolute; left: 12px; top: -60px; z-index: 20; background: var(--surface); color: var(--ink); padding: 8px 14px; border-radius: var(--r-sm); }
 .skip:focus { top: 12px; }
 
@@ -61,7 +62,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .brand img { height: 30px; width: auto; }
 .brand b { color: #4aa3ff; font-weight: 600; }
 .top nav { margin-left: auto; display: flex; gap: 26px; font-size: 0.95rem; }
-.top nav a { color: var(--on-navy-2); text-decoration: none; padding: 6px 0; }
+.top nav a { color: var(--on-navy-2); text-decoration: none; padding: 12px 0; }
 .top nav a:hover, .top nav a[aria-current] { color: var(--on-navy); }
 
 /* hero */
@@ -74,8 +75,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .btn { display: inline-flex; align-items: center; padding: 13px 22px; border-radius: var(--r-md); font-weight: 600; text-decoration: none; border: 1px solid transparent; line-height: 1.2; }
 .btn-primary { background: var(--blue-fill); color: #fff; }
 .btn-primary:hover { background: #0650c4; }
-.btn-line { border-color: var(--navy-line); color: var(--on-navy); }
+.btn-line { border-color: #6f86b3; color: var(--on-navy); }
 .btn-line:hover { border-color: var(--on-navy-2); }
+.top a:focus-visible, .hero a:focus-visible, footer a:focus-visible { outline-color: var(--cyan); }
 
 /* the pair: one login, as you see it and as the server stores it */
 .pair { display: grid; gap: 0; max-width: 460px; justify-self: end; width: 100%; }
@@ -139,7 +141,9 @@ section .lead { color: var(--ink-2); font-size: var(--t-lg); line-height: 1.55; 
 .steps li::before { content: counter(step); position: absolute; left: 0; top: 0.05em; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--soft); color: var(--blue-ink); font-weight: 600; font-size: var(--t-sm); }
 .steps b { color: var(--ink); }
 .terminal { margin: 0; background: var(--navy); color: #dbe6f7; border-radius: var(--r-lg); padding: 28px 30px; overflow-x: auto; line-height: 1.75; font-size: 0.86rem; box-shadow: 0 24px 60px rgb(8 32 82 / 0.18); }
+.terminal code { font-size: inherit; }
 .terminal .c { color: #7f95bb; }
+.terminal:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
 :not(pre) > code { background: var(--soft); padding: 1px 6px; border-radius: 5px; }
 
 /* apps */
@@ -185,6 +189,7 @@ footer a:hover { color: #fff; text-decoration: underline; }
   .ledger .seen-col { border-left: 0; border-top: 1px solid var(--line); }
   .ledger .col { padding: 24px; }
   .top nav a.opt { display: none; }
+  .top nav { gap: 16px; font-size: 0.9rem; }
   .terminal { padding: 20px; font-size: 0.8rem; }
   .app .frame { height: 380px; }
 }

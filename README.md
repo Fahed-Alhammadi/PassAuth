@@ -23,8 +23,8 @@
 ## Why PassAuth
 
 - **Your server, your data.** One small container with the web vault built in. SQLite by default, PostgreSQL if you prefer.
-- **Zero knowledge.** Items are encrypted on your device. The server never sees your master password and stores only ciphertext, including item names and website addresses.
-- **Everything in one place.** Logins, verification codes (TOTP), passkeys, cards, identities and notes.
+- **Zero knowledge.** Items are encrypted on your device. The server never sees your master password and can't read your vault, including item names and website addresses.
+- **Everything in one place.** Logins, verification codes, passkeys, cards, identities and notes.
 - **Made for sharing.** Share vaults with family or a team; each vault key is sealed to each member.
 - **Easy to switch.** Import exports from other password managers, read and encrypted in your browser.
 
@@ -44,17 +44,18 @@ You need a machine with Docker and Docker Compose, and a domain with HTTPS to us
 ```bash
 git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
 cd passauth
-cp .env.example .env          # set DOMAIN, an admin token and email
+cp .env.example .env          # then set DOMAIN in .env
+mkdir -p data && sudo chown 1000:1000 data   # owned by your PUID:PGID
 docker compose up -d
 ```
 
-Then open your domain and create your account. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: the admin token, email, HTTPS with a reverse proxy, updates, backups and all settings.
+Put it behind HTTPS (the apps require it), open your domain and create your account. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: the admin token, email, HTTPS with a reverse proxy, updates, backups and all settings.
 
 To update: `docker compose pull && docker compose up -d`. Database changes apply on start.
 
 ## Security
 
-- **Sign-in:** OPAQUE, so the server can't learn or test your master password. Two-step login by authenticator app, email code or recovery code.
+- **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code or recovery code.
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.
