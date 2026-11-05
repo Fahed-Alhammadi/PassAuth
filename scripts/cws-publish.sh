@@ -7,9 +7,10 @@
 #   CWS_ITEM_ID               the extension ID (end of the store listing URL)
 #
 # Usage: scripts/cws-publish.sh passauth-extension-X.Y.Z.zip
+#        scripts/cws-publish.sh --check   (sign in and print the store status only)
 set -euo pipefail
 
-zip="$1"
+zip="${1:?usage: $0 <zip> | --check}"
 : "${CWS_SERVICE_ACCOUNT_JSON:?}" "${CWS_PUBLISHER_ID:?}" "${CWS_ITEM_ID:?}"
 api="https://chromewebstore.googleapis.com"
 item="publishers/$CWS_PUBLISHER_ID/items/$CWS_ITEM_ID"
@@ -32,6 +33,12 @@ echo "::add-mask::$token"
 auth=(-H "Authorization: Bearer $token")
 
 status() { curl -sS --fail-with-body "${auth[@]}" "$api/v2/$item:fetchStatus"; }
+
+if [ "$zip" = --check ]; then
+  echo "Signed in as $(jq -r .client_email <<<"$CWS_SERVICE_ACCOUNT_JSON")"
+  status | jq '{published: .publishedItemRevisionStatus, submitted: .submittedItemRevisionStatus}'
+  exit 0
+fi
 
 # A newer release replaces a version still waiting for review.
 if [ "$(status | jq -r '.submittedItemRevisionStatus.state // empty')" = PENDING_REVIEW ]; then

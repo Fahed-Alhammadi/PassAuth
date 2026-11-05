@@ -1,19 +1,37 @@
 name: Extension release
 
 # Push a tag like extension-v1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
-# extension and publish passauth-extension-1.2.3.zip as a GitHub release (the zip to upload to
-# the Chrome Web Store). The version comes from extension/package.json and
+# extension, publish passauth-extension-1.2.3.zip as a GitHub release and submit it to the
+# Chrome Web Store. The version comes from extension/package.json and
 # extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
 # manifest version for every upload).
+# Run it by hand (Actions → Extension release → Run workflow) to only check the Web Store
+# connection: it signs in and prints the store status; nothing is built or uploaded.
 on:
   push:
     tags: ["extension-v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  store-check:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check the Chrome Web Store connection
+        env:
+          CWS_SERVICE_ACCOUNT_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
+        run: scripts/cws-publish.sh --check
+
   github-release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
