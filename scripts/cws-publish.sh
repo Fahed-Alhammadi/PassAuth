@@ -36,7 +36,11 @@ status() { curl -sS --fail-with-body "${auth[@]}" "$api/v2/$item:fetchStatus"; }
 
 if [ "$zip" = --check ]; then
   echo "Signed in as $(jq -r .client_email <<<"$CWS_SERVICE_ACCOUNT_JSON")"
-  status | jq '{published: .publishedItemRevisionStatus, submitted: .submittedItemRevisionStatus}'
+  # Plain text: GitHub masks "{" and "}" in logs because the JSON secret contains them.
+  status | jq -r '
+    def rev: if . then "\(.distributionChannels[0].crxVersion // "?") (\(.state))" else "none" end;
+    "Live in the store: \(.publishedItemRevisionStatus | rev)",
+    "Submitted for review: \(.submittedItemRevisionStatus | rev)"'
   exit 0
 fi
 
