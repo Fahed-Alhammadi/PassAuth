@@ -5,111 +5,192 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PassAuth — self-hosted password manager</title>
 <meta name="description" content="PassAuth is a password manager you host yourself. Passwords, verification codes and passkeys, encrypted on your devices, synced through your own server.">
+<meta property="og:title" content="PassAuth — self-hosted password manager">
+<meta property="og:description" content="Passwords, verification codes and passkeys, encrypted on your devices, synced through your own server.">
+<meta name="theme-color" content="#082052">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/ibm-plex-sans-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="./"><img src="assets/logo.svg" alt=""><span>Pass<b>Auth</b></span></a>
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="27" height="30"><span>Pass<b>Auth</b></span></a>
     <nav aria-label="Main">
       <a class="opt" href="#features">Features</a>
-      <a class="opt" href="#install">Install</a>
-      <a href="privacy.html">Privacy</a>
-      <a href="support.html">Support</a>
+      <a class="opt" href="#security">Security</a>
+      <a class="opt" href="#install">Self-host</a>
+      <a class="opt" href="#apps">Apps</a>
+      <a href="https://github.com/Fahed-Alhammadi/PassAuth">GitHub</a>
     </nav>
   </div>
 </header>
 
-<main>
+<main id="main">
   <div class="hero">
     <div class="wrap">
-      <div>
+      <div class="hero-copy">
         <h1>Your passwords, on your own server.</h1>
-        <p>PassAuth keeps your logins, verification codes and passkeys encrypted on your devices and syncs them through a server you run.</p>
+        <p>PassAuth encrypts your logins, verification codes and passkeys on your devices, then syncs them through a server you run. The server only ever holds ciphertext.</p>
         <div class="cta">
-          <a class="btn btn-primary" href="#install">Install PassAuth</a>
+          <a class="btn btn-primary" href="#install">Install the server</a>
           <a class="btn btn-line" href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan">Add to Chrome</a>
-          <a class="btn btn-line" href="https://github.com/Fahed-Alhammadi/PassAuth">Source code</a>
         </div>
+        <p class="fine">Free and open source under the MIT License.</p>
       </div>
-      <img class="shot popup" src="assets/popup-vault.png" width="760" height="1200" alt="The PassAuth extension showing the login saved for the current site, favorites and all items.">
+
+      <div class="pair" aria-label="The same login, as you see it and as your server stores it">
+        <figure class="seen">
+          <figcaption>What you see</figcaption>
+          <div class="item">
+            <div class="item-head"><span class="avatar" aria-hidden="true">H</span><div><b>Harbor Bank</b><span>online.harborbank.example</span></div></div>
+            <dl>
+              <div><dt>Username</dt><dd>alex.morgan</dd></div>
+              <div><dt>Password</dt><dd class="dots" aria-label="hidden password">••••••••••••</dd></div>
+              <div><dt>Verification code</dt><dd class="code">256 920</dd></div>
+            </dl>
+          </div>
+        </figure>
+        <p class="seal"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>Encrypted on your device</p>
+        <figure class="stored">
+          <figcaption>What your server stores</figcaption>
+          <code id="cipher" data-plain='{"name":"Harbor Bank","username":"alex.morgan","password":"T4v!q9-Lmw2#Rz","totp":"JBSWY3DPEHPK3PXP","uri":"https://online.harborbank.example"}'>pU3KGCUwux1tEyze1iN7LtkeP3IfyxlxF0SU1kk8nVw0YL4xIB5p/tqg7ui5mX9cfCmZ/a/lkyU81lSvTfrXFCegrrP+6SMvivIhH57kkcWxC+y1Vjv8Hm+TQn7LyP4pVeXNjkbcjtS3wnZ</code>
+        </figure>
+      </div>
     </div>
   </div>
 
   <section id="features">
     <div class="wrap">
-      <h2>Everything a password manager should do</h2>
-      <p class="lead">Fill logins in your browser and apps, keep two-step codes next to your passwords, and use passkeys, with nothing readable leaving your devices.</p>
-      <div class="features">
-        <div class="feature"><h3>Fill in one click</h3><p>Pick a login from the menu under the field, from the toolbar, or with a keyboard shortcut. The icon shows how many logins match the site.</p></div>
-        <div class="feature"><h3>Verification codes</h3><p>Two-step codes count down next to the password and are copied after you fill, ready to paste.</p></div>
-        <div class="feature"><h3>Passkeys</h3><p>Save and use passkeys on sites that support them. They sync to all your devices like your passwords.</p></div>
-        <div class="feature"><h3>Save as you sign in</h3><p>PassAuth offers to save new logins and update changed passwords the moment you use them.</p></div>
-        <div class="feature"><h3>Share with your people</h3><p>Share vaults with family or a team. Keys are sealed to each person, and you can check who you share with.</p></div>
-        <div class="feature"><h3>Bring your passwords</h3><p>Import the export file from your current password manager. It's read and encrypted on your device.</p></div>
-      </div>
+      <h2>Everything you expect from a password manager</h2>
+      <p class="lead">Fill logins in your browser and apps, keep two-step codes next to your passwords, and sign in with passkeys.</p>
+      <figure class="screen">
+        <img src="assets/page-inline.png" width="2000" height="1280" loading="lazy" alt="A website's sign-in page with the PassAuth menu under the email field, offering the saved login.">
+        <figcaption>Click into a login field and PassAuth lists the logins saved for that site. The extension draws the list itself, so the website can't read it.</figcaption>
+      </figure>
+      <ul class="features">
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4l6.5 16 2.3-6.7L20.5 11z"/></svg><h3>Fill in one click</h3><p>Pick a login from the menu under the field, from the toolbar or with a shortcut. Logins only fill on the site they were saved for.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><h3>Verification codes</h3><p>Two-step codes count down next to the password and are copied after you fill, ready to paste.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15.5" r="4"/><path d="M11 12.5l8.5-8.5M16.5 7l2.5 2.5"/></svg><h3>Passkeys</h3><p>Create and use passkeys on sites that support them. They sync to all your devices with your passwords.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><h3>Save as you sign in</h3><p>PassAuth offers to save new logins and update changed passwords when you submit a form.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17" cy="9.5" r="2.5"/><path d="M16.5 14.2c2.9.3 5 2.4 5 5.8"/></svg><h3>Share with your people</h3><p>Share vaults with family or a team. Each vault key is sealed to each member, and you can check who you share with.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4.5 16.5v3.5h15v-3.5"/></svg><h3>Bring your passwords</h3><p>Import the export file from your current password manager. It's read and encrypted in your browser.</p></li>
+      </ul>
     </div>
   </section>
 
-  <section>
-    <div class="wrap split">
-      <img src="assets/page-inline.png" width="2000" height="1280" alt="A website's sign-in page with the PassAuth menu under the email field, offering the saved login.">
-      <div>
-        <h2>Fill right from the login field</h2>
-        <p class="lead">Click into a login field and PassAuth lists the logins saved for that site. The list is shown by the extension, so the website can't read it. Logins only fill on the site they belong to.</p>
+  <section class="band" id="security">
+    <div class="wrap">
+      <h2>What your server can and can't see</h2>
+      <p class="lead">Everything you save is encrypted before it leaves your device, with keys made from your master password. Whoever runs the server gets as little as possible.</p>
+      <div class="ledger">
+        <div class="col hidden-col">
+          <h3><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></svg>Encrypted, unreadable to the server</h3>
+          <ul>
+            <li>Your master password. It is never sent, not even as a hash.</li>
+            <li>Item names, usernames, passwords and notes</li>
+            <li>Website addresses saved with your logins</li>
+            <li>Verification-code secrets and passkeys</li>
+            <li>Cards, identities and secure notes</li>
+          </ul>
+        </div>
+        <div class="col seen-col">
+          <h3><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg>Visible to the server</h3>
+          <ul>
+            <li>Your email address, and your name if you add one</li>
+            <li>How many items you have and when they change</li>
+            <li>Which vaults you share, and with whom</li>
+            <li>Your IP address when a device connects</li>
+            <li>Websites whose icons you ask it to fetch (you can turn icons off)</li>
+          </ul>
+        </div>
       </div>
-    </div>
-  </section>
-
-  <section class="band">
-    <div class="wrap split">
-      <div>
-        <h2>Encrypted before it leaves your device</h2>
-        <p class="lead">Your master password never reaches the server, not even as a hash. Every item has its own key, and the server stores only encrypted data, including item names and website addresses.</p>
-        <ul class="points">
-          <li><b>Sign-in without sending your password.</b> The OPAQUE protocol proves you know it without revealing it.</li>
-          <li><b>Strong keys.</b> Argon2id, with an optional Secret Key that never leaves your devices.</li>
-          <li><b>Modern encryption.</b> XChaCha20-Poly1305 for every item, bound to its vault so it can't be swapped.</li>
-        </ul>
-      </div>
-      <img class="popup" src="assets/popup-item.png" width="760" height="1200" alt="A login in PassAuth showing its username, password and a verification code with a countdown.">
+      <dl class="crypto">
+        <div><dt>Sign-in</dt><dd>OPAQUE proves you know your master password without revealing it, so the server can't learn or test it.</dd></div>
+        <div><dt>Keys</dt><dd>Argon2id, optionally mixed with a 128-bit Secret Key that never leaves your devices.</dd></div>
+        <div><dt>Encryption</dt><dd>Every item has its own key and is sealed with XChaCha20-Poly1305, bound to its vault so it can't be swapped.</dd></div>
+      </dl>
+      <p class="more"><a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/ARCHITECTURE.md">Read the security design</a></p>
     </div>
   </section>
 
   <section id="install">
-    <div class="wrap">
-      <h2>Run your own server</h2>
-      <p class="lead">PassAuth runs as one small container. You need a machine with Docker and, to use it from your phone or other computers, a domain with HTTPS.</p>
-      <pre><code>git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
+    <div class="wrap split">
+      <div>
+        <h2>Run your own server</h2>
+        <p class="lead">PassAuth is one small container with the web vault built in. It stores data in SQLite, or PostgreSQL if you prefer, and never runs as root.</p>
+        <ol class="steps">
+          <li><b>Get the files</b> on a machine with Docker.</li>
+          <li><b>Set your domain</b> and an admin token in <code>.env</code>.</li>
+          <li><b>Start it</b>, put it behind HTTPS and create your account.</li>
+        </ol>
+        <p class="more"><a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">Read the full self-hosting guide</a></p>
+      </div>
+      <pre class="terminal"><code><span class="c"># 1. get the files</span>
+git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
 cd passauth
-cp .env.example .env        # set DOMAIN, then the admin token and email
+
+<span class="c"># 2. set DOMAIN, the admin token and email</span>
+cp .env.example .env
+
+<span class="c"># 3. start it</span>
 docker compose up -d</code></pre>
-      <p>The full guide covers the admin token, email, HTTPS, updates and backups: <a href="https://github.com/Fahed-Alhammadi/PassAuth#install-the-server">installation guide</a>.</p>
     </div>
   </section>
 
   <section class="band" id="apps">
     <div class="wrap">
-      <h2>Apps</h2>
-      <p class="lead">Use PassAuth in the web vault on your server, in your browser and on your phone.</p>
+      <h2>On your computer and your phone</h2>
+      <p class="lead">Sign in with your server's address, your email and your master password. Your vault stays in sync everywhere.</p>
       <div class="apps">
-        <div class="app"><h3>Chrome extension</h3><span class="state">Available on the <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan">Chrome Web Store</a>.</span></div>
-        <div class="app"><h3>Android</h3><span class="state">In testing. Google Play coming soon.</span></div>
-        <div class="app"><h3>iPhone and iPad</h3><span class="state">Coming soon.</span></div>
+        <figure class="app">
+          <div class="frame"><img src="assets/popup-vault.png" width="760" height="1200" loading="lazy" alt="The PassAuth browser extension showing the login for the current site, favorites and all items."></div>
+          <figcaption><h3>Browser extension</h3><p>For Chrome, Edge, Brave and other Chromium browsers. <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan">Get it on the Chrome Web Store</a></p></figcaption>
+        </figure>
+        <figure class="app">
+          <div class="frame"><img src="assets/android-vault.png" width="630" height="1120" loading="lazy" alt="The PassAuth Android app showing favorites and all items."></div>
+          <figcaption><h3>Android</h3><p>Autofill in apps and browsers, and a passkey provider. <span class="state">In testing; Google Play soon.</span></p></figcaption>
+        </figure>
+        <figure class="app">
+          <div class="frame"><img src="assets/iphone-login.png" width="515" height="1120" loading="lazy" alt="A login in the PassAuth iPhone app with its username, password and verification code."></div>
+          <figcaption><h3>iPhone and iPad</h3><p>AutoFill for passwords, codes and passkeys. <span class="state">In testing; App Store soon.</span></p></figcaption>
+        </figure>
       </div>
+      <p class="more">Every server also includes a web vault for managing items, sharing and importing.</p>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="wrap">
-    <span class="grow">© Fahed Alhammadi. PassAuth is open source under the MIT License.</span>
-    <a href="privacy.html">Privacy policy</a>
-    <a href="support.html">Support</a>
-    <a href="https://github.com/Fahed-Alhammadi/PassAuth">GitHub</a>
+    <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="22" height="25"><span>Pass<b>Auth</b></span></a>
+    <span class="grow">© Fahed Alhammadi. Open source under the MIT License.</span>
+    <nav aria-label="Footer">
+      <a href="privacy.html">Privacy policy</a>
+      <a href="support.html">Support</a>
+      <a href="https://github.com/Fahed-Alhammadi/PassAuth">GitHub</a>
+    </nav>
   </div>
 </footer>
+
+<script>
+// The hero's one moment: the saved login turns into the ciphertext the server keeps.
+(() => {
+  const el = document.getElementById("cipher");
+  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const cipher = el.textContent, plain = el.dataset.plain.padEnd(cipher.length).slice(0, cipher.length);
+  const pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let n = 0;
+  el.textContent = plain;
+  setTimeout(function step() {
+    n += 3;
+    const noise = Array.from({ length: 6 }, () => pool[(Math.random() * 64) | 0]).join("");
+    el.textContent = cipher.slice(0, n) + noise.slice(0, Math.max(0, cipher.length - n)) + plain.slice(n + 6);
+    if (n < cipher.length) setTimeout(step, 22); else el.textContent = cipher;
+  }, 900);
+})();
+</script>
 </body>
 </html>

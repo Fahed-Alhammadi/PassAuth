@@ -1,195 +1,82 @@
-<p align="center"><img src="assets/passauth-logo.svg" alt="PassAuth" width="96"></p>
+<p align="center"><img src="assets/passauth-logo.svg" alt="" width="88"></p>
 
-# PassAuth
+<h1 align="center">PassAuth</h1>
 
-**Website:** https://fahed-alhammadi.github.io/PassAuth/ · [Privacy policy](https://fahed-alhammadi.github.io/PassAuth/privacy.html) · [Support](https://fahed-alhammadi.github.io/PassAuth/support.html)
+<p align="center">A password manager you host yourself.<br>Logins, verification codes and passkeys, encrypted on your devices and synced through your own server.</p>
 
-PassAuth is a self-hosted password manager. You run the server; your passwords, verification codes, passkeys, cards and notes are encrypted on your own devices before they reach it.
+<p align="center">
+  <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest"><img src="https://img.shields.io/github/v/release/Fahed-Alhammadi/PassAuth?label=server&color=0866ED" alt="Latest server release"></a>
+  <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan"><img src="https://img.shields.io/chrome-web-store/v/pnofinkalfnjjgofaikljeikjaoogaan?label=Chrome%20Web%20Store&color=0866ED" alt="Chrome Web Store"></a>
+  <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-082052" alt="MIT License"></a>
+</p>
 
-- **Server**: one small container with the web vault built in. SQLite by default, PostgreSQL optional.
-- **Web vault**: manage items, share vaults with other people, import from other password managers, two-step login, admin page.
-- **Chrome extension** ([Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan)): fills logins and verification codes, saves new logins, works as a passkey provider, supports several accounts.
-- **Mobile apps** (iOS and Android): coming next.
+<p align="center">
+  <a href="https://fahed-alhammadi.github.io/PassAuth/">Website</a> ·
+  <a href="docs/SELF_HOSTING.md">Self-hosting guide</a> ·
+  <a href="docs/ARCHITECTURE.md">Security design</a> ·
+  <a href="https://fahed-alhammadi.github.io/PassAuth/support.html">Support</a>
+</p>
 
-The server never sees your master password (sign-in uses the OPAQUE protocol) and stores only encrypted data, including item names and website addresses.
+<p align="center"><img src="assets/screenshot-extension.png" alt="The PassAuth extension open on a sign-in page, showing the saved login for the site." width="860"></p>
 
----
+## Why PassAuth
+
+- **Your server, your data.** One small container with the web vault built in. SQLite by default, PostgreSQL if you prefer.
+- **Zero knowledge.** Items are encrypted on your device. The server never sees your master password and stores only ciphertext, including item names and website addresses.
+- **Everything in one place.** Logins, verification codes (TOTP), passkeys, cards, identities and notes.
+- **Made for sharing.** Share vaults with family or a team; each vault key is sealed to each member.
+- **Easy to switch.** Import exports from other password managers, read and encrypted in your browser.
+
+## Apps
+
+| App | What it does | Get it |
+|---|---|---|
+| Web vault | Manage items, share vaults, import, two-step login, admin page | Built into every server |
+| Browser extension | Fills logins and codes, saves new logins, passkey provider, several accounts | [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) (Chrome, Edge, Brave) |
+| Android | Autofill in apps and browsers, passkeys, verification codes | In testing |
+| iPhone and iPad | AutoFill for passwords, codes and passkeys | In testing |
 
 ## Install the server
 
-You need a Linux or macOS machine with **Docker** and **Docker Compose**. To use PassAuth from other devices you also need a domain name and HTTPS (see [HTTPS](#https)).
-
-### 1. Get the files
-
-Clone the repository, or copy `docker-compose.yml` and `.env.example` into an empty folder. The container image is public at `ghcr.io/fahed-alhammadi/passauth`:
+You need a machine with Docker and Docker Compose, and a domain with HTTPS to use PassAuth from other devices.
 
 ```bash
 git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
 cd passauth
-cp .env.example .env
-```
-
-### 2. Edit `.env`
-
-Open `.env` in a text editor and set at least:
-
-| Setting | What to put |
-|---|---|
-| `DOMAIN` | The address people will open, without a trailing slash, e.g. `https://vault.example.com` (or `http://localhost:8080` to try it on this computer). Used in email links. |
-| `PASSAUTH_VERSION` | `latest` to always run the newest release, or a version such as `0.3.2` to stay on it. |
-| `PUID` / `PGID` | The user and group the container runs as (default `1000`). The container never runs as root. |
-| `PASSAUTH_PORT` | Port on this machine (default `8080`). |
-
-### 3. Create the data folder
-
-Everything PassAuth stores (the database and cached website icons) goes into `./data`, which must belong to the `PUID:PGID` user:
-
-```bash
-mkdir -p data
-sudo chown 1000:1000 data        # use your PUID:PGID if you changed them
-```
-
-On macOS you can instead set `PUID` and `PGID` in `.env` to the output of `id -u` and `id -g`, and skip `chown`.
-
-### 4. Create an admin token
-
-The admin page (`/admin`) is where you manage users, send invitations and close sign-ups. It stays off until you set an admin token. Only a **hash** of the token goes into `.env`; you type the token itself on the admin page.
-
-1. Make up a strong token of at least 16 characters, and keep it somewhere safe:
-   ```bash
-   openssl rand -base64 32
-   ```
-2. Hash it. Run this and paste the token when asked:
-   ```bash
-   docker compose run --rm passauth hash-admin-token
-   ```
-   It prints a line starting with `$argon2id$`.
-3. Add it to `.env`, writing **every `$` as `$$`** (otherwise Docker Compose reads `$` as the start of a variable):
-   ```
-   ADMIN_TOKEN=$$argon2id$$v=19$$m=19456,t=2,p=1$$...
-   ```
-
-Steps 2 and 3 in one command, printing the line already escaped for `.env`:
-
-```bash
-printf '%s\n' 'YOUR-TOKEN' | docker compose run --rm -T passauth hash-admin-token 2>/dev/null | sed 's/\$/$$/g'
-```
-
-To turn the admin page off again, remove `ADMIN_TOKEN` from `.env` and run `docker compose up -d`.
-
-### 5. Email (optional, recommended)
-
-With email set up, PassAuth sends sign-up verification, new-device alerts, two-step codes by email and invitations. Fill in the `SMTP_*` settings in `.env`:
-
-```
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_SECURITY=starttls        # starttls, force_tls or off
-SMTP_USERNAME=passauth@example.com
-SMTP_PASSWORD=your-smtp-password
-SMTP_FROM=passauth@example.com
-```
-
-Check it from the admin page with **Send test email**.
-
-### 6. Start PassAuth
-
-```bash
-docker compose up -d
-docker compose logs -f passauth      # "PassAuth server listening" means it's ready
-```
-
-Open your `DOMAIN` (or `http://localhost:8080`) and create your account. Then open `/admin`, sign in with your admin token, and turn off **Allow new accounts to sign up** if only people you invite should join.
-
-### HTTPS
-
-Put PassAuth behind a reverse proxy that handles HTTPS and forwards to port 8080, including WebSocket connections to `/api/ws`. With [Caddy](https://caddyserver.com), which gets certificates automatically, the whole configuration is:
-
-```
-vault.example.com {
-    reverse_proxy localhost:8080
-}
-```
-
-Tell PassAuth which header carries each visitor's real address, so rate limits work per visitor:
-
-- Caddy: `IP_HEADER=X-Forwarded-For`
-- nginx: add `proxy_set_header X-Real-IP $remote_addr;` and set `IP_HEADER=X-Real-IP`
-
-PassAuth believes that header only from proxies on the same machine or a private network (loopback, `10.x`, `172.16–31.x`, `192.168.x`, IPv6 ULA). If your proxy connects from another address, list it in `TRUSTED_PROXIES`.
-
-When the proxy runs on the same host, publish PassAuth on loopback only so nobody can reach it around the proxy (Docker's published ports bypass host firewalls): set `PASSAUTH_PORT=127.0.0.1:8080` in `.env`.
-
----
-
-## Update
-
-```bash
-docker compose pull
+cp .env.example .env          # set DOMAIN, an admin token and email
 docker compose up -d
 ```
 
-With `PASSAUTH_VERSION=latest` this always brings you to the newest release. Database changes are applied automatically when the new version starts.
+Then open your domain and create your account. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: the admin token, email, HTTPS with a reverse proxy, updates, backups and all settings.
 
-## Back up
+To update: `docker compose pull && docker compose up -d`. Database changes apply on start.
 
-All data is in `./data`. To back up the SQLite database while PassAuth is running:
+## Security
 
-```bash
-sqlite3 data/passauth.db ".backup 'passauth-backup.db'"
-```
+- **Sign-in:** OPAQUE, so the server can't learn or test your master password. Two-step login by authenticator app, email code or recovery code.
+- **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
+- **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
+- **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.
+- **Server:** runs as a non-root user on a read-only filesystem with no extra Linux capabilities.
 
-Or stop the container (`docker compose stop`), copy the `data` folder, and start it again. Vault contents in the backup are encrypted, but keep the backup private anyway.
+The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
-## Configuration reference
+## Import
 
-All settings live in `.env`. Any secret can be read from a file instead by adding `_FILE` to its name, e.g. `SMTP_PASSWORD_FILE=/run/secrets/smtp`.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `DOMAIN` | (required) | Public address of the server. |
-| `PASSAUTH_VERSION` | `latest` | Image version to run. |
-| `PASSAUTH_PORT` | `8080` | Port on the host. |
-| `PUID` / `PGID` | `1000` | User and group the container runs as. |
-| `DATABASE_URL` | SQLite in `/data` | `postgres://user:pass@host:5432/db` to use PostgreSQL. |
-| `ADMIN_TOKEN` | off | Hash of the admin token (see step 4). |
-| `SIGNUPS_ALLOWED` | `true` | Starting value for open sign-ups; the admin page can change it. |
-| `SIGNUPS_DOMAINS_WHITELIST` | any | Only these email domains may sign up, e.g. `example.com,example.org`. |
-| `SIGNUPS_VERIFY` | on when email is set up | Require email verification before the first sign-in. |
-| `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |
-| `TRUSTED_PROXIES` | loopback + private networks | Proxies whose `IP_HEADER` is believed, as IPs or CIDRs, e.g. `10.0.0.5,fd00::/8`. |
-| `ICON_SERVICE` | `internal` | `off` stops the server fetching website icons. |
-| `LOG_LEVEL` / `LOG_FORMAT` | `info` / text | Logging detail; `json` for structured logs. |
-| `SMTP_*` | off | Email delivery (see step 5). |
-
----
-
-## Chrome extension
-
-1. Install PassAuth from the [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) and click **Add to Chrome**. Chrome keeps it up to date.
-2. Pin PassAuth, open it, enter your server address and sign in.
-
-Without the Web Store (e.g. to try a version before it's approved): build it (`scripts/build-wasm.sh web/src/wasm && scripts/build-wasm.sh extension/src/wasm && cd extension && pnpm install && pnpm build`), then open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose `extension/dist`. Chrome doesn't update an extension loaded this way.
-
-The extension needs an `https://` server address; plain `http` is allowed only for `localhost`.
-
-## Import from another password manager
-
-In the web vault open **Import** and choose the export file from your old password manager. JSON (including password-protected), CSV, `.1pux` and KDBX exports are supported. Files are read and encrypted in your browser; nothing unencrypted is sent to the server.
-
----
-
-## Security design
-
-- **Keys**: Argon2id derives your keys from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
-- **Encryption**: every item has its own key and is encrypted with XChaCha20-Poly1305. Each ciphertext is bound to its item and vault, so it can't be moved or swapped.
-- **Sign-in**: OPAQUE, so the server can't learn or test your master password. Refresh tokens rotate and detect reuse. Two-step login by authenticator app, email code or recovery code.
-- **Sharing**: vault keys are sealed to each member's X25519 key, and fingerprints let you confirm who you share with.
-- **Server**: runs as a non-root user on a read-only filesystem with no extra Linux capabilities.
-
-Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+In the web vault, open **Import** and choose the export file from your old password manager. JSON (including password-protected), CSV, `.1pux` and KDBX exports are supported. Files are read and encrypted in your browser; nothing unencrypted reaches the server. Supported formats: [docs/IMPORT_FORMATS.md](docs/IMPORT_FORMATS.md).
 
 ## Develop
+
+The Rust core (crypto and importers) is shared by every client: compiled to WebAssembly for the web vault and extension, and bound through UniFFI for the mobile apps.
+
+| Path | What |
+|---|---|
+| `crates/core` | Crypto, item format, importers |
+| `crates/server` | API server (axum, sqlx) that also serves the web vault |
+| `web/` | Web vault (React, Vite) |
+| `extension/` | Chrome extension (Manifest V3, TypeScript) |
+| `android/`, `ios/` | Mobile apps (Kotlin/Compose, SwiftUI) |
 
 ```bash
 cargo test --workspace                       # crypto, importers and server API tests
@@ -200,9 +87,13 @@ docker compose up -d --build                 # build and run the image locally
 
 Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the version in `Cargo.lock`, Node.js 26 and pnpm.
 
-**Releases:** the server, the extension and the mobile apps each have their own version. Server releases are published as Docker images and [GitHub releases](https://github.com/Fahed-Alhammadi/PassAuth/releases); the extension and apps are published through their stores.
+To try an extension build, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose `extension/dist`.
 
----
+The server, the extension and the mobile apps each have their own version. Server releases are published as Docker images (`ghcr.io/fahed-alhammadi/passauth`) and [GitHub releases](https://github.com/Fahed-Alhammadi/PassAuth/releases); the extension and apps are published through their stores.
+
+## Support
+
+Questions and bug reports: [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues). Please don't include passwords, codes or other vault contents. More help: [support page](https://fahed-alhammadi.github.io/PassAuth/support.html).
 
 ## License
 
