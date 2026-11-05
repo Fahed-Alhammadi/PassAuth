@@ -34,10 +34,10 @@
 |---|---|---|
 | Web vault | Manage items, share vaults, import, two-step login, admin page | Built into every server |
 | Browser extension | Fills logins and codes, saves new logins, passkey provider, several accounts | [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) (Chrome, Edge, Brave) |
-| Android | Autofill in apps and browsers, passkeys, verification codes | Beta: [join the test on Google Play](https://play.google.com/apps/testing/io.passauth.app) |
+| Android | Autofill in apps and browsers, passkeys, verification codes | Beta: [join the group](https://groups.google.com/g/passauth-app), then [join the test on Google Play](https://play.google.com/apps/testing/io.passauth.app) |
 | iPhone and iPad | AutoFill for passwords, codes and passkeys | Beta: [join the test on TestFlight](https://testflight.apple.com/join/MGBhGbhp) |
 
-The mobile apps aren't in the stores yet. To try them before the official release, join the beta from the links above; you'll get updates automatically. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
+The mobile apps aren't in the stores yet. To try them before the official release, join the beta from the links above; you'll get updates automatically. On Android, first join the [passauth-app Google Group](https://groups.google.com/g/passauth-app) with the Google account you use on your phone, then open the Google Play link. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
 
 ## Install the server
 
