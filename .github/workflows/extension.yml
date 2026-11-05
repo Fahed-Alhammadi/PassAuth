@@ -77,9 +77,10 @@ jobs:
           pre=()
           [[ "$v" == *-* ]] && pre=(--prerelease)
           # Own notes: --generate-notes would diff against the newest release of any part.
+          # Never "Latest": that badge belongs to the server release; users install from the store.
           scripts/release-notes.sh "$GITHUB_REF_NAME" \
             extension web/src crates/core crates/core-wasm > notes.md
-          gh release create "$GITHUB_REF_NAME" --notes-file notes.md \
+          gh release create "$GITHUB_REF_NAME" --latest=false --notes-file notes.md \
             --title "PassAuth extension v$v" \
             "passauth-extension-$v.zip" "${pre[@]}"
       # Off until repo variable CWS_UPLOAD_ENABLED=true (plus CWS_PUBLISHER_ID, CWS_ITEM_ID and

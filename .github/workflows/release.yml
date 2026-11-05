@@ -4,7 +4,7 @@ name: Server release
 # web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
 # Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
 # always gets the newest version. Pre-release tags (server-v1.2.3-rc.1) don't move :latest.
-# Then creates a GitHub release with the server changes (not marked Latest).
+# Then creates a GitHub release with the server changes, marked Latest (pre-releases aren't).
 # The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
 on:
   push:
@@ -61,8 +61,8 @@ jobs:
           provenance: true
           sbom: true
 
-  # A GitHub release with the changes, so users can see what's new before pulling. It is never
-  # marked "Latest": that badge stays on the extension release, whose zip users download.
+  # A GitHub release with the changes, so users can see what's new before pulling. It is marked
+  # "Latest": self-hosters get the server from GitHub, the extension and apps come from the stores.
   github-release:
     needs: server-image
     runs-on: ubuntu-latest
@@ -89,8 +89,8 @@ jobs:
             echo '```'
             [[ "$v" == *-* ]] || echo "Also tagged \`latest\`."
           } >> notes.md
-          pre=()
-          [[ "$v" == *-* ]] && pre=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" --latest=false \
-            --title "PassAuth server v$v" --notes-file notes.md "${pre[@]}"
+          flags=(--latest)
+          [[ "$v" == *-* ]] && flags=(--prerelease --latest=false)
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" \
+            --title "PassAuth server v$v" --notes-file notes.md
 
