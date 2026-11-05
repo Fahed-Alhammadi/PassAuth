@@ -64,3 +64,12 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --notes-file notes.md \
             --title "PassAuth extension v$v" \
             "passauth-extension-$v.zip" "${pre[@]}"
+      # Off until repo variable CWS_UPLOAD_ENABLED=true (plus CWS_PUBLISHER_ID, CWS_ITEM_ID and
+      # secret CWS_SERVICE_ACCOUNT_JSON). Pre-releases (X.Y.Z-beta) stay on GitHub only.
+      - name: Submit to the Chrome Web Store
+        if: vars.CWS_UPLOAD_ENABLED == 'true' && !contains(github.ref_name, '-')
+        env:
+          CWS_SERVICE_ACCOUNT_JSON: ${{ secrets.CWS_SERVICE_ACCOUNT_JSON }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
+        run: scripts/cws-publish.sh "passauth-extension-${GITHUB_REF_NAME#extension-v}.zip"
