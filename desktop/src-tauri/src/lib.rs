@@ -6,6 +6,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::menu::{
     AboutMetadataBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem,
     SubmenuBuilder,
@@ -13,7 +15,7 @@ use tauri::menu::{
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::NewWindowResponse;
 use tauri::{
-    AppHandle, Emitter, Listener, Manager, RunEvent, State, Url, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Listener, Manager, State, Url, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
