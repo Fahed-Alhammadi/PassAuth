@@ -198,19 +198,9 @@ scripts/build-wasm.sh extension/src/wasm && (cd extension && pnpm install && pnp
 docker compose up -d --build                 # build and run the image locally
 ```
 
-Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the version in `Cargo.lock`, Node.js 24 and pnpm.
+Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the version in `Cargo.lock`, Node.js 26 and pnpm.
 
-**Releasing:** the server (with the web vault), the extension, the iOS app and the Android app each have their own version. Bump one, then push:
-
-```bash
-scripts/release.sh server 0.4.5     # or: extension | ios | android
-git push origin main                # wait for CI to pass
-git push origin server-v0.4.5
-```
-
-- `server-vX.Y.Z`: GitHub Actions publishes `ghcr.io/fahed-alhammadi/passauth:X.Y.Z` and moves `:latest` to it, and creates a GitHub release listing the server changes, marked **Latest**.
-- `extension-vX.Y.Z`: a GitHub release with `passauth-extension-X.Y.Z.zip` (never marked Latest: users install from the store), and the zip is submitted to the Chrome Web Store (live after Google's review) when the repository variable `CWS_UPLOAD_ENABLED` is `true`.
-- `ios-vX.Y.Z` / `android-vX.Y.Z`: the app goes to TestFlight / Google Play testing (the track is the repository variable `PLAY_TRACK`, `internal` by default). No GitHub release.
+**Releases:** the server, the extension and the mobile apps each have their own version. Server releases are published as Docker images and [GitHub releases](https://github.com/Fahed-Alhammadi/PassAuth/releases); the extension and apps are published through their stores.
 
 ---
 
