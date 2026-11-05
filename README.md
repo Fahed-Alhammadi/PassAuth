@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="CHANGELOG.md"><img src="https://img.shields.io/github/v/tag/Fahed-Alhammadi/PassAuth?filter=server-*&label=latest&color=0866ED" alt="Latest server version"></a>
+  <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest"><img src="https://img.shields.io/github/v/release/Fahed-Alhammadi/PassAuth?label=desktop&color=0866ED" alt="Latest desktop app release"></a>
   <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan"><img src="https://img.shields.io/chrome-web-store/v/pnofinkalfnjjgofaikljeikjaoogaan?label=Chrome%20Web%20Store&color=0866ED" alt="Chrome Web Store"></a>
   <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-082052" alt="MIT License"></a>
@@ -34,10 +35,21 @@
 |---|---|---|
 | Web vault | Manage items, share vaults, import, two-step login, admin page | Built into every server |
 | Browser extension | Fills logins and codes, saves new logins, passkey provider, several accounts | [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) (Chrome, Edge, Brave) |
+| Desktop | Your vault on macOS, Windows and Linux; updates itself | [Downloads](#desktop-app) below |
 | Android | Autofill in apps and browsers, passkeys, verification codes | Beta: [join the group](https://groups.google.com/g/passauth-app), then [join the test on Google Play](https://play.google.com/apps/testing/io.passauth.app) |
 | iPhone and iPad | AutoFill for passwords, codes and passkeys | Beta: [join the test on TestFlight](https://testflight.apple.com/join/MGBhGbhp) |
 
 The mobile apps aren't in the stores yet. To try them before the official release, join the beta from the links above; you'll get updates automatically. On Android, first join the [passauth-app Google Group](https://groups.google.com/g/passauth-app) with the Google account you use on your phone, then open the Google Play link. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
+
+### Desktop app
+
+The desktop app is the web vault in its own window, with your server's address, email and master password remembered on the machine.
+
+- macOS (Apple silicon and Intel): [PassAuth-macOS.dmg](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-macOS.dmg)
+- Windows (64-bit): [PassAuth-Windows-x64-setup.exe](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Windows-x64-setup.exe)
+- Linux (x86_64): [PassAuth-Linux-x86_64.AppImage](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-x86_64.AppImage), or [.deb](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-amd64.deb) for Debian and Ubuntu and [.rpm](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-x86_64.rpm) for Fedora and openSUSE
+
+Updates: the app checks GitHub for new versions and asks before installing. Every version is on the [releases page](https://github.com/Fahed-Alhammadi/PassAuth/releases). The macOS app is signed and notarized, so it opens without warnings. Windows shows a SmartScreen warning on first run until the builds are code-signed; choose "More info" → "Run anyway".
 
 ## Install the server
 
@@ -79,12 +91,14 @@ The Rust core (crypto and importers) is shared by every client: compiled to WebA
 | `crates/server` | API server (axum, sqlx) that also serves the web vault |
 | `web/` | Web vault (React, Vite) |
 | `extension/` | Chrome extension (Manifest V3, TypeScript) |
+| `desktop/` | Desktop app (Tauri: Rust shell + the web vault) |
 | `android/`, `ios/` | Mobile apps (Kotlin/Compose, SwiftUI) |
 
 ```bash
 cargo test --workspace                       # crypto, importers and server API tests
 scripts/build-wasm.sh web/src/wasm && (cd web && pnpm install && pnpm build)
 scripts/build-wasm.sh extension/src/wasm && (cd extension && pnpm install && pnpm build)
+scripts/build-wasm.sh web/src/wasm && (cd desktop && pnpm install && pnpm tauri dev)   # desktop app
 docker compose up -d --build                 # build and run the image locally
 ```
 
@@ -92,7 +106,7 @@ Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-
 
 To try an extension build, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose `extension/dist`.
 
-The server, the extension and the mobile apps each have their own version. Server versions are published as the Docker image `ghcr.io/fahed-alhammadi/passauth`, with their changes in [CHANGELOG.md](CHANGELOG.md); the extension and apps are published through their stores.
+The server, the extension, the desktop app and the two mobile apps each have their own version (five parts). Server versions are published as the Docker image `ghcr.io/fahed-alhammadi/passauth`, with their changes in [CHANGELOG.md](CHANGELOG.md); the desktop app as [GitHub releases](https://github.com/Fahed-Alhammadi/PassAuth/releases) tagged `vX.Y.Z`, which the installed app updates from; the extension and the mobile apps through their stores.
 
 ## Support
 

@@ -5,7 +5,7 @@ name: Server release
 # Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
 # always gets the newest version. Pre-release tags (server-1.2.3-rc.1) don't move :latest.
 # No GitHub release: the changes are in CHANGELOG.md (written by scripts/release.sh). GitHub
-# releases are kept for downloadable apps (a future desktop app).
+# releases are used only by the desktop app (desktop.yml, tags vX.Y.Z).
 # The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
 on:
   push:

@@ -5,6 +5,7 @@
 #   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-X.Y.Z (Chrome Web Store)
 #   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-X.Y.Z       (TestFlight)
 #   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-X.Y.Z   (Play internal testing)
+#   scripts/release.sh desktop   X.Y.Z   desktop/package.json + src-tauri/Cargo.toml (+ Cargo.lock) -> vX.Y.Z (GitHub release with the installers, marked Latest; the app updates from it)
 #
 # ios/android also need updated "What's new" notes, committed before running this:
 # ios/whatsnew/en-US.txt (TestFlight "What to Test", ≤4000 chars) and
@@ -16,7 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 part=${1:-} version=${2:-}
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 server|extension|ios|android X.Y.Z" >&2; exit 1; }
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 server|extension|ios|android|desktop X.Y.Z" >&2; exit 1; }
 
 json_version() { node -p "require('./$1').version"; }
 # Replace only the top-level "version" value, keeping the file's formatting.
@@ -35,14 +36,18 @@ case "$part" in
   ios | android)
     current=$(tr -d '[:space:]' < "$part/VERSION")
     files=("$part/VERSION") ;;
-  *) echo "usage: $0 server|extension|ios|android X.Y.Z" >&2; exit 1 ;;
+  desktop)
+    current=$(json_version desktop/package.json)
+    files=(desktop/package.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock) ;;
+  *) echo "usage: $0 server|extension|ios|android|desktop X.Y.Z" >&2; exit 1 ;;
 esac
 
 if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ] || [ "$current" = "$version" ]; then
   echo "$part is at $current; the new version must be higher (got $version)" >&2
   exit 1
 fi
-tag="$part-$version"
+# The desktop app's tag is vX.Y.Z: its GitHub release is the one marked Latest.
+if [ "$part" = desktop ]; then tag="v$version"; else tag="$part-$version"; fi
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists" >&2; exit 1; }
 
 # Mobile releases carry "What's new" notes (TestFlight "What to Test", Play release notes):
@@ -80,6 +85,13 @@ case "$part" in
     set_json_version extension/public/manifest.json "$version" ;;
   ios | android)
     echo "$version" > "$part/VERSION" ;;
+  desktop)
+    set_json_version desktop/package.json "$version"
+    awk -v v="$version" '/^\[package\]/{s=1} /^\[/ && !/^\[package\]/{s=0}
+      s && /^version *=/ && !done {sub(/"[^"]*"/, "\"" v "\""); done=1} {print}' desktop/src-tauri/Cargo.toml > desktop/src-tauri/Cargo.toml.tmp &&
+      mv desktop/src-tauri/Cargo.toml.tmp desktop/src-tauri/Cargo.toml
+    # Only the app's own entry in its lockfile changes (its own workspace, nothing fetched).
+    cargo update --workspace --offline --quiet --manifest-path desktop/src-tauri/Cargo.toml ;;
 esac
 
 git add -- "${files[@]}"

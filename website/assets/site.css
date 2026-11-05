@@ -147,13 +147,17 @@ section .lead { color: var(--ink-2); font-size: var(--t-lg); line-height: 1.55; 
 :not(pre) > code { background: var(--soft); padding: 1px 6px; border-radius: 5px; }
 
 /* apps */
-.apps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; }
+.apps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 28px; }
 .app { margin: 0; }
-.app .frame { height: 440px; display: flex; align-items: flex-end; justify-content: center; padding: 28px 28px 0; background: var(--paper); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
+.app .frame { height: 400px; display: flex; align-items: flex-end; justify-content: center; padding: 28px 28px 0; background: var(--paper); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; }
 .app .frame img { max-height: 100%; width: auto; border-radius: 14px 14px 0 0; box-shadow: 0 16px 40px rgb(8 32 82 / 0.16); }
+/* the desktop window is wide: show its left part, running off the card's right edge */
+.app-wide .frame { justify-content: flex-start; padding: 40px 0 0 24px; }
+.app-wide .frame img { width: 150%; max-width: none; border-radius: 12px 0 0 0; }
 .app h3 { margin: 20px 0 4px; font-size: var(--t-lg); font-weight: 600; }
 .app p { margin: 0; color: var(--ink-2); }
 .app .state { display: block; margin-top: 6px; color: var(--ink-3); font-size: var(--t-sm); }
+.downloads { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; font-weight: 600; }
 
 /* documents (privacy, support) */
 .doc { padding: 64px 0 96px; }
@@ -175,17 +179,21 @@ footer nav { display: flex; flex-wrap: wrap; gap: 12px 28px; }
 footer a { color: #d3ddee; text-decoration: none; }
 footer a:hover { color: #fff; text-decoration: underline; }
 
+@media (max-width: 1099px) {
+  .apps { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; }
+  .app .frame { height: 440px; }
+}
 @media (max-width: 920px) {
   .hero .wrap, .split { grid-template-columns: minmax(0, 1fr); gap: 48px; }
   .hero .wrap { padding: 56px 0 72px; }
   .pair { justify-self: start; }
   .features, .crypto { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .apps { grid-template-columns: minmax(0, 1fr); max-width: 460px; }
   .top nav { gap: 18px; }
   section { padding: 64px 0; }
 }
 @media (max-width: 640px) {
   .features, .crypto, .ledger { grid-template-columns: minmax(0, 1fr); }
+  .apps { grid-template-columns: minmax(0, 1fr); max-width: 460px; }
   .ledger .seen-col { border-left: 0; border-top: 1px solid var(--line); }
   .ledger .col { padding: 24px; }
   .top nav a.opt { display: none; }

@@ -1,0 +1,224 @@
+name: Desktop release
+
+# Builds the desktop app (Tauri) for macOS, Windows and Linux.
+# - Push a tag vX.Y.Z (scripts/release.sh desktop X.Y.Z; version in desktop/package.json and
+#   desktop/src-tauri/Cargo.toml): builds all three and creates the GitHub release "PassAuth X.Y.Z",
+#   marked Latest, with the installers, the updater files (*.sig, latest.json) and fixed-name copies
+#   of the installers (PassAuth-macOS.dmg, ...) that the README and the website link to. Installed
+#   apps update from releases/latest/download/latest.json. A pre-release tag (vX.Y.Z-beta.1, made
+#   by hand with the files at X.Y.Z) gets a pre-release without latest.json, so no app updates to it.
+# - "Run workflow" (manual): builds only; the bundles are kept on the run as artifacts.
+# macOS: signed and notarized when APPLE_CERTIFICATE (base64 Developer ID Application .p12) and
+# APPLE_CERTIFICATE_PASSWORD are set; notarization uses the App Store Connect API key from ios.yml
+# (APP_STORE_CONNECT_API_KEY_ID / _API_ISSUER_ID / _API_KEY_P8). Without the certificate the app
+# is built unsigned and Gatekeeper warns on first open (Control-click → Open).
+# Windows: unsigned for now; SmartScreen warns until a code-signing certificate is added.
+# Updater signatures: TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key
+# has one; empty otherwise). The matching public key is in desktop/src-tauri/tauri.conf.json.
+on:
+  push:
+    tags: ["v[0-9]*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin
+            targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+          - os: windows-latest
+            args: ""
+            targets: wasm32-unknown-unknown
+          - os: ubuntu-22.04
+            args: ""
+            targets: wasm32-unknown-unknown
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check versions match the tag
+        id: v
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./desktop/package.json').version")"
+          crate="$(awk '/^\[package\]/{s=1;next} /^\[/{s=0} s && /^version *=/{gsub(/[" ]/,"");sub(/version=/,"");print;exit}' desktop/src-tauri/Cargo.toml)"
+          [ "${tag%%-*}" = "$pkg" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match desktop/package.json version $pkg"; exit 1; }
+          [ "$pkg" = "$crate" ] || { echo "::error::desktop/src-tauri/Cargo.toml version $crate differs from desktop/package.json $pkg"; exit 1; }
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      # Changes since the previous desktop tag, plus which file is for which system. The bundle
+      # names carry the version from Cargo.toml (the tag without a pre-release suffix).
+      - name: Release notes
+        id: notes
+        if: github.event_name == 'push'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          v="${VERSION%%-*}"
+          # A random delimiter, so no line of the notes can end the output block early.
+          eof="NOTES-$(openssl rand -hex 16)"
+          {
+            echo "body<<$eof"
+            scripts/release-notes.sh "$GITHUB_REF_NAME" desktop web/src crates/core crates/core-wasm
+            echo
+            echo '## Downloads'
+            echo
+            echo "- macOS (Apple silicon and Intel): \`PassAuth_${v}_universal.dmg\`"
+            echo "- Windows (64-bit): \`PassAuth_${v}_x64-setup.exe\`"
+            echo "- Linux (x86_64): \`PassAuth_${v}_amd64.AppImage\` runs on any distribution; \`PassAuth_${v}_amd64.deb\` for Debian and Ubuntu, \`PassAuth-${v}-1.x86_64.rpm\` for Fedora and openSUSE"
+            echo
+            echo "The installed app checks here for new versions and asks before updating. The other files (\`latest.json\`, \`*.sig\`, \`*.app.tar.gz\`) are for that updater."
+            echo "$eof"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # The root workspace builds the core for the browser; the app is its own workspace.
+          workspaces: |
+            .
+            desktop/src-tauri
+      - name: Install wasm-bindgen CLI (version from Cargo.lock)
+        run: |
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Build the core for the browser
+        run: scripts/build-wasm.sh web/src/wasm
+      - run: pnpm install --frozen-lockfile
+        working-directory: desktop
+
+      # Developer ID certificate into a temporary keychain (as ios.yml does) and the App Store
+      # Connect API key for notarization; Tauri picks both up from the environment. Skipped
+      # (unsigned build) while APPLE_CERTIFICATE is not set.
+      - name: macOS signing and notarization
+        if: runner.os == 'macOS'
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          if [ -z "$P12_BASE64" ]; then
+            echo "::notice::APPLE_CERTIFICATE is not set: the macOS app is built unsigned (Gatekeeper warns on first open)"
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw="$(uuidgen)"
+          p12="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -k "$kcpw" "$kc" > /dev/null
+          # shellcheck disable=SC2046 # one keychain path per word
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm -f "$p12"
+          security find-identity -v -p codesigning "$kc"
+          echo "SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_IDENTITY=Developer ID Application: Fahed Alhammadi (JEXQBK3SQ5)" >> "$GITHUB_ENV"
+          if [ -z "$KEY_P8" ]; then
+            echo "::warning::APP_STORE_CONNECT_API_KEY_P8 is not set: the macOS app is signed but not notarized"
+            exit 0
+          fi
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s\n' "$KEY_P8" > "$key"
+          {
+            echo "APPLE_API_KEY=$KEY_ID"
+            echo "APPLE_API_ISSUER=$ISSUER_ID"
+            echo "APPLE_API_KEY_PATH=$key"
+          } >> "$GITHUB_ENV"
+
+      # Tag push: builds, then creates the release (or adds to it: the three systems share one)
+      # and uploads the bundles, their updater signatures and latest.json (not for pre-releases).
+      # Manual run: builds and keeps the bundles on the run.
+      - name: Build (and release)
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: desktop
+          args: ${{ matrix.args }}
+          tagName: ${{ github.event_name == 'push' && github.ref_name || '' }}
+          releaseName: ${{ github.event_name == 'push' && format('PassAuth {0}', steps.v.outputs.version) || '' }}
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          uploadUpdaterJson: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+          updaterJsonPreferNsis: true
+          uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Remove the API key and keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          [ -z "${SIGNING_KEYCHAIN:-}" ] || security delete-keychain "$SIGNING_KEYCHAIN" || true
+
+  # Fixed-name copies of the installers on the same release, so the README and the website can
+  # link https://github.com/<repo>/releases/latest/download/PassAuth-macOS.dmg and so on.
+  fixed-names:
+    name: fixed-name downloads
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Copy each installer under its fixed name
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # copy <glob of the versioned asset> <fixed name>: exactly one asset must match.
+          copy() {
+            rm -rf dl && mkdir dl
+            gh release download "$GITHUB_REF_NAME" --pattern "$1" --dir dl
+            [ "$(find dl -type f | wc -l)" -eq 1 ] || { echo "::error::expected one release asset matching $1, found: $(ls dl)"; exit 1; }
+            mv dl/* "$2"
+            gh release upload "$GITHUB_REF_NAME" "$2" --clobber
+          }
+          copy 'PassAuth_*_universal.dmg' PassAuth-macOS.dmg
+          copy 'PassAuth_*_x64-setup.exe' PassAuth-Windows-x64-setup.exe
+          copy 'PassAuth_*_amd64.AppImage' PassAuth-Linux-x86_64.AppImage
+          copy 'PassAuth_*_amd64.deb' PassAuth-Linux-amd64.deb
+          copy 'PassAuth-[0-9]*.x86_64.rpm' PassAuth-Linux-x86_64.rpm

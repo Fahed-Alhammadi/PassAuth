@@ -1,5 +1,5 @@
-# Keeps the commit-SHA pins of GitHub Actions, the Docker base image digests
-# and Rust dependencies current. Each update arrives as a pull request.
+# Keeps the commit-SHA pins of GitHub Actions, the Docker base image digests,
+# Rust dependencies and the npm packages of the clients current. Each update arrives as a pull request.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,6 +15,16 @@ updates:
       interval: weekly
   - package-ecosystem: cargo
     directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: cargo
+    directory: /desktop/src-tauri
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directories: [/desktop, /web, /extension]
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
