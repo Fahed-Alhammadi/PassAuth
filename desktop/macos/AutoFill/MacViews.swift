@@ -409,11 +409,11 @@ struct MacSettings: View {
                 LabeledContent("Vault", value: state.status == .unlocked ? "Unlocked" : "Locked")
             }
             Section {
-                Picker("Vault timeout", selection: Binding(get: { state.settings.vaultTimeout }, set: setTimeout)) {
+                Picker("Vault timeout", selection: Binding(get: { state.settings.vaultTimeout }, set: { setTimeout($0) })) {
                     ForEach(TimedUnlockPolicy.choices, id: \.self) { Text($0.label).tag($0) }
                 }
                 if bio.available {
-                    Toggle("Unlock with \(bio.name)", isOn: Binding(get: { state.biometricEnabled }, set: setBiometric))
+                    Toggle("Unlock with \(bio.name)", isOn: Binding(get: { state.biometricEnabled }, set: { setBiometric($0) }))
                         .disabled(busy || (state.status != .unlocked && !state.biometricEnabled))
                 }
                 Toggle(isOn: Binding(get: { state.settings.autoCopyTotp }, set: { v in
