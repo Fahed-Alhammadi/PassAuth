@@ -168,7 +168,7 @@ public final class SecureStore {
 
     public func writeCache(_ id: String, _ json: Data) {
         guard let blob = seal(json, aad: "vault:\(id)") else { return }
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
         write(blob, to: cacheURL(id))
     }
 
@@ -184,8 +184,8 @@ public final class SecureStore {
         let url = cacheURL(id), dir = cacheDir, aad = Data("vault:\(id)".utf8)
         await Task.detached(priority: .utility) {
             guard let blob = try? ChaChaPoly.seal(json, using: SymmetricKey(data: keyData), authenticating: aad).combined else { return }
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
-            try? blob.write(to: url, options: [.atomic, .completeFileProtection])
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
+            try? blob.write(to: url, options: SharedConfig.writeOptions)
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             var u = url
@@ -244,7 +244,7 @@ public final class SecureStore {
     }
 
     private func write(_ data: Data, to url: URL) {
-        try? data.write(to: url, options: [.atomic, .completeFileProtection])
+        try? data.write(to: url, options: SharedConfig.writeOptions)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         var u = url

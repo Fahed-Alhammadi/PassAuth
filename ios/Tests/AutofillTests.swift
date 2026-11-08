@@ -108,7 +108,7 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(pw.first?.serviceIdentifier.type, .domain)
         XCTAssertEqual(pw.first?.recordIdentifier, "1")
         XCTAssertEqual(ids.compactMap { $0 as? ASPasskeyCredentialIdentity }.first?.relyingPartyIdentifier, "example.com")
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, macOS 15.0, *) {
             XCTAssertEqual(ids.compactMap { $0 as? ASOneTimeCodeCredentialIdentity }.first?.label, "Example")
         }
     }

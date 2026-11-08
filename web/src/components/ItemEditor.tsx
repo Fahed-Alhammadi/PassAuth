@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { errorMessage } from "../lib/api";
 import { KIND_LABEL, kindOf, type Field, type Item, type LoginUrl } from "../lib/types";
 import { ErrorText, Icon, PasswordField } from "./ui";
@@ -18,6 +18,7 @@ export function ItemEditor({
   onSave,
   onCancel,
   generate,
+  onDirtyChange,
 }: {
   initial: Item;
   isNew: boolean;
@@ -30,8 +31,14 @@ export function ItemEditor({
   onCancel: () => void;
   /** Password generator; defaults to the web vault's. */
   generate?: () => Promise<string>;
+  /** Told when the form first differs from `initial`, and `false` when it goes away. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [item, setItem] = useState<Item>(initial);
+  const dirtyRef = useRef(onDirtyChange);
+  dirtyRef.current = onDirtyChange;
+  useEffect(() => dirtyRef.current?.(item !== initial), [item, initial]);
+  useEffect(() => () => dirtyRef.current?.(false), []);
   // No vault list = editing an existing item without a vault picker: it stays in its own vault.
   const [vaultId, setVaultId] = useState(vaults.length === 0 || vaults.some((v) => v.id === defaultVault) ? defaultVault : "");
   const [busy, setBusy] = useState(false);

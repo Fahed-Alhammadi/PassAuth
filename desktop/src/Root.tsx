@@ -6,6 +6,7 @@ import { Modal } from "@web/components/ui";
 import { SESSION_KEY } from "@web/lib/api";
 import { loadSecrets, secretStore } from "@web/lib/platform";
 import { EMAIL_KEY, boot, rememberKey, secretKeyKey, useVault } from "@web/lib/vault";
+import { AddCodeHost } from "./AddCode";
 import { Connect } from "./Connect";
 import { setSecretsHost } from "./secrets";
 import { connectServer, rememberServer, savedServer } from "./server";
@@ -94,6 +95,7 @@ export function Root() {
         <>
           <App key={stage.base} />
           <VaultStateForTray />
+          <AddCodeHost />
         </>
       )}
       <ChangeServerDialog />

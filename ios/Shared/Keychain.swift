@@ -6,7 +6,31 @@ import Security
 /// a shared Keychain access group for secrets.
 public enum SharedConfig {
     public static let appGroup = "group.io.passauth.app"
+    #if os(macOS)
+    /// macOS (the desktop app's AutoFill extension): no App Group; the extension keeps its own
+    /// Keychain group `JEXQBK3SQ5.io.passauth.desktop.autofill` and its own sandbox container.
+    static let keychainGroupSuffix = "io.passauth.desktop.autofill"
+    #else
     static let keychainGroupSuffix = "io.passauth.shared"
+    #endif
+
+    /// File protection "complete" where the platform has it (iOS); plain atomic writes on macOS,
+    /// where the sandbox container and FileVault protect the files.
+    static var writeOptions: Data.WritingOptions {
+        #if os(iOS)
+        [.atomic, .completeFileProtection]
+        #else
+        [.atomic]
+        #endif
+    }
+
+    static var directoryAttributes: [FileAttributeKey: Any] {
+        #if os(iOS)
+        [.protectionKey: FileProtectionType.complete]
+        #else
+        [:]
+        #endif
+    }
 
     /// The shared Keychain access group, exactly as listed in both targets' entitlements
     /// (`$(AppIdentifierPrefix)io.passauth.shared`): `JEXQBK3SQ5.io.passauth.shared` in builds
@@ -22,11 +46,16 @@ public enum SharedConfig {
     /// present, else Application Support. Excluded from backups.
     public static func dataDirectory() -> URL {
         let fm = FileManager.default
+        #if os(macOS)
+        // Asking for a group container that isn't in the entitlements makes macOS warn the user.
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #else
         let base = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
             ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #endif
         var dir = base.appendingPathComponent("PassAuth", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: directoryAttributes)
         }
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
@@ -48,6 +77,10 @@ public enum Keychain {
         ]
         if let account { q[kSecAttrAccount as String] = account }
         if let group = SharedConfig.keychainGroup { q[kSecAttrAccessGroup as String] = group }
+        #if os(macOS)
+        // The iOS-style Keychain (access groups, access control, this-device-only items).
+        q[kSecUseDataProtectionKeychain as String] = true
+        #endif
         return q
     }
 

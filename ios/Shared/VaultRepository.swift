@@ -1,7 +1,9 @@
 import Foundation
 import Observation
 import PassAuthCore
+#if canImport(UIKit)
 import UIKit
+#endif
 
 public enum Status: Sendable { case setup, loggedOut, locked, unlocked }
 
@@ -266,7 +268,12 @@ public final class VaultRepository {
     // MARK: Login
 
     var deviceInfo: JSON {
+        #if os(iOS)
         ["id": .string(store.get().file.deviceId), "name": .string("PassAuth for iOS (\(UIDevice.current.model))"), "kind": "mobile"]
+        #else
+        // The desktop app's AutoFill extension signs in on its own: its own device on the server.
+        ["id": .string(store.get().file.deviceId), "name": "PassAuth for Mac AutoFill", "kind": "desktop"]
+        #endif
     }
 
     public func login(email: String, password: String, secretKey: String?) async throws -> LoginResult {
@@ -1160,6 +1167,35 @@ public final class VaultRepository {
         return p.origin + path
     }
 }
+
+#if os(macOS)
+// MARK: Timed unlock (macOS AutoFill extension)
+
+/// macOS starts the AutoFill extension anew for most requests, so its vault timeout keeps the
+/// unlocked keys (session bytes, as for the timeout "Never") in its own Keychain until the
+/// timeout passes (`desktop/macos/AutoFill/TimedUnlock.swift`).
+extension VaultRepository {
+    /// The active account's unlocked keys, nil while locked. Wipe the copy after use.
+    public func activeSessionBytes() -> Data? {
+        sessions[activeId]?.account.toSessionBytes()
+    }
+
+    /// Reopen the active account from kept session bytes; false if they don't fit its bundle.
+    public func openActive(sessionBytes: Data) async -> Bool {
+        await lock.run {
+            let s = store.get()
+            let id = s.activeId
+            guard sessions[id] == nil, let bundle = s.active?.bundle, s.tokens(id) != nil else { return sessions[id] != nil }
+            let accountId = Self.bundleAccountId(bundle)
+            let copy = sessionBytes
+            guard let account = try? await core({ try accountFromSessionBytes(accountId: accountId, bytes: copy) }) else { return false }
+            openSession(id, Session(accountId: accountId, account: account))
+            try? await syncLocked(fallbackToCache: true, cacheFirst: true)
+            return true
+        }
+    }
+}
+#endif
 
 /// Thrown by `setServer` for plain http to a local-network address: ask the user first.
 public struct PlainHttpConfirmation: Error, Sendable {

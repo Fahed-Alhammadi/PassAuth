@@ -46,6 +46,9 @@
       "windows": {
         "installMode": "passive"
       }
+    },
+    "deep-link": {
+      "desktop": { "schemes": ["otpauth", "apple-otpauth"] }
     }
   }
 }

@@ -12,6 +12,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import init from "@web/wasm/passauth_core";
 import { applyTheme, onThemeChange } from "@web/lib/prefs";
 import { registerDesktop } from "@web/lib/platform";
+import { installOtpLinks } from "./AddCode";
 import { Root } from "./Root";
 import { hooks } from "./hooks";
 import { installBridge } from "./bridge";
@@ -27,6 +28,8 @@ scheduleUpdateCheck();
 const root = document.getElementById("root")!;
 try {
   await init();
+  // Parsing a link needs the wasm module.
+  void installOtpLinks().catch((e) => console.error(e));
   createRoot(root).render(
     <StrictMode>
       <Root />

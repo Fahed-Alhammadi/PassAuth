@@ -86,3 +86,9 @@ upload_certificate.pem
 /ios/DerivedData/
 xcuserdata/
 /passauth-demo.txt
+
+# macOS AutoFill extension (desktop/macos): generated project, core bindings/framework, version config, build output
+/desktop/macos/PassAuthAutoFill.xcodeproj/
+/desktop/macos/Core/
+/desktop/macos/Version.xcconfig
+/desktop/macos/build/

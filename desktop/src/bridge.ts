@@ -12,7 +12,7 @@ const lockNow = () => {
 };
 
 /** The web vault's router follows popstate, so a native "Settings…" can navigate without a React handle. */
-function navigateTo(path: string) {
+export function navigateTo(path: string) {
   history.pushState(null, "", path);
   dispatchEvent(new PopStateEvent("popstate"));
 }

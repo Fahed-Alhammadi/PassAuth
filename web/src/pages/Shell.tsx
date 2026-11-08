@@ -1,8 +1,9 @@
-import { useState } from "react";
-import { Link, NavLink, Outlet, useNavigate } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { Wordmark } from "../components/Logo";
 import { Icon, toast, type IconName } from "../components/ui";
 import { api, friendlyError } from "../lib/api";
+import { keepDraftFor } from "../lib/drafts";
 import { getDesktop } from "../lib/platform";
 import { dismissWarnings, lock, logout, useVault } from "../lib/vault";
 import { kindOf, type ItemKind } from "../lib/types";
@@ -36,6 +37,9 @@ export function Shell() {
   const { vaults } = useVault();
   const { counts, folders } = useCounts();
   const lockShortcut = getDesktop()?.lockShortcut;
+  // A prepared edit (desktop) lives only while its item's route is open.
+  const { pathname } = useLocation();
+  useEffect(() => keepDraftFor(pathname), [pathname]);
 
   return (
     <div className="shell" data-shell>

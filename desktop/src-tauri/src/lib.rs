@@ -18,6 +18,7 @@ use tauri::{
     AppHandle, Emitter, Listener, Manager, State, Url, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_window_state::StateFlags;
 
@@ -399,9 +400,14 @@ pub fn run() {
             base: Mutex::new(None),
             client,
         })
+        // First, so a second launch is caught before anything else starts. Its `deep-link` feature hands a link
+        // that launched the second instance (Windows, Linux) to the deep-link plugin before calling this.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app)
         }))
+        // otpauth:// and apple-otpauth:// links (schemes in tauri.conf.json): the webview reads them with
+        // `getCurrent` / `onOpenUrl` and offers to add the verification code to a login.
+        .plugin(tauri_plugin_deep_link::init())
         // Size and position only: a window hidden at quit must still appear on the next launch.
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -429,6 +435,15 @@ pub fn run() {
             build_tray(&handle, &tray_lock)?;
             build_window(&handle)?;
             app.manage(LockItems(vec![menu_lock, tray_lock]));
+            let shown = handle.clone();
+            app.deep_link().on_open_url(move |_| show_window(&shown));
+            // deb/rpm and the Windows installer register the schemes; an AppImage has to do it itself.
+            #[cfg(target_os = "linux")]
+            if handle.env().appimage.is_some()
+                && let Err(e) = app.deep_link().register_all()
+            {
+                eprintln!("couldn't register the otpauth link handler: {e}");
+            }
             app.listen(VAULT_STATE, move |event| {
                 let unlocked = event.payload() == "true";
                 for item in &handle.state::<LockItems>().0 {

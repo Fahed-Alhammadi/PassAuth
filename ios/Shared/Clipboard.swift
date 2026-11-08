@@ -1,16 +1,34 @@
 import Foundation
 import os
 import PassAuthCore
-import UIKit
 import UniformTypeIdentifiers
+#if canImport(UIKit)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// Clipboard copies: this device only (no Universal Clipboard), expiring after the user's
 /// clearing delay (seconds, 0 = never). Used by the app and the AutoFill extension.
 public enum Clipboard {
     public static func copy(_ text: String, clearAfter: Int) {
+        #if canImport(UIKit)
         var options: [UIPasteboard.OptionsKey: Any] = [.localOnly: true]
         if clearAfter > 0 { options[.expirationDate] = Date().addingTimeInterval(TimeInterval(clearAfter)) }
         UIPasteboard.general.setItems([[UTType.plainText.identifier: text]], options: options)
+        #else
+        // macOS: marked concealed and transient (clipboard managers and Universal Clipboard
+        // skip it). Not cleared later: the AutoFill extension's process ends right after the
+        // request, so a timer here would never fire (`clearAfter` is ignored; the settings say so).
+        _ = clearAfter
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(text, forType: .string)
+        item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        item.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        pb.writeObjects([item])
+        #endif
     }
 
     /// The current code of an authenticator key, or nil if the key isn't valid.
@@ -36,8 +54,12 @@ public enum MemoryStats {
     /// Bytes this process can still allocate before reaching its limit; nil where the system
     /// doesn't say (the simulator, which has no extension memory limit).
     public static func available() -> UInt64? {
+        #if os(iOS)
         let n = os_proc_available_memory()
         return n > 0 ? UInt64(n) : nil
+        #else
+        return nil
+        #endif
     }
 
     public static func mb(_ bytes: UInt64) -> String { String(format: "%.1f MB", Double(bytes) / 1_048_576) }

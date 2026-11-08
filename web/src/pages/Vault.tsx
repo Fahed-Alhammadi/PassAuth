@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router";
 import { ItemEditor } from "../components/ItemEditor";
 import { CopyButton, ErrorText, Icon, Modal, SiteIcon, TotpView, toast } from "../components/ui";
 import { errorMessage } from "../lib/api";
+import { clearDraft, setEditorDirty, useDraft } from "../lib/drafts";
 import { createItem, defaultVaultId, purgeItem, restoreItem, trashItem, updateItem, useVault, writableVaults } from "../lib/vault";
 import { useShowIcons } from "../lib/prefs";
 import { emptyItem, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type VaultEntry } from "../lib/types";
@@ -45,6 +46,7 @@ export function VaultPage() {
   // Filtering thousands of items on every keystroke would make typing lag: let React render it in the background.
   const deferredQuery = useDeferredValue(query);
   const [creating, setCreating] = useState(false);
+  const draft = useDraft();
 
   const list = useMemo(() => {
     const q = deferredQuery.trim().toLowerCase();
@@ -61,6 +63,8 @@ export function VaultPage() {
 
   const selected = items.find((e) => e.id === itemId);
   const newKind = itemId?.startsWith("new-") ? (itemId.slice(4) as ItemKind) : null;
+  // A prepared edit (desktop: a verification code from a link) shows while its item's route is open.
+  const drafted = draft && draft.itemId === itemId && (selected || newKind) ? draft : null;
   const open = (id: string) => nav(`${filterPath(filter)}/${id}`);
   const close = () => nav(filterPath(filter));
   useNarrowFocus(itemId);
@@ -127,7 +131,19 @@ export function VaultPage() {
       </section>
 
       <section className="detail-pane" aria-label="Item details">
-        {newKind ? (
+        {drafted ? (
+          <Editor
+            key={`draft-${drafted.seq}`}
+            entry={selected}
+            kind={newKind ?? kindOf(selected!.item)}
+            prefill={drafted.apply}
+            onDone={(id) => {
+              clearDraft();
+              if (id) open(id);
+              else close();
+            }}
+          />
+        ) : newKind ? (
           <Editor key={itemId} kind={newKind} onDone={(id) => (id ? open(id) : close())} />
         ) : selected ? (
           // Keyed by id only: a sync that changes the item must not throw away an edit in progress.
@@ -158,7 +174,7 @@ export function VaultPage() {
           </div>
         </Modal>
       )}
-      <ShellDetailFlag active={!!(selected || newKind)} />
+      <ShellDetailFlag active={!!(selected || newKind || drafted)} />
     </>
   );
 }
@@ -408,14 +424,17 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
 
 // ------------------------------------------------------------------ editor
 
-function Editor({ entry, kind, onDone }: { entry?: VaultEntry; kind: ItemKind; onDone: (id?: string) => void }) {
+function Editor({ entry, kind, prefill, onDone }: { entry?: VaultEntry; kind: ItemKind; prefill?: (item: Item) => Item; onDone: (id?: string) => void }) {
   const writable = writableVaults();
   const { items } = useVault();
   const folders = [...new Set(items.map((e) => e.item.folder).filter(Boolean))] as string[];
   // The version the edit started from. Saving sends its revision, so the server refuses to overwrite a
   // change made elsewhere in the meantime; the user then decides which version wins.
   const [base, setBase] = useState(entry);
-  const [initial] = useState(() => (entry ? structuredClone(entry.item) : emptyItem(kind)));
+  const [initial] = useState(() => {
+    const item = entry ? structuredClone(entry.item) : emptyItem(kind);
+    return prefill ? prefill(item) : item;
+  });
   const changed = !!(entry && base && entry.revision !== base.revision);
   return (
     <>
@@ -440,6 +459,7 @@ function Editor({ entry, kind, onDone }: { entry?: VaultEntry; kind: ItemKind; o
         vaults={writable}
         defaultVault={entry?.vaultId ?? defaultVaultId()}
         folders={folders}
+        onDirtyChange={setEditorDirty}
         onCancel={() => onDone(entry?.id)}
         onSave={async (item, vaultId) => {
           if (base) {

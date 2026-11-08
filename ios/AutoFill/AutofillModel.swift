@@ -3,7 +3,6 @@ import LocalAuthentication
 import Observation
 import PassAuthCore
 import PassAuthKit
-import UIKit
 
 /// What iOS asked the extension to do.
 enum AutofillRequest {
@@ -32,6 +31,7 @@ struct SaveInfo {
     let password: String
     let event: Event
 
+    #if os(iOS)
     @available(iOS 26.2, *)
     init(_ r: ASSavePasswordRequest) {
         page = AutofillMatcher.page(r.serviceIdentifier)
@@ -43,6 +43,7 @@ struct SaveInfo {
         default: event = .formDidDisappear
         }
     }
+    #endif
 }
 
 /// An `ASGeneratePasswordsRequest`, as plain values.
@@ -50,11 +51,13 @@ struct GenerateInfo {
     let page: String?
     let rules: PasswordRules?
 
+    #if os(iOS)
     @available(iOS 26.2, *)
     init(_ r: ASGeneratePasswordsRequest) {
         page = AutofillMatcher.page(r.serviceIdentifier)
         rules = PasswordGeneration.rules(field: r.passwordFieldPasswordRules, quirks: r.passwordRulesFromQuirks, confirm: r.confirmPasswordFieldPasswordRules)
     }
+    #endif
 }
 
 /// The extension's state and actions. It runs in its own process: the vault is unlocked here
@@ -92,7 +95,12 @@ final class AutofillModel {
 
     init(request: AutofillRequest) {
         self.request = request
+        #if os(macOS)
+        // macOS: the desktop app's extension has its own sign-in and owns its state (no app shares it).
+        let store = SecureStore(role: .app)
+        #else
         let store = SecureStore(role: .appExtension)
+        #endif
         let api = ApiClient(store: store)
         repo = VaultRepository(store: store, api: api)
         repo.preferCache = true
@@ -118,7 +126,7 @@ final class AutofillModel {
         // Not offered here: nothing to unlock for.
         if case .save(let info) = request, saveBlocked(info) != nil { return cancel() }
         // Vault timeout "Never": the keys kept in the Keychain open the vault without a prompt.
-        _ = await repo.restorePersisted()
+        await reopenKept()
         if repo.isUnlocked {
             await proceed()
         } else {
@@ -136,7 +144,7 @@ final class AutofillModel {
         guard request.type == .password || model.isOneTimeCode(request), model.repo.store.exists else {
             return model.cancel(.userInteractionRequired)
         }
-        _ = await model.repo.restorePersisted()
+        await model.reopenKept()
         guard model.repo.isUnlocked, let entry = model.entry(request.credentialIdentity.recordIdentifier) else {
             return model.cancel(.userInteractionRequired)
         }
@@ -148,9 +156,27 @@ final class AutofillModel {
     }
 
     private func isOneTimeCode(_ r: any ASCredentialRequest) -> Bool {
-        if #available(iOS 18.0, *) { return r.type == .oneTimeCode }
+        if #available(iOS 18.0, macOS 15.0, *) { return r.type == .oneTimeCode }
         return false
     }
+
+    /// Open the vault without the user: the keys kept for the vault timeout "Never" and, on
+    /// macOS, those kept until the vault timeout passes (`TimedUnlock`).
+    func reopenKept() async {
+        _ = await repo.restorePersisted()
+        #if os(macOS)
+        if !repo.isUnlocked { _ = await TimedUnlock.restore(repo) }
+        #endif
+    }
+
+    #if os(macOS)
+    /// macOS: the extension signed in by itself (its own sign-in screens); continue the request.
+    func signedIn() async {
+        unlockedHere = true
+        TimedUnlock.keep(repo)
+        await proceed()
+    }
+    #endif
 
     // MARK: Unlock
 
@@ -173,6 +199,9 @@ final class AutofillModel {
                 try await repo.unlock(password: password, secretKey: secretKey.isEmpty ? nil : secretKey)
                 noteMemory("master password", before)
                 unlockedHere = true
+                #if os(macOS)
+                TimedUnlock.keep(repo)
+                #endif
                 busy = false
                 await proceed()
             } catch {
@@ -192,6 +221,9 @@ final class AutofillModel {
                 if try await repo.unlockWithBiometric(reason: saveInfo == nil ? "Unlock PassAuth to fill" : "Unlock PassAuth to save the login") {
                     noteMemory("biometric", before)
                     unlockedHere = true
+                    #if os(macOS)
+                    TimedUnlock.keep(repo)
+                    #endif
                     busy = false
                     await proceed()
                     return
@@ -328,7 +360,7 @@ final class AutofillModel {
         guard let code = Clipboard.totp(e.item.login?.totp) else {
             return message("No verification code", "This login has no valid authenticator key.")
         }
-        if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, macOS 15.0, *) {
             complete { ctx in ctx.completeOneTimeCodeRequest(using: ASOneTimeCodeCredential(code: code), completionHandler: nil) }
         }
     }
@@ -381,7 +413,7 @@ final class AutofillModel {
             }
             let rp = id.relyingPartyIdentifier.lowercased()
             // Checked only after the user agreed, so a website can't probe the vault silently.
-            if #available(iOS 18.0, *), let excluded = r.excludedCredentials?.map(\.credentialID) {
+            if #available(iOS 18.0, macOS 15.0, *), let excluded = r.excludedCredentials?.map(\.credentialID) {
                 let all = repo.vault?.entries.flatMap { $0.item.login?.passkeys ?? [] } ?? []
                 if PasskeyLogic.excludedExists(excluded, rpId: rp, all: all) {
                     return cancel(.matchedExcludedCredential)
@@ -433,7 +465,7 @@ final class AutofillModel {
         let s = model.repo.state
         guard model.repo.store.exists, s.status == .locked || s.status == .unlocked else { return model.cancel(.failed) }
         if model.saveBlocked(info) != nil || info.event == .generatedPasswordFilled { return model.cancel() }
-        _ = await model.repo.restorePersisted()
+        await model.reopenKept()
         guard model.repo.isUnlocked, let plan = model.savePlan else { return model.cancel(.userInteractionRequired) }
         switch plan {
         case .unchanged: model.completeSave()
@@ -480,9 +512,11 @@ final class AutofillModel {
     }
 
     private func completeSave() {
+        #if os(iOS)
         if #available(iOS 26.2, *) {
             complete { ctx in ctx.completeSavePasswordRequest(completionHandler: nil) }
         }
+        #endif
     }
 
     // MARK: Generate passwords (iOS 26.2)
@@ -510,6 +544,7 @@ final class AutofillModel {
     }
 
     func useGenerated(_ list: [PasswordGeneration.Candidate]) {
+        #if os(iOS)
         guard #available(iOS 26.2, *), !list.isEmpty else { return cancel(.failed) }
         let results = list.map { c in
             let kind: ASGeneratedPassword.Kind = switch c.kind {
@@ -520,6 +555,9 @@ final class AutofillModel {
             return ASGeneratedPassword(kind: kind, value: c.value)
         }
         complete { ctx in ctx.completeGeneratePasswordRequest(results: results, completionHandler: nil) }
+        #else
+        cancel(.failed) // macOS has no password generation requests.
+        #endif
     }
 
     // MARK: Finish
@@ -527,12 +565,14 @@ final class AutofillModel {
     func finishConfiguration() {
         guard !finished else { return }
         finished = true
+        endOfRequest()
         context?.completeExtensionConfigurationRequest()
     }
 
     private func complete(_ body: (ASCredentialProviderExtensionContext) -> Void) {
         guard !finished, let context else { return }
         finished = true
+        endOfRequest()
         body(context)
     }
 
@@ -540,7 +580,15 @@ final class AutofillModel {
         if case .configuration = request { return finishConfiguration() }
         guard !finished, let context else { return }
         finished = true
+        endOfRequest()
         context.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
+    }
+
+    /// macOS: drop kept keys that are past the vault timeout as each request ends.
+    private func endOfRequest() {
+        #if os(macOS)
+        TimedUnlock.purgeExpired(repo)
+        #endif
     }
 
     private func message(_ title: String, _ body: String) {

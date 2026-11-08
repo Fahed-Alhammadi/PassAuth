@@ -1,7 +1,13 @@
 import PassAuthCore
 import PassAuthKit
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+typealias PlatformColor = UIColor
+#else
+import AppKit
+typealias PlatformColor = NSColor
+#endif
 
 // Neutral iOS-style surfaces (light: grouped gray on white cards; dark: true black with
 // raised grays, no tinted backgrounds) with the PassAuth blue from assets/passauth-logo.svg as
@@ -9,13 +15,28 @@ import UIKit
 // (≥4.5:1) on their surfaces.
 extension Color {
     private static func dyn(_ light: UInt32, _ dark: UInt32) -> Color {
+        #if canImport(UIKit)
         Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: dark) : UIColor(hex: light) })
+        #else
+        Color(nsColor: NSColor(name: nil) { a in
+            a.bestMatch(from: [.darkAqua, .vibrantDark, .accessibilityHighContrastDarkAqua, .accessibilityHighContrastVibrantDark]) != nil
+                ? NSColor(hex: dark) : NSColor(hex: light)
+        })
+        #endif
+    }
+
+    private static func fixed(_ hex: UInt32) -> Color {
+        #if canImport(UIKit)
+        Color(uiColor: UIColor(hex: hex))
+        #else
+        Color(nsColor: NSColor(hex: hex))
+        #endif
     }
 
     static let paAccent = dyn(0x0866ED, 0x3B8CFA)
     /// Fill behind white text (filled buttons): the brand blue in both modes, since white on the
     /// lighter dark-mode accent is only 3.3:1 (this is 4.9:1).
-    static let paAccentFill = Color(uiColor: UIColor(hex: 0x0866ED))
+    static let paAccentFill = fixed(0x0866ED)
     static let paAccentInk = dyn(0x0553C9, 0x8EC2FF)
     static let paAccentSoft = dyn(0xE7F0FE, 0x1C2633)
     static let paBackground = dyn(0xF2F2F7, 0x000000)
@@ -30,13 +51,13 @@ extension Color {
     static let paDanger = dyn(0xC4251B, 0xFF6B60)
 
     enum Brand {
-        static let navy = Color(uiColor: UIColor(hex: 0x082052))
-        static let blue = Color(uiColor: UIColor(hex: 0x0866ED))
-        static let cyan = Color(uiColor: UIColor(hex: 0x23D5F4))
+        static let navy = Color.fixed(0x082052)
+        static let blue = Color.fixed(0x0866ED)
+        static let cyan = Color.fixed(0x23D5F4)
     }
 }
 
-extension UIColor {
+extension PlatformColor {
     convenience init(hex: UInt32) {
         self.init(red: CGFloat((hex >> 16) & 0xff) / 255, green: CGFloat((hex >> 8) & 0xff) / 255, blue: CGFloat(hex & 0xff) / 255, alpha: 1)
     }
@@ -45,11 +66,13 @@ extension UIColor {
 // MARK: Screen chrome
 
 extension View {
+    #if os(iOS)
     /// Navigation bar in the page colour, following light and dark mode.
     func paNavBar() -> some View {
         toolbarBackground(Color.paBackground, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
     }
+    #endif
 
     /// Lists and forms on the brand background.
     func paList() -> some View {
@@ -224,6 +247,9 @@ struct StrengthMeter: View {
 
 // MARK: Inputs
 
+#if os(iOS)
+// The macOS AutoFill extension has its own inputs (desktop/macos/AutoFill/MacViews.swift).
+
 /// A labelled text box: the label sits above the box, never inside it.
 struct LabeledInput: View {
     let label: String
@@ -346,6 +372,8 @@ struct AuthField: View {
         }
     }
 }
+
+#endif
 
 /// Full-width brand button.
 struct PrimaryButton: View {

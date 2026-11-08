@@ -170,6 +170,27 @@ jobs:
             echo "APPLE_API_KEY_PATH=$key"
           } >> "$GITHUB_ENV"
 
+      # macOS AutoFill extension (desktop/macos): built, signed with its own entitlements and the
+      # Developer ID provisioning profile, then copied into PassAuth.app/Contents/PlugIns by Tauri
+      # (bundle.macOS.files, CI-only config). Tauri signs the outer app without --deep, so the
+      # extension keeps its signature. Skipped (no extension) while the profile secret is missing.
+      - name: macOS AutoFill extension
+        if: runner.os == 'macOS'
+        env:
+          PROFILE_BASE64: ${{ secrets.MACOS_AUTOFILL_PROVISIONING_PROFILE }}
+        run: |
+          if [ -z "$PROFILE_BASE64" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::warning::MACOS_AUTOFILL_PROVISIONING_PROFILE or the signing certificate is missing: the macOS app is built without AutoFill"
+            exit 0
+          fi
+          brew install xcodegen
+          profile="$RUNNER_TEMP/autofill.provisionprofile"
+          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$profile"
+          MACOS_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" MACOS_SIGN_KEYCHAIN="$SIGNING_KEYCHAIN" MACOS_AUTOFILL_PROFILE="$profile" desktop/macos/build.sh
+          appex="$GITHUB_WORKSPACE/desktop/macos/build/PassAuthAutoFill.appex"
+          codesign --verify --strict --verbose=2 "$appex"
+          printf '{"bundle":{"macOS":{"files":{"PlugIns/PassAuthAutoFill.appex":"%s"}}}}' "$appex" > "$RUNNER_TEMP/autofill.json"
+          echo "AUTOFILL_ARGS=--config $RUNNER_TEMP/autofill.json" >> "$GITHUB_ENV"
       # Tag push: builds, then creates the release (or adds to it: the three systems share one)
       # and uploads the bundles, their updater signatures and latest.json (not for pre-releases).
       # Manual run: builds and keeps the bundles on the run.
@@ -181,7 +202,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ env.AUTOFILL_ARGS }}
           tagName: ${{ github.event_name == 'push' && github.ref_name || '' }}
           releaseName: ${{ github.event_name == 'push' && github.ref_name || '' }}
           releaseBody: ${{ steps.notes.outputs.body }}
@@ -190,6 +211,15 @@ jobs:
           uploadUpdaterJson: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
           updaterJsonPreferNsis: true
           uploadWorkflowArtifacts: ${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Check the AutoFill extension is inside the signed app
+        if: runner.os == 'macOS' && env.AUTOFILL_ARGS != ''
+        run: |
+          app="desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/PassAuth.app"
+          appex="$app/Contents/PlugIns/PassAuthAutoFill.appex"
+          test -d "$appex"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -d --entitlements - "$appex" 2>/dev/null | grep -q autofill-credential-provider
 
       - name: Remove the API key and keychain
         if: always() && runner.os == 'macOS'
