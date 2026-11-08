@@ -10,6 +10,7 @@ import { secrets } from "./secrets";
 import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
 import { checkForUpdates, installUpdate } from "./updater";
 import { appHook } from "./app";
+import { clearAutofillHandoff } from "./handoff";
 
 const isMac = navigator.platform.startsWith("Mac");
 
@@ -17,6 +18,7 @@ const isMac = navigator.platform.startsWith("Mac");
 export async function changeServer() {
   if (getState().status !== "logged-out" && !(await confirmChangeServer())) return;
   clearPersistedKeys();
+  await clearAutofillHandoff();
   await logout();
   forgetSecrets();
   Object.keys(localStorage)

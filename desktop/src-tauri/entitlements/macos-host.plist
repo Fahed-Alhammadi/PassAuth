@@ -12,5 +12,11 @@
 	<string>JEXQBK3SQ5</string>
 	<key>com.apple.developer.authentication-services.autofill-credential-provider</key>
 	<true/>
+	<!-- The AutoFill extension's group: the app leaves it the server, email and Secret Key
+	     (never tokens or keys) so the extension only asks for the master password. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>JEXQBK3SQ5.io.passauth.desktop.autofill</string>
+	</array>
 </dict>
 </plist>

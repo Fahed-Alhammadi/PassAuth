@@ -3025,11 +3025,13 @@ version = "0.6.4"
 dependencies = [
  "arboard",
  "block2",
+ "core-foundation 0.10.1",
  "keyring",
  "objc2-app-kit",
  "objc2-foundation",
  "reqwest",
  "rustls",
+ "security-framework",
  "serde",
  "serde_json",
  "tauri",

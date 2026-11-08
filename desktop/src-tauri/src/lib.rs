@@ -39,6 +39,14 @@ const CHECK_UPDATES: &str = "check-updates";
 const HELP: &str = "help";
 const REPORT: &str = "report";
 const QUIT: &str = "quit";
+/// macOS: the AutoFill extension's Keychain access group (its Info.plist `PAKeychainGroup`) and the
+/// hand-off item the desktop app writes there (`desktop/macos/AutoFill/MacSignIn.swift` reads it).
+#[cfg(target_os = "macos")]
+const HANDOFF_GROUP: &str = "JEXQBK3SQ5.io.passauth.desktop.autofill";
+#[cfg(target_os = "macos")]
+const HANDOFF_SERVICE: &str = "io.passauth.desktop.handoff";
+#[cfg(target_os = "macos")]
+const HANDOFF_ACCOUNT: &str = "handoff";
 /// Webview → shell: `true` while the vault is unlocked. Shell → webview: the window was hidden; the screen was
 /// locked, the computer is going to sleep or the user session was switched (vault timeout "On system lock").
 const VAULT_STATE: &str = "vault-state";
@@ -253,6 +261,78 @@ async fn secret_delete(app: AppHandle, name: String) -> Result<(), String> {
         Err(e) => Err(keychain_error(e)),
     })
     .await
+}
+
+/// What the desktop app hands the macOS AutoFill extension so it can sign in as its own device without
+/// asking for the server, email and Secret Key again. Never tokens or vault keys: the extension gets its
+/// own session (a shared refresh token would be flagged as reuse by the server and end both sessions).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Handoff {
+    server: String,
+    email: String,
+    secret_key: Option<String>,
+}
+
+#[tauri::command]
+async fn autofill_handoff(
+    server: String,
+    email: String,
+    secret_key: Option<String>,
+) -> Result<(), String> {
+    let json = serde_json::to_vec(&Handoff {
+        server,
+        email,
+        secret_key,
+    })
+    .map_err(|e| e.to_string())?;
+    write_handoff(json).await
+}
+
+/// Change server / sign out of the desktop app: the extension keeps its own sign-in, but gets no hint.
+#[tauri::command]
+async fn autofill_handoff_clear() -> Result<(), String> {
+    write_handoff(b"{}".to_vec()).await
+}
+
+#[cfg(target_os = "macos")]
+async fn write_handoff(json: Vec<u8>) -> Result<(), String> {
+    use core_foundation::data::CFData;
+    use security_framework::item::{
+        ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
+        ItemUpdateValue, Location, update_item,
+    };
+    blocking(move || {
+        let data = CFData::from_buffer(&json);
+        let mut search = ItemSearchOptions::new();
+        search
+            .class(ItemClass::generic_password())
+            .service(HANDOFF_SERVICE)
+            .account(HANDOFF_ACCOUNT)
+            .access_group(HANDOFF_GROUP)
+            .ignore_legacy_keychains();
+        let mut update = ItemUpdateOptions::new();
+        update.set_value(ItemUpdateValue::Data(data.clone()));
+        if update_item(&search, &update).is_ok() {
+            return Ok(());
+        }
+        let mut add = ItemAddOptions::new(ItemAddValue::Data {
+            class: ItemClass::generic_password(),
+            data,
+        });
+        add.set_service(HANDOFF_SERVICE)
+            .set_account_name(HANDOFF_ACCOUNT)
+            .set_access_group(HANDOFF_GROUP)
+            .set_location(Location::DataProtectionKeychain)
+            .set_label("PassAuth AutoFill");
+        add.add().map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn write_handoff(_json: Vec<u8>) -> Result<(), String> {
+    Ok(())
 }
 
 /// macOS: tell the webview when the screen locks, the Mac goes to sleep or the user session is switched.
@@ -587,7 +667,9 @@ pub fn run() {
             copy_secret,
             save_file,
             shell_settings_get,
-            shell_settings_set
+            shell_settings_set,
+            autofill_handoff,
+            autofill_handoff_clear
         ])
         .setup(|app| {
             let handle = app.handle().clone();

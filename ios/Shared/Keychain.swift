@@ -132,6 +132,21 @@ public enum Keychain {
         SecItemDelete(base(service, account) as CFDictionary)
     }
 
+    #if os(macOS)
+    /// What the desktop app on this Mac left for the AutoFill extension's own sign-in (server, email,
+    /// Secret Key as JSON; `autofill_handoff` in desktop/src-tauri). Its own service, so a fresh
+    /// install's `deleteAll` keeps it.
+    static let desktopHandoffService = "io.passauth.desktop.handoff"
+    public static func readDesktopHandoff() -> Data? {
+        var q = base(desktopHandoffService, "handoff")
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
+        return out as? Data
+    }
+    #endif
+
     /// Remove every item of this app (fresh install: Keychain items outlive the app).
     public static func deleteAll() {
         SecItemDelete(base(service, nil) as CFDictionary)

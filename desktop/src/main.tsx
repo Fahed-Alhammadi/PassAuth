@@ -17,6 +17,7 @@ import { Root } from "./Root";
 import { hooks } from "./hooks";
 import { installBridge } from "./bridge";
 import { installBackgroundSync } from "./app";
+import { installAutofillHandoff } from "./handoff";
 import { installVaultTimeout } from "./timeout";
 import { scheduleUpdateCheck } from "./updater";
 
@@ -27,6 +28,7 @@ registerDesktop(await hooks());
 installBridge();
 installVaultTimeout();
 installBackgroundSync();
+installAutofillHandoff();
 scheduleUpdateCheck();
 
 const root = document.getElementById("root")!;

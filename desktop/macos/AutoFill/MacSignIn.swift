@@ -2,12 +2,37 @@ import AppKit
 import PassAuthKit
 import SwiftUI
 
-/// The extension's own sign-in (it shares nothing with the desktop app): server address,
+/// Server, email and Secret Key the desktop app on this Mac handed over (a Keychain item in the
+/// extension's group, written while its vault is unlocked). The extension still signs in itself and
+/// gets its own session; the hand-off only spares the typing, so just the master password is asked.
+struct DesktopHandoff: Decodable, Equatable {
+    var server: String?
+    var email: String?
+    var secretKey: String?
+
+    static func read() -> DesktopHandoff? {
+        guard let data = Keychain.readDesktopHandoff(),
+              let h = try? JSONDecoder().decode(DesktopHandoff.self, from: data),
+              let server = h.server, !server.isEmpty else { return nil }
+        return h
+    }
+
+    /// The hand-off, if it is for the server the extension is connected to.
+    static func read(for server: String) -> DesktopHandoff? {
+        guard let h = read(), h.server == server else { return nil }
+        return h
+    }
+}
+
+/// The extension's own sign-in (it shares no session with the desktop app): server address,
 /// email + master password (+ Secret Key), then two-step login, as the iOS app's
-/// `SetupView` / `LoginView` / `TwoStepView` (ios/App/AuthViews.swift).
+/// `SetupView` / `LoginView` / `TwoStepView` (ios/App/AuthViews.swift). With a desktop hand-off the
+/// server is connected by itself and email + Secret Key are filled in.
 struct MacSignIn: View {
     @Bindable var model: AutofillModel
     @State private var step: Step?
+    @State private var handoff: DesktopHandoff?
+    @State private var connecting = false
 
     enum Step: Equatable {
         case server
@@ -17,22 +42,42 @@ struct MacSignIn: View {
 
     var body: some View {
         let current = step ?? (model.state.server.isEmpty ? .server : .login)
-        switch current {
-        case .server:
-            MacServerStep(model: model, canCancel: !model.state.server.isEmpty) { step = .login }
-        case .login:
-            MacLoginStep(model: model, changeServer: { step = .server }) { token, providers, email in
-                step = .twoStep(token: token, providers: providers, email: email)
+        Group {
+            if connecting {
+                MacFrame(title: "Connecting to your PassAuth server", subtitle: hostOf(handoff?.server ?? "")) {
+                    ProgressView().frame(maxWidth: .infinity)
+                }
+            } else {
+                switch current {
+                case .server:
+                    MacServerStep(model: model, canCancel: !model.state.server.isEmpty, prefill: handoff?.server) { step = .login }
+                case .login:
+                    MacLoginStep(model: model, handoff: handoff, changeServer: { step = .server }) { token, providers, email in
+                        step = .twoStep(token: token, providers: providers, email: email)
+                    }
+                case .twoStep(let token, let providers, let email):
+                    MacTwoStep(model: model, token: token, providers: providers, email: email) { step = .login }
+                }
             }
-        case .twoStep(let token, let providers, let email):
-            MacTwoStep(model: model, token: token, providers: providers, email: email) { step = .login }
         }
+        .task { await applyHandoff() }
+    }
+
+    /// No server yet: take the desktop app's and connect to it (plain http was already accepted there).
+    private func applyHandoff() async {
+        guard step == nil, model.state.server.isEmpty, let h = DesktopHandoff.read(), let server = h.server else { return }
+        handoff = h
+        connecting = true
+        let ok = (try? await model.repo.setServer(server, allowLanHttp: true)) != nil
+        connecting = false
+        step = ok ? .login : .server
     }
 }
 
 private struct MacServerStep: View {
     @Bindable var model: AutofillModel
     let canCancel: Bool
+    var prefill: String?
     let done: () -> Void
     @State private var url = ""
     @State private var busy = false
@@ -50,7 +95,7 @@ private struct MacServerStep: View {
                 Button("Back") { done() }.buttonStyle(.link).frame(maxWidth: .infinity)
             }
         }
-        .onAppear { if url.isEmpty { url = model.state.server } }
+        .onAppear { if url.isEmpty { url = prefill ?? model.state.server } }
         .alert("Use plain http?", isPresented: Binding(get: { lanHost != nil }, set: { if !$0 { lanHost = nil } })) {
             Button("Connect anyway", role: .destructive) { connect(allowLanHttp: true) }
             Button("Cancel", role: .cancel) {}
@@ -81,6 +126,7 @@ private struct MacServerStep: View {
 
 private struct MacLoginStep: View {
     @Bindable var model: AutofillModel
+    var handoff: DesktopHandoff?
     let changeServer: () -> Void
     let twoStep: (String, [String], String) -> Void
     @State private var email = ""
@@ -89,9 +135,13 @@ private struct MacLoginStep: View {
     @State private var needKey = false
     @State private var busy = false
     @State private var error: String?
+    @State private var fromDesktop = false
 
     var body: some View {
         MacFrame(title: "Sign in to PassAuth", subtitle: hostOf(model.state.server)) {
+            if fromDesktop {
+                Notice(text: "Server and email come from the PassAuth app on this Mac. Enter your master password once: AutoFill signs in as its own device and then unlocks with Touch ID or on its own timer.", kind: .ok)
+            }
             MacField(label: "Email", text: $email, content: .username)
             MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } })
             if needKey {
@@ -102,7 +152,16 @@ private struct MacLoginStep: View {
                              enabled: !email.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty, action: submit)
             Button("Change server") { changeServer() }.buttonStyle(.link).frame(maxWidth: .infinity)
         }
-        .onAppear { if email.isEmpty { email = model.state.email } }
+        .onAppear {
+            guard email.isEmpty else { return }
+            if let h = handoff ?? DesktopHandoff.read(for: model.state.server), h.server == model.state.server {
+                email = h.email ?? model.state.email
+                secretKey = h.secretKey ?? ""
+                fromDesktop = !email.isEmpty
+            } else {
+                email = model.state.email
+            }
+        }
     }
 
     private func submit() {
