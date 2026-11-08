@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "passauth-desktop"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "arboard",
  "block2",
