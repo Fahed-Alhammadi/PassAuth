@@ -22,6 +22,9 @@ struct SetupView: View {
     @Environment(AppModel.self) private var model
     var initial = ""
     var onCancel: (() -> Void)? = nil
+    /// Called after the server is saved. The root view only switches screens when the app phase changes,
+    /// which doesn't happen when the sign-in screen changes server, so the caller must close this view.
+    var onConnected: (() -> Void)? = nil
     @State private var url = ""
     @State private var busy = false
     @State private var error: String?
@@ -55,6 +58,9 @@ struct SetupView: View {
         Task {
             do {
                 try await model.repo.setServer(url, allowLanHttp: allowLanHttp)
+                busy = false
+                onConnected?()
+                return
             } catch let e as PlainHttpConfirmation {
                 lanHost = e.host
             } catch { self.error = errorMessage(error) }
@@ -80,7 +86,7 @@ struct LoginView: View {
     var body: some View {
         let state = model.state
         if changingServer {
-            SetupView(initial: state.server) { changingServer = false }
+            SetupView(initial: state.server, onCancel: { changingServer = false }, onConnected: { changingServer = false })
         } else if creating {
             RegisterView(onSignIn: { e, p, sk in
                 creating = false

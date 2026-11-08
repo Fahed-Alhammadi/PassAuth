@@ -57,6 +57,7 @@ struct RootView: View {
             w.addGestureRecognizer(r)
             applyTheme(state.settings.theme)
         })
+        .onOpenURL { model.open($0) }
         .task {
             ExportFile.removeTemporaryCopies()
             await model.repo.start()
@@ -123,6 +124,7 @@ struct NoticeView: View {
 /// The unlocked app: Vault, Generator, Settings.
 struct MainView: View {
     enum Tab: Hashable { case vault, generator, settings }
+    @Environment(AppModel.self) private var model
     @State private var tab: Tab = .vault
 
     var body: some View {
@@ -138,5 +140,8 @@ struct MainView: View {
                 .tag(Tab.settings)
         }
         .modifier(BiometricOffer())
+        .sheet(item: Binding(get: { model.pendingOtp }, set: { model.pendingOtp = $0 })) { p in
+            AddCodeSheet(key: p.key)
+        }
     }
 }

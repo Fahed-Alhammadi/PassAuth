@@ -24,6 +24,22 @@ final class AppModel {
     /// A screen shows a secret outside the unlocked vault (the new Secret Key): cover it in the app switcher.
     var showsSecret = false
 
+    /// An authenticator key from an opened otpauth link, waiting for the vault to be unlocked.
+    var pendingOtp: PendingOtp?
+
+    /// otpauth:// and apple-otpauth:// links (QR codes from the Camera, Set Up Codes In, links in Safari).
+    func open(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "otpauth" || scheme == "apple-otpauth" else { return }
+        let text = "otpauth" + url.absoluteString.dropFirst(scheme.count)
+        switch OtpAuth.parse(text) {
+        case .valid(let key):
+            pendingOtp = PendingOtp(key: key)
+            if state.status != .unlocked { notify("Unlock PassAuth to save the verification code.") }
+        case .invalid(let problem):
+            notify(problem)
+        }
+    }
+
     init() {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { SecureStore.wipeAll() }

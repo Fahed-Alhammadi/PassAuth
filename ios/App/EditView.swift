@@ -25,12 +25,23 @@ struct EditView: View {
     @State private var conflict = false
     @State private var confirmDiscard = false
 
-    init(entry: Entry?, kind: ItemKind, onSaved: @escaping (String?) -> Void) {
+    /// `otp`: an authenticator key to add (an otpauth:// link opened in the app); a new login also
+    /// takes its issuer as the name and its account as the username.
+    init(entry: Entry?, kind: ItemKind, otp: OtpKey? = nil, onSaved: @escaping (String?) -> Void) {
         _entry = State(initialValue: entry)
         self.onSaved = onSaved
         let start = entry?.item ?? Item.empty(kind)
+        var edited = start
+        if let otp {
+            if edited.login == nil { edited.login = Login() }
+            edited.login?.totp = otp.value
+            if entry == nil {
+                if edited.name.isEmpty { edited.name = otp.issuer }
+                if edited.login?.username.isEmpty ?? false { edited.login?.username = otp.account }
+            }
+        }
         _original = State(initialValue: start)
-        _item = State(initialValue: start)
+        _item = State(initialValue: edited)
         _vaultId = State(initialValue: entry?.vaultId ?? "")
     }
 

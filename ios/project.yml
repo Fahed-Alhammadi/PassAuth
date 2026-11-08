@@ -82,6 +82,14 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        # otpauth links and QR codes: apple-otpauth makes PassAuth a choice in
+        # Settings → General → AutoFill & Passwords → Set Up Codes In (iOS 18+).
+        CFBundleURLTypes:
+          - CFBundleURLName: io.passauth.app.otpauth
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - apple-otpauth
+              - otpauth
         UILaunchScreen:
           UIColorName: LaunchBackground
           UIImageName: LaunchLogo

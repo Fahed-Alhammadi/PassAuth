@@ -1,5 +1,4 @@
-New in 0.5.1
-• Change your master password in the app: Settings → Account security → Master password. You can also turn your Secret Key on or off there. A new Secret Key is shown once, with an Emergency Kit to save.
-• Set up two-step login in the app: an authenticator app (QR code or setup key) or email codes. Recovery codes are shown once to save.
-• Make new recovery codes or turn a method off after confirming your master password.
-Please test: change the password, then lock and unlock (including Face ID), and AutoFill. Turn on the authenticator app, then sign out and sign in again with a code.
+New in 0.5.2
+• Fixed: after you entered a new server with "Change server" on the sign-in screen, the app stayed on that screen. It now goes back to sign-in with the new server.
+• PassAuth can now set up verification codes: choose it in Settings → General → AutoFill & Passwords → Set Up Codes In. When you scan a two-step login QR code with the Camera, or tap an otpauth link, PassAuth opens and lets you add the code to an existing login or a new one.
+Please test: change server from the sign-in screen. Pick PassAuth in Set Up Codes In, scan a two-step login QR code with the Camera app, add it to a login, then check that the code appears and fills with AutoFill.
