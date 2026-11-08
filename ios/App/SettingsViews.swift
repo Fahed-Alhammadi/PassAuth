@@ -17,6 +17,15 @@ private func matchHelp(_ m: UrlMatch) -> String {
     }
 }
 
+private func backgroundSyncLabel(_ minutes: Int) -> String {
+    switch minutes {
+    case 0: "Off"
+    case 60: "Every hour"
+    case ..<60: "Every \(minutes) minutes"
+    default: "Every \(minutes / 60) hours"
+    }
+}
+
 private func lastSyncText(_ t: Double) -> String {
     guard t > 0 else { return "never" }
     let d = Date(timeIntervalSince1970: t)
@@ -435,6 +444,15 @@ private struct VaultOptionsPage: View {
             .disabled(syncing)
         } footer: {
             Text("Last sync: \(lastSyncText(model.state.lastSync))")
+        }
+        .paRow()
+        Section {
+            Picker("Background sync", selection: Binding(get: { model.state.settings.backgroundSyncMinutes }, set: { v in update(model) { $0.backgroundSyncMinutes = v } })) {
+                ForEach([0, 30, 60, 120, 360, 720], id: \.self) { Text(backgroundSyncLabel($0)).tag($0) }
+            }
+            .accessibilityIdentifier("backgroundSync")
+        } footer: {
+            Text("Keeps your offline copy up to date while the app is in the background. iOS decides when it runs.")
         }
         .paRow()
         Section {

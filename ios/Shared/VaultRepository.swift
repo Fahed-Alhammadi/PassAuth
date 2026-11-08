@@ -115,6 +115,13 @@ public struct Registered: Sendable {
     public let emailVerificationRequired: Bool
 }
 
+/// What a locked cache refresh writes (`VaultRepository.offlineCopyUpdate`).
+public struct OfflineCopyUpdate: Equatable, Sendable {
+    public let revision: Int64
+    /// The account bundle as JSON text.
+    public let bundle: String?
+}
+
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
 final class Session {
     let accountId: String
@@ -748,6 +755,52 @@ public final class VaultRepository {
             Task { @MainActor [weak self] in await self?.backgroundSync(id, session) }
         }
     }
+
+    /// Background App Refresh: keep an account's encrypted offline copy current without
+    /// unlocking it. The `/sync` body is stored as the server sent it (ciphertext and metadata;
+    /// nothing is decrypted or kept in memory, the identity store isn't touched), and only when
+    /// it is a valid sync response at least as new as the copy on disk ([offlineCopyUpdate]).
+    /// The active account, when unlocked, gets a normal sync instead.
+    public func refreshCacheLocked(accountId id: String) async throws {
+        if sessions[id] != nil && activeId == id {
+            try await lock.run { try await syncLocked() }
+            return
+        }
+        let s = store.get()
+        guard let a = s.file.accounts[id], a.isListed, s.tokens(id) != nil else { return }
+        let data = try await api.callData(id, "/sync")
+        try Task.checkCancellation()
+        let cached = await store.readCacheInBackground(id)
+        guard let update = try await core({ Self.offlineCopyUpdate(fetched: data, cached: cached) }) else {
+            throw UserError("The server's answer couldn't be read.")
+        }
+        try Task.checkCancellation()
+        await lock.run {
+            // Unlocked and shown meanwhile: its own sync writes the copy.
+            guard !(sessions[id] != nil && activeId == id) else { return }
+            await store.writeCacheInBackground(id, data)
+            store.updateAccount(id) { a in
+                a.lastSync = Date().timeIntervalSince1970
+                if let bundle = update.bundle { a.bundle = bundle }
+            }
+        }
+    }
+
+    /// Decides what a locked cache refresh may write: `fetched` must decode as a sync response
+    /// (numeric revision, bundle, vaults and items present; well-formed rows) and must not be
+    /// older than the `cached` copy (never downgrade). An unreadable cached copy is replaced.
+    nonisolated public static func offlineCopyUpdate(fetched: Data, cached: Data?) -> OfflineCopyUpdate? {
+        guard let res = try? JSONDecoder().decode(SyncResponse.self, from: fetched),
+              let revision = res.revision, res.vaults != nil, res.items != nil,
+              let bundle = res.bundle, bundle != .null else { return nil }
+        if let cached, let old = try? JSONDecoder().decode(SyncRevision.self, from: cached),
+           let oldRevision = old.revision, revision < oldRevision {
+            return nil
+        }
+        return OfflineCopyUpdate(revision: revision, bundle: bundle.text)
+    }
+
+    private struct SyncRevision: Decodable { let revision: Int64? }
 
     /// The server sync after a cache-first unlock; an unreachable server leaves the copy marked offline.
     private func backgroundSync(_ id: String, _ session: Session) async {

@@ -13,6 +13,7 @@ final class AppModel {
     let icons: IconLoader
     @ObservationIgnored private(set) var lockManager: LockManager!
     @ObservationIgnored private(set) var liveSync: LiveSync!
+    @ObservationIgnored private(set) var backgroundRefresh: BackgroundRefresh!
     let permissions: PermissionCenter
     /// UI tests that aren't about it skip the first-launch permissions screen.
     let skipPermissionsIntro: Bool
@@ -60,6 +61,8 @@ final class AppModel {
         lockManager = LockManager(repo: repo)
         liveSync = LiveSync(repo: repo)
         permissions = PermissionCenter(repo: repo)
+        backgroundRefresh = BackgroundRefresh(repo: repo)
+        BackgroundRefresh.current = backgroundRefresh
     }
 
     var state: AppState { repo.state }

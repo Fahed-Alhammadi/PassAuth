@@ -1,4 +1,3 @@
-New in 0.5.2
-• Fixed: after you entered a new server with "Change server" on the sign-in screen, the app stayed on that screen. It now goes back to sign-in with the new server.
-• PassAuth can now set up verification codes: choose it in Settings → General → AutoFill & Passwords → Set Up Codes In. When you scan a two-step login QR code with the Camera, or tap an otpauth link, PassAuth opens and lets you add the code to an existing login or a new one.
-Please test: change server from the sign-in screen. Pick PassAuth in Set Up Codes In, scan a two-step login QR code with the Camera app, add it to a login, then check that the code appears and fills with AutoFill.
+New in 0.5.3
+• Background sync: PassAuth now refreshes your offline copy of the vault in the background, about every 2 hours by default (iOS decides the exact moment), so it's current when you open the app or use AutoFill. Change or turn it off in Settings → Vault options → Background sync.
+Please test: change a login on another device, leave the iPhone alone for a few hours with the app in the background, then open PassAuth and check the change is already there before the sync spinner runs.

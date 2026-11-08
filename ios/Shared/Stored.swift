@@ -57,6 +57,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var generator = GeneratorSettings()
     /// The permissions screen: shown once, and what iOS doesn't report itself.
     public var permissions = PermissionMemory()
+    /// Background App Refresh of the offline copy, in minutes between runs (iOS decides the
+    /// actual timing); 0 = off. Options: 0, 30, 60, 120, 360, 720.
+    public var backgroundSyncMinutes = 120
 
     public init() {}
 
@@ -75,6 +78,7 @@ public struct Settings: Codable, Equatable, Sendable {
         neverSave = c.lenient(.neverSave, d.neverSave)
         generator = c.lenient(.generator, d.generator)
         permissions = c.lenient(.permissions, d.permissions)
+        backgroundSyncMinutes = c.lenient(.backgroundSyncMinutes, d.backgroundSyncMinutes)
     }
 }
 

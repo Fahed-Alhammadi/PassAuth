@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct PassAuthApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -11,6 +12,14 @@ struct PassAuthApp: App {
                 .environment(model)
                 .tint(Color.paAccent)
         }
+    }
+}
+
+/// Registers the Background App Refresh handler before the app finishes launching.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        BackgroundRefresh.register()
+        return true
     }
 }
 
@@ -69,7 +78,9 @@ struct RootView: View {
                 model.repo.store.reload()
                 Task { await model.repo.refreshIfStale() }
             }
+            if phase == .background { model.backgroundRefresh.schedule() }
         }
+        .onChange(of: state.settings.backgroundSyncMinutes) { _, _ in model.backgroundRefresh.schedule() }
         // Live sync: only while on screen with the active account unlocked.
         .onChange(of: "\(scenePhase == .active)|\(state.activeId)|\(state.status)", initial: true) { _, _ in
             model.liveSync.update(foreground: scenePhase == .active)

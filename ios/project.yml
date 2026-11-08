@@ -95,6 +95,11 @@ targets:
           UIImageName: LaunchLogo
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # Background App Refresh of the offline copy (App/BackgroundRefresh.swift).
+        UIBackgroundModes:
+          - fetch
+        BGTaskSchedulerPermittedIdentifiers:
+          - io.passauth.app.refresh
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
