@@ -6,6 +6,17 @@ The browser extension and the mobile apps show their changes in their stores.
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.6.0 (2026-11-08)
+
+- Security keys as a two-step method; desktop vault timeout (daab5bd)
+- Desktop: macOS AutoFill extension + verification-code links (47687d8)
+- Bump zip from 9.2.1 to 9.2.2 (170e701)
+- Bump aes from 0.9.3 to 0.9.4 (a89191e)
+- Bump @vitejs/plugin-react from 6.1.2 to 6.2.1 in /web (64b14e1)
+- Desktop app for macOS, Windows and Linux (Tauri 2) (f787a6d)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.5.1...server-0.6.0)
+
 ## 0.5.1 (2026-11-05)
 
 - Node 26: install pnpm with npm in the image, build CI on Node 26 (1d9faf7)
