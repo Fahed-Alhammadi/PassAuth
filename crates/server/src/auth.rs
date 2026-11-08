@@ -27,6 +27,7 @@ use crate::config::canonical;
 use crate::db::{now, now_ms};
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
+use crate::passkeys;
 use crate::state::{
     AppState, DeviceInfo, PendingLogin, PendingRegistration, PendingTwoFactor, ct_eq, hash_token,
     normalize_email, random_token,
@@ -47,6 +48,8 @@ pub fn routes() -> Router<AppState> {
         .route("/login/finish", post(login_finish))
         .route("/2fa/verify", post(two_factor_verify))
         .route("/2fa/email", post(two_factor_send_email))
+        .route("/2fa/passkey/start", post(two_factor_passkey_start))
+        .route("/2fa/passkey/finish", post(two_factor_passkey_finish))
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
         .route("/verify-email", post(verify_email))
@@ -652,6 +655,7 @@ async fn login_finish(
                 user_id,
                 device,
                 attempts: 0,
+                passkey: None,
             },
             5 * 60,
         );
@@ -693,7 +697,7 @@ async fn two_factor_verify(
     State(state): State<AppState>,
     Json(b): Json<TwoFactorVerify>,
 ) -> ApiResult<Json<Value>> {
-    let (exp, mut pending) = state
+    let (exp, pending) = state
         .two_factor
         .take(&b.two_factor_token)
         .ok_or(ApiError::bad("sign-in expired, start again"))?;
@@ -701,21 +705,146 @@ async fn two_factor_verify(
         return Err(ApiError::TooManyRequests);
     }
     if !twofactor::verify(&state.db, &pending.user_id, &b.provider, &b.code).await? {
-        if twofactor::record_failure(&state.db, &pending.user_id).await? {
-            alert_two_factor_lockout(&state, &pending.user_id).await?;
-            return Err(ApiError::TooManyRequests);
-        }
-        pending.attempts += 1;
-        if pending.attempts < 5 {
-            state.two_factor.put_back(b.two_factor_token, pending, exp);
-        }
-        return Err(ApiError::bad("invalid two-factor code"));
+        return Err(two_factor_failed(&state, b.two_factor_token, pending, exp).await?);
     }
     twofactor::clear_failures(&state.db, &pending.user_id).await?;
     let remember = b.remember.then(random_token);
     Ok(Json(
         issue_session(&state, &pending.user_id, &pending.device, remember).await?,
     ))
+}
+
+/// Count a wrong code or failed security-key assertion against the account
+/// (lockout after too many), keep the sign-in alive for a few more tries, and
+/// give the error to answer with.
+async fn two_factor_failed(
+    state: &AppState,
+    token: String,
+    mut pending: PendingTwoFactor,
+    exp: i64,
+) -> ApiResult<ApiError> {
+    if twofactor::record_failure(&state.db, &pending.user_id).await? {
+        alert_two_factor_lockout(state, &pending.user_id).await?;
+        return Ok(ApiError::TooManyRequests);
+    }
+    pending.attempts += 1;
+    pending.passkey = None;
+    if pending.attempts < 5 {
+        state.two_factor.put_back(token, pending, exp);
+    }
+    Ok(ApiError::bad("invalid two-factor code"))
+}
+
+// ------------------------------------------------- security keys / passkeys
+
+/// Assertion options for the account's security keys (`allowCredentials`).
+async fn two_factor_passkey_start(
+    State(state): State<AppState>,
+    Json(b): Json<TwoFactorEmail>,
+) -> ApiResult<Json<Value>> {
+    let (exp, mut pending) = state
+        .two_factor
+        .take(&b.two_factor_token)
+        .ok_or(ApiError::bad("sign-in expired, start again"))?;
+    if twofactor::locked_out(&state.db, &pending.user_id).await? {
+        state.two_factor.put_back(b.two_factor_token, pending, exp);
+        return Err(ApiError::TooManyRequests);
+    }
+    let webauthn = match passkeys::relying_party(&state) {
+        Ok(w) => w,
+        Err(e) => {
+            state.two_factor.put_back(b.two_factor_token, pending, exp);
+            return Err(e);
+        }
+    };
+    if let Err(e) = limit(&state, format!("2fa-passkey:{}", pending.user_id), 20, 300) {
+        state.two_factor.put_back(b.two_factor_token, pending, exp);
+        return Err(e);
+    }
+    let keys = passkeys::list(&state.db, &pending.user_id).await?;
+    if keys.is_empty() {
+        state.two_factor.put_back(b.two_factor_token, pending, exp);
+        return Err(ApiError::bad("this account has no security keys"));
+    }
+    let creds: Vec<_> = keys.into_iter().map(|k| k.key).collect();
+    let (options, auth_state) = webauthn
+        .start_securitykey_authentication(&creds)
+        .map_err(|e| anyhow::anyhow!("webauthn authentication start: {e:?}"))?;
+    pending.passkey = Some(auth_state);
+    state.two_factor.put_back(b.two_factor_token, pending, exp);
+    Ok(Json(json!({ "options": passkeys::options(&options)? })))
+}
+
+#[derive(Deserialize)]
+struct TwoFactorPasskeyFinish {
+    two_factor_token: String,
+    credential: webauthn_rs::prelude::PublicKeyCredential,
+    #[serde(default)]
+    remember: bool,
+}
+
+async fn two_factor_passkey_finish(
+    State(state): State<AppState>,
+    Json(b): Json<TwoFactorPasskeyFinish>,
+) -> ApiResult<Json<Value>> {
+    let (exp, mut pending) = state
+        .two_factor
+        .take(&b.two_factor_token)
+        .ok_or(ApiError::bad("sign-in expired, start again"))?;
+    if twofactor::locked_out(&state.db, &pending.user_id).await? {
+        state.two_factor.put_back(b.two_factor_token, pending, exp);
+        return Err(ApiError::TooManyRequests);
+    }
+    let Some(auth_state) = pending.passkey.take() else {
+        state.two_factor.put_back(b.two_factor_token, pending, exp);
+        return Err(ApiError::bad("ask for security key options first"));
+    };
+    let webauthn = passkeys::relying_party(&state)?;
+    let result = match webauthn.finish_securitykey_authentication(&b.credential, &auth_state) {
+        Ok(r) => r,
+        Err(e) => {
+            use webauthn_rs::prelude::WebauthnError;
+            let cred = b64(&b.credential.raw_id);
+            match e {
+                WebauthnError::CredentialPossibleCompromise => {
+                    tracing::warn!(user = %pending.user_id, credential = %cred, "security key counter went backwards: possible cloned key");
+                    alert_passkey_compromise(&state, &pending.user_id).await?;
+                }
+                WebauthnError::UserNotVerified | WebauthnError::InvalidRPOrigin => {
+                    tracing::warn!(user = %pending.user_id, credential = %cred, error = ?e, "security key assertion rejected (check DOMAIN / authenticator settings)");
+                }
+                _ => tracing::debug!(error = ?e, "security key assertion rejected"),
+            }
+            return Err(two_factor_failed(&state, b.two_factor_token, pending, exp).await?);
+        }
+    };
+    let mut keys = passkeys::list(&state.db, &pending.user_id).await?;
+    passkeys::record_use(&state.db, &pending.user_id, &mut keys, &result).await?;
+    twofactor::clear_failures(&state.db, &pending.user_id).await?;
+    let remember = b.remember.then(random_token);
+    Ok(Json(
+        issue_session(&state, &pending.user_id, &pending.device, remember).await?,
+    ))
+}
+
+/// Tell the owner that a security key's signature counter went backwards (a
+/// cloned key, or a reset one; either way worth a look).
+async fn alert_passkey_compromise(state: &AppState, user_id: &str) -> ApiResult<()> {
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await?;
+    state.mailer.send_later(
+        email,
+        Email {
+            subject: "PassAuth security key check failed".into(),
+            heading: "Unexpected security key response".into(),
+            body: "A security key for your account returned an unexpected counter during two-step login; it may have been cloned. The sign-in was refused. If you don't recognise this, remove the key in Settings → Two-step login and change your master password.".into(),
+            action: Some(("Review two-step login".into(), format!("{}/settings/two-step", state.config.domain))),
+            code: None,
+        },
+    );
+    Ok(())
 }
 
 /// Tell the owner that someone with their password is guessing two-factor codes.

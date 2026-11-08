@@ -129,7 +129,12 @@ pub async fn connect(url: &str) -> Result<Db> {
 }
 
 /// Schema changes in order; each runs once, in one transaction, when the stored version is lower.
-const MIGRATIONS: &[(i64, &[&str])] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
+const MIGRATIONS: &[(i64, &[&str])] = &[
+    (1, SCHEMA_V1),
+    (2, SCHEMA_V2),
+    (3, SCHEMA_V3),
+    (4, SCHEMA_V4),
+];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
 const SCHEMA_V2: &[&str] =
@@ -146,6 +151,18 @@ const SCHEMA_V3: &[&str] = &[
         failures BIGINT NOT NULL,
         window_start BIGINT NOT NULL,
         locked_until BIGINT NOT NULL)",
+];
+
+/// Security keys / passkeys for two-step login (`credential` = webauthn-rs `SecurityKey` JSON).
+const SCHEMA_V4: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS passkey_credentials (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        credential TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        last_used_at BIGINT)",
+    "CREATE INDEX IF NOT EXISTS passkey_credentials_user ON passkey_credentials (user_id)",
 ];
 
 async fn migrate(db: &Db) -> Result<()> {

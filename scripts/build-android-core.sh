@@ -19,7 +19,8 @@ JNI=android/core/src/main/jniLibs
 KOTLIN=android/core/src/main/kotlin
 flag=(); [ "$PROFILE" = release ] && flag=(--release)
 
-cargo ndk -t arm64-v8a -t x86_64 -P 34 -o "$JNI" build -p passauth-core-ffi "${flag[@]}"
+# `${flag[@]+...}`: an empty array is "unbound" under `set -u` in macOS's bash 3.2.
+cargo ndk -t arm64-v8a -t x86_64 -P 34 -o "$JNI" build -p passauth-core-ffi ${flag[@]+"${flag[@]}"}
 
 # Bindings come from an unstripped host (debug) build of the same crate: library mode reads
 # UniFFI metadata symbols, which the release profile's `strip` removes on Linux.

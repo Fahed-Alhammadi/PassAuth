@@ -38,9 +38,12 @@ const CHECK_UPDATES: &str = "check-updates";
 const HELP: &str = "help";
 const REPORT: &str = "report";
 const QUIT: &str = "quit";
-/// Webview → shell: `true` while the vault is unlocked. Shell → webview: the window was hidden.
+/// Webview → shell: `true` while the vault is unlocked. Shell → webview: the window was hidden; the screen was
+/// locked, the computer is going to sleep or the user session was switched (vault timeout "On system lock").
 const VAULT_STATE: &str = "vault-state";
 const WINDOW_HIDDEN: &str = "window-hidden";
+#[cfg(target_os = "macos")]
+const SYSTEM_LOCK: &str = "system-lock";
 
 /// The connected server and the client for it. Only `api_fetch` reaches the network, so the webview can't call other hosts.
 struct Server {
@@ -133,13 +136,21 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-fn entry(name: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, name).map_err(keychain_error)
+/// Keychain entries are filed under the bundle identifier (`io.passauth.desktop`), so a build with another
+/// identifier (a test build) never touches the real app's secrets.
+fn entry(app: &AppHandle, name: &str) -> Result<keyring::Entry, String> {
+    let service = app.config().identifier.as_str();
+    let service = if service.is_empty() {
+        KEYCHAIN_SERVICE
+    } else {
+        service
+    };
+    keyring::Entry::new(service, name).map_err(keychain_error)
 }
 
 #[tauri::command]
-async fn secret_get(name: String) -> Result<Option<String>, String> {
-    blocking(move || match entry(&name)?.get_password() {
+async fn secret_get(app: AppHandle, name: String) -> Result<Option<String>, String> {
+    blocking(move || match entry(&app, &name)?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(keychain_error(e)),
@@ -148,17 +159,65 @@ async fn secret_get(name: String) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-async fn secret_set(name: String, value: String) -> Result<(), String> {
-    blocking(move || entry(&name)?.set_password(&value).map_err(keychain_error)).await
+async fn secret_set(app: AppHandle, name: String, value: String) -> Result<(), String> {
+    blocking(move || {
+        entry(&app, &name)?
+            .set_password(&value)
+            .map_err(keychain_error)
+    })
+    .await
 }
 
 #[tauri::command]
-async fn secret_delete(name: String) -> Result<(), String> {
-    blocking(move || match entry(&name)?.delete_credential() {
+async fn secret_delete(app: AppHandle, name: String) -> Result<(), String> {
+    blocking(move || match entry(&app, &name)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(keychain_error(e)),
     })
     .await
+}
+
+/// macOS: tell the webview when the screen locks, the Mac goes to sleep or the user session is switched.
+/// Observers live as long as the process (the tokens are never removed).
+#[cfg(target_os = "macos")]
+fn watch_system_lock(app: AppHandle) {
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2_app_kit::{
+        NSWorkspace, NSWorkspaceSessionDidResignActiveNotification,
+        NSWorkspaceWillSleepNotification,
+    };
+    use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
+
+    let block = RcBlock::new(move |_: NonNull<NSNotification>| {
+        let _ = app.emit(SYSTEM_LOCK, ());
+    });
+    // SAFETY: the block captures only an `AppHandle` (Send + Sync) and is kept alive by the leaked observer.
+    unsafe {
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        for name in [
+            NSWorkspaceWillSleepNotification,
+            NSWorkspaceSessionDidResignActiveNotification,
+        ] {
+            std::mem::forget(workspace.addObserverForName_object_queue_usingBlock(
+                Some(name),
+                None,
+                None,
+                &block,
+            ));
+        }
+        let screen_locked = NSString::from_str("com.apple.screenIsLocked");
+        std::mem::forget(
+            NSDistributedNotificationCenter::defaultCenter()
+                .addObserverForName_object_queue_usingBlock(
+                    Some(&screen_locked),
+                    None,
+                    None,
+                    &block,
+                ),
+        );
+    }
 }
 
 /// Copy a secret, kept out of clipboard history, and clear it after 30 s if it's still there.
@@ -435,6 +494,8 @@ pub fn run() {
             build_tray(&handle, &tray_lock)?;
             build_window(&handle)?;
             app.manage(LockItems(vec![menu_lock, tray_lock]));
+            #[cfg(target_os = "macos")]
+            watch_system_lock(handle.clone());
             let shown = handle.clone();
             app.deep_link().on_open_url(move |_| show_window(&shown));
             // deb/rpm and the Windows installer register the schemes; an AppImage has to do it itself.

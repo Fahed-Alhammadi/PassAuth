@@ -10,6 +10,7 @@ import * as core from "../wasm/passauth_core";
 import { ApiError, UnreachableError, api, deviceInfo, getTokens, onSessionLost, setTokens } from "./api";
 import { secretStore } from "./platform";
 import { server } from "./server";
+import { getCredential } from "./webauthn";
 import {
   isSyncResponse,
   type Bundle,
@@ -89,6 +90,14 @@ export function useVault(): State {
 export const getState = () => state;
 export const getAccount = () => account;
 export const getBundle = () => bundle;
+/** Run `fn` after every state change (outside React); returns the unsubscribe. */
+export const onVaultChange = subscribe;
+
+/** Desktop vault timeout "never": the unlocked account keys for the OS keychain; null while locked. */
+export function sessionKeys(): { accountId: string; keys: Uint8Array } | null {
+  if (!account || !bundle) return null;
+  return { accountId: bundle.account_id, keys: account.toSessionBytes() };
+}
 
 onSessionLost(() => resetToLoggedOut());
 
@@ -275,6 +284,17 @@ export async function sendTwoFactorEmail(token: string) {
   await api("/auth/2fa/email", { body: { two_factor_token: token }, auth: false });
 }
 
+/** Two-step login with a security key or passkey: server challenge → browser WebAuthn → session. */
+export async function verifyTwoFactorPasskey(token: string, remember: boolean) {
+  const { options } = await api<{ options: unknown }>("/auth/2fa/passkey/start", { body: { two_factor_token: token }, auth: false });
+  const credential = await getCredential(options);
+  const result = await api<LoginFinishResponse>("/auth/2fa/passkey/finish", { body: { two_factor_token: token, credential, remember }, auth: false });
+  if (!pendingMaster) throw new Error("Sign-in expired, start again.");
+  const master = pendingMaster;
+  pendingMaster = null;
+  await finishLogin(master, result);
+}
+
 function rememberToken(email: string) {
   return secretStore.get(rememberKey(email)) ?? undefined;
 }
@@ -315,6 +335,21 @@ export async function unlock(password: string, secretKey: string | null) {
     throw e;
   }
   if (sk) rememberSecretKey(state.email, sk);
+  connectSocket();
+}
+
+/** Open a locked session with keys saved by `sessionKeys()` (desktop, vault timeout "never") instead of the master password. */
+export async function restoreUnlocked(accountId: string, keys: Uint8Array) {
+  if (!bundle) throw new Error("Sign in again to unlock this vault.");
+  if (bundle.account_id !== accountId) throw new Error("The saved keys belong to another account.");
+  dropKeys();
+  account = core.accountFromSessionBytes(accountId, keys);
+  try {
+    await sync();
+  } catch (e) {
+    dropKeys();
+    throw e;
+  }
   connectSocket();
 }
 

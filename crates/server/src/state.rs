@@ -30,6 +30,10 @@ pub struct App {
     pub logins: Expiring<PendingLogin>,
     pub two_factor: Expiring<PendingTwoFactor>,
     pub reauth: Expiring<String>,
+    /// Security-key registrations in progress (`passkeys.rs`).
+    pub passkey_registrations: Expiring<PendingPasskeyRegistration>,
+    /// WebAuthn relying party from `DOMAIN`; `None` when it isn't a usable URL.
+    pub webauthn: Option<webauthn_rs::Webauthn>,
     pub limiter: RateLimiter,
     pub notify: DashMap<String, broadcast::Sender<String>>,
     pub icons: IconService,
@@ -64,6 +68,13 @@ pub struct PendingTwoFactor {
     pub user_id: String,
     pub device: DeviceInfo,
     pub attempts: u32,
+    /// Security-key challenge issued by `/auth/2fa/passkey/start`, if any.
+    pub passkey: Option<webauthn_rs::prelude::SecurityKeyAuthentication>,
+}
+
+pub struct PendingPasskeyRegistration {
+    pub user_id: String,
+    pub state: webauthn_rs::prelude::SecurityKeyRegistration,
 }
 
 impl App {
@@ -93,7 +104,16 @@ impl App {
                 .map(str::to_owned)
                 .collect();
         }
+        let webauthn = match crate::passkeys::build(&config.domain) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                tracing::warn!(error = %e, "security keys for two-step login are unavailable until DOMAIN is the server's full public address");
+                None
+            }
+        };
         Ok(Arc::new(Self {
+            webauthn,
+            passkey_registrations: Expiring::default(),
             signups: std::sync::RwLock::new(signups),
             mailer: Arc::new(Mailer::new(&config)?),
             icons: IconService::new(&config),
@@ -143,6 +163,7 @@ impl App {
         self.logins.sweep();
         self.two_factor.sweep();
         self.reauth.sweep();
+        self.passkey_registrations.sweep();
         self.limiter.sweep();
         self.notify.retain(|_, tx| tx.receiver_count() > 0);
     }

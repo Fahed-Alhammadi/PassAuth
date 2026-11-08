@@ -25,6 +25,27 @@ export interface DesktopHooks {
     set(name: string, value: string): Promise<void>;
     delete(name: string): Promise<void>;
   };
+  /** Vault timeout setting (the extension's options). Settings shows the card only when present. */
+  vaultTimeout?: VaultTimeoutHook;
+}
+
+/** Minutes, or a moment: the same values as the extension. */
+export type VaultTimeout = number | "immediately" | "system-lock" | "restart" | "never";
+export type TimeoutAction = "lock" | "logout";
+export interface TimeoutSettings {
+  vaultTimeout: VaultTimeout;
+  timeoutAction: TimeoutAction;
+}
+export interface VaultTimeoutHook {
+  /** The options this platform supports, in display order, with their labels. */
+  options: [VaultTimeout, string][];
+  /** Plain-language note for each option. */
+  help: Partial<Record<string, string>>;
+  /** Why an option can't be chosen right now (e.g. "Never" without a keychain), or null when it can. */
+  disabledReason(value: VaultTimeout): string | null;
+  get(): TimeoutSettings;
+  set(patch: Partial<TimeoutSettings>): void;
+  subscribe(fn: () => void): () => void;
 }
 
 let desktop: DesktopHooks | null = null;
@@ -53,12 +74,12 @@ export const secretStore = {
       return null;
     }
   },
-  set(key: string, value: string | null) {
+  /** The mirror updates at once; the returned promise settles when the keychain write has finished (desktop). */
+  set(key: string, value: string | null): Promise<void> {
     if (desktop) {
       if (value === null) mirror.delete(key);
       else mirror.set(key, value);
-      void (value === null ? desktop.secrets.delete(key) : desktop.secrets.set(key, value)).catch(() => {});
-      return;
+      return (value === null ? desktop.secrets.delete(key) : desktop.secrets.set(key, value)).catch(() => {});
     }
     try {
       if (value === null) localStorage.removeItem(key);
@@ -66,6 +87,7 @@ export const secretStore = {
     } catch {
       /* storage unavailable */
     }
+    return Promise.resolve();
   },
 };
 

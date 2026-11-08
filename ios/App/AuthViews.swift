@@ -138,9 +138,14 @@ private func providerLabel(_ p: String) -> String {
     switch p {
     case "totp": "Authenticator app"
     case "email": "Email code"
-    default: "Recovery code"
+    case "recovery": "Recovery code"
+    default: p
     }
 }
+
+/// Shown when the account's only two-step method besides recovery codes is a
+/// security key (WebAuthn), which the app can't use yet.
+let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
 struct TwoStepView: View {
     @Environment(AppModel.self) private var model
@@ -160,8 +165,14 @@ struct TwoStepView: View {
         return known.isEmpty ? ["totp"] : known
     }
 
+    /// Only a security key (unsupported here) besides recovery codes.
+    private var securityKeyOnly: Bool {
+        providers.contains("passkey") && choices.allSatisfy { $0 == "recovery" }
+    }
+
     var body: some View {
         AuthFrame(title: "Two-step login") {
+            if securityKeyOnly { Notice(text: securityKeyUnsupportedMessage) }
             if choices.count > 1 {
                 Picker("Verify with", selection: $provider) {
                     ForEach(choices, id: \.self) { Text(providerLabel($0)).tag($0) }

@@ -10,6 +10,7 @@ import { AddCodeHost } from "./AddCode";
 import { Connect } from "./Connect";
 import { setSecretsHost } from "./secrets";
 import { connectServer, rememberServer, savedServer } from "./server";
+import { KEYS_KEY, applyTimeoutAtStart } from "./timeout";
 import { UpdateDialog } from "./updater";
 
 const SLOW_BOOT_MS = 10_000;
@@ -43,7 +44,7 @@ export function confirmChangeServer(): Promise<boolean> {
 /** The keychain entries for this server, read before the web vault starts. */
 async function preloadSecrets(host: string) {
   setSecretsHost(host);
-  await loadSecrets([SESSION_KEY, EMAIL_KEY]);
+  await loadSecrets([SESSION_KEY, EMAIL_KEY, KEYS_KEY]);
   const email = secretStore.get(EMAIL_KEY);
   if (email) await loadSecrets([secretKeyKey(email), rememberKey(email)]);
 }
@@ -62,6 +63,8 @@ export function Root() {
       await preloadSecrets(new URL(base).host).catch(() => {});
       await connectServer(base);
       await boot();
+      // Vault timeout: "never" opens the vault with the saved keys; the "sign out" action signs out.
+      if (!cancelled) await applyTimeoutAtStart().catch(() => {});
       if (!cancelled) setStage({ kind: "app", base });
     })();
     return () => {

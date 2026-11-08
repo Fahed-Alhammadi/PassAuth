@@ -134,15 +134,24 @@ func providerLabel(_ p: String) -> String {
     switch p {
     case "totp": "Authenticator app"
     case "email": "Email code"
-    default: "Recovery code"
+    case "recovery": "Recovery code"
+    default: p
     }
 }
 
 /// Two-step providers PassAuth knows, in the server's order (authenticator app when none is known).
+/// Security keys (`passkey`, WebAuthn) are left out: the extension can't use them yet.
 func twoStepChoices(_ providers: [String]) -> [String] {
     let known = providers.filter { ["totp", "email", "recovery"].contains($0) }
     return known.isEmpty ? ["totp"] : known
 }
+
+/// Whether the account's only method besides recovery codes is a security key.
+func securityKeyOnly(_ providers: [String]) -> Bool {
+    providers.contains("passkey") && twoStepChoices(providers).allSatisfy { $0 == "recovery" }
+}
+
+let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
 private struct MacTwoStep: View {
     @Bindable var model: AutofillModel
@@ -160,6 +169,7 @@ private struct MacTwoStep: View {
     var body: some View {
         let choices = twoStepChoices(providers)
         MacFrame(title: "Two-step login", subtitle: email) {
+            if securityKeyOnly(providers) { Notice(text: securityKeyUnsupportedMessage) }
             if choices.count > 1 {
                 Picker("Verify with", selection: $provider) {
                     ForEach(choices, id: \.self) { Text(providerLabel($0)).tag($0) }

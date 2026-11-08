@@ -69,7 +69,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 
 ## Security
 
-- **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code or recovery code.
+- **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code, security key or passkey (WebAuthn, web vault), or recovery code.
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.

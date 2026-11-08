@@ -2962,7 +2962,10 @@ name = "passauth-desktop"
 version = "0.6.2"
 dependencies = [
  "arboard",
+ "block2",
  "keyring",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest",
  "rustls",
  "serde",

@@ -90,8 +90,15 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
     try {
       const r = await send<{ done?: true; twoFactor?: TwoFactorChallenge }>({ type: "login", email, password, secretKey: secretKey || undefined });
       if (r.twoFactor) {
-        setChallenge(r.twoFactor);
-        setProvider(r.twoFactor.providers[0]);
+        // Security keys (WebAuthn) can't be used from the popup yet: offer the other methods.
+        const providers = r.twoFactor.providers.filter((p) => p === "totp" || p === "email" || p === "recovery");
+        setChallenge({ ...r.twoFactor, providers });
+        setProvider(providers[0] ?? "recovery");
+        setNote(
+          r.twoFactor.providers.includes("passkey") && providers.every((p) => p === "recovery")
+            ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
+            : null,
+        );
       } else onDone();
     } catch (err) {
       if (err instanceof Error && err.message === "secret_key_required") setNeedKey(true);

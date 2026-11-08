@@ -7,6 +7,7 @@ import { forgetSecrets, type DesktopHooks } from "@web/lib/platform";
 import { getState, logout } from "@web/lib/vault";
 import { confirmChangeServer, requestChangeServer } from "./Root";
 import { secrets } from "./secrets";
+import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
 import { checkForUpdates, installUpdate } from "./updater";
 
 const isMac = navigator.platform.startsWith("Mac");
@@ -14,6 +15,7 @@ const isMac = navigator.platform.startsWith("Mac");
 /** Sign out and forget everything of this server kept in the WebView, so nothing of it is used on the next one. */
 export async function changeServer() {
   if (getState().status !== "logged-out" && !(await confirmChangeServer())) return;
+  clearPersistedKeys();
   await logout();
   forgetSecrets();
   Object.keys(localStorage)
@@ -42,5 +44,6 @@ export async function hooks(): Promise<DesktopHooks> {
     copySecret: (value) => invoke("copy_secret", { value }),
     openUrl: (url) => openUrl(url),
     secrets,
+    vaultTimeout: vaultTimeoutHook,
   };
 }

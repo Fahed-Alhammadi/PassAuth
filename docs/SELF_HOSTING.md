@@ -28,7 +28,7 @@ Open `.env` in a text editor and set at least:
 
 | Setting | What to put |
 |---|---|
-| `DOMAIN` | The address people will open, without a trailing slash, e.g. `https://vault.example.com` (or `http://localhost:8080` to try it on this computer). Used in email links. |
+| `DOMAIN` | The address people will open, without a trailing slash, e.g. `https://vault.example.com` (or `http://localhost:8080` to try it on this computer). Used in email links, and as the WebAuthn origin for security keys in two-step login, so behind a reverse proxy it must be the public `https://` address people actually use. |
 | `PASSAUTH_VERSION` | `latest` to always run the newest release, or a version such as `0.3.2` to stay on it. |
 | `PUID` / `PGID` | The user and group the container runs as (default `1000`). The container never runs as root. |
 | `PASSAUTH_PORT` | Port on this machine (default `8080`). |
@@ -138,7 +138,7 @@ All settings live in `.env`. Any secret can be read from a file instead by addin
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `DOMAIN` | (required) | Public address of the server. |
+| `DOMAIN` | (required) | Public address of the server, e.g. `https://vault.example.com`. Also the origin security keys / passkeys are bound to: if it isn't the exact address people open in their browser, two-step login with a security key can't be set up (the server logs a warning and the setting is greyed out in the web vault). |
 | `PASSAUTH_VERSION` | `latest` | Image version to run. |
 | `PASSAUTH_PORT` | `8080` | Port on the host. |
 | `PUID` / `PGID` | `1000` | User and group the container runs as. |

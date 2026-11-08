@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
 import { LogoMark } from "./components/Logo";
 import { ToastHost } from "./components/ui";
+import { getDesktop } from "./lib/platform";
 import { server } from "./lib/server";
 import { boot, lock, logout, useVault } from "./lib/vault";
 import { AdminPage } from "./pages/Admin";
@@ -71,10 +72,10 @@ function Unreachable() {
   );
 }
 
-/** Lock after 15 minutes without interaction (this tab only). */
+/** Lock after 15 minutes without interaction (this tab only). The desktop app's own vault timeout replaces it. */
 function useAutoLock(active: boolean) {
   useEffect(() => {
-    if (!active) return;
+    if (!active || getDesktop()?.vaultTimeout) return;
     const idleLock = () => lock(false);
     let timer = window.setTimeout(idleLock, AUTO_LOCK_MS);
     const reset = () => {

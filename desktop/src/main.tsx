@@ -16,6 +16,7 @@ import { installOtpLinks } from "./AddCode";
 import { Root } from "./Root";
 import { hooks } from "./hooks";
 import { installBridge } from "./bridge";
+import { installVaultTimeout } from "./timeout";
 import { scheduleUpdateCheck } from "./updater";
 
 // Title bar and native dialogs follow the vault's theme setting.
@@ -23,6 +24,7 @@ onThemeChange((theme) => void getCurrentWindow().setTheme(theme === "system" ? n
 applyTheme();
 registerDesktop(await hooks());
 installBridge();
+installVaultTimeout();
 scheduleUpdateCheck();
 
 const root = document.getElementById("root")!;

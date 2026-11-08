@@ -3,4 +3,9 @@
 # elliptic-curve 0.13). Only reachable through NIST-curve arithmetic; PassAuth's
 # OPAQUE suite is Ristretto255 (curve25519-dalek), so the vulnerable code is
 # never executed. Remove once opaque-ke ships on elliptic-curve >= 0.14.
-ignore = ["RUSTSEC-2026-0387"]
+#
+# RUSTSEC-2023-0071: Marvin timing attack on RSA private-key operations (`rsa`,
+# via webauthn-rs -> crypto-glue). The server only verifies RS256 signatures of
+# security keys with their public keys; it never holds or uses an RSA private
+# key, so there is no secret to recover. No fixed release exists yet.
+ignore = ["RUSTSEC-2026-0387", "RUSTSEC-2023-0071"]

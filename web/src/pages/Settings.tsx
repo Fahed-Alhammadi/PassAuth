@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
 import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
 import { downloadEmergencyKit, downloadFile, printEmergencyKit } from "../lib/kit";
-import { clientName, getDesktop, isDesktop, type DesktopHooks } from "../lib/platform";
+import { clientName, getDesktop, isDesktop, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { server } from "../lib/server";
 import type { Role } from "../lib/types";
+import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
   changeKeys,
   createVault,
@@ -42,6 +43,16 @@ interface AccountInfo {
   two_factor: string[];
   recovery_codes_left: number;
   email_enabled: boolean;
+  passkeys: PasskeyInfo[];
+  /** False when the server's DOMAIN isn't a full address (no WebAuthn relying party). */
+  passkeys_available: boolean;
+}
+
+interface PasskeyInfo {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
 }
 
 interface Member {
@@ -350,6 +361,8 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
         </div>
       </section>
 
+      {desktop?.vaultTimeout && <VaultTimeoutCard hook={desktop.vaultTimeout} />}
+
       <section className="card" aria-labelledby="fp-title">
         <h2 id="fp-title">Your public key fingerprint</h2>
         <p className="card-text">
@@ -407,6 +420,62 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
         </ConfirmPassword>
       )}
     </>
+  );
+}
+
+/** Desktop app only: when the vault locks by itself, and whether it locks or signs out (the extension's options). */
+function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
+  const settings = useSyncExternalStore(hook.subscribe, hook.get);
+  const lockShortcut = getDesktop()?.lockShortcut;
+  const current = String(settings.vaultTimeout);
+  const unavailable = hook.options.map(([v, label]) => [label, hook.disabledReason(v)] as const).filter(([, reason]) => reason);
+  const neverActive = settings.vaultTimeout === "never" && !hook.disabledReason("never");
+  return (
+    <section className="card" aria-labelledby="timeout-title">
+      <h2 id="timeout-title">Vault timeout</h2>
+      <label className="field">
+        <span>Vault timeout</span>
+        <select
+          className="select"
+          value={String(settings.vaultTimeout)}
+          onChange={(e) => {
+            const picked = hook.options.find(([v]) => String(v) === e.target.value);
+            if (picked) hook.set({ vaultTimeout: picked[0] });
+          }}
+        >
+          {hook.options.map(([v, label]) => (
+            <option key={String(v)} value={String(v)} disabled={hook.disabledReason(v) !== null}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {unavailable.map(([label, reason]) => (
+        <p key={label} className="small muted">
+          {label}: {reason}
+        </p>
+      ))}
+      {neverActive && (
+        <div className="alert alert-error small">
+          With "Never", your vault key is stored in this computer's keychain without the master password protecting it. Anyone who can use this computer account can
+          open your vault.
+        </div>
+      )}
+      {!neverActive && hook.help[current] && <p className="small muted">{hook.help[current]}</p>}
+      <label className="field">
+        <span>Timeout action</span>
+        <select className="select" value={settings.timeoutAction} onChange={(e) => hook.set({ timeoutAction: e.target.value as TimeoutSettings["timeoutAction"] })}>
+          <option value="lock">Lock</option>
+          <option value="logout">Sign out</option>
+        </select>
+      </label>
+      <p className="small muted">
+        {settings.timeoutAction === "lock"
+          ? "Locking keeps your encrypted vault here; unlock with your master password."
+          : "Signing out removes the vault from this app; sign in again (with two-step login) to use it."}
+        {lockShortcut && ` Lock at any time with ${lockShortcut}; that always needs the master password again.`}
+      </p>
+    </section>
   );
 }
 
@@ -662,6 +731,8 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
   const [codes, setCodes] = useState<string[] | null>(null);
   const [disabling, setDisabling] = useState<"totp" | "email" | null>(null);
   const [regenerating, setRegenerating] = useState(false);
+  const [addingKey, setAddingKey] = useState(false);
+  const [removingKey, setRemovingKey] = useState<PasskeyInfo | null>(null);
   const totpOn = account.two_factor.includes("totp");
   const emailOn = account.two_factor.includes("email");
   const anyOn = account.two_factor.length > 0;
@@ -687,7 +758,17 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
     await reload();
   }
 
+  async function removeKey(password: string) {
+    if (!removingKey) return;
+    const token = await reauth(password);
+    await api(`/account/2fa/passkey/${encodeURIComponent(removingKey.id)}`, { method: "DELETE", headers: { "x-reauth-token": token } });
+    toast("Security key removed");
+    setRemovingKey(null);
+    await reload();
+  }
+
   const lastOne = account.two_factor.length === 1;
+  const lastKey = account.passkeys.length === 1 && lastOne;
 
   return (
     <>
@@ -697,6 +778,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
 
       <TotpCard on={totpOn} onEnabled={enabled} onDisable={() => setDisabling("totp")} />
       <EmailCard on={emailOn} available={account.email_enabled} email={account.email} onEnabled={enabled} onDisable={() => setDisabling("email")} />
+      <PasskeysCard account={account} onAdd={() => setAddingKey(true)} onRemove={setRemovingKey} />
 
       <section className="card" aria-labelledby="rc-title">
         <h2 id="rc-title">Recovery codes</h2>
@@ -742,8 +824,171 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
         </ConfirmPassword>
       )}
 
+      {addingKey && (
+        <AddPasskeyModal
+          onAdded={async (recovery) => {
+            setAddingKey(false);
+            await enabled(recovery);
+          }}
+          onClose={() => setAddingKey(false)}
+        />
+      )}
+
+      {removingKey && (
+        <ConfirmPassword title={`Remove "${removingKey.name}"`} action="Remove" danger onConfirm={removeKey} onClose={() => setRemovingKey(null)}>
+          <p className="card-text">
+            {lastKey
+              ? "This is your only two-step method. Removing it also deletes your recovery codes, and signing in will need only your master password."
+              : "You can add it again at any time."}
+          </p>
+        </ConfirmPassword>
+      )}
+
       {codes && <RecoveryCodesModal codes={codes} onClose={() => setCodes(null)} />}
     </>
+  );
+}
+
+// ------------------------------------------------- security keys / passkeys
+
+function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAdd: () => void; onRemove: (key: PasskeyInfo) => void }) {
+  const on = account.passkeys.length > 0;
+  const desktop = isDesktop();
+  const supported = !desktop && webauthnSupported();
+  const canAdd = account.passkeys_available && supported && account.passkeys.length < 10;
+
+  return (
+    <section className="card" aria-labelledby="passkeys-title">
+      <div className="card-head">
+        <h2 id="passkeys-title">Security keys and passkeys</h2>
+        {on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
+      </div>
+      <p className="card-text">
+        Confirm your sign-in by touching a hardware security key or with a passkey on your device (Touch ID, Windows Hello, your phone). Nothing to type.
+      </p>
+      <div className="alert alert-warn">
+        The phone apps, browser extension and desktop app can't use a security key for two-step login yet. If you sign in there, keep an authenticator app
+        or email codes turned on as well. Recovery codes work everywhere.
+      </div>
+
+      {on && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Added</th>
+                <th scope="col">Last used</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {account.passkeys.map((k) => (
+                <tr key={k.id}>
+                  <td>{k.name}</td>
+                  <td>{formatDate(k.created_at)}</td>
+                  <td title={k.last_used_at ? formatDate(k.last_used_at) : undefined}>{k.last_used_at ? ago(k.last_used_at) : "Never"}</td>
+                  <td className="actions">
+                    <button type="button" className="btn btn-danger" onClick={() => onRemove(k)}>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!account.passkeys_available ? (
+        <p className="small muted">This server's DOMAIN setting isn't its full public address, so security keys can't be set up. Ask your PassAuth administrator.</p>
+      ) : desktop ? (
+        <p className="small muted">Add or use security keys from the web vault in a browser.</p>
+      ) : !supported ? (
+        <p className="small muted">This browser can't use security keys here. Open the web vault over https (or localhost) in a current browser.</p>
+      ) : null}
+      <div>
+        <button type="button" className="btn btn-primary" onClick={onAdd} disabled={!canAdd}>
+          Add a security key or passkey
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** Name the key, confirm the master password, then register it with the browser's WebAuthn prompt. */
+function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | null) => Promise<void>; onClose: () => void }) {
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [step, setStep] = useState<"form" | "confirming" | "waiting" | "saving">("form");
+  const [error, setError] = useState<string | null>(null);
+  const busy = step !== "form";
+  const close = useCallback(() => {
+    if (!busy) onClose();
+  }, [busy, onClose]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return setError("Give the key a name, such as the key's model or the device it's on.");
+    if (!password) return setError("Enter your master password to continue.");
+    setError(null);
+    try {
+      setStep("confirming");
+      const token = await reauth(password);
+      const start = await api<{ registration_id: string; options: unknown }>("/account/2fa/passkey/register/start", {
+        method: "POST",
+        headers: { "x-reauth-token": token },
+      });
+      setStep("waiting");
+      const credential = await createCredential(start.options);
+      setStep("saving");
+      const r = await api<{ id: string; recovery_codes: string[] | null }>("/account/2fa/passkey/register/finish", {
+        body: { registration_id: start.registration_id, name: trimmed, credential },
+      });
+      toast("Security key added");
+      await onAdded(r.recovery_codes);
+    } catch (err) {
+      setError(friendly(err));
+      setStep("form");
+    }
+  }
+
+  return (
+    <Modal title="Add a security key or passkey" onClose={close}>
+      <form className="stack" onSubmit={submit}>
+        <p className="card-text">After you confirm, your browser asks you to touch your security key or to use the passkey on this device.</p>
+        <div className="field">
+          <label htmlFor="passkey-name">Name</label>
+          <input
+            id="passkey-name"
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Blue key, Work laptop"
+            maxLength={60}
+            autoFocus
+            disabled={busy}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="passkey-password">Master password</label>
+          <PasswordInput id="passkey-password" value={password} onChange={setPassword} />
+        </div>
+        {step === "waiting" && <div className="alert alert-info">Waiting for your security key or passkey…</div>}
+        <ErrorText error={error} />
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {step === "form" ? "Continue" : step === "confirming" ? "Confirming…" : step === "waiting" ? "Waiting for key…" : "Saving…"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

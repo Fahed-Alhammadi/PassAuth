@@ -11,6 +11,8 @@ use crate::state::{ct_eq, hash_token};
 pub const TOTP: &str = "totp";
 pub const EMAIL: &str = "email";
 pub const RECOVERY: &str = "recovery";
+/// Security keys / passkeys (WebAuthn, `passkeys.rs`); the `two_factor` row only marks the method on.
+pub const PASSKEY: &str = "passkey";
 const EMAIL_CODE_TTL: i64 = 10 * 60;
 const EMAIL_CODE_ATTEMPTS: i64 = 5;
 /// Wrong codes allowed per account within [`FAILURE_WINDOW`] before two-step
@@ -47,6 +49,9 @@ pub async fn verify(db: &Db, user_id: &str, provider: &str, code: &str) -> ApiRe
         TOTP => verify_totp(db, user_id, &code).await,
         EMAIL => verify_email_code(db, user_id, "2fa", &code).await,
         RECOVERY => verify_recovery(db, user_id, &code).await,
+        PASSKEY => Err(ApiError::bad(
+            "security keys sign in through /auth/2fa/passkey/start and /finish",
+        )),
         _ => Err(ApiError::bad("unknown two-factor provider")),
     }
 }

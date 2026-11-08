@@ -5,13 +5,21 @@ import { ErrorText, PasswordField } from "../components/ui";
 import { errorMessage, friendlyError, usePublicConfig } from "../lib/api";
 import { getDesktop } from "../lib/platform";
 import { server } from "../lib/server";
-import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor, WRONG_CREDENTIALS } from "../lib/vault";
+import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor, verifyTwoFactorPasskey, WRONG_CREDENTIALS } from "../lib/vault";
+import { webauthnSupported } from "../lib/webauthn";
 
 const PROVIDER_LABEL: Record<string, string> = {
   totp: "Authenticator app",
   email: "Email code",
+  passkey: "Security key or passkey",
   recovery: "Recovery code",
 };
+
+/** Methods this page can offer: security keys only where the browser can run WebAuthn (not in the desktop app's WebView). */
+function usableProviders(providers: string[]) {
+  const here = (p: string) => p !== "passkey" || (!getDesktop() && webauthnSupported());
+  return providers.filter((p) => p in PROVIDER_LABEL && here(p));
+}
 
 export function LoginPage() {
   const config = usePublicConfig();
@@ -45,8 +53,14 @@ export function LoginPage() {
       const r = await login(email, password, typed || remembered);
       if (r.done) nav(next, { replace: true });
       else {
-        setTwoFactor({ token: r.twoFactorToken, providers: r.providers });
-        setProvider(r.providers[0]);
+        const usable = usableProviders(r.providers);
+        setTwoFactor({ token: r.twoFactorToken, providers: usable });
+        setProvider(usable[0] ?? "recovery");
+        setNotice(
+          r.providers.includes("passkey") && !usable.includes("passkey") && usable.every((p) => p === "recovery")
+            ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault in a browser."
+            : null,
+        );
       }
     } catch (err) {
       const msg = errorMessage(err);
@@ -90,6 +104,22 @@ export function LoginPage() {
     }
   }
 
+  async function securityKey() {
+    if (!twoFactor) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await verifyTwoFactorPasskey(twoFactor.token, remember);
+      nav(next, { replace: true });
+    } catch (err) {
+      setError(friendlyError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const usePasskey = provider === "passkey";
+
   return (
     <main className="auth">
       <div className="auth-card">
@@ -130,7 +160,7 @@ export function LoginPage() {
             {twoFactor.providers.length > 1 && (
               <label className="field">
                 <span>Verify with</span>
-                <select className="select" value={provider} onChange={(e) => (setProvider(e.target.value), setCode(""))}>
+                <select className="select" value={provider} onChange={(e) => (setProvider(e.target.value), setCode(""), setError(null))}>
                   {twoFactor.providers.map((p) => (
                     <option key={p} value={p}>
                       {PROVIDER_LABEL[p] ?? p}
@@ -139,18 +169,22 @@ export function LoginPage() {
                 </select>
               </label>
             )}
-            <label className="field">
-              <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
-              <input
-                className="input mono"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                inputMode={provider === "recovery" ? "text" : "numeric"}
-                autoComplete="one-time-code"
-                autoFocus
-                required
-              />
-            </label>
+            {usePasskey ? (
+              <p className="card-text">Confirm with your security key or passkey. Insert or tap your key, or use the fingerprint, face or PIN prompt on this device.</p>
+            ) : (
+              <label className="field">
+                <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
+                <input
+                  className="input mono"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  inputMode={provider === "recovery" ? "text" : "numeric"}
+                  autoComplete="one-time-code"
+                  autoFocus
+                  required
+                />
+              </label>
+            )}
             {provider === "email" && (
               <button type="button" className="btn btn-ghost" onClick={emailCode}>
                 Email me a code
@@ -162,10 +196,16 @@ export function LoginPage() {
               <span>Don't ask again on this device for 30 days</span>
             </label>
             <ErrorText error={error} />
-            <button className="btn btn-accent btn-block" disabled={busy || !code}>
-              {busy ? "Verifying…" : "Verify and sign in"}
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => (setTwoFactor(null), setCode(""), setError(null))}>
+            {usePasskey ? (
+              <button type="button" className="btn btn-accent btn-block" disabled={busy} onClick={securityKey} autoFocus>
+                {busy ? "Waiting for your security key…" : "Use security key or passkey"}
+              </button>
+            ) : (
+              <button className="btn btn-accent btn-block" disabled={busy || !code}>
+                {busy ? "Verifying…" : "Verify and sign in"}
+              </button>
+            )}
+            <button type="button" className="btn btn-ghost" onClick={() => (setTwoFactor(null), setCode(""), setError(null), setNotice(null))}>
               Use a different account
             </button>
           </form>

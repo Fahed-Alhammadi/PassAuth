@@ -6,6 +6,7 @@ mod db;
 mod error;
 mod icons;
 mod mail;
+mod passkeys;
 mod state;
 mod twofactor;
 mod vault;

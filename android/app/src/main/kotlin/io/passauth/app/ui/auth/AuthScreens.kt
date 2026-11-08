@@ -221,12 +221,22 @@ fun LoginScreen(ctx: UiCtx) {
 private fun providerLabel(p: String) = when (p) {
     "totp" -> "Authenticator app"
     "email" -> "Email code"
-    else -> "Recovery code"
+    "recovery" -> "Recovery code"
+    else -> p
 }
+
+/** Two-step methods the app can use (security keys / WebAuthn `passkey` are left out), authenticator app when none is known. */
+private fun twoStepChoices(providers: List<String>) =
+    providers.filter { it == "totp" || it == "email" || it == "recovery" }.ifEmpty { listOf("totp") }
+
+private const val SECURITY_KEY_UNSUPPORTED =
+    "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
 @Composable
 private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: String, onCancel: () -> Unit) {
-    var provider by rememberSaveable { mutableStateOf(challenge.providers.firstOrNull() ?: "totp") }
+    val choices = twoStepChoices(challenge.providers)
+    val securityKeyOnly = "passkey" in challenge.providers && choices.all { it == "recovery" }
+    var provider by rememberSaveable { mutableStateOf(choices.first()) }
     var code by remember { mutableStateOf("") }
     var remember by rememberSaveable { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -248,14 +258,15 @@ private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: S
     }
 
     AuthFrame("Two-step login") {
-        if (challenge.providers.size > 1) {
+        if (securityKeyOnly) Alert(SECURITY_KEY_UNSUPPORTED)
+        if (choices.size > 1) {
             Text("Verify with", style = MaterialTheme.typography.labelLarge, modifier = Modifier.fillMaxWidth())
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                challenge.providers.forEachIndexed { i, p ->
+                choices.forEachIndexed { i, p ->
                     SegmentedButton(
                         selected = provider == p,
                         onClick = { provider = p; code = ""; error = null },
-                        shape = SegmentedButtonDefaults.itemShape(i, challenge.providers.size),
+                        shape = SegmentedButtonDefaults.itemShape(i, choices.size),
                         label = { Text(providerLabel(p), maxLines = 1, style = MaterialTheme.typography.labelMedium) },
                     )
                 }

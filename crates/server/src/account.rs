@@ -19,7 +19,8 @@ use crate::auth::{AuthUser, require_reauth};
 use crate::db::now;
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
-use crate::state::AppState;
+use crate::passkeys;
+use crate::state::{AppState, PendingPasskeyRegistration};
 use crate::twofactor::{self, TotpData};
 
 pub fn routes() -> Router<AppState> {
@@ -33,6 +34,12 @@ pub fn routes() -> Router<AppState> {
         .route("/2fa/email/setup", post(email_setup))
         .route("/2fa/email/enable", post(email_enable))
         .route("/2fa/recovery", post(recovery_regenerate))
+        .route("/2fa/passkey/register/start", post(passkey_register_start))
+        .route(
+            "/2fa/passkey/register/finish",
+            post(passkey_register_finish),
+        )
+        .route("/2fa/passkey/{id}", delete(passkey_remove))
         .route("/2fa/{provider}", delete(two_factor_disable))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", delete(revoke_session))
@@ -63,7 +70,10 @@ async fn get_account(State(state): State<AppState>, user: AuthUser) -> ApiResult
         .ok()
         .and_then(|k| <[u8; 32]>::try_from(k).ok())
         .map(|k| passauth_core::crypto::fingerprint(&k));
+    let passkeys = passkeys::summary(&passkeys::list(&state.db, &user.user_id).await?);
     Ok(Json(json!({
+        "passkeys": passkeys,
+        "passkeys_available": state.webauthn.is_some(),
         "user_id": user.user_id,
         "email": user.email,
         "name": name,
@@ -341,6 +351,97 @@ async fn two_factor_disable(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ------------------------------------------------- security keys / passkeys
+
+/// Creation options for the browser. Needs a reauth token; the returned
+/// `registration_id` is single-use and bound to the account.
+async fn passkey_register_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: AuthUser,
+) -> ApiResult<Json<Value>> {
+    require_reauth(&state, &user, reauth_header(&headers))?;
+    let webauthn = passkeys::relying_party(&state)?;
+    let existing = passkeys::list(&state.db, &user.user_id).await?;
+    if existing.len() as i64 >= passkeys::MAX_PER_USER {
+        return Err(ApiError::bad("you can register at most 10 security keys"));
+    }
+    let (name, _): (String, i64) =
+        sqlx::query_as("SELECT name, created_at FROM users WHERE id = $1")
+            .bind(&user.user_id)
+            .fetch_one(&state.db)
+            .await?;
+    let exclude: Vec<_> = existing.iter().map(|k| k.key.cred_id().clone()).collect();
+    let (options, reg_state) = webauthn
+        .start_securitykey_registration(
+            passkeys::user_handle(&user.user_id),
+            &user.email,
+            if name.is_empty() { &user.email } else { &name },
+            (!exclude.is_empty()).then_some(exclude),
+            None,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("webauthn registration start: {e:?}"))?;
+    let registration_id = state.passkey_registrations.insert(
+        PendingPasskeyRegistration {
+            user_id: user.user_id.clone(),
+            state: reg_state,
+        },
+        passkeys::CHALLENGE_TTL,
+    );
+    Ok(Json(json!({
+        "registration_id": registration_id,
+        "options": passkeys::options(&options)?,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PasskeyRegisterFinish {
+    registration_id: String,
+    name: String,
+    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
+}
+
+async fn passkey_register_finish(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(b): Json<PasskeyRegisterFinish>,
+) -> ApiResult<Json<Value>> {
+    let name = passkeys::clean_name(&b.name)?;
+    let webauthn = passkeys::relying_party(&state)?;
+    let (_, pending) = state
+        .passkey_registrations
+        .take(&b.registration_id)
+        .ok_or(ApiError::bad("security key setup expired, start again"))?;
+    if pending.user_id != user.user_id {
+        return Err(ApiError::Forbidden("reauth_required".into()));
+    }
+    let key = webauthn
+        .finish_securitykey_registration(&b.credential, &pending.state)
+        .map_err(|e| {
+            tracing::debug!(error = ?e, "security key registration rejected");
+            ApiError::bad("the security key's response couldn't be verified; try again")
+        })?;
+    let id = passkeys::insert(&state.db, &user.user_id, &name, &key).await?;
+    Ok(Json(json!({
+        "id": id,
+        "recovery_codes": first_recovery_codes(&state, &user).await?,
+    })))
+}
+
+async fn passkey_remove(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    require_reauth(&state, &user, reauth_header(&headers))?;
+    if !passkeys::remove(&state.db, &user.user_id, &id).await? {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---------------------------------------------------------------- sessions
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -429,6 +530,7 @@ pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
         "DELETE FROM sessions WHERE user_id = $1",
         "DELETE FROM devices WHERE user_id = $1",
         "DELETE FROM two_factor WHERE user_id = $1",
+        "DELETE FROM passkey_credentials WHERE user_id = $1",
         "DELETE FROM two_factor_failures WHERE user_id = $1",
         "DELETE FROM email_tokens WHERE user_id = $1",
         "DELETE FROM users WHERE id = $1",

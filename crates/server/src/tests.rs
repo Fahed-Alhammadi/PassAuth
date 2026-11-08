@@ -60,12 +60,27 @@ async fn call(
     token: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
+    call_with(app, method, path, token, &[], body).await
+}
+
+/// `call` with extra request headers (e.g. `x-reauth-token`).
+async fn call_with(
+    app: &Router,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Value,
+) -> (StatusCode, Value) {
     let mut req = Request::builder()
         .method(method)
         .uri(path)
         .header("content-type", "application/json");
     if let Some(t) = token {
         req = req.header("authorization", format!("Bearer {t}"));
+    }
+    for (k, v) in headers {
+        req = req.header(*k, *v);
     }
     let resp = app
         .clone()
@@ -1097,4 +1112,398 @@ fn healthcheck_connects_to_the_bound_address() {
     assert_eq!(t(Some("0.0.0.0:9000")).to_string(), "127.0.0.1:9000");
     assert_eq!(t(Some("[::]:8080")).to_string(), "[::1]:8080");
     assert_eq!(t(Some("10.0.0.4:8080")).to_string(), "10.0.0.4:8080");
+}
+
+// ------------------------------------------------- security keys / passkeys
+
+/// A reauth token for `email` (OPAQUE login with `purpose: "reauth"` on the session `token`).
+async fn reauth_token(app: &Router, email: &str, pw: &str, token: &str) -> String {
+    let (_, pre) = call(
+        app,
+        Method::POST,
+        "/api/auth/prelogin",
+        None,
+        json!({ "email": email }),
+    )
+    .await;
+    let kdf: KdfParams = serde_json::from_value(pre["kdf"].clone()).unwrap();
+    let master =
+        derive_master_keys(pw, None, pre["account_id"].as_str().unwrap(), &kdf, false).unwrap();
+    let start = opaque::login_start(&master.login).unwrap();
+    let (_, resp) = call(
+        app,
+        Method::POST,
+        "/api/auth/login/start",
+        None,
+        json!({ "email": email, "message": start.message }),
+    )
+    .await;
+    let fin = opaque::login_finish(
+        &start.state,
+        &master.login,
+        resp["message"].as_str().unwrap(),
+    )
+    .unwrap();
+    let (s, v) = call(
+        app,
+        Method::POST,
+        "/api/auth/login/finish",
+        Some(token),
+        json!({
+            "login_id": resp["login_id"], "message": fin, "purpose": "reauth",
+            "device": { "id": "dev-1", "name": "Test device", "kind": "cli" },
+        }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    v["reauth_token"].as_str().unwrap().to_owned()
+}
+
+/// The test server's relying party (`Config::for_tests` domain).
+const RP_ID: &str = "localhost";
+const RP_ORIGIN: &str = "http://localhost";
+
+/// Soft authenticator: the core's passkey crypto plays the security key.
+struct SoftKey(passauth_core::passkey::NewPasskey);
+
+impl SoftKey {
+    fn create(options: &Value) -> (Self, Value) {
+        use passauth_core::passkey::{client_data_json, create};
+        let pk = &options["publicKey"];
+        assert_eq!(pk["rp"]["id"], RP_ID, "{options}");
+        assert_eq!(
+            pk["authenticatorSelection"]["userVerification"], "preferred",
+            "{options}"
+        );
+        assert!(pk.get("hints").is_none(), "{options}");
+        // Chrome: NotSupportedError when credProtect is requested with UV "preferred".
+        assert!(
+            pk["extensions"].get("credentialProtectionPolicy").is_none(),
+            "{options}"
+        );
+        let key = create(RP_ID).unwrap();
+        let client_data = client_data_json(
+            "webauthn.create",
+            pk["challenge"].as_str().unwrap(),
+            RP_ORIGIN,
+        );
+        let credential = json!({
+            "id": b64(&key.credential_id), "rawId": b64(&key.credential_id), "type": "public-key",
+            "response": { "attestationObject": b64(&key.attestation_object), "clientDataJSON": b64(client_data.as_bytes()) },
+        });
+        (Self(key), credential)
+    }
+
+    fn id(&self) -> String {
+        b64(&self.0.credential_id)
+    }
+
+    /// An assertion for `options`; `valid = false` corrupts the signature.
+    fn assert(&self, options: &Value, valid: bool) -> Value {
+        use passauth_core::passkey::{assert, client_data_json, sha256};
+        let pk = &options["publicKey"];
+        assert_eq!(pk["rpId"], RP_ID, "{options}");
+        let client_data =
+            client_data_json("webauthn.get", pk["challenge"].as_str().unwrap(), RP_ORIGIN);
+        let a = assert(
+            &self.0.private_key_pkcs8,
+            RP_ID,
+            &sha256(client_data.as_bytes()),
+        )
+        .unwrap();
+        let mut sig = a.signature;
+        if !valid {
+            let last = sig.len() - 1;
+            sig[last] ^= 1;
+        }
+        json!({
+            "id": self.id(), "rawId": self.id(), "type": "public-key",
+            "response": {
+                "authenticatorData": b64(&a.authenticator_data), "clientDataJSON": b64(client_data.as_bytes()),
+                "signature": b64(&sig), "userHandle": null,
+            },
+        })
+    }
+}
+
+/// Password login, then the security-key challenge; returns (two-factor token, options).
+async fn passkey_challenge(app: &Router, email: &str, pw: &str) -> (StatusCode, Value, Value) {
+    let (s, l) = login(app, email, pw, "d2").await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(l["two_factor_required"], true);
+    assert!(
+        l["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "passkey"),
+        "{l}"
+    );
+    let tf = l["two_factor_token"].clone();
+    let (s, o) = call(
+        app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    (s, tf, o["options"].clone())
+}
+
+#[tokio::test]
+async fn passkey_two_factor() {
+    let app = app().await;
+    let (email, pw) = ("gail@example.com", "pw-gail-12");
+    register(&app, email, pw).await;
+    let t = token(&app, email, pw).await;
+
+    // Registration needs a fresh reauth token.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/account/2fa/passkey/register/start",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let ra = reauth_token(&app, email, pw, &t).await;
+    let (s, start) = call_with(
+        &app,
+        Method::POST,
+        "/api/account/2fa/passkey/register/start",
+        Some(&t),
+        &[("x-reauth-token", &ra)],
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{start}");
+    let (key, credential) = SoftKey::create(&start["options"]);
+    let (s, v) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "  ", "credential": credential })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, done) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "Blue key", "credential": credential })).await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+    assert_eq!(done["id"], key.id());
+    // First method → recovery codes, shown once.
+    assert_eq!(done["recovery_codes"].as_array().unwrap().len(), 10);
+    // The registration id is single-use.
+    let (s, v) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "Again", "credential": credential })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+
+    let (_, acct) = call(&app, Method::GET, "/api/account", Some(&t), json!(null)).await;
+    assert_eq!(acct["two_factor"], json!(["passkey"]));
+    assert_eq!(acct["passkeys"][0]["name"], "Blue key");
+    assert_eq!(acct["passkeys"][0]["id"], key.id());
+    assert!(acct["passkeys"][0]["last_used_at"].is_null());
+    assert_eq!(acct["recovery_codes_left"], 10);
+
+    // Sign in: a bad assertion is a wrong code; a good one gives a session.
+    let (s, tf, options) = passkey_challenge(&app, email, pw).await;
+    assert_eq!(s, StatusCode::OK, "{options}");
+    assert_eq!(
+        options["publicKey"]["allowCredentials"][0]["id"],
+        key.id(),
+        "{options}"
+    );
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/finish",
+        None,
+        json!({ "two_factor_token": tf, "credential": key.assert(&options, false) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    // The challenge is gone after a failure: finish needs a new start.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/finish",
+        None,
+        json!({ "two_factor_token": tf, "credential": key.assert(&options, true) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (s, o) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{o}");
+    let (s, ok) = call(&app, Method::POST, "/api/auth/2fa/passkey/finish", None,
+        json!({ "two_factor_token": tf, "credential": key.assert(&o["options"], true), "remember": true })).await;
+    assert_eq!(s, StatusCode::OK, "{ok}");
+    assert!(ok["access_token"].is_string());
+    assert!(ok["remember_token"].is_string());
+    // A code sent to the classic endpoint for this provider is refused.
+    let (s, l) = login(&app, email, pw, "d3").await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/verify",
+        None,
+        json!({ "two_factor_token": l["two_factor_token"], "provider": "passkey", "code": "x" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+
+    let (_, acct) = call(&app, Method::GET, "/api/account", Some(&t), json!(null)).await;
+    assert!(acct["passkeys"][0]["last_used_at"].is_i64(), "{acct}");
+
+    // Removing the only key turns the method off and drops the recovery codes.
+    let (s, v) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/account/2fa/passkey/{}", key.id()),
+        Some(&t),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    let ra = reauth_token(&app, email, pw, &t).await;
+    let (s, v) = call_with(
+        &app,
+        Method::DELETE,
+        &format!("/api/account/2fa/passkey/{}", key.id()),
+        Some(&t),
+        &[("x-reauth-token", &ra)],
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (_, acct) = call(&app, Method::GET, "/api/account", Some(&t), json!(null)).await;
+    assert_eq!(acct["two_factor"], json!([]));
+    assert_eq!(acct["passkeys"], json!([]));
+    assert_eq!(acct["recovery_codes_left"], 0);
+    let (s, l) = login(&app, email, pw, "d4").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(l["access_token"].is_string(), "{l}");
+}
+
+#[tokio::test]
+async fn passkey_failures_lock_the_account() {
+    let app = app().await;
+    let (email, pw) = ("hank@example.com", "pw-hank-12");
+    register(&app, email, pw).await;
+    let t = token(&app, email, pw).await;
+    let ra = reauth_token(&app, email, pw, &t).await;
+    let (s, start) = call_with(
+        &app,
+        Method::POST,
+        "/api/account/2fa/passkey/register/start",
+        Some(&t),
+        &[("x-reauth-token", &ra)],
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{start}");
+    let (key, credential) = SoftKey::create(&start["options"]);
+    let (s, done) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "Key", "credential": credential })).await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+
+    // Each wrong assertion counts against the account (across sign-in tokens);
+    // the 10th pauses two-step sign-in. A token takes 5 tries, then a new login is needed.
+    let mut locked = false;
+    'logins: for _ in 0..3 {
+        let (s, tf, mut options) = passkey_challenge(&app, email, pw).await;
+        assert_eq!(s, StatusCode::OK, "{options}");
+        for _ in 0..5 {
+            let (s, _) = call(
+                &app,
+                Method::POST,
+                "/api/auth/2fa/passkey/finish",
+                None,
+                json!({ "two_factor_token": tf, "credential": key.assert(&options, false) }),
+            )
+            .await;
+            if s == StatusCode::TOO_MANY_REQUESTS {
+                locked = true;
+                break 'logins;
+            }
+            assert_eq!(s, StatusCode::BAD_REQUEST);
+            let (s, o) = call(
+                &app,
+                Method::POST,
+                "/api/auth/2fa/passkey/start",
+                None,
+                json!({ "two_factor_token": tf }),
+            )
+            .await;
+            if s != StatusCode::OK {
+                break; // token used up after 5 tries
+            }
+            options = o["options"].clone();
+        }
+    }
+    assert!(
+        locked,
+        "fresh tokens per login must not reset the per-account limit"
+    );
+    let (s, _, o) = passkey_challenge(&app, email, pw).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{o}");
+}
+
+#[tokio::test]
+async fn passkey_challenges_are_rate_limited() {
+    let app = app().await;
+    let (email, pw) = ("ivy@example.com", "pw-ivy-123");
+    register(&app, email, pw).await;
+    let t = token(&app, email, pw).await;
+    let ra = reauth_token(&app, email, pw, &t).await;
+    let (s, start) = call_with(
+        &app,
+        Method::POST,
+        "/api/account/2fa/passkey/register/start",
+        Some(&t),
+        &[("x-reauth-token", &ra)],
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{start}");
+    let (_, credential) = SoftKey::create(&start["options"]);
+    let (s, done) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "Key", "credential": credential })).await;
+    assert_eq!(s, StatusCode::OK, "{done}");
+
+    // 20 challenges per account per 5 minutes; the sign-in token survives the refusal.
+    let (s, tf, o) = passkey_challenge(&app, email, pw).await;
+    assert_eq!(s, StatusCode::OK, "{o}");
+    for _ in 1..20 {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            "/api/auth/2fa/passkey/start",
+            None,
+            json!({ "two_factor_token": tf }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "token kept: {v}");
 }
