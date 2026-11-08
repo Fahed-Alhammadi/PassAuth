@@ -123,6 +123,7 @@ dependencies {
     implementation(libs.androidx.fragment)
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.autofill)
+    implementation(libs.androidx.work)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

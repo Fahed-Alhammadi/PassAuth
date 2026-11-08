@@ -19,6 +19,8 @@ okhttp = "5.4.0"
 jna = "5.19.1"
 camerax = "1.6.2"
 zxing = "3.5.4"
+# 2.10.x is the last WorkManager line for compileSdk 36.
+work = "2.10.5"
 junit = "4.13.2"
 
 [libraries]
@@ -32,6 +34,7 @@ androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "b
 androidx-fragment = { module = "androidx.fragment:fragment-ktx", version.ref = "fragment" }
 androidx-credentials = { module = "androidx.credentials:credentials", version.ref = "credentials" }
 androidx-autofill = { module = "androidx.autofill:autofill", version.ref = "autofill" }
+androidx-work = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }

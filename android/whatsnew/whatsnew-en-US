@@ -1,4 +1,1 @@
-• Change your master password in the app (Settings → Account security)
-• Turn your Secret Key on or off, with an Emergency Kit to save
-• Set up two-step login: authenticator app or email codes
-• Save recovery codes, make new ones, or turn a method off after confirming your password
+• Background sync: PassAuth now refreshes your offline copy of the vault on its own, every 2 hours by default, so it's current when you open the app. Change or turn it off in Settings → Vault options → Background sync.

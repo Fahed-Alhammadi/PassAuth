@@ -10,6 +10,7 @@
     "process:allow-restart",
     "opener:allow-open-url",
     "opener:allow-default-urls",
-    "deep-link:allow-get-current"
+    "deep-link:allow-get-current",
+    "autostart:default"
   ]
 }

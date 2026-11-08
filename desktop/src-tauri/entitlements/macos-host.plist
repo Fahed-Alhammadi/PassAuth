@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The containing app of an AutoFill credential provider must carry the AutoFill
+	     entitlement too (System Settings skips the extension otherwise). These three keys are
+	     restricted: the app needs the Developer ID provisioning profile for io.passauth.desktop
+	     at Contents/embedded.provisionprofile (CI: MACOS_DESKTOP_PROVISIONING_PROFILE). -->
+	<key>com.apple.application-identifier</key>
+	<string>JEXQBK3SQ5.io.passauth.desktop</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>JEXQBK3SQ5</string>
+	<key>com.apple.developer.authentication-services.autofill-credential-provider</key>
+	<true/>
+</dict>
+</plist>

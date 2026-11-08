@@ -51,6 +51,23 @@ data class Settings(
      * app as `androidapp://<package>`. Like the extension's never-save list.
      */
     val neverSave: List<String> = emptyList(),
+    /**
+     * Minutes between background refreshes of the encrypted offline copy (0 = off).
+     * One of [BACKGROUND_SYNC_OPTIONS]; older stored settings lack the key and get the default.
+     */
+    val backgroundSyncMinutes: Int = BACKGROUND_SYNC_DEFAULT,
+)
+
+const val BACKGROUND_SYNC_DEFAULT = 120
+
+/** Background sync choices (minutes; 0 = off) with their labels. */
+val BACKGROUND_SYNC_OPTIONS: List<Pair<Int, String>> = listOf(
+    0 to "Off",
+    30 to "Every 30 minutes",
+    60 to "Every hour",
+    120 to "Every 2 hours",
+    360 to "Every 6 hours",
+    720 to "Every 12 hours",
 )
 
 @Serializable

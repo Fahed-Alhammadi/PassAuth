@@ -1,9 +1,11 @@
 package io.passauth.app
 
 import android.app.Application
+import android.util.Log
 import androidx.lifecycle.ProcessLifecycleOwner
 import io.passauth.app.credentials.AssetLinksVerifier
 import io.passauth.app.data.ApiClient
+import io.passauth.app.data.BackgroundSync
 import io.passauth.app.data.ClipboardHelper
 import io.passauth.app.data.IconLoader
 import io.passauth.app.data.LiveSync
@@ -16,8 +18,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -71,6 +76,17 @@ class PassAuthApp : Application() {
         graph.lock.watchScreen(this)
         // Vault timeout "never": stay unlocked across app restarts.
         graph.restoreJob = graph.scope.launch { runCatching { graph.repo.restorePersisted() } }
+        // Background sync follows the setting and whether any account is signed in
+        // (first value = app start; later ones = setting changed, last account logged out, sign-in).
+        graph.scope.launch {
+            graph.repo.state.filter { it.loaded }
+                .map { s -> s.settings.backgroundSyncMinutes to s.accounts.any { a -> a.status == Status.Locked || a.status == Status.Unlocked } }
+                .distinctUntilChanged()
+                .collect { (minutes, hasAccounts) ->
+                    runCatching { BackgroundSync.schedule(this@PassAuthApp, minutes, hasAccounts) }
+                        .onFailure { Log.w("PassAuth", "Background sync could not be scheduled", it) }
+                }
+        }
     }
 }
 

@@ -27,6 +27,26 @@ export interface DesktopHooks {
   };
   /** Vault timeout setting (the extension's options). Settings shows the card only when present. */
   vaultTimeout?: VaultTimeoutHook;
+  /** Desktop shell settings (start at login, Dock, background sync). Settings shows the card only when present. */
+  app?: DesktopAppHook;
+}
+
+export interface DesktopAppSettings {
+  /** OS login item; the app then starts in the tray. */
+  startAtLogin: boolean;
+  /** macOS: keep the Dock icon while the window is closed (the app is always in the menu bar). */
+  keepDock: boolean;
+  /** Minutes between background checks of the server's revision while unlocked; 0 = off. */
+  backgroundSyncMinutes: number;
+}
+export interface DesktopAppHook {
+  platform: "macos" | "windows" | "linux";
+  /** Background-sync intervals in minutes (0 = off), in display order, with their labels. */
+  syncOptions: [number, string][];
+  get(): DesktopAppSettings;
+  /** Applies what it can and reports failures itself (toast). */
+  set(patch: Partial<DesktopAppSettings>): Promise<void>;
+  subscribe(fn: () => void): () => void;
 }
 
 /** Minutes, or a moment: the same values as the extension. */

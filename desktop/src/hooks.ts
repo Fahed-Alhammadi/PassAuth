@@ -9,6 +9,7 @@ import { confirmChangeServer, requestChangeServer } from "./Root";
 import { secrets } from "./secrets";
 import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
 import { checkForUpdates, installUpdate } from "./updater";
+import { appHook } from "./app";
 
 const isMac = navigator.platform.startsWith("Mac");
 
@@ -45,5 +46,6 @@ export async function hooks(): Promise<DesktopHooks> {
     openUrl: (url) => openUrl(url),
     secrets,
     vaultTimeout: vaultTimeoutHook,
+    app: await appHook(),
   };
 }

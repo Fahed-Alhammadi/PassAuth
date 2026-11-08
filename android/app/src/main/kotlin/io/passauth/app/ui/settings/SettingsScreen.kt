@@ -57,6 +57,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.passauth.app.BuildConfig
+import io.passauth.app.data.BACKGROUND_SYNC_DEFAULT
+import io.passauth.app.data.BACKGROUND_SYNC_OPTIONS
 import io.passauth.app.data.Settings
 import io.passauth.app.data.ThemeMode
 import io.passauth.app.data.TimeoutAction
@@ -338,6 +340,14 @@ private fun ColumnScope.VaultOptions(ctx: UiCtx) {
         Text(if (syncing) "Syncing…" else "Sync vault now")
     }
     Muted("Last sync: ${formatTime(ctx.state.lastSync)}")
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    SelectField(
+        "Background sync",
+        BACKGROUND_SYNC_OPTIONS,
+        BACKGROUND_SYNC_OPTIONS.firstOrNull { it.first == ctx.state.settings.backgroundSyncMinutes }?.first ?: BACKGROUND_SYNC_DEFAULT,
+        { v -> ctx.update { it.copy(backgroundSyncMinutes = v) } },
+    )
+    Muted("Keeps your offline copy up to date while the app is closed.")
     HorizontalDivider(color = PassAuthTheme.colors.line)
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings("export")) }.padding(vertical = 6.dp),

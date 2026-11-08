@@ -613,6 +613,56 @@ class VaultRepository(
     /** Ask the server whether this session still exists: an ended one signs the account out (refresh fails). */
     suspend fun checkSession() = refreshIfStale()
 
+    /** Result of [refreshAllCaches]: accounts whose copy was checked, and how many the server couldn't be reached for. */
+    data class CacheRefreshOutcome(val refreshed: Int = 0, val networkFailures: Int = 0)
+
+    /**
+     * Background sync: bring every signed-in account's encrypted offline copy up to
+     * date. The active account, if unlocked, gets a normal sync; every other account
+     * gets [refreshCacheLocked] (ciphertext only, nothing decrypted or kept in memory).
+     */
+    suspend fun refreshAllCaches(): CacheRefreshOutcome {
+        var outcome = CacheRefreshOutcome()
+        val s = store.get()
+        for ((id, a) in s.accounts) {
+            if (a.tokens == null || a.server.isEmpty()) continue
+            try {
+                if (id == s.activeId && sessions.containsKey(id)) mutex.withLock { syncLocked() } else refreshCacheLocked(id)
+                outcome = outcome.copy(refreshed = outcome.refreshed + 1)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: ApiException) {
+                // Server answered (e.g. the session ended → signed out by ApiClient): nothing to retry.
+            } catch (_: Exception) {
+                outcome = outcome.copy(networkFailures = outcome.networkFailures + 1)
+            }
+        }
+        return outcome
+    }
+
+    /**
+     * Refresh one account's offline copy without unlocking it: GET `/sync` through the
+     * usual client (token refresh and 401 handling unchanged), check the body is a vault
+     * snapshot and not older than the cached one, then store it as is. Never downgrades
+     * the copy and never writes an unparseable body.
+     */
+    private suspend fun refreshCacheLocked(id: String) {
+        val json = api.callText(id, "/sync")
+        val fetched = core { CacheRefresh.revisionOf(json) } ?: return
+        val cached = withContext(Dispatchers.IO) { store.readCache(id) }?.let { c -> core { CacheRefresh.revisionOf(c) } }
+        if (!CacheRefresh.shouldWrite(fetched, cached)) return
+        if (store.get().accounts[id]?.tokens == null) return // signed out meanwhile
+        withContext(Dispatchers.IO) { store.writeCache(id, json) }
+        val data = core { AppJson.parseToJsonElement(json).jsonObject }
+        store.updateAccount(id) {
+            it.copy(
+                lastSync = System.currentTimeMillis(),
+                name = (data["user"] as? JsonObject)?.str("name") ?: it.name,
+                bundle = data["bundle"]?.toString() ?: it.bundle,
+            )
+        }
+    }
+
     /**
      * Fetch and decrypt the active account's vault. With [fallbackToCache] an
      * unreachable server shows the on-device copy (offline). With [cacheFirst]

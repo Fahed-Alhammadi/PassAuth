@@ -36,6 +36,7 @@ tauri-plugin-process = "2.4"
 tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
 tauri-plugin-updater = "2.14"
 tauri-plugin-window-state = "2.5"
+tauri-plugin-autostart = "2"
 
 # Vault timeout "On system lock": screen-lock, sleep and session-switch notifications. Same versions Tauri uses.
 [target.'cfg(target_os = "macos")'.dependencies]

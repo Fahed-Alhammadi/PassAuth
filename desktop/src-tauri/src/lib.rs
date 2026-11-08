@@ -3,17 +3,18 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
-#[cfg(target_os = "macos")]
-use tauri::RunEvent;
 use tauri::menu::{
     AboutMetadataBuilder, Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem,
     SubmenuBuilder,
 };
 use tauri::tray::TrayIconBuilder;
 use tauri::webview::NewWindowResponse;
+#[cfg(target_os = "macos")]
+use tauri::{ActivationPolicy, RunEvent};
 use tauri::{
     AppHandle, Emitter, Listener, Manager, State, Url, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
@@ -44,6 +45,12 @@ const VAULT_STATE: &str = "vault-state";
 const WINDOW_HIDDEN: &str = "window-hidden";
 #[cfg(target_os = "macos")]
 const SYSTEM_LOCK: &str = "system-lock";
+/// Shell → webview: the computer woke from sleep (the webview re-checks the server and reconnects).
+#[cfg(target_os = "macos")]
+const SYSTEM_WAKE: &str = "system-wake";
+/// Passed by the login item (autostart plugin): start in the tray without opening the window.
+const HIDDEN_ARG: &str = "--hidden";
+const SHELL_SETTINGS_FILE: &str = "shell.json";
 
 /// The connected server and the client for it. Only `api_fetch` reaches the network, so the webview can't call other hosts.
 struct Server {
@@ -53,6 +60,77 @@ struct Server {
 
 /// "Lock Vault" in the app menu and the tray: enabled only while the vault is unlocked.
 struct LockItems(Vec<MenuItem<tauri::Wry>>);
+
+/// What the shell must know before the webview loads, kept in `shell.json` in the app's config directory.
+/// `keep_dock` (macOS): keep the Dock icon while the window is closed; off, the app is only in the menu bar then.
+struct ShellSettings {
+    keep_dock: AtomicBool,
+}
+
+#[derive(Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ShellSettingsDto {
+    keep_dock: bool,
+}
+
+fn shell_settings_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(SHELL_SETTINGS_FILE))
+}
+
+fn load_shell_settings(app: &AppHandle) -> ShellSettingsDto {
+    shell_settings_path(app)
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn shell_settings_get(settings: State<ShellSettings>) -> ShellSettingsDto {
+    ShellSettingsDto {
+        keep_dock: settings.keep_dock.load(Ordering::Relaxed),
+    }
+}
+
+#[tauri::command]
+fn shell_settings_set(app: AppHandle, keep_dock: bool) -> Result<(), String> {
+    app.state::<ShellSettings>()
+        .keep_dock
+        .store(keep_dock, Ordering::Relaxed);
+    let path = shell_settings_path(&app).ok_or("no config directory")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_vec(&ShellSettingsDto { keep_dock }).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    // Applies at once if the window is closed right now.
+    let visible = app
+        .get_webview_window(WINDOW)
+        .is_some_and(|w| w.is_visible().unwrap_or(true));
+    apply_dock(&app, visible);
+    Ok(())
+}
+
+/// macOS: with the window closed and "keep Dock icon" off, the app becomes a menu-bar-only (accessory) app;
+/// showing the window makes it a regular app again (Dock icon, app menu, Cmd-Tab).
+#[cfg(target_os = "macos")]
+fn apply_dock(app: &AppHandle, window_visible: bool) {
+    let keep = app
+        .state::<ShellSettings>()
+        .keep_dock
+        .load(Ordering::Relaxed);
+    let policy = if window_visible || keep {
+        ActivationPolicy::Regular
+    } else {
+        ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_dock(_app: &AppHandle, _window_visible: bool) {}
 
 #[derive(Serialize)]
 struct ApiResponse {
@@ -185,17 +263,27 @@ fn watch_system_lock(app: AppHandle) {
 
     use block2::RcBlock;
     use objc2_app_kit::{
-        NSWorkspace, NSWorkspaceSessionDidResignActiveNotification,
+        NSWorkspace, NSWorkspaceDidWakeNotification, NSWorkspaceSessionDidResignActiveNotification,
         NSWorkspaceWillSleepNotification,
     };
     use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
 
+    let woke = app.clone();
     let block = RcBlock::new(move |_: NonNull<NSNotification>| {
         let _ = app.emit(SYSTEM_LOCK, ());
     });
-    // SAFETY: the block captures only an `AppHandle` (Send + Sync) and is kept alive by the leaked observer.
+    let wake_block = RcBlock::new(move |_: NonNull<NSNotification>| {
+        let _ = woke.emit(SYSTEM_WAKE, ());
+    });
+    // SAFETY: the blocks capture only an `AppHandle` (Send + Sync) and are kept alive by the leaked observers.
     unsafe {
         let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        std::mem::forget(workspace.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceDidWakeNotification),
+            None,
+            None,
+            &wake_block,
+        ));
         for name in [
             NSWorkspaceWillSleepNotification,
             NSWorkspaceSessionDidResignActiveNotification,
@@ -273,6 +361,7 @@ async fn save_file(app: AppHandle, filename: String, content: String) -> Result<
 
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(WINDOW) {
+        apply_dock(app, true);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -295,11 +384,17 @@ fn allowed_navigation(url: &Url) -> bool {
     }
 }
 
+fn launched_hidden() -> bool {
+    std::env::args().skip(1).any(|a| a == HIDDEN_ARG)
+}
+
 fn build_window(app: &AppHandle) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::default())
         .title("PassAuth")
         .inner_size(1100.0, 760.0)
         .min_inner_size(900.0, 620.0)
+        // The login item starts the app in the tray.
+        .visible(!launched_hidden())
         .on_navigation(allowed_navigation)
         // Links that would open a new window go to the browser instead.
         .on_new_window(|url, _| {
@@ -477,6 +572,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // "Start at login" (Settings → This app): a login item that launches the app hidden in the tray.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .args([HIDDEN_ARG])
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             set_server,
             api_fetch,
@@ -484,15 +585,23 @@ pub fn run() {
             secret_set,
             secret_delete,
             copy_secret,
-            save_file
+            save_file,
+            shell_settings_get,
+            shell_settings_set
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            app.manage(ShellSettings {
+                keep_dock: AtomicBool::new(load_shell_settings(&handle).keep_dock),
+            });
             let menu_lock = lock_item(&handle)?;
             let tray_lock = lock_item(&handle)?;
             app.set_menu(build_menu(&handle, &menu_lock)?)?;
             build_tray(&handle, &tray_lock)?;
             build_window(&handle)?;
+            if launched_hidden() {
+                apply_dock(&handle, false);
+            }
             app.manage(LockItems(vec![menu_lock, tray_lock]));
             #[cfg(target_os = "macos")]
             watch_system_lock(handle.clone());
@@ -514,10 +623,11 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing hides the window; the app stays in the tray (and the Dock on macOS).
+            // Closing hides the window; the app stays in the tray (and, if the user keeps it, the macOS Dock).
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                apply_dock(window.app_handle(), false);
                 let _ = window.emit(WINDOW_HIDDEN, ());
             }
         })

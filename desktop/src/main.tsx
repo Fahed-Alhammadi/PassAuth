@@ -16,6 +16,7 @@ import { installOtpLinks } from "./AddCode";
 import { Root } from "./Root";
 import { hooks } from "./hooks";
 import { installBridge } from "./bridge";
+import { installBackgroundSync } from "./app";
 import { installVaultTimeout } from "./timeout";
 import { scheduleUpdateCheck } from "./updater";
 
@@ -25,6 +26,7 @@ applyTheme();
 registerDesktop(await hooks());
 installBridge();
 installVaultTimeout();
+installBackgroundSync();
 scheduleUpdateCheck();
 
 const root = document.getElementById("root")!;

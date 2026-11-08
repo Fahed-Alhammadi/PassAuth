@@ -5,7 +5,7 @@ import QRCode from "qrcode";
 import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
 import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
 import { downloadEmergencyKit, downloadFile, printEmergencyKit } from "../lib/kit";
-import { clientName, getDesktop, isDesktop, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
+import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { server } from "../lib/server";
 import type { Role } from "../lib/types";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
@@ -362,6 +362,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
       </section>
 
       {desktop?.vaultTimeout && <VaultTimeoutCard hook={desktop.vaultTimeout} />}
+      {desktop?.app && <DesktopAppCard hook={desktop.app} />}
 
       <section className="card" aria-labelledby="fp-title">
         <h2 id="fp-title">Your public key fingerprint</h2>
@@ -474,6 +475,48 @@ function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
           ? "Locking keeps your encrypted vault here; unlock with your master password."
           : "Signing out removes the vault from this app; sign in again (with two-step login) to use it."}
         {lockShortcut && ` Lock at any time with ${lockShortcut}; that always needs the master password again.`}
+      </p>
+    </section>
+  );
+}
+
+/** Desktop app only: login item, Dock icon (macOS) and background sync. */
+function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
+  const s = useSyncExternalStore(hook.subscribe, hook.get);
+  return (
+    <section className="card" aria-labelledby="app-title">
+      <h2 id="app-title">This app</h2>
+      <label className="check">
+        <input type="checkbox" checked={s.startAtLogin} onChange={(e) => void hook.set({ startAtLogin: e.target.checked })} />
+        <span>
+          Start PassAuth when you sign in to this computer
+          <span className="small muted block">It starts in the {hook.platform === "macos" ? "menu bar" : "tray"} without opening the window.</span>
+        </span>
+      </label>
+      {hook.platform === "macos" && (
+        <label className="check">
+          <input type="checkbox" checked={s.keepDock} onChange={(e) => void hook.set({ keepDock: e.target.checked })} />
+          <span>
+            Keep the Dock icon while the window is closed
+            <span className="small muted block">
+              Closing the window leaves PassAuth running in the menu bar. When this is off, the Dock icon goes away until you open the window again.
+            </span>
+          </span>
+        </label>
+      )}
+      <label className="field">
+        <span>Background sync</span>
+        <select className="select" value={String(s.backgroundSyncMinutes)} onChange={(e) => void hook.set({ backgroundSyncMinutes: Number(e.target.value) })}>
+          {hook.syncOptions.map(([m, label]) => (
+            <option key={m} value={String(m)}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="small muted">
+        Changes reach this app as they happen while it's connected. On this schedule, and after the computer wakes, it also checks the server and reconnects,
+        so the vault stays current if the connection dropped. Runs only while the vault is unlocked.
       </p>
     </section>
   );

@@ -289,7 +289,10 @@ jobs:
       # macOS AutoFill extension (desktop/macos): built, signed with its own entitlements and the
       # Developer ID provisioning profile, then copied into PassAuth.app/Contents/PlugIns by Tauri
       # (bundle.macOS.files, CI-only config). Tauri signs the outer app without --deep, so the
-      # extension keeps its signature. Skipped (no extension) while the profile secret is missing.
+      # extension keeps its signature. macOS lists a credential provider only when its containing
+      # app carries the AutoFill entitlement too, so the app is signed with
+      # entitlements/macos-host.plist and its own Developer ID profile (Contents/embedded.provisionprofile,
+      # secret MACOS_DESKTOP_PROVISIONING_PROFILE). Skipped (no extension) while a secret is missing.
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         if: runner.os == 'macOS'
         with:
@@ -298,9 +301,10 @@ jobs:
         if: runner.os == 'macOS'
         env:
           PROFILE_BASE64: ${{ secrets.MACOS_AUTOFILL_PROVISIONING_PROFILE }}
+          HOST_PROFILE_BASE64: ${{ secrets.MACOS_DESKTOP_PROVISIONING_PROFILE }}
         run: |
-          if [ -z "$PROFILE_BASE64" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "::warning::MACOS_AUTOFILL_PROVISIONING_PROFILE or the signing certificate is missing: the macOS app is built without AutoFill"
+          if [ -z "$PROFILE_BASE64" ] || [ -z "$HOST_PROFILE_BASE64" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "::warning::MACOS_AUTOFILL_PROVISIONING_PROFILE, MACOS_DESKTOP_PROVISIONING_PROFILE or the signing certificate is missing: the macOS app is built without AutoFill"
             exit 0
           fi
           brew install xcodegen
@@ -309,7 +313,11 @@ jobs:
           MACOS_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" MACOS_SIGN_KEYCHAIN="$SIGNING_KEYCHAIN" MACOS_AUTOFILL_PROFILE="$profile" desktop/macos/build.sh
           appex="$GITHUB_WORKSPACE/desktop/macos/build/PassAuthAutoFill.appex"
           codesign --verify --strict --verbose=2 "$appex"
-          printf '{"bundle":{"macOS":{"files":{"PlugIns/PassAuthAutoFill.appex":"%s"}}}}' "$appex" > "$RUNNER_TEMP/autofill.json"
+          host_profile="$RUNNER_TEMP/desktop.provisionprofile"
+          printf '%s' "$HOST_PROFILE_BASE64" | base64 --decode > "$host_profile"
+          entitlements="$GITHUB_WORKSPACE/desktop/src-tauri/entitlements/macos-host.plist"
+          printf '{"bundle":{"macOS":{"entitlements":"%s","files":{"PlugIns/PassAuthAutoFill.appex":"%s","embedded.provisionprofile":"%s"}}}}' \
+            "$entitlements" "$appex" "$host_profile" > "$RUNNER_TEMP/autofill.json"
           echo "AUTOFILL_ARGS=--config $RUNNER_TEMP/autofill.json" >> "$GITHUB_ENV"
       # Tag push: builds, then creates the release (or adds to it: the three systems share one)
       # and uploads the bundles, their updater signatures and latest.json (not for pre-releases).
@@ -340,6 +348,9 @@ jobs:
           test -d "$appex"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$appex" 2>/dev/null | grep -q autofill-credential-provider
+          # The containing app: AutoFill entitlement + the profile that allows it (or macOS kills it at launch).
+          codesign -d --entitlements - "$app" 2>/dev/null | grep -q autofill-credential-provider
+          test -f "$app/Contents/embedded.provisionprofile"
 
       - name: Remove the API key and keychain
         if: always() && runner.os == 'macOS'

@@ -497,6 +497,19 @@ function connectSocket() {
   };
 }
 
+/**
+ * Desktop: after sleep, a network change or on the background-sync timer. The live connection can die without a
+ * close event, so the server is asked for its revision first (which also refreshes an expired access token),
+ * the connection is reopened and the vault synced if the server has anything newer. A no-op while locked.
+ */
+export async function resync(): Promise<void> {
+  if (state.status !== "unlocked") return;
+  const r = await api<{ revision: number }>("/sync/revision");
+  if (state.status !== "unlocked") return;
+  connectSocket();
+  if (r.revision > state.revision) await sync();
+}
+
 // -------------------------------------------------------------- save target
 
 const personalKey = (userId: string) => `pa.personal.${userId}`;
