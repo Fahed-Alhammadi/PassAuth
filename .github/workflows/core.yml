@@ -1,6 +1,6 @@
 # Rust core + server: fmt, clippy, tests (SQLite and PostgreSQL), dependency audit.
 # Runs only when the Rust workspace changes; the audit also runs weekly for new advisories.
-name: CI core + server
+name: Core + server
 
 on:
   workflow_dispatch:
@@ -11,14 +11,14 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
-      - ".github/workflows/ci-core.yml"
+      - ".github/workflows/core.yml"
   pull_request:
     paths:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
-      - ".github/workflows/ci-core.yml"
+      - ".github/workflows/core.yml"
   schedule:
     - cron: "17 5 * * 1"
 

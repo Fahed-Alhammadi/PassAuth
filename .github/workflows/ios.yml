@@ -1,7 +1,8 @@
-name: iOS
-
-# Builds the signed iOS app and uploads it to App Store Connect (TestFlight).
-# - Push a tag ios-X.Y.Z (scripts/release.sh ios X.Y.Z; version in ios/VERSION): archives and uploads.
+# iOS app + AutoFill extension with the Rust core (UniFFI).
+# - Push to main / pull request: simulator build (unsigned), when the iOS app or the core changes.
+#   Unit and UI tests run locally (see ARCHITECTURE.md).
+# - Push a tag ios-X.Y.Z (scripts/release.sh ios X.Y.Z; version in ios/VERSION): archives the
+#   signed app and uploads it to App Store Connect (TestFlight).
 # - "Run workflow" (manual): archives only; tick "upload" to also send it to TestFlight.
 # Signing is automatic with the App Store Connect API key in
 # APP_STORE_CONNECT_API_KEY_ID / _ISSUER_ID / _KEY_P8 (an Admin key: Xcode manages the
@@ -9,9 +10,29 @@ name: iOS
 # with the existing Apple Development certificate from IOS_DEV_CERT_P12_BASE64 /
 # IOS_DEV_CERT_PASSWORD; without it every run would create a new development certificate
 # (team limit). The upload is re-signed with the cloud-managed distribution certificate.
+name: iOS
+
 on:
   push:
+    branches: [main]
     tags: ["ios-[0-9]*.*.*"]
+    paths:
+      - "ios/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-ios-core.sh"
+      - ".github/workflows/ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-ios-core.sh"
+      - ".github/workflows/ios.yml"
   workflow_dispatch:
     inputs:
       upload:
@@ -22,12 +43,42 @@ on:
 permissions:
   contents: read
 
+# Check runs on a branch replace each other; a tag run (release) is never cancelled.
 concurrency:
-  group: ios-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && '-manual' || '' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
+  ios:
+    name: ios app
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build (simulator, unsigned)
+        run: |
+          scripts/build-ios-core.sh
+          cd ios && xcodegen generate
+          xcodebuild -project PassAuth.xcodeproj -scheme PassAuth -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build -quiet
+
   archive:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,6 +130,7 @@ jobs:
           security unlock-keychain -p "$kcpw" "$kc"
           security import "$p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -k "$kcpw" "$kc" > /dev/null
+          # shellcheck disable=SC2046 # one keychain path per word
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
           rm -f "$p12"
           security find-identity -v -p codesigning "$kc"

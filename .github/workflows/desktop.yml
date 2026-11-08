@@ -1,6 +1,8 @@
-name: Desktop release
-
-# Builds the desktop app (Tauri) for macOS, Windows and Linux.
+# Desktop app (Tauri, reuses web/src) + its macOS AutoFill extension (reuses ios/Shared).
+# - Push to main / pull request: checks the desktop app (typecheck, frontend build, clippy),
+#   audits desktop/src-tauri and runs the macOS AutoFill extension unit tests, when the desktop
+#   app or code it is built from changes.
+# Release: builds the desktop app (Tauri) for macOS, Windows and Linux.
 # - Push a tag vX.Y.Z (scripts/release.sh desktop X.Y.Z; version in desktop/package.json and
 #   desktop/src-tauri/Cargo.toml): builds all three and creates the GitHub release "PassAuth X.Y.Z",
 #   marked Latest, with the installers, the updater files (*.sig, latest.json) and fixed-name copies
@@ -15,24 +17,138 @@ name: Desktop release
 # Windows: unsigned for now; SmartScreen warns until a code-signing certificate is added.
 # Updater signatures: TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key
 # has one; empty otherwise). The matching public key is in desktop/src-tauri/tauri.conf.json.
+name: Desktop
+
 on:
   push:
+    branches: [main]
     tags: ["v[0-9]*.*.*"]
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-wasm.sh"
+      - "scripts/build-macos-core.sh"
+      - "ios/Shared/**"
+      - "ios/AutoFill/**"
+      - "ios/UI/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "web/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-wasm.sh"
+      - "scripts/build-macos-core.sh"
+      - "ios/Shared/**"
+      - "ios/AutoFill/**"
+      - "ios/UI/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Check runs on a branch replace each other; a tag run (release) is never cancelled.
 concurrency:
-  group: desktop-${{ github.ref }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && '-manual' || '' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  desktop:
+    name: desktop app
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # The root workspace builds the core for the browser; the app is its own workspace.
+          workspaces: |
+            .
+            desktop/src-tauri
+      - name: Install wasm-bindgen CLI (version from Cargo.lock)
+        run: |
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - run: scripts/build-wasm.sh web/src/wasm
+      # The desktop app imports web/src, whose imports resolve from web/node_modules.
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
+        working-directory: desktop
+      # The Rust shell embeds the built frontend, so it is checked after `pnpm build`.
+      - run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings
+        working-directory: desktop/src-tauri
+
+  # The desktop app is its own Cargo workspace with its own lockfile.
+  audit:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: desktop/src-tauri
+
+  autofill:
+    name: macOS AutoFill extension
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Unit tests
+        run: |
+          scripts/build-macos-core.sh
+          cd desktop/macos && xcodegen generate
+          xcodebuild -project PassAuthAutoFill.xcodeproj -scheme PassAuthAutoFill -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO test -quiet
+
   build:
     name: ${{ matrix.os }}
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
     strategy:
       fail-fast: false
       matrix:
@@ -235,7 +351,7 @@ jobs:
   # link https://github.com/<repo>/releases/latest/download/PassAuth-macOS.dmg and so on.
   fixed-names:
     name: fixed-name downloads
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     permissions:

@@ -1,21 +1,81 @@
-name: Extension release
+# Web vault + Chrome extension.
+# - Push to main / pull request: builds the web vault and the extension (and runs the extension
+#   tests) against the browser build of the core.
+# - Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
+#   extension and submit it to the Chrome Web Store. There is no GitHub release: the zip
+#   (passauth-extension-1.2.3.zip) is kept as a download on the workflow run for 90 days. The version comes from extension/package.json and
+#   extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
+#   manifest version for every upload).
+# - Run it by hand (Actions → Extension → Run workflow) to only check the Web Store
+#   connection: it signs in and prints the store status; nothing is built or uploaded.
+name: Extension
 
-# Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
-# extension and submit it to the Chrome Web Store. There is no GitHub release: the zip
-# (passauth-extension-1.2.3.zip) is kept as a download on the workflow run for 90 days. The version comes from extension/package.json and
-# extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
-# manifest version for every upload).
-# Run it by hand (Actions → Extension release → Run workflow) to only check the Web Store
-# connection: it signs in and prints the store status; nothing is built or uploaded.
 on:
   push:
+    branches: [main]
     tags: ["extension-[0-9]*.*.*"]
+    paths:
+      - "web/**"
+      - "extension/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-wasm.sh"
+      - ".github/workflows/extension.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "extension/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-wasm.sh"
+      - ".github/workflows/extension.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Check runs on a branch replace each other; a tag run (release) is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && '-manual' || '' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  clients:
+    name: web vault + extension
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install wasm-bindgen CLI (version from Cargo.lock)
+        run: |
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - run: scripts/build-wasm.sh web/src/wasm extension/src/wasm
+      - run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: web
+      - run: pnpm install --frozen-lockfile && pnpm build && pnpm test
+        working-directory: extension
+
   store-check:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -31,7 +91,7 @@ jobs:
         run: scripts/cws-publish.sh --check
 
   release:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

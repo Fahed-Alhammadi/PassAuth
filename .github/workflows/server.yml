@@ -1,0 +1,111 @@
+# Server container image (amd64 + arm64): the server plus the web vault it serves.
+# - Push to main / pull request: builds the image (not pushed) when something that goes into it changes.
+# - Push a tag like server-1.2.3 (scripts/release.sh server 1.2.3) to publish the server +
+#   web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
+#   Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
+#   always gets the newest version. Pre-release tags (server-1.2.3-rc.1) don't move :latest.
+#   No GitHub release: the changes are in CHANGELOG.md (written by scripts/release.sh). GitHub
+#   releases are used only by the desktop app (desktop.yml, tags vX.Y.Z).
+#   The extension and the apps have their own versions and tags (extension.yml, ios.yml, android.yml).
+name: Server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["server-[0-9]*.*.*"]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/**"
+      - "web/**"
+      - ".github/workflows/server.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/**"
+      - "web/**"
+      - ".github/workflows/server.yml"
+
+permissions:
+  contents: read
+
+# Check runs on a branch replace each other; a tag run (release) is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && '-manual' || '' }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  docker:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build image (amd64 + arm64, not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  server-image:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check versions match the tag
+        id: v
+        run: |
+          tag="${GITHUB_REF_NAME#server-}"
+          crate="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          web="$(node -p "require('./web/package.json').version")"
+          [ "${tag%%-*}" = "$crate" ] || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1; }
+          [ "$crate" = "$web" ] || { echo "::error::web/package.json version $web differs from Cargo.toml $crate"; exit 1; }
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/passauth
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ steps.v.outputs.version }}
+            type=raw,value=latest,enable=${{ !contains(steps.v.outputs.version, '-') }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.v.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
