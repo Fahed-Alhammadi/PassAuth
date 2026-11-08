@@ -45,6 +45,9 @@ targets:
     settings:
       base:
         PRODUCT_NAME: PassAuthCore
+        # Swift-only consumers: no Objective-C header to install (copying it into
+        # Products/include is denied by the build sandbox on CI's Xcode).
+        SWIFT_INSTALL_OBJC_HEADER: NO
         # Generated code: Swift 5 mode keeps it free of Swift 6 diagnostics.
         SWIFT_VERSION: "5.0"
         SWIFT_STRICT_CONCURRENCY: minimal
