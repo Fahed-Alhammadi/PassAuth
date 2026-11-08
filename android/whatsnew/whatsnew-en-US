@@ -1,1 +1,2 @@
-• Background sync: PassAuth now refreshes your offline copy of the vault on its own, every 2 hours by default, so it's current when you open the app. Change or turn it off in Settings → Vault options → Background sync.
+• Fixes the app not starting after the 0.5.2 update.
+• Background sync: PassAuth refreshes your offline copy of the vault on its own, every 2 hours by default, so it's current when you open the app. Change or turn it off in Settings → Vault options → Background sync.
