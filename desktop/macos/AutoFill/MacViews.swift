@@ -383,6 +383,22 @@ struct MacPasskey: View {
 
 // MARK: Settings (configuration screen and the gear button)
 
+/// Default URI match options, as the iOS app's Settings → AutoFill (`ios/App/SettingsViews.swift`).
+private let defaultMatches: [(UrlMatch, String)] = [
+    (.domain, "Base domain"), (.host, "Host"), (.startsWith, "Starts with"), (.regex, "Regular expression"), (.exact, "Exact"), (.never, "Never"),
+]
+
+private func matchHelp(_ m: UrlMatch) -> String {
+    switch m {
+    case .host: "Same host name and port only: login.example.com doesn't match www.example.com."
+    case .startsWith: "The page address must start with the saved website address."
+    case .regex: "The saved website is a regular expression tested against the page address. Advanced."
+    case .exact: "The page address must be exactly the saved website address."
+    case .never: "Never suggest or fill logins automatically. Items can still set their own matching."
+    default: "login.example.com and www.example.com both match example.com."
+    }
+}
+
 struct MacSettings: View {
     @Bindable var model: AutofillModel
     /// Shown from the gear button: back to the request. Nil on the configuration screen.
@@ -433,6 +449,18 @@ struct MacSettings: View {
                 Text(state.settings.vaultTimeout == .never
                      ? "Your vault opens without your master password until you lock it or sign out."
                      : "After this time without AutoFill use, PassAuth asks for your master password\(bio.available ? " or \(bio.name)" : "") again.")
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Picker("Default URI match detection", selection: Binding(get: { state.settings.defaultMatch }, set: { v in
+                    Task { await model.repo.updateSettings { $0.defaultMatch = v } }
+                })) {
+                    ForEach(defaultMatches, id: \.0) { Text($0.1).tag($0.0) }
+                }
+            } header: {
+                Text("Filling")
+            } footer: {
+                Text("\(matchHelp(state.settings.defaultMatch)) Applies to websites set to \"Default\" in an item; the same setting as in the apps and the browser extension, kept per device.")
                     .foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(Color.paDanger) }
