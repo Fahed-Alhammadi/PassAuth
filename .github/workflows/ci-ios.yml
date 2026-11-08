@@ -1,0 +1,58 @@
+# iOS app + AutoFill extension: simulator build with the Rust core (UniFFI).
+# Runs only when the iOS app or the core changes. Unit and UI tests run locally (see ARCHITECTURE.md).
+name: CI ios
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-ios-core.sh"
+      - ".github/workflows/ci-ios.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-ios-core.sh"
+      - ".github/workflows/ci-ios.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios:
+    name: ios app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build (simulator, unsigned)
+        run: |
+          scripts/build-ios-core.sh
+          cd ios && xcodegen generate
+          xcodebuild -project PassAuth.xcodeproj -scheme PassAuth -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build -quiet

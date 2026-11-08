@@ -8,7 +8,7 @@
   <a href="CHANGELOG.md"><img src="https://img.shields.io/github/v/tag/Fahed-Alhammadi/PassAuth?filter=server-*&label=latest&color=0866ED" alt="Latest server version"></a>
   <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest"><img src="https://img.shields.io/github/v/release/Fahed-Alhammadi/PassAuth?label=desktop&color=0866ED" alt="Latest desktop app release"></a>
   <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan"><img src="https://img.shields.io/chrome-web-store/v/pnofinkalfnjjgofaikljeikjaoogaan?label=Chrome%20Web%20Store&color=0866ED" alt="Chrome Web Store"></a>
-  <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci-core.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/ci-core.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-082052" alt="MIT License"></a>
 </p>
 

@@ -1,0 +1,67 @@
+# Android app: debug build + unit tests with the Rust core (UniFFI).
+# Runs only when the Android app or the core changes.
+name: CI android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-android-core.sh"
+      - ".github/workflows/ci-android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "scripts/build-android-core.sh"
+      - ".github/workflows/ci-android.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  android:
+    name: android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          # The default also installs the retired "tools" package, which no longer exists.
+          packages: platform-tools
+      - name: Install NDK
+        run: sdkmanager --install "ndk;29.0.14206865" >/dev/null && echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2
+        with:
+          tool: cargo-ndk
+          # Build it from crates.io when GitHub release downloads fail (seen during outages).
+          fallback: cargo-install
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - name: Build and test (debug)
+        run: |
+          PROFILE=debug scripts/build-android-core.sh
+          cd android && ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest
