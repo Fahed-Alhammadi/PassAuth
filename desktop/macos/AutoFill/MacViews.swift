@@ -1,6 +1,7 @@
 import AppKit
 import PassAuthKit
 import SwiftUI
+import os
 
 // The macOS AutoFill sheet: native macOS controls (rounded text fields, grouped forms, push
 // buttons) with the PassAuth accent and logo from ios/UI/Theme.swift. Same screens as the iOS
@@ -258,6 +259,7 @@ struct MacList: View {
     var body: some View {
         let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
         let suggestions = model.suggestions
+        let _ = Logger(subsystem: "io.passauth.autofill", category: "list").notice("list: \(model.pages.count) pages, \(suggestions.count) suggestions, \(model.repo.vault?.entries.count ?? -1) entries")
         let passkeys = model.passkeyChoices
         VStack(spacing: 0) {
             HStack(spacing: 6) {

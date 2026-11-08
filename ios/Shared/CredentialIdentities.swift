@@ -1,4 +1,5 @@
 import AuthenticationServices
+import os
 import CryptoKit
 import Foundation
 
@@ -140,10 +141,21 @@ public final class CredentialIdentitySync {
         if let sink { return sink(records) }
         let identities = IdentityMapper.identities(records)
         pending = Task {
-            guard await Self.isEnabled() else { return }
-            try? await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities)
+            guard await Self.isEnabled() else {
+                Self.log.notice("identity store: PassAuth not enabled for AutoFill, \(records.count) records not written")
+                return
+            }
+            do {
+                try await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities)
+                Self.log.notice("identity store: wrote \(records.count) records")
+            } catch {
+                Self.log.error("identity store: write failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
+
+    /// Counts and outcomes only (no sites, names or users): `log show --predicate 'subsystem == "io.passauth.autofill"'`.
+    static let log = Logger(subsystem: "io.passauth.autofill", category: "identities")
 
     /// The last write started (AutoFill extension: waited for before completing a request,
     /// as iOS may end the extension right after).

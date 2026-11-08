@@ -563,25 +563,41 @@ final class AutofillModel {
     // MARK: Finish
 
     func finishConfiguration() {
-        guard !finished else { return }
+        guard !finished, context != nil else { return }
         finished = true
         endOfRequest()
-        context?.completeExtensionConfigurationRequest()
+        handOver { $0.completeExtensionConfigurationRequest() }
     }
 
-    private func complete(_ body: (ASCredentialProviderExtensionContext) -> Void) {
-        guard !finished, let context else { return }
+    private func complete(_ body: @escaping @MainActor (ASCredentialProviderExtensionContext) -> Void) {
+        guard !finished, context != nil else { return }
         finished = true
         endOfRequest()
-        body(context)
+        handOver(body)
     }
 
     func cancel(_ code: ASExtensionError.Code = .userCanceled) {
         if case .configuration = request { return finishConfiguration() }
-        guard !finished, let context else { return }
+        guard !finished, context != nil else { return }
         finished = true
         endOfRequest()
-        context.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue))
+        handOver { $0.cancelRequest(withError: NSError(domain: ASExtensionErrorDomain, code: code.rawValue)) }
+    }
+
+    /// Answer the system. macOS ends the extension right after, and nothing else writes the
+    /// credential identity store there (on iOS the app does too), so the write started by the
+    /// last sync or unlock must land first; otherwise Safari never learns which logins fit which
+    /// site and only offers the full list.
+    private func handOver(_ body: @escaping @MainActor (ASCredentialProviderExtensionContext) -> Void) {
+        guard let context else { return }
+        #if os(macOS)
+        Task { @MainActor in
+            await repo.identities.flush(timeout: .seconds(2))
+            body(context)
+        }
+        #else
+        body(context)
+        #endif
     }
 
     /// macOS: drop kept keys that are past the vault timeout as each request ends.

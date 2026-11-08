@@ -2,6 +2,10 @@ import AppKit
 import AuthenticationServices
 import PassAuthKit
 import SwiftUI
+import os
+
+/// Counts only: `log show --predicate 'subsystem == "io.passauth.autofill"'`.
+private let log = Logger(subsystem: "io.passauth.autofill", category: "requests")
 
 /// PassAuth's AutoFill credential provider for macOS (embedded in the desktop app): passwords,
 /// passkeys and (macOS 15) verification codes for Safari and apps. Same flow as the iOS
@@ -47,7 +51,9 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     // MARK: Lists
 
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
-        show(.list(pages: AutofillMatcher.pages(serviceIdentifiers), passkey: nil))
+        let pages = AutofillMatcher.pages(serviceIdentifiers)
+        log.notice("list request: \(serviceIdentifiers.count) service identifiers (\(serviceIdentifiers.filter { $0.type == .URL }.count) URL, \(serviceIdentifiers.filter { $0.type == .domain }.count) domain) → \(pages.count) pages")
+        show(.list(pages: pages, passkey: nil))
     }
 
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier], requestParameters: ASPasskeyCredentialRequestParameters) {
