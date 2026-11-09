@@ -68,10 +68,9 @@ class AutofillMatcherTest {
     }
 
     @Test
-    fun vaultPageAndNeverSaveKeys() {
-        assertTrue(AutofillMatcher.isVaultPage(FillTarget.Web("https", "vault.example.com"), "https://vault.example.com/app"))
-        assertFalse(AutofillMatcher.isVaultPage(FillTarget.Web("https", "example.com"), "https://vault.example.com"))
-        assertFalse(AutofillMatcher.isVaultPage(app, "https://vault.example.com"))
+    fun vaultPageIsAnOrdinarySiteAndNeverSaveKeys() {
+        // The PassAuth server's own web vault is filled like any website.
+        assertTrue(AutofillMatcher.matches(FillTarget.Web("https", "vault.example.com"), login("https://vault.example.com"), UrlMatch.Domain))
         assertEquals("example.com", AutofillMatcher.neverSaveKey(web))
         assertEquals("androidapp://com.example.app", AutofillMatcher.neverSaveKey(app))
         assertEquals("https://login.example.com", AutofillMatcher.saveUrl(web))

@@ -18,23 +18,22 @@ final class SaveGenerateTests: XCTestCase {
     }
 
     private func plan(_ v: VaultData, page: String = "https://login.example.com/signup", user: String, password: String) -> SaveLogic.Plan {
-        SaveLogic.plan(page: page, username: user, password: password, vault: v, defaultMatch: .domain, server: "https://vault.example.org")
+        SaveLogic.plan(page: page, username: user, password: password, vault: v, defaultMatch: .domain)
     }
 
     // MARK: Save: offer or not
 
     func testSaveBlocked() {
         var s = Settings()
-        let server = "https://pass.example.org"
-        XCTAssertNil(SaveLogic.blocked(page: "https://www.shop.co.uk/register", password: "pw", settings: s, server: server))
-        XCTAssertEqual(SaveLogic.blocked(page: "https://pass.example.org/login", password: "pw", settings: s, server: server), .vaultPage)
-        XCTAssertEqual(SaveLogic.blocked(page: nil, password: "pw", settings: s, server: server), .notWebsite, "apps without a domain")
-        XCTAssertEqual(SaveLogic.blocked(page: "https://example.com/", password: "", settings: s, server: server), .noPassword)
+        XCTAssertNil(SaveLogic.blocked(page: "https://www.shop.co.uk/register", password: "pw", settings: s))
+        XCTAssertNil(SaveLogic.blocked(page: "https://pass.example.org/login", password: "pw", settings: s), "the server's own web vault is saved like any site")
+        XCTAssertEqual(SaveLogic.blocked(page: nil, password: "pw", settings: s), .notWebsite, "apps without a domain")
+        XCTAssertEqual(SaveLogic.blocked(page: "https://example.com/", password: "", settings: s), .noPassword)
         s.neverSave = ["shop.co.uk"]
-        XCTAssertEqual(SaveLogic.blocked(page: "https://accounts.shop.co.uk/x", password: "pw", settings: s, server: server), .neverSave, "keyed by base domain")
-        XCTAssertNil(SaveLogic.blocked(page: "https://example.com/", password: "pw", settings: s, server: server))
+        XCTAssertEqual(SaveLogic.blocked(page: "https://accounts.shop.co.uk/x", password: "pw", settings: s), .neverSave, "keyed by base domain")
+        XCTAssertNil(SaveLogic.blocked(page: "https://example.com/", password: "pw", settings: s))
         s.askToSave = false
-        XCTAssertEqual(SaveLogic.blocked(page: "https://example.com/", password: "pw", settings: s, server: server), .askToSaveOff)
+        XCTAssertEqual(SaveLogic.blocked(page: "https://example.com/", password: "pw", settings: s), .askToSaveOff)
     }
 
     func testNeverSaveKey() {

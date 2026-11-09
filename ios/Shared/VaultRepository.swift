@@ -842,7 +842,7 @@ public final class VaultRepository {
         let s = store.get()
         identities.seed(s.file.identityFingerprint)
         guard let v = vault, sessions[s.activeId] != nil else { return identities.clear() }
-        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch, server: s.active?.server ?? ""))
+        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch))
     }
 
     private struct SyncResponse: Decodable {
@@ -1168,7 +1168,7 @@ public final class VaultRepository {
         try await sync()
         guard let v = vault else { throw UserError("Your vault is locked.") }
         let s = store.get()
-        switch SaveLogic.plan(page: page, username: username, password: password, vault: v, defaultMatch: s.settings.defaultMatch, server: s.active?.server ?? "") {
+        switch SaveLogic.plan(page: page, username: username, password: password, vault: v, defaultMatch: s.settings.defaultMatch) {
         case .create:
             try await createItem(SaveLogic.newItem(page: page, username: username, password: password), vaultId: nil)
             return .created

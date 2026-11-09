@@ -29,11 +29,11 @@ public struct IdentityRecord: Equatable, Hashable, Sendable {
 /// offers it on subdomains, like the matcher); "host" → a `.URL` identity of the origin;
 /// "exact" / "starts with" → a `.URL` identity of the address. iOS matches these itself and
 /// doesn't tell PassAuth the page when a suggestion is picked, so websites PassAuth can't
-/// express this way are left out: regular expressions, "never", app websites, non-web schemes,
-/// and anything covering the PassAuth server's own host (never fill the web vault).
+/// express this way are left out: regular expressions, "never", app websites and non-web
+/// schemes. A login for the PassAuth server's own address is written like any other, so Safari
+/// suggests it on the web vault's sign-in page.
 public enum IdentityMapper {
-    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, server: String) -> [IdentityRecord] {
-        let serverHost = UrlMatcher.parse(server)?.hostname ?? ""
+    public static func records(_ entries: [Entry], defaultMatch: UrlMatch) -> [IdentityRecord] {
         var out: [IdentityRecord] = []
         var seen = Set<IdentityRecord>()
         func add(_ r: IdentityRecord) { if seen.insert(r).inserted { out.append(r) } }
@@ -41,7 +41,7 @@ public enum IdentityMapper {
             guard let l = e.item.login else { continue }
             let rank = e.item.favorite ? 1 : 0
             let user = l.username.isEmpty ? e.item.name : l.username
-            let services = l.urls.compactMap { service($0, defaultMatch: defaultMatch, serverHost: serverHost) }
+            let services = l.urls.compactMap { service($0, defaultMatch: defaultMatch) }
             let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
             for (svc, type) in services {
                 if !l.password.isEmpty || !l.username.isEmpty {
@@ -61,20 +61,16 @@ public enum IdentityMapper {
         return out
     }
 
-    static func service(_ u: LoginUrl, defaultMatch: UrlMatch, serverHost: String) -> (String, IdentityRecord.Service)? {
+    static func service(_ u: LoginUrl, defaultMatch: UrlMatch) -> (String, IdentityRecord.Service)? {
         let match = u.match == .default ? defaultMatch : u.match
         guard !AutofillMatcher.isAppUrl(u), let p = UrlMatcher.parse(u.url), p.scheme == "http" || p.scheme == "https", !p.hostname.isEmpty else { return nil }
-        let covers: (String) -> Bool = { domain in
-            !serverHost.isEmpty && (serverHost == domain || serverHost.hasSuffix("." + domain))
-        }
         switch match {
         case .domain, .default:
-            let base = UrlMatcher.baseDomain(p.hostname)
-            return covers(base) ? nil : (base, .domain)
+            return (UrlMatcher.baseDomain(p.hostname), .domain)
         case .host:
-            return covers(p.hostname) ? nil : (p.origin, .url)
+            return (p.origin, .url)
         case .exact, .startsWith:
-            return covers(p.hostname) ? nil : (p.href, .url)
+            return (p.href, .url)
         case .regex, .never:
             return nil
         }

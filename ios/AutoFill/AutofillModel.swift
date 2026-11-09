@@ -319,14 +319,9 @@ final class AutofillModel {
         return false
     }
 
-    /// The pages include PassAuth's own web vault: nothing is filled there.
-    var isVaultPage: Bool {
-        pages.contains { AutofillMatcher.isVaultPage($0, server: state.server) }
-    }
-
     var suggestions: [Entry] {
         guard let v = repo.vault else { return [] }
-        let all = AutofillMatcher.candidates(pages, v.entries, defaultMatch: state.settings.defaultMatch, server: state.server)
+        let all = AutofillMatcher.candidates(pages, v.entries, defaultMatch: state.settings.defaultMatch)
         return onlyCodes ? all.filter { Clipboard.totp($0.item.login?.totp) != nil } : all
     }
 
@@ -361,7 +356,6 @@ final class AutofillModel {
 
     func fill(_ e: Entry) {
         guard let l = e.item.login else { return }
-        if isVaultPage { return message("Not on PassAuth", "PassAuth doesn't fill logins into its own web vault.") }
         if state.settings.autoCopyTotp, let code = Clipboard.totp(l.totp) {
             Clipboard.copy(code, clearAfter: state.settings.clearClipboard)
         }
@@ -452,13 +446,13 @@ final class AutofillModel {
     }
 
     func saveBlocked(_ info: SaveInfo) -> SaveLogic.Blocked? {
-        SaveLogic.blocked(page: info.page, password: info.password, settings: state.settings, server: state.server)
+        SaveLogic.blocked(page: info.page, password: info.password, settings: state.settings)
     }
 
     /// What saving would do, on the vault as currently open (the save itself syncs first).
     var savePlan: SaveLogic.Plan? {
         guard let info = saveInfo, let page = info.page, let v = repo.vault else { return nil }
-        return SaveLogic.plan(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch, server: state.server)
+        return SaveLogic.plan(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch)
     }
 
     var saveHost: String {

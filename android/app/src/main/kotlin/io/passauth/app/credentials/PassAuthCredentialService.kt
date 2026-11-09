@@ -153,7 +153,6 @@ class PassAuthCredentialService : CredentialProviderService() {
                         val fallback = graph(context).repo.state.value.settings.defaultMatch
                         for ((e, l) in logins) {
                             if (!AutofillMatcher.matches(target, l, fallback)) continue
-                            if (AutofillMatcher.isVaultPage(target, graph(context).repo.state.value.server)) continue
                             out += PasswordCredentialEntry.Builder(
                                 context,
                                 l.username.ifEmpty { e.item.name },

@@ -45,23 +45,23 @@ final class AutofillTests: XCTestCase {
         let other = entry("6", name: "Other", user: "f", urls: [("https://example.org", .default)])
         let all = [domain, host, exact, starts, app, other]
         // Safari: the full page URL.
-        let url = AutofillMatcher.candidates(["https://example.com/signin"], all, defaultMatch: .domain, server: "")
+        let url = AutofillMatcher.candidates(["https://example.com/signin"], all, defaultMatch: .domain)
         XCTAssertEqual(url.map(\.id), ["1", "3", "4"])
         // An app's associated domain: only scheme and host, so "exact" sees https://example.com/.
-        let dom = AutofillMatcher.candidates([AutofillMatcher.page("example.com", isURL: false)!], all, defaultMatch: .domain, server: "")
+        let dom = AutofillMatcher.candidates([AutofillMatcher.page("example.com", isURL: false)!], all, defaultMatch: .domain)
         XCTAssertEqual(dom.map(\.id), ["1", "4"])
-        let www = AutofillMatcher.candidates([AutofillMatcher.page("www.example.com", isURL: false)!], all, defaultMatch: .host, server: "")
+        let www = AutofillMatcher.candidates([AutofillMatcher.page("www.example.com", isURL: false)!], all, defaultMatch: .host)
         XCTAssertEqual(www.map(\.id), ["1", "2"], "default match = host: both www logins, not the bare-domain ones")
     }
 
-    func testDowngradeAndVaultPageRefused() {
+    func testDowngradeRefusedAndVaultPageFilled() {
         let https = entry("1", name: "Secure", user: "a", urls: [("https://example.com", .default)])
         let local = entry("2", name: "Local", user: "b", urls: [("http://localhost:8099", .default)])
-        XCTAssertTrue(AutofillMatcher.candidates(["http://example.com/login"], [https], defaultMatch: .domain, server: "").isEmpty, "https login never on an http page")
-        XCTAssertEqual(AutofillMatcher.candidates(["http://localhost:8099/login.html"], [local], defaultMatch: .domain, server: "").map(\.id), ["2"])
+        XCTAssertTrue(AutofillMatcher.candidates(["http://example.com/login"], [https], defaultMatch: .domain).isEmpty, "https login never on an http page")
+        XCTAssertEqual(AutofillMatcher.candidates(["http://localhost:8099/login.html"], [local], defaultMatch: .domain).map(\.id), ["2"])
+        // The PassAuth server's own web vault is an ordinary website.
         let vaultLogin = entry("3", name: "Vault", user: "c", urls: [("https://vault.example.net", .default)])
-        XCTAssertTrue(AutofillMatcher.isVaultPage("https://vault.example.net/vault", server: "https://vault.example.net"))
-        XCTAssertTrue(AutofillMatcher.candidates(["https://vault.example.net/"], [vaultLogin], defaultMatch: .domain, server: "https://vault.example.net").isEmpty)
+        XCTAssertEqual(AutofillMatcher.candidates(["https://vault.example.net/login"], [vaultLogin], defaultMatch: .domain).map(\.id), ["3"])
     }
 
     func testSearch() {
@@ -86,11 +86,12 @@ final class AutofillTests: XCTestCase {
             entry("3", name: "Skipped", user: "carol", password: "x", urls: [("^https://.*", .regex), ("androidapp://com.x", .default), ("https://never.test", .never), ("ssh://host", .default)]),
             entry("4", name: "Server", user: "dave", password: "x", urls: [("https://pa.example.org", .default), ("https://pa.example.org/login", .host)]),
         ]
-        let r = IdentityMapper.records(entries, defaultMatch: .domain, server: "https://pa.example.org")
+        let r = IdentityMapper.records(entries, defaultMatch: .domain)
         let passwords = r.filter { $0.kind == .password }
-        XCTAssertEqual(passwords.map(\.service), ["example.com", "https://shop.test/account", "https://shop.test"], "deduplicated, regex/never/app/non-web and the server's host left out")
-        XCTAssertEqual(passwords.map(\.serviceType), [.domain, .url, .url])
-        XCTAssertEqual(passwords.map(\.recordId), ["1", "2", "2"])
+        XCTAssertEqual(passwords.map(\.service), ["example.com", "https://shop.test/account", "https://shop.test", "example.org", "https://pa.example.org"],
+                       "deduplicated, regex/never/app/non-web left out; the server's own address is written like any site")
+        XCTAssertEqual(passwords.map(\.serviceType), [.domain, .url, .url, .domain, .url])
+        XCTAssertEqual(passwords.map(\.recordId), ["1", "2", "2", "4", "4"])
         XCTAssertEqual(passwords.first?.user, "alice")
         XCTAssertEqual(r.filter { $0.kind == .oneTimeCode }.map(\.service), ["example.com"])
         let passkeys = r.filter { $0.kind == .passkey }
@@ -115,17 +116,17 @@ final class AutofillTests: XCTestCase {
 
     func testDefaultMatchChangesIdentities() {
         let e = [entry("1", name: "Example", user: "alice", urls: [("https://www.example.com/login", .default)])]
-        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .domain, server: "").map(\.service), ["example.com"])
-        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .host, server: "").map(\.service), ["https://www.example.com"])
-        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .exact, server: "").map(\.service), ["https://www.example.com/login"])
-        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .never, server: "").isEmpty)
+        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .domain).map(\.service), ["example.com"])
+        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .host).map(\.service), ["https://www.example.com"])
+        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .exact).map(\.service), ["https://www.example.com/login"])
+        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .never).isEmpty)
     }
 
     func testIdentitySyncWritesOnlyChanges() {
         let sync = CredentialIdentitySync()
         var writes: [[IdentityRecord]?] = []
         sync.sink = { writes.append($0) }
-        let r = IdentityMapper.records([entry("1", name: "A", user: "a", urls: [("https://a.test", .default)])], defaultMatch: .domain, server: "")
+        let r = IdentityMapper.records([entry("1", name: "A", user: "a", urls: [("https://a.test", .default)])], defaultMatch: .domain)
         sync.replace(r)
         sync.replace(r)
         XCTAssertEqual(writes.count, 1)
@@ -140,8 +141,8 @@ final class AutofillTests: XCTestCase {
     }
 
     func testIdentitySyncSeedsFromPersistedFingerprint() {
-        let r = IdentityMapper.records([entry("1", name: "A", user: "a", urls: [("https://a.test", .default)])], defaultMatch: .domain, server: "")
-        let other = IdentityMapper.records([entry("2", name: "B", user: "b", urls: [("https://b.test", .default)])], defaultMatch: .domain, server: "")
+        let r = IdentityMapper.records([entry("1", name: "A", user: "a", urls: [("https://a.test", .default)])], defaultMatch: .domain)
+        let other = IdentityMapper.records([entry("2", name: "B", user: "b", urls: [("https://b.test", .default)])], defaultMatch: .domain)
         // The fingerprint is handed out after a write (here: the test sink took it).
         let first = CredentialIdentitySync()
         var persisted: [String?] = []

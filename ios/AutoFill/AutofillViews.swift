@@ -140,9 +140,6 @@ private struct ListScreen: View {
         let suggestions = model.suggestions
         let passkeys = model.passkeyChoices
         List {
-            if model.isVaultPage {
-                Section { Text("PassAuth doesn't fill logins into its own web vault.").foregroundStyle(Color.paMuted) }.paRow()
-            }
             if !searching && !passkeys.isEmpty {
                 Section("Passkeys for \(model.passkeyRpId ?? "")") {
                     ForEach(passkeys, id: \.1.credentialId) { e, p in
@@ -155,7 +152,7 @@ private struct ListScreen: View {
                 }
                 .paRow()
             }
-            if !searching && !model.pages.isEmpty && !model.isVaultPage {
+            if !searching && !model.pages.isEmpty {
                 Section(model.pages.first.map { "Suggestions for \(AutofillMatcher.displayHost($0))" } ?? "Suggestions") {
                     if suggestions.isEmpty {
                         Text(model.onlyCodes ? "No login with a verification code for this website." : "No saved login for this website. Search all logins below.")
@@ -167,7 +164,7 @@ private struct ListScreen: View {
             }
             // Other logins (the suggestions aren't repeated), or the search results.
             let shown = Set(suggestions.map(\.id))
-            let results = model.searchResults(query).filter { searching || model.isVaultPage || !shown.contains($0.id) }
+            let results = model.searchResults(query).filter { searching || !shown.contains($0.id) }
             if searching || !results.isEmpty {
                 Section(searching ? "Results" : model.pages.isEmpty ? "All logins" : "Other logins") {
                     if results.isEmpty { Text("No logins found.").foregroundStyle(Color.paMuted) }
@@ -191,7 +188,6 @@ private struct ListScreen: View {
             Row(title: e.item.name, subtitle: e.item.login?.username ?? "", letter: e.item.name, hasCode: Clipboard.totp(e.item.login?.totp) != nil)
         }
         .accessibilityIdentifier("login-\(e.item.name)")
-        .disabled(model.isVaultPage)
     }
 }
 

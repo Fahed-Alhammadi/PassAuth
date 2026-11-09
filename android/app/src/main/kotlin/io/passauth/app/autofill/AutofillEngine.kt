@@ -45,19 +45,16 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
 
     private fun settings() = graph.repo.state.value.settings
 
-    /** Is filling (or saving) blocked for this target: PassAuth's own web vault. */
-    fun blocked(target: FillTarget): Boolean = AutofillMatcher.isVaultPage(target, graph.repo.state.value.server)
-
+    /** Matching logins for the target (the PassAuth server's own web vault is an ordinary website). */
     fun matches(vault: VaultData, target: FillTarget): List<Entry> {
-        if (blocked(target)) return emptyList()
         val logins = vault.entries.mapNotNull { e -> e.item.login?.let { e to it } }
         return AutofillMatcher.candidates(target, logins, settings().defaultMatch).map { it.first }
     }
 
-    /** Offer to save on this target? ("Ask to save" on, not on the never-save list, not the web vault.) */
+    /** Offer to save on this target? ("Ask to save" on and not on the never-save list.) */
     fun offerSave(target: FillTarget): Boolean {
         val s = settings()
-        return s.askToSave && AutofillMatcher.neverSaveKey(target) !in s.neverSave && !blocked(target)
+        return s.askToSave && AutofillMatcher.neverSaveKey(target) !in s.neverSave
     }
 
     /** The username and password a save request submitted. */

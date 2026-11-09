@@ -3,11 +3,11 @@ import Foundation
 /// Saving logins from AutoFill (`ASSavePasswordRequest`, iOS 26.2): whether to offer it and
 /// what it changes. The same rules as the extension's `onSubmitted` and Android's
 /// `onSaveRequest`: same site + user name → update that login's password (the old one goes to
-/// the password history), otherwise a new login; never when "Ask to save" is off, the site is
-/// on the never-save list (base domain), or on the PassAuth server's own web vault.
+/// the password history), otherwise a new login; never when "Ask to save" is off or the site is
+/// on the never-save list (base domain). The server's own web vault counts as any other site.
 public enum SaveLogic {
     public enum Blocked: Equatable, Sendable {
-        case askToSaveOff, neverSave, vaultPage, notWebsite, noPassword
+        case askToSaveOff, neverSave, notWebsite, noPassword
     }
 
     public enum Plan: Sendable {
@@ -35,19 +35,18 @@ public enum SaveLogic {
     }
 
     /// Why not to offer saving (nil: offer it). `page` is from `AutofillMatcher.page`.
-    public static func blocked(page: String?, password: String, settings: Settings, server: String) -> Blocked? {
+    public static func blocked(page: String?, password: String, settings: Settings) -> Blocked? {
         guard settings.askToSave else { return .askToSaveOff }
         guard let page, let key = neverSaveKey(page) else { return .notWebsite }
-        if AutofillMatcher.isVaultPage(page, server: server) { return .vaultPage }
         if settings.neverSave.contains(key) { return .neverSave }
         if password.isEmpty { return .noPassword }
         return nil
     }
 
     /// What saving `username` / `password` on `page` does to the vault.
-    public static func plan(page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch, server: String) -> Plan {
+    public static func plan(page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch) -> Plan {
         let user = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let same = AutofillMatcher.candidates([page], vault.entries, defaultMatch: defaultMatch, server: server)
+        let same = AutofillMatcher.candidates([page], vault.entries, defaultMatch: defaultMatch)
             .filter { ($0.item.login?.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == user }
         if let e = same.first(where: { $0.item.login?.password == password }) { return .unchanged(e) }
         if let e = same.first(where: vault.canWrite) { return .update(e) }

@@ -1,2 +1,2 @@
-• Fixes the app not starting after the 0.5.2 update.
-• Background sync: PassAuth refreshes your offline copy of the vault on its own, every 2 hours by default, so it's current when you open the app. Change or turn it off in Settings → Vault options → Background sync.
+• Autofill now works on your PassAuth web vault too: save a login for your server's address and it is offered on the vault's sign-in page.
+• Smaller fixes and updated help pages.

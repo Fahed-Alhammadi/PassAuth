@@ -51,7 +51,6 @@ class PassAuthAutofillService : AutofillService() {
         val form = parsed.form
         if (form.isEmpty) return null
         val target = engine.target(parsed) ?: return null
-        if (engine.blocked(target)) return null
         val state = graph.loadedState()
         if (state.status == Status.Setup || state.status == Status.LoggedOut) return null
         val ids = (form.fillIds + listOfNotNull(form.otp?.id)).distinct()

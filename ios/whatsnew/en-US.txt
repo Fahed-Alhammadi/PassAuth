@@ -1,3 +1,6 @@
-New in 0.5.3
-• Background sync: PassAuth now refreshes your offline copy of the vault in the background, about every 2 hours by default (iOS decides the exact moment), so it's current when you open the app or use AutoFill. Change or turn it off in Settings → Vault options → Background sync.
-Please test: change a login on another device, leave the iPhone alone for a few hours with the app in the background, then open PassAuth and check the change is already there before the sync spinner runs.
+New in 0.5.4
+• AutoFill is faster: it no longer downloads and decrypts your whole vault on every request, and it no longer rewrites the Safari/app suggestion index when nothing changed.
+• AutoFill now works on your PassAuth web vault too: save a login for your server's address and it is suggested on the vault's sign-in page.
+• A suggestion for a login you have deleted is now removed from the QuickType bar instead of showing an error.
+• If PassAuth's data can't be read for a moment (for example right after the phone restarts), AutoFill says so instead of asking you to sign in again.
+Please test: use AutoFill on a few sites and in apps; open your server's web vault in Safari and check the login you saved for it is suggested; delete a login and confirm its suggestion disappears.

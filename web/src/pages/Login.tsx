@@ -132,7 +132,7 @@ export function LoginPage() {
           <form className="auth-panel stack" onSubmit={submit}>
             <label className="field">
               <span>Email</span>
-              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus={!email} />
+              <input className="input" type="email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus={!email} />
             </label>
             <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus={!!email} />
             {needSecretKey && (

@@ -71,20 +71,6 @@ vault.setLockCheck(async () => {
   if (Date.now() - seen > 60_000 && (await vault.anyUnlocked())) await timeout();
 });
 
-/** PassAuth's own web vault (any signed-in account's server): never fill or offer to save there — it would capture a master password. */
-async function isVaultPage(url: string) {
-  const { accounts } = await local.get();
-  const page = parse(url);
-  if (!page) return false;
-  return Object.values(accounts).some((a) => {
-    try {
-      return !!a.server && new URL(a.server).origin === page.origin;
-    } catch {
-      return false;
-    }
-  });
-}
-
 // ------------------------------------------------------------ icon badge
 
 /** Show how many saved logins match each window's active tab (nothing while locked). */
@@ -180,7 +166,7 @@ async function onSubmitted(sender: chrome.runtime.MessageSender, username: strin
   if (tabId === undefined || !password || !sameSiteAsTab(sender) || !(await vault.ensureUnlocked().catch(() => false))) return false;
   const host = parse(url)?.hostname ?? "";
   const { neverSave, settings } = await local.get();
-  if (!settings.askToSave || !host || neverSave.includes(baseDomain(host)) || (await isVaultPage(url)) || (await isVaultPage(sender.tab?.url ?? ""))) return false;
+  if (!settings.askToSave || !host || neverSave.includes(baseDomain(host))) return false;
   if (!username) {
     // Identifier-first logins ask for the password on a second step without the username field.
     const last = ((await scratch.get<LastUsers>(LAST_USERS)) ?? {})[tabId];
@@ -286,7 +272,6 @@ async function fill(id: string, tabId: number, frameId?: number) {
   const url = tab.url ?? "";
   const page = parse(url);
   if (!page || !/^https?:$/.test(page.protocol)) throw new Error("PassAuth can only fill on websites.");
-  if (await isVaultPage(url)) throw new Error("PassAuth doesn't fill logins on your PassAuth web vault.");
   if (login.urls.length && !login.urls.some((u) => matchesUrl(url, u, settings.defaultMatch))) {
     throw new Error(`This login is saved for ${login.urls.map(describe).join(", ")}, not for this site.`);
   }
@@ -374,7 +359,7 @@ async function inlineInfo(sender: chrome.runtime.MessageSender): Promise<InlineI
   const { settings, tokens } = await local.get();
   const off: InlineInfo = { mode: "off", status: "locked", count: 0 };
   const top = parse(sender.tab?.url ?? "");
-  if (settings.inlineMenu === "off" || !tokens || !top || (await isVaultPage(top.href)) || (await isVaultPage(sender.url ?? ""))) return off;
+  if (settings.inlineMenu === "off" || !tokens || !top) return off;
   // Only frames on the same site as the tab: fill() refuses the others anyway.
   if (!sameSiteAsTab(sender)) return off;
   if (!(await vault.ensureUnlocked().catch(() => false))) return { mode: settings.inlineMenu, status: "locked", count: 0 };

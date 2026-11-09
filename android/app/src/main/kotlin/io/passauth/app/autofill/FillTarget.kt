@@ -90,13 +90,6 @@ object AutofillMatcher {
     fun <K> candidates(target: FillTarget, logins: List<Pair<K, Login>>, defaultMatch: UrlMatch): List<Pair<K, Login>> =
         logins.filter { (_, l) -> matches(target, l, defaultMatch) }
 
-    /** PassAuth's own web vault: never fill or save there (it would capture the master password). */
-    fun isVaultPage(target: FillTarget, server: String): Boolean {
-        if (target !is FillTarget.Web || server.isBlank()) return false
-        val s = UrlMatcher.parse(server) ?: return false
-        return s.origin == target.origin
-    }
-
     /** The never-save key: a website's base domain, or `androidapp://<package>`. */
     fun neverSaveKey(target: FillTarget): String = when (target) {
         is FillTarget.Web -> UrlMatcher.baseDomain(target.host)

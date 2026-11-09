@@ -308,9 +308,6 @@ struct MacList: View {
             .padding(.horizontal, 16).padding(.vertical, 10)
 
             List {
-                if model.isVaultPage {
-                    Text("PassAuth doesn't fill logins into its own web vault.").foregroundStyle(.secondary)
-                }
                 if !searching && !passkeys.isEmpty {
                     Section("Passkeys for \(model.passkeyRpId ?? "")") {
                         ForEach(passkeys, id: \.1.credentialId) { e, p in
@@ -323,7 +320,7 @@ struct MacList: View {
                         }
                     }
                 }
-                if !searching && !model.pages.isEmpty && !model.isVaultPage {
+                if !searching && !model.pages.isEmpty {
                     Section(model.pages.first.map { "Suggestions for \(AutofillMatcher.displayHost($0))" } ?? "Suggestions") {
                         if suggestions.isEmpty {
                             Text(model.onlyCodes ? "No login with a verification code for this website." : "No saved login for this website. Search all logins.")
@@ -333,7 +330,7 @@ struct MacList: View {
                     }
                 }
                 let shown = Set(suggestions.map(\.id))
-                let results = model.searchResults(query).filter { searching || model.isVaultPage || !shown.contains($0.id) }
+                let results = model.searchResults(query).filter { searching || !shown.contains($0.id) }
                 if searching || !results.isEmpty {
                     Section(searching ? "Results" : model.pages.isEmpty ? "All logins" : "Other logins") {
                         if results.isEmpty { Text("No logins found.").foregroundStyle(.secondary) }
@@ -362,7 +359,6 @@ struct MacList: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("login-\(e.item.name)")
-        .disabled(model.isVaultPage)
     }
 }
 
