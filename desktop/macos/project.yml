@@ -112,7 +112,6 @@ targets:
               ProvidesPasskeys: true
               # macOS 15 and later; macOS 14 ignores it.
               ProvidesOneTimeCodes: true
-              ShowsConfigurationUI: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.passauth.desktop.autofill

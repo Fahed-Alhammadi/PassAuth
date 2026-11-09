@@ -3,6 +3,7 @@ import LocalAuthentication
 import Observation
 import PassAuthCore
 import PassAuthKit
+import os
 
 /// What iOS asked the extension to do.
 enum AutofillRequest {
@@ -89,6 +90,8 @@ final class AutofillModel {
     private(set) var memoryNote = ""
     @ObservationIgnored weak var context: ASCredentialProviderExtensionContext?
     @ObservationIgnored private var finished = false
+    /// Outcomes only, never sites, names or secrets (`subsystem == "io.passauth.autofill"`).
+    static let log = Logger(subsystem: "io.passauth.autofill", category: "model")
     /// Password generation: the offered passwords and how they were made.
     private(set) var generated: [PasswordGeneration.Candidate] = []
     private(set) var generatePlan: PasswordGeneration.Plan?
@@ -117,6 +120,13 @@ final class AutofillModel {
             regenerate()
             screen = .generate
             return
+        }
+        // The state exists but couldn't be read (Keychain refused, e.g. right after login or
+        // wake): not "signed out" (a new sign-in's writes would be refused, as the unread state
+        // must never be replaced).
+        if repo.store.exists && !repo.store.loaded {
+            Self.log.error("start: state exists but can't be read")
+            return message("Can't read PassAuth's data", "Try again in a moment.")
         }
         let s = repo.state
         guard repo.store.exists, s.status == .locked || s.status == .unlocked else {
@@ -283,7 +293,9 @@ final class AutofillModel {
             return
         }
         guard let entry = entry(recordId) else {
-            return message("Login not found", "This login is no longer in your PassAuth vault (\(state.email)).")
+            // As for passkeys: the system drops the stale QuickType entry.
+            Self.log.notice("provide: record not in the vault, credentialIdentityNotFound")
+            return cancel(.credentialIdentityNotFound)
         }
         if isOneTimeCode(r) { fillCode(entry) } else { fill(entry) }
     }
@@ -572,6 +584,8 @@ final class AutofillModel {
     private func complete(_ body: @escaping @MainActor (ASCredentialProviderExtensionContext) -> Void) {
         guard !finished, context != nil else { return }
         finished = true
+        // The sheet shows progress while `handOver` waits for the identity store (macOS).
+        busy = true
         endOfRequest()
         handOver(body)
     }

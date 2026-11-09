@@ -77,12 +77,15 @@
         <figcaption>Click into a login field and PassAuth lists the logins saved for that site. The extension draws the list itself, so the website can't read it.</figcaption>
       </figure>
       <ul class="features">
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4l6.5 16 2.3-6.7L20.5 11z"/></svg><h3>Fill in one click</h3><p>Pick a login from the menu under the field, from the toolbar or with a shortcut. Logins only fill on the site they were saved for.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4l6.5 16 2.3-6.7L20.5 11z"/></svg><h3>Fill in one click</h3><p>Pick a login from the menu under the field, from the toolbar or with a shortcut. Logins only fill on the site they were saved for. On a Mac, the desktop app's AutoFill extension fills Safari and apps too.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><h3>Verification codes</h3><p>Codes count down next to the password and are copied after you fill, ready to paste.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15.5" r="4"/><path d="M11 12.5l8.5-8.5M16.5 7l2.5 2.5"/></svg><h3>Passkeys</h3><p>Create and use passkeys on sites that support them. They sync to all your devices with your passwords.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><h3>Save as you sign in</h3><p>PassAuth offers to save new logins and update changed passwords when you submit a form.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17" cy="9.5" r="2.5"/><path d="M16.5 14.2c2.9.3 5 2.4 5 5.8"/></svg><h3>Share with your people</h3><p>Share vaults with family or a team. Each vault key is sealed to each member, and you can compare key fingerprints to confirm who you share with.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4.5 16.5v3.5h15v-3.5"/></svg><h3>Bring your passwords</h3><p>Import the export file from your current password manager. It's read and encrypted in your browser.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-3 8.1-7 9.5-4-1.4-7-5.2-7-9.5V6z"/><path d="M9 12l2 2 4-4"/></svg><h3>Two-step login</h3><p>Protect your account with an authenticator app, an email code, a security key or a passkey. Recovery codes get you back in if you lose the device.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2.5-6 4 12 2.5-6h6"/></svg><h3>Works offline</h3><p>The extension and the apps keep an encrypted copy of your vault on the device, so you can unlock it and fill logins when your server is out of reach.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5V4.5M7.5 9l4.5-4.5L16.5 9M4.5 16.5v3.5h15v-3.5"/></svg><h3>Export anytime</h3><p>Take your vault with you as a file whenever you like, and print an Emergency Kit with everything you need to get back in.</p></li>
       </ul>
     </div>
   </section>
@@ -117,6 +120,7 @@
         <div><dt>Sign-in</dt><dd>OPAQUE proves you know your master password without sending it, so the server never sees it. Guessing it from stolen server data is slowed by Argon2id, and blocked if you use a Secret Key.</dd></div>
         <div><dt>Keys</dt><dd>Argon2id, optionally mixed with a 128-bit Secret Key that never leaves your devices.</dd></div>
         <div><dt>Encryption</dt><dd>Every item has its own key and is sealed with XChaCha20-Poly1305, bound to its vault so it can't be swapped.</dd></div>
+        <div><dt>Two-step login</dt><dd>A second step at sign-in: an authenticator app, an email code, a security key or a passkey in the web vault. Recovery codes cover a lost device.</dd></div>
       </dl>
       <p class="more"><a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/ARCHITECTURE.md">Read the security design</a></p>
     </div>
@@ -160,7 +164,7 @@ docker compose up -d</code></pre>
         </figure>
         <figure class="app app-wide">
           <div class="frame"><img src="assets/desktop-vault.png" width="1100" height="760" loading="lazy" alt="The PassAuth desktop app showing the vault list and a login."></div>
-          <figcaption><h3>Desktop</h3><p>macOS, Windows and Linux. Updates itself.</p>
+          <figcaption><h3>Desktop</h3><p>macOS, Windows and Linux. Lives in your menu bar or system tray, syncs in the background and updates itself. On a Mac it fills passwords, passkeys and codes in Safari and apps through AutoFill.</p>
             <ul class="downloads">
               <li><a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-macOS.dmg">Download for macOS</a></li>
               <li><a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Windows-x64-setup.exe">Download for Windows</a></li>
@@ -175,7 +179,7 @@ docker compose up -d</code></pre>
         </figure>
         <figure class="app">
           <div class="frame"><img src="assets/iphone-login.png" width="515" height="1120" loading="lazy" alt="A login in the PassAuth iPhone app with its username, password and verification code."></div>
-          <figcaption><h3>iPhone and iPad</h3><p>AutoFill for passwords, codes and passkeys. <span class="state">Not in the App Store yet. <a href="https://testflight.apple.com/join/MGBhGbhp">Join the beta on TestFlight</a></span></p></figcaption>
+          <figcaption><h3>iPhone and iPad</h3><p>AutoFill for passwords, codes and passkeys. Saves new logins and suggests strong passwords as you sign up. <span class="state">Not in the App Store yet. <a href="https://testflight.apple.com/join/MGBhGbhp">Join the beta on TestFlight</a></span></p></figcaption>
         </figure>
       </div>
     </div>
@@ -185,7 +189,7 @@ docker compose up -d</code></pre>
 <footer>
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="22" height="25"><span>Pass<b>Auth</b></span></a>
-    <span class="grow">© Fahed Alhammadi. Open source under the MIT License.</span>
+    <span class="grow">© 2026 Fahed Alhammadi. Open source under the MIT License.</span>
     <nav aria-label="Footer">
       <a href="privacy.html">Privacy policy</a>
       <a href="support.html">Support</a>

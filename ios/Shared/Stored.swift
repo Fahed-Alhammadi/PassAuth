@@ -156,6 +156,11 @@ public struct StoredFile: Codable, Equatable, Sendable {
     public var settings = Settings()
     /// Account order (oldest first), for stable lists.
     public var order: [String] = []
+    /// Fingerprint of the records last written to the system credential identity store
+    /// (`CredentialIdentitySync`), "" after it was emptied, nil when unknown: a process that
+    /// starts fresh (macOS runs the extension per request) skips rewriting an unchanged store.
+    /// Optional, so files written before it exists decode (`decodeIfPresent`).
+    public var identityFingerprint: String?
 }
 
 /// Secrets kept in the Keychain (this device only, never backed up).

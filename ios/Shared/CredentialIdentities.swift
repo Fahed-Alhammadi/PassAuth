@@ -111,11 +111,26 @@ public enum IdentityMapper {
 /// account is locked after a switch. Written only while PassAuth is enabled for AutoFill.
 @MainActor
 public final class CredentialIdentitySync {
+    /// Fingerprint of what the store holds as far as this process knows ("" = emptied, nil =
+    /// unknown): starts from the persisted value ([seed]) and moves on with each write started.
     private var last: String?
+    private var seeded = false
     /// Test hook: called with the records instead of writing to the system store.
     public var sink: (([IdentityRecord]?) -> Void)?
+    /// Called after the system store took a write, with the fingerprint of what it now holds
+    /// ("" after `clear`), or nil from [invalidate]: the owner persists it for the next process
+    /// (`StoredFile.identityFingerprint`), so an unchanged store isn't rewritten on every launch.
+    public var onWritten: ((String?) -> Void)?
 
     public init() {}
+
+    /// Start from the fingerprint persisted by an earlier process; only the first call counts,
+    /// and never after [invalidate] in this process.
+    public func seed(_ fingerprint: String?) {
+        guard !seeded else { return }
+        seeded = true
+        if last == nil { last = fingerprint }
+    }
 
     /// Whether PassAuth is turned on in Settings → General → AutoFill & Passwords.
     public static func isEnabled() async -> Bool {
@@ -138,7 +153,7 @@ public final class CredentialIdentitySync {
         let key = Self.fingerprint(records)
         guard key != last else { return }
         last = key
-        if let sink { return sink(records) }
+        if let sink { sink(records); onWritten?(key); return }
         let identities = IdentityMapper.identities(records)
         pending = Task {
             guard await Self.isEnabled() else {
@@ -148,6 +163,7 @@ public final class CredentialIdentitySync {
             do {
                 try await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities)
                 Self.log.notice("identity store: wrote \(records.count) records")
+                onWritten?(key)
             } catch {
                 Self.log.error("identity store: write failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -187,14 +203,24 @@ public final class CredentialIdentitySync {
     public func clear() {
         guard last != "" else { return }
         last = ""
-        if let sink { return sink(nil) }
+        if let sink { sink(nil); onWritten?(""); return }
         pending = Task {
-            try? await ASCredentialIdentityStore.shared.removeAllCredentialIdentities()
+            do {
+                try await ASCredentialIdentityStore.shared.removeAllCredentialIdentities()
+                onWritten?("")
+            } catch {
+                Self.log.error("identity store: clear failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
-    /// Forget what was written (e.g. AutoFill was just turned on): the next replace writes again.
-    public func invalidate() { last = nil }
+    /// Forget what was written (e.g. AutoFill was just turned on), here and in the persisted
+    /// fingerprint: the next replace writes again, in this process and the next.
+    public func invalidate() {
+        last = nil
+        seeded = true
+        onWritten?(nil)
+    }
 
     static func fingerprint(_ records: [IdentityRecord]) -> String {
         var h = SHA256()

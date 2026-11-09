@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Support — PassAuth</title>
 <meta name="description" content="Get help with PassAuth: setup, sign-in, deleting your account and reporting problems.">
+<meta property="og:title" content="Support — PassAuth">
+<meta property="og:description" content="Get help with PassAuth: setup, sign-in, deleting your account and reporting problems.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://fahed-alhammadi.github.io/PassAuth/support.html">
+<link rel="canonical" href="https://fahed-alhammadi.github.io/PassAuth/support.html">
+<meta name="theme-color" content="#082052">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
@@ -30,10 +36,16 @@
 
     <h2>Getting started</h2>
     <ul>
-      <li><strong>You need a PassAuth server.</strong> Run your own (see the <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">installation guide</a>) or ask the person who runs your organization's server for an account.</li>
+      <li><strong>You need a PassAuth server.</strong> Run your own (see the <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>) or ask the person who runs your organization's server for an account.</li>
       <li><strong>Connect an app or the extension</strong> by entering the server's address (it must start with <code>https://</code>), then sign in with your email and master password.</li>
-      <li><strong>Turn on autofill</strong> on Android in the app's Settings → Autofill, which opens the system setting where you choose PassAuth.</li>
+      <li><strong>Turn on autofill.</strong> Android: in the app, Settings → Autofill opens the system setting where you choose PassAuth. iPhone and iPad: Settings → General → AutoFill &amp; Passwords, turn on PassAuth. Mac (macOS 14 or later): install the desktop app and sign in, then in System Settings → General → AutoFill &amp; Passwords turn on PassAuth; the extension reuses the app's server address, email and Secret Key, so you only type your master password. Browser extension: turn on "Make PassAuth your default password manager" in its settings so the browser stops offering to save passwords itself.</li>
     </ul>
+
+    <h2>The desktop app</h2>
+    <p>The desktop app lives in the menu bar on macOS and in the system tray on Windows and Linux. Closing the window keeps it running; quit it from the menu bar or tray icon. In Settings → Account → "This app" you can start it at login, show or hide the Dock icon on macOS, and change how often it syncs in the background (every 2 hours by default). It checks for a new version once a day and asks before installing. On Windows, the first run shows a SmartScreen warning because the installer isn't code-signed yet: choose "More info", then "Run anyway".</p>
+
+    <h2>HTTPS and self-signed certificates</h2>
+    <p>The apps and the extension connect to your server only over <code>https://</code>. Use a certificate from a public certificate authority, which most reverse proxies can obtain for you; the <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md#https">HTTPS section of the self-hosting guide</a> shows how. A self-signed certificate is trusted only on devices where you've installed it as a trusted root, so phones, browsers and the desktop app will refuse the connection until you do.</p>
 
     <h2>I forgot my master password</h2>
     <p>Nobody can recover it, not even the server's administrator: your vault is encrypted with keys only your master password (and Secret Key, if you use one) can unlock. The account can only be deleted and created again. Write your master password down in your Emergency Kit and keep it somewhere safe.</p>
@@ -41,18 +53,24 @@
     <h2>I lost my Secret Key</h2>
     <p>Your Secret Key is in the Emergency Kit you saved when you created the account, and on every device where you've signed in. Without it you can't sign in on a new device.</p>
 
+    <h2>Where is my Emergency Kit?</h2>
+    <p>In the web vault, go to <strong>Settings → Account → Emergency Kit</strong> and print it or save it as a PDF. It lists your server's address, your email and your Secret Key, with room to write your master password. Keep it somewhere safe, offline, and keep your two-step login recovery codes with it.</p>
+
+    <h2>I lost my two-step login device</h2>
+    <p>Sign in with one of the recovery codes you saved when you turned on two-step login, then set up the new device again under Two-step login in Settings (Account security in the mobile apps). If you added a second method (for example an email code next to an authenticator app), you can use that instead. Without a recovery code or another method, you can't sign in; in that case ask your server's administrator for help.</p>
+
     <h2 id="delete-account">Delete your account</h2>
     <p>Open your PassAuth server in a browser, sign in to the web vault, and go to <strong>Settings → Account → Delete account</strong>. This permanently deletes the account and all vaults you own. If you can't sign in, ask your server's administrator to delete it from the admin page. See also the <a href="privacy.html#delete-account">privacy policy</a>.</p>
 
     <h2>Running the server</h2>
-    <p>Installation, the admin token, email, HTTPS, updates and backups are covered in the <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">installation guide</a>.</p>
+    <p>Installation, the admin token, email, HTTPS, updates and backups are covered in the <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">self-hosting guide</a>.</p>
   </div>
 </main>
 
 <footer>
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="22" height="25"><span>Pass<b>Auth</b></span></a>
-    <span class="grow">© Fahed Alhammadi. Open source under the MIT License.</span>
+    <span class="grow">© 2026 Fahed Alhammadi. Open source under the MIT License.</span>
     <nav aria-label="Footer">
       <a href="privacy.html">Privacy policy</a>
       <a href="support.html">Support</a>

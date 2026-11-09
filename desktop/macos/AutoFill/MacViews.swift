@@ -141,7 +141,10 @@ struct MacField: View {
     var prompt: String? = nil
     var content: NSTextContentType? = nil
     var submit: (() -> Void)? = nil
+    /// Take the keyboard focus when shown (the first box of a step).
+    var autofocus = false
     @State private var reveal = false
+    @FocusState private var focused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -158,9 +161,12 @@ struct MacField: View {
                 .textFieldStyle(.roundedBorder)
                 .textContentType(content)
                 .autocorrectionDisabled()
+                .focused($focused)
                 .onSubmit { submit?() }
                 .accessibilityLabel(label)
                 .accessibilityIdentifier(label)
+                .onAppear { if autofocus { takeFocus() } }
+                .onChange(of: autofocus) { if autofocus { takeFocus() } }
                 if secure {
                     Button { reveal.toggle() } label: { Image(systemName: reveal ? "eye.slash" : "eye") }
                         .buttonStyle(.borderless)
@@ -168,6 +174,15 @@ struct MacField: View {
                         .accessibilityLabel(reveal ? "Hide \(label.lowercased())" : "Show \(label.lowercased())")
                 }
             }
+        }
+    }
+
+    /// The hosting view isn't always the key view yet when the step appears: ask again shortly after.
+    private func takeFocus() {
+        focused = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            if autofocus && !focused { focused = true }
         }
     }
 }
@@ -223,7 +238,7 @@ struct MacUnlock: View {
         let bio = BiometryKind.current
         let canBio = state.biometricEnabled && bio.available
         MacFrame(title: "Unlock PassAuth", subtitle: state.email) {
-            MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } })
+            MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } }, autofocus: true)
             if needKey { MacField(label: "Secret Key", text: $secretKey, mono: true, submit: submit) }
             ErrorText(text: model.error)
             MacPrimaryButton(title: model.busy ? "Unlocking…" : "Unlock", busy: model.busy, enabled: !password.isEmpty, action: submit)
@@ -255,12 +270,26 @@ struct MacList: View {
     @Bindable var model: AutofillModel
     @State private var query = ""
     @FocusState private var searchFocused: Bool
+    /// `model.suggestions` / `passkeyChoices` match every login against the pages: computed
+    /// when the list appears and when the vault or the match setting changes, not per render.
+    @State private var suggestions: [Entry] = []
+    @State private var passkeys: [(Entry, Passkey)] = []
+
+    /// What the suggestions depend on.
+    private struct Inputs: Equatable {
+        var revision: Int64?
+        var entries: Int
+        var match: UrlMatch
+    }
+
+    private var inputs: Inputs {
+        Inputs(revision: model.repo.vault?.revision, entries: model.repo.vault?.entries.count ?? -1, match: model.state.settings.defaultMatch)
+    }
+
+    private static let log = Logger(subsystem: "io.passauth.autofill", category: "list")
 
     var body: some View {
         let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
-        let suggestions = model.suggestions
-        let _ = Logger(subsystem: "io.passauth.autofill", category: "list").notice("list: \(model.pages.count) pages, \(suggestions.count) suggestions, \(model.repo.vault?.entries.count ?? -1) entries")
-        let passkeys = model.passkeyChoices
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -314,7 +343,17 @@ struct MacList: View {
             }
             .listStyle(.inset)
         }
-        .onAppear { searchFocused = suggestions.isEmpty && passkeys.isEmpty }
+        .onAppear {
+            recompute()
+            Self.log.notice("list: \(model.pages.count) pages, \(suggestions.count) suggestions, \(model.repo.vault?.entries.count ?? -1) entries")
+            searchFocused = suggestions.isEmpty && passkeys.isEmpty
+        }
+        .onChange(of: inputs) { recompute() }
+    }
+
+    private func recompute() {
+        suggestions = model.suggestions
+        passkeys = model.passkeyChoices
     }
 
     private func entryRow(_ e: Entry) -> some View {

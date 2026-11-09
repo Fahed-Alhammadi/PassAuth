@@ -139,6 +139,58 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(writes.count, 4)
     }
 
+    func testIdentitySyncSeedsFromPersistedFingerprint() {
+        let r = IdentityMapper.records([entry("1", name: "A", user: "a", urls: [("https://a.test", .default)])], defaultMatch: .domain, server: "")
+        let other = IdentityMapper.records([entry("2", name: "B", user: "b", urls: [("https://b.test", .default)])], defaultMatch: .domain, server: "")
+        // The fingerprint is handed out after a write (here: the test sink took it).
+        let first = CredentialIdentitySync()
+        var persisted: [String?] = []
+        first.sink = { _ in }
+        first.onWritten = { persisted.append($0) }
+        first.replace(r)
+        XCTAssertEqual(persisted.count, 1)
+        guard let fp = persisted[0], !fp.isEmpty else { return XCTFail("no fingerprint") }
+        first.clear()
+        XCTAssertEqual(persisted.last, "")
+
+        // The next process, seeded with it, doesn't rewrite the same records; only the first seed counts.
+        let next = CredentialIdentitySync()
+        var writes: [[IdentityRecord]?] = []
+        next.sink = { writes.append($0) }
+        next.seed(fp)
+        next.replace(r)
+        XCTAssertEqual(writes.count, 0)
+        next.replace(other)
+        XCTAssertEqual(writes.count, 1)
+        next.seed(fp)
+        next.replace(r)
+        XCTAssertEqual(writes.count, 2)
+
+        // Seeded "" (store emptied): a clear is skipped, a replace writes.
+        let empty = CredentialIdentitySync()
+        var emptyWrites = 0
+        empty.sink = { _ in emptyWrites += 1 }
+        empty.seed("")
+        empty.clear()
+        XCTAssertEqual(emptyWrites, 0)
+        empty.replace(r)
+        XCTAssertEqual(emptyWrites, 1)
+
+        // invalidate forgets the persisted value too and wins over a later seed.
+        let reset = CredentialIdentitySync()
+        var resetWrites = 0
+        var resetPersisted: [String?] = []
+        reset.sink = { _ in resetWrites += 1 }
+        reset.onWritten = { resetPersisted.append($0) }
+        reset.invalidate()
+        XCTAssertEqual(resetPersisted.count, 1)
+        XCTAssertNil(resetPersisted[0])
+        reset.seed(fp)
+        reset.replace(r)
+        XCTAssertEqual(resetWrites, 1)
+        XCTAssertEqual(resetPersisted.last, fp)
+    }
+
     // MARK: Passkeys
 
     func testPasskeyRegistrationAssertionAndStoredShape() throws {

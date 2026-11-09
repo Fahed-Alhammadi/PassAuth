@@ -79,6 +79,11 @@ struct ShellSettings {
 #[serde(rename_all = "camelCase")]
 struct ShellSettingsDto {
     keep_dock: bool,
+    /// One-shot: the next launch shows the window even with `--hidden`. Set before an update restarts the app
+    /// (the updater re-executes with the same arguments, so an app started by the login item would come back
+    /// tray-only and look as if the update had failed). Cleared when consumed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    show_next_launch: bool,
 }
 
 fn shell_settings_path(app: &AppHandle) -> Option<std::path::PathBuf> {
@@ -95,10 +100,31 @@ fn load_shell_settings(app: &AppHandle) -> ShellSettingsDto {
         .unwrap_or_default()
 }
 
+fn save_shell_settings(app: &AppHandle, dto: &ShellSettingsDto) -> Result<(), String> {
+    let path = shell_settings_path(app).ok_or("no config directory")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_vec(dto).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Before the updater restarts the app (`show` = true), or to undo that when the install failed.
+#[tauri::command]
+fn prepare_relaunch(app: AppHandle, show: bool) -> Result<(), String> {
+    let mut dto = load_shell_settings(&app);
+    if dto.show_next_launch == show {
+        return Ok(());
+    }
+    dto.show_next_launch = show;
+    save_shell_settings(&app, &dto)
+}
+
 #[tauri::command]
 fn shell_settings_get(settings: State<ShellSettings>) -> ShellSettingsDto {
     ShellSettingsDto {
         keep_dock: settings.keep_dock.load(Ordering::Relaxed),
+        show_next_launch: false,
     }
 }
 
@@ -107,12 +133,9 @@ fn shell_settings_set(app: AppHandle, keep_dock: bool) -> Result<(), String> {
     app.state::<ShellSettings>()
         .keep_dock
         .store(keep_dock, Ordering::Relaxed);
-    let path = shell_settings_path(&app).ok_or("no config directory")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let json = serde_json::to_vec(&ShellSettingsDto { keep_dock }).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    let mut dto = load_shell_settings(&app);
+    dto.keep_dock = keep_dock;
+    save_shell_settings(&app, &dto)?;
     // Applies at once if the window is closed right now.
     let visible = app
         .get_webview_window(WINDOW)
@@ -464,17 +487,33 @@ fn allowed_navigation(url: &Url) -> bool {
     }
 }
 
-fn launched_hidden() -> bool {
-    std::env::args().skip(1).any(|a| a == HIDDEN_ARG)
+fn hidden_arg(args: &[String]) -> bool {
+    args.iter().any(|a| a == HIDDEN_ARG)
 }
 
-fn build_window(app: &AppHandle) -> tauri::Result<()> {
+/// Started by the login item (`--hidden`), unless an update restart asked for the window once (see
+/// `ShellSettingsDto::show_next_launch`). Decided once per run, in `setup`.
+fn launched_hidden(app: &AppHandle) -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !hidden_arg(&args) {
+        return false;
+    }
+    let mut dto = load_shell_settings(app);
+    if dto.show_next_launch {
+        dto.show_next_launch = false;
+        let _ = save_shell_settings(app, &dto);
+        return false;
+    }
+    true
+}
+
+fn build_window(app: &AppHandle, hidden: bool) -> tauri::Result<()> {
     WebviewWindowBuilder::new(app, WINDOW, WebviewUrl::default())
         .title("PassAuth")
         .inner_size(1100.0, 760.0)
         .min_inner_size(900.0, 620.0)
         // The login item starts the app in the tray.
-        .visible(!launched_hidden())
+        .visible(!hidden)
         .on_navigation(allowed_navigation)
         // Links that would open a new window go to the browser instead.
         .on_new_window(|url, _| {
@@ -636,8 +675,12 @@ pub fn run() {
         })
         // First, so a second launch is caught before anything else starts. Its `deep-link` feature hands a link
         // that launched the second instance (Windows, Linux) to the deep-link plugin before calling this.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_window(app)
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // A second launch brings the window up, unless it is the login item starting the app while a
+            // copy already runs (e.g. macOS "reopen windows at login" racing the login item).
+            if !hidden_arg(&args[1.min(args.len())..]) {
+                show_window(app)
+            }
         }))
         // otpauth:// and apple-otpauth:// links (schemes in tauri.conf.json): the webview reads them with
         // `getCurrent` / `onOpenUrl` and offers to add the verification code to a login.
@@ -668,11 +711,13 @@ pub fn run() {
             save_file,
             shell_settings_get,
             shell_settings_set,
+            prepare_relaunch,
             autofill_handoff,
             autofill_handoff_clear
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            let hidden = launched_hidden(&handle);
             app.manage(ShellSettings {
                 keep_dock: AtomicBool::new(load_shell_settings(&handle).keep_dock),
             });
@@ -680,8 +725,8 @@ pub fn run() {
             let tray_lock = lock_item(&handle)?;
             app.set_menu(build_menu(&handle, &menu_lock)?)?;
             build_tray(&handle, &tray_lock)?;
-            build_window(&handle)?;
-            if launched_hidden() {
+            build_window(&handle, hidden)?;
+            if hidden {
                 apply_dock(&handle, false);
             }
             app.manage(LockItems(vec![menu_lock, tray_lock]));
@@ -689,9 +734,11 @@ pub fn run() {
             watch_system_lock(handle.clone());
             let shown = handle.clone();
             app.deep_link().on_open_url(move |_| show_window(&shown));
-            // deb/rpm and the Windows installer register the schemes; an AppImage has to do it itself.
+            // deb/rpm and the Windows installer register the schemes; an AppImage has to do it itself (once:
+            // `register_all` spawns update-desktop-database + xdg-mime, so skip it when already registered).
             #[cfg(target_os = "linux")]
             if handle.env().appimage.is_some()
+                && !app.deep_link().is_registered("otpauth").unwrap_or(false)
                 && let Err(e) = app.deep_link().register_all()
             {
                 eprintln!("couldn't register the otpauth link handler: {e}");

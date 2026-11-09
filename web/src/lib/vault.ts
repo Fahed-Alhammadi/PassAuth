@@ -465,12 +465,33 @@ async function doSync() {
   });
 }
 
+/** Reconnect delay: 3 s after a healthy connection drops, doubling to 2 min while the server stays unreachable. */
+const RECONNECT_MIN = 3000;
+const RECONNECT_MAX = 120_000;
+let reconnectDelay = RECONNECT_MIN;
+let onlineListener: (() => void) | null = null;
+
 function connectSocket() {
   socket?.close();
   const t = getTokens();
   if (!t) return;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    // Offline: don't hammer the network; reconnect when the browser/OS reports a connection again.
+    if (!onlineListener && typeof window !== "undefined") {
+      onlineListener = () => {
+        window.removeEventListener("online", onlineListener!);
+        onlineListener = null;
+        if (state.status === "unlocked") connectSocket();
+      };
+      window.addEventListener("online", onlineListener);
+    }
+    return;
+  }
   const ws = new WebSocket(server.wsUrl(`/ws?access_token=${encodeURIComponent(t.access)}`));
   socket = ws;
+  ws.onopen = () => {
+    reconnectDelay = RECONNECT_MIN;
+  };
   ws.onmessage = (e) => {
     let msg: { type?: string; revision?: number };
     try {
@@ -483,7 +504,11 @@ function connectSocket() {
   };
   ws.onclose = () => {
     if (socket !== ws || state.status !== "unlocked") return;
-    // Reconnect after the access token has had a chance to refresh.
+    // Reconnect after the access token has had a chance to refresh; back off while the server is unreachable
+    // (a desktop app in the tray would otherwise retry every few seconds all night). `resync()` on wake/focus
+    // reconnects at once regardless of the delay.
+    const delay = reconnectDelay + Math.random() * 1000;
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX);
     setTimeout(() => {
       if (state.status === "unlocked" && socket === ws) {
         api<{ revision: number }>("/sync/revision")
@@ -493,7 +518,7 @@ function connectSocket() {
             if (state.status === "unlocked" && socket === ws) connectSocket();
           });
       }
-    }, 3000);
+    }, delay);
   };
 }
 
@@ -506,6 +531,7 @@ export async function resync(): Promise<void> {
   if (state.status !== "unlocked") return;
   const r = await api<{ revision: number }>("/sync/revision");
   if (state.status !== "unlocked") return;
+  reconnectDelay = RECONNECT_MIN;
   connectSocket();
   if (r.revision > state.revision) await sync();
 }

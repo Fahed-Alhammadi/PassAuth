@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy policy — PassAuth</title>
 <meta name="description" content="How the PassAuth apps, browser extension and server handle your data.">
+<meta property="og:title" content="Privacy policy — PassAuth">
+<meta property="og:description" content="How the PassAuth apps, browser extension and server handle your data.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://fahed-alhammadi.github.io/PassAuth/privacy.html">
+<link rel="canonical" href="https://fahed-alhammadi.github.io/PassAuth/privacy.html">
+<meta name="theme-color" content="#082052">
 <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="assets/fonts/ibm-plex-sans-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
@@ -22,7 +28,7 @@
 <main class="doc" id="main">
   <div class="wrap">
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated: 1 November 2026</p>
+    <p class="updated">Last updated: 9 November 2026</p>
 
     <p>PassAuth is a self-hosted password manager. This policy covers the PassAuth Android, iOS and desktop apps, the PassAuth browser extension, the web vault and the PassAuth server software. You choose the PassAuth server the apps connect to. It is run by you, or by the organization that gave you an account, not by the PassAuth developer.</p>
 
@@ -41,22 +47,23 @@
       <li>Encrypted vault data and account details go only to the PassAuth server address you enter.</li>
       <li>If "Show website icons" is on, the apps ask <em>your</em> PassAuth server for the icon of a website saved in your vault; the server fetches it from that website. Your server therefore learns which website addresses have icons requested, but nothing else from your vault. You can turn this off in Settings → Appearance.</li>
       <li>The desktop app checks GitHub (github.com) for a new version once a day and whenever you ask it to. That request sends your IP address and the app's version to GitHub, and nothing else. Website icons fetched from your server may be cached on the device, as a browser would cache them.</li>
+      <li>The apps sync in the background: the desktop app every 2 hours by default (you can change or turn this off), the Android and iOS apps when the system allows. A background sync only refreshes the encrypted copy of your vault from your server; it doesn't unlock the vault or send anything new.</li>
       <li>Nothing is sent to the PassAuth developer. The apps and the extension contain no analytics, advertising, tracking or third-party services.</li>
     </ul>
 
     <h2>On your devices</h2>
     <ul>
-      <li>The apps keep your settings, your accounts' server addresses and sign-in tokens, and your encrypted vault data on the device. Mobile apps protect them with the device's secure key storage (Android Keystore, iOS Keychain).</li>
+      <li>The apps keep your settings, your accounts' server addresses and sign-in tokens, and your encrypted vault data on the device. Mobile apps protect them with the device's secure key storage (Android Keystore, iOS Keychain). The desktop app keeps its sign-in tokens in the system keychain (macOS Keychain, Windows Credential Manager, the Linux secret service), along with the vault keys if you set the vault timeout to "Never", and on macOS a hand-off item with your server address, email and Secret Key that the AutoFill extension reads so you don't have to type them again. Your master password is never stored.</li>
       <li>While the vault is unlocked, its keys are kept in memory. If you turn on unlocking with fingerprint or face, the keys are stored encrypted with a key that only your device's biometric check can release. Your biometric data itself is handled by the device and never seen by PassAuth.</li>
       <li>The vault locks after the time you choose (or never, if you choose so). Logging out removes the account and its data from the device. Uninstalling the app or extension removes everything it stored.</li>
-      <li>Copied passwords and codes are marked as sensitive and cleared from the clipboard after a delay you choose (30 seconds by default).</li>
+      <li>Copied passwords and codes are marked as sensitive and cleared from the clipboard after a delay you choose (30 seconds by default). The macOS AutoFill extension is the exception: it can't clear the clipboard, so a code you copy there stays until you copy something else.</li>
     </ul>
 
     <h2>Camera</h2>
     <p>The mobile apps use the camera only when you choose to scan a two-step login QR code while adding a verification code to an item. The image is read on your device to find the code and is never stored or sent anywhere.</p>
 
-    <h2>Autofill and passkeys on Android and iOS</h2>
-    <p>If you enable PassAuth as your autofill service or passkey provider, the operating system shows PassAuth the login fields of the app or website you're using, and the request details for passkeys. PassAuth uses them only to offer and fill your own logins and passkeys, and to save new ones you confirm. PassAuth does not use accessibility services.</p>
+    <h2>Autofill and passkeys on Android, iOS and macOS</h2>
+    <p>If you enable PassAuth as your autofill service or passkey provider, the operating system shows PassAuth the login fields of the app or website you're using, and the request details for passkeys. PassAuth uses them only to offer and fill your own logins and passkeys, and to save new ones you confirm. PassAuth does not use accessibility services. On macOS, the desktop app's AutoFill extension works the same way: macOS tells it which website or app asked, and it fills only logins, passkeys and one-time codes you pick.</p>
 
     <h2>Browser extension</h2>
     <p>The extension needs access to the websites you visit to detect login forms, fill the login you choose (only on the site it was saved for), offer to save logins and answer passkey requests. If you turn on "Make PassAuth your default password manager", it uses the browser's privacy settings to turn off the browser's own password saving and address and card autofill; turning it off gives these back to the browser.</p>
@@ -81,7 +88,7 @@
 <footer>
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="22" height="25"><span>Pass<b>Auth</b></span></a>
-    <span class="grow">© Fahed Alhammadi. Open source under the MIT License.</span>
+    <span class="grow">© 2026 Fahed Alhammadi. Open source under the MIT License.</span>
     <nav aria-label="Footer">
       <a href="privacy.html">Privacy policy</a>
       <a href="support.html">Support</a>

@@ -177,7 +177,6 @@ targets:
               ProvidesPasskeys: true
               # iOS 18 and later; earlier versions ignore it.
               ProvidesOneTimeCodes: true
-              ShowsConfigurationUI: true
               # iOS 26.2 and later: save logins from sign-up / password change forms
               # (ASSavePasswordRequest) and generate passwords for new-password fields
               # (ASGeneratePasswordsRequest; with UI, the default of

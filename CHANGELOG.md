@@ -2,7 +2,7 @@
 
 Changes to the PassAuth server and web vault, newest first. Each version is published as the Docker image `ghcr.io/fahed-alhammadi/passauth:X.Y.Z`, and `:latest` always points to the newest one. Update with `docker compose pull && docker compose up -d`.
 
-The browser extension and the mobile apps show their changes in their stores.
+The desktop app has its own releases on GitHub; the browser extension and the mobile apps show their changes in their stores.
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 

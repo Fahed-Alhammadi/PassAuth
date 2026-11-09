@@ -3,6 +3,7 @@
  * before anything is downloaded or installed; the dialog is the web vault's Modal, not a native one.
  */
 import { useState, useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Modal } from "@web/components/ui";
@@ -67,6 +68,9 @@ export async function installUpdate() {
   const update = found;
   let downloaded = 0;
   setPhase({ kind: "downloading", version: update.version, downloaded: 0, total: null });
+  // The updater restarts the app with this run's arguments (on Windows the installer does): an app started by
+  // the login item would come back hidden in the tray. Ask the shell to show the window once on the next launch.
+  await invoke("prepare_relaunch", { show: true }).catch(() => {});
   try {
     await update.downloadAndInstall((event) => {
       if (event.event === "Started") setPhase({ kind: "downloading", version: update.version, downloaded: 0, total: event.data.contentLength ?? null });
@@ -77,6 +81,7 @@ export async function installUpdate() {
     });
     await relaunch();
   } catch (e) {
+    await invoke("prepare_relaunch", { show: false }).catch(() => {});
     found = null;
     setPhase({ kind: "error", message: "Couldn't install the update. Try again later.", detail: detailOf(e) });
   }

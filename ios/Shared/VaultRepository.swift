@@ -183,6 +183,9 @@ public final class VaultRepository {
     public init(store: SecureStore, api: ApiClient) {
         self.store = store
         self.api = api
+        identities.onWritten = { [weak self] fingerprint in
+            self?.store.update { $0.file.identityFingerprint = fingerprint }
+        }
         api.onSessionLost = { [weak self] id in
             // Runs later: the request that noticed it may hold the lock.
             Task { @MainActor in
@@ -689,12 +692,21 @@ public final class VaultRepository {
         try await lock.run { try await syncLocked() }
     }
 
-    /// Re-sync if the server has newer data (cheap revision check).
+    /// Re-sync if the server has newer data (cheap revision check). When the server's revision
+    /// is the one already shown, the copy is current: only the offline mark is dropped (no
+    /// `/sync`, decrypt or cache re-seal). An unanswered revision call keeps it.
     public func refreshIfStale() async {
         guard let current = vault else { return }
         let id = activeId
         guard let r = try? await api.call(id, "/sync/revision")["revision"]?.int else { return }
-        if r > current.revision || current.offline { await lock.run { try? await syncLocked() } }
+        if r > current.revision {
+            await lock.run { try? await syncLocked() }
+        } else if current.offline {
+            await lock.run {
+                guard activeId == id, let v = vault, v.offline, v.revision == current.revision else { return }
+                vault?.offline = false
+            }
+        }
     }
 
     /// Fetch and decrypt the active account's vault. With `fallbackToCache` an unreachable
@@ -828,6 +840,7 @@ public final class VaultRepository {
     /// active account is locked or signed out).
     public func refreshIdentities() {
         let s = store.get()
+        identities.seed(s.file.identityFingerprint)
         guard let v = vault, sessions[s.activeId] != nil else { return identities.clear() }
         identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch, server: s.active?.server ?? ""))
     }

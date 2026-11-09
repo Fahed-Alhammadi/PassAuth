@@ -128,7 +128,7 @@ section .lead { color: var(--ink-2); font-size: var(--t-lg); line-height: 1.55; 
 .ledger ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .ledger li { padding-left: 30px; position: relative; color: var(--ink-2); }
 .ledger li::before { content: ""; position: absolute; left: 9px; top: 0.72em; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.45; }
-.crypto { margin: 48px 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 48px; }
+.crypto { margin: 48px 0 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 32px 40px; }
 .crypto div { border-top: 2px solid var(--blue); padding-top: 16px; }
 .crypto dt { font-weight: 600; margin-bottom: 6px; }
 .crypto dd { margin: 0; color: var(--ink-2); }
@@ -182,6 +182,9 @@ footer a:hover { color: #fff; text-decoration: underline; }
 @media (max-width: 1099px) {
   .apps { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; }
   .app .frame { height: 440px; }
+}
+@media (max-width: 1099px) {
+  .crypto { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 48px; }
 }
 @media (max-width: 920px) {
   .hero .wrap, .split { grid-template-columns: minmax(0, 1fr); gap: 48px; }

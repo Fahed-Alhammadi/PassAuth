@@ -4,7 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "@web/components/ui";
 import { forgetSecrets, type DesktopHooks } from "@web/lib/platform";
-import { getState, logout } from "@web/lib/vault";
+import { EMAIL_KEY, getState, logout, rememberKey, secretKeyKey } from "@web/lib/vault";
+import { secretStore } from "@web/lib/platform";
 import { confirmChangeServer, requestChangeServer } from "./Root";
 import { secrets } from "./secrets";
 import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
@@ -20,6 +21,12 @@ export async function changeServer() {
   clearPersistedKeys();
   await clearAutofillHandoff();
   await logout();
+  // The keychain entries are per server (`<host>|pa.*`): remove the old server's, or they'd pile up forever.
+  const email = secretStore.get(EMAIL_KEY);
+  await Promise.all([
+    secretStore.set(EMAIL_KEY, null),
+    ...(email ? [secretStore.set(secretKeyKey(email), null), secretStore.set(rememberKey(email), null)] : []),
+  ]);
   forgetSecrets();
   Object.keys(localStorage)
     .filter((k) => k.startsWith("pa."))

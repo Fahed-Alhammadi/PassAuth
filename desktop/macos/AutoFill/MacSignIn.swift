@@ -86,7 +86,7 @@ private struct MacServerStep: View {
 
     var body: some View {
         MacFrame(title: "Connect to your PassAuth server", subtitle: "PassAuth AutoFill signs in on its own, as a separate device.") {
-            MacField(label: "Server address", text: $url, prompt: "https://vault.example.com", content: .URL, submit: submit)
+            MacField(label: "Server address", text: $url, prompt: "https://vault.example.com", content: .URL, submit: submit, autofocus: true)
             Text("Use an https:// address. Plain http works only for test servers on this Mac or your local network.")
                 .font(.footnote).foregroundStyle(.secondary)
             ErrorText(text: error)
@@ -136,15 +136,23 @@ private struct MacLoginStep: View {
     @State private var busy = false
     @State private var error: String?
     @State private var fromDesktop = false
+    /// The email the hand-off was for: typing another email drops its Secret Key too.
+    @State private var handoffEmail = ""
+    /// Set once the prefill is known: the first empty box gets the focus.
+    @State private var focusPassword = false
 
     var body: some View {
         MacFrame(title: "Sign in to PassAuth", subtitle: hostOf(model.state.server)) {
             if fromDesktop {
                 Notice(text: "Server and email come from the PassAuth app on this Mac. Enter your master password once: AutoFill signs in as its own device and then unlocks with Touch ID or on its own timer.", kind: .ok)
             }
-            MacField(label: "Email", text: $email, content: .username)
-            MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } })
+            MacField(label: "Email", text: $email, content: .username, autofocus: !focusPassword)
+            MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } }, autofocus: focusPassword)
             if needKey {
+                if fromDesktop && !secretKey.isEmpty {
+                    Text("Secret Key from the PassAuth app on this Mac. Change it here if it's not the right one.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 MacField(label: "Secret Key", text: $secretKey, mono: true, prompt: "PA1-XXXXXX-…", submit: submit)
             }
             ErrorText(text: error)
@@ -158,10 +166,25 @@ private struct MacLoginStep: View {
                 email = h.email ?? model.state.email
                 secretKey = h.secretKey ?? ""
                 fromDesktop = !email.isEmpty
+                handoffEmail = Self.normalized(email)
+                // Shown prefilled, so a wrong or stale key can be corrected.
+                needKey = !secretKey.isEmpty
             } else {
                 email = model.state.email
             }
+            focusPassword = !email.isEmpty
         }
+        .onChange(of: email) {
+            // Another account than the hand-off's: its Secret Key doesn't apply.
+            guard fromDesktop, Self.normalized(email) != handoffEmail else { return }
+            fromDesktop = false
+            secretKey = ""
+            handoffEmail = ""
+        }
+    }
+
+    private static func normalized(_ email: String) -> String {
+        email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func submit() {

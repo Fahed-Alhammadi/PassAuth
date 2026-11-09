@@ -7,8 +7,16 @@ repository = "https://github.com/Fahed-Alhammadi/PassAuth"
 description = "PassAuth desktop app"
 publish = false
 
-# Standalone: not a member of the repository's Rust workspace (the server image and tests never build it).
+# Standalone: not a member of the repository's Rust workspace (the server image and tests never build it),
+# so the root workspace's release profile doesn't apply; this one mirrors it.
 [workspace]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"
+panic = "abort"
 
 [lib]
 name = "passauth_desktop_lib"

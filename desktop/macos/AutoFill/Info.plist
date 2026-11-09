@@ -39,8 +39,6 @@
 				<true/>
 				<key>ProvidesPasswords</key>
 				<true/>
-				<key>ShowsConfigurationUI</key>
-				<true/>
 			</dict>
 			<key>ASCredentialProviderExtensionShowsConfigurationUI</key>
 			<true/>

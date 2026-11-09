@@ -69,6 +69,9 @@ export async function appHook(): Promise<DesktopAppHook> {
     isEnabled().catch(() => false),
     invoke<{ keepDock: boolean }>("shell_settings_get").catch(() => ({ keepDock: false })),
   ]);
+  // The login item stores this executable's path. Rewrite it once per launch so it follows the app when it was
+  // moved (Downloads → Applications) or a new AppImage was downloaded by hand; `isEnabled` only checks existence.
+  if (startAtLogin) enable().catch(() => {});
   settings = { ...settings, startAtLogin, keepDock: shell.keepDock };
   return {
     platform,
