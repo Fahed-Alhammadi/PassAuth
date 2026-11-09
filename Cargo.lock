@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "passauth-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aes",
  "argon2 0.6.0",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "passauth-core-ffi"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "passauth-core",
  "serde",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "passauth-core-wasm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "passauth-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",

@@ -6,6 +6,14 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.6.1 (2026-11-09)
+
+- Fill and save logins on the PassAuth web vault like on any site (bd361b2)
+- Review round: AutoFill efficiency, desktop resource use, docs (1144623)
+- Desktop: AutoFill host entitlement, start at login, Dock, background sync; Android background sync (93568c6)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.6.0...server-0.6.1)
+
 ## 0.6.0 (2026-11-08)
 
 - Security keys as a two-step method; desktop vault timeout (daab5bd)
