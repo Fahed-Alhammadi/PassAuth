@@ -93,10 +93,16 @@ import type {
 
   // ---------------------------------------------------------------- result objects
 
-  /** Own, non-enumerable, read-only properties that shadow the native prototype getters. */
+  /**
+   * Own, non-enumerable properties that shadow the native prototype members. Data values are
+   * read-only (natively they are getters); methods stay writable like native prototype methods,
+   * because sites patch them: @github/webauthn-json's ponyfill does `credential.toJSON = …`,
+   * which throws in strict mode on a read-only property (GitHub: "Passkey registration failed").
+   */
   function define<T extends object>(target: T, props: Record<string, unknown>): T {
     for (const k of Object.keys(props)) {
-      defineProperty(target, k, { value: props[k], enumerable: false, writable: false, configurable: true });
+      const method = typeof props[k] === "function";
+      defineProperty(target, k, { value: props[k], enumerable: false, writable: method, configurable: true });
     }
     return target;
   }

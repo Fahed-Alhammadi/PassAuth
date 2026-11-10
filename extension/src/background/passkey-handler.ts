@@ -15,10 +15,9 @@ import {
   matchingPasskeys,
   PasskeyError,
   supportsCreateRequest,
-  uvRequired,
 } from "./passkeys";
 import type { CreateRequest, GetRequest } from "../shared/passkey-types";
-import { allEntries, canWrite, createItem, ensureUnlocked, recentlyVerified, updateItem, verifyMasterPassword, type Entry } from "./vault";
+import { allEntries, canWrite, createItem, ensureUnlocked, updateItem, verifyMasterPassword, type Entry } from "./vault";
 import { baseDomain } from "./urls";
 
 type Decision = { accept: boolean; credentialId?: string; fallback?: boolean; verified?: boolean };
@@ -49,8 +48,6 @@ interface Pending {
   decide: (d: Decision) => void;
 }
 
-/** How recently the master password must have been entered to report "user verified". */
-const UV_WINDOW_MS = 5 * 60_000;
 // Same bounds as the page shim (page/webauthn.ts), so the window never outlives the page's own timeout.
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MIN_TIMEOUT_MS = 10_000;
@@ -87,8 +84,10 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
     return FALLBACK;
   }
   const kind = msg.type === "passkey:create" ? "create" : "get";
-  const recent = await recentlyVerified(UV_WINDOW_MS);
-  const needsPassword = uvRequired(kind, msg.options) && !recent;
+  // User verification: PassAuth is unlocked (checked above), which took the master password, and
+  // the vault timeout locks it again, like a platform authenticator unlocked with the device PIN.
+  // So no extra password prompt; the user still approves each request in PassAuth's window.
+  const needsPassword = false;
   const base = { origin: msg.origin, rpId, needsPassword, tabId: msg.tabId, frameId: msg.frameId, bridgeId: msg.bridgeId };
   const wait = timeoutOf(msg.options);
 
@@ -101,7 +100,7 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
     if (excludedPasskeyExists(req, msg.origin, allPasskeys().map((x) => x.passkey))) {
       return { error: { name: "InvalidStateError", message: "A passkey for this account is already saved in PassAuth." } };
     }
-    const { passkey, response } = await createPasskey(req, msg.origin, { uv: recent || !!decision.verified });
+    const { passkey, response } = await createPasskey(req, msg.origin, { uv: true });
     await storePasskey(passkey, req.rp?.name ?? rpId);
     return { result: response };
   }
@@ -124,7 +123,7 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   const decision = await confirm({ ...base, kind, userName: "", candidates }, wait);
   if (!decision.accept) return decision.fallback ? FALLBACK : notAllowed();
   const chosen = matches.find((p) => p.credential_id === decision.credentialId) ?? matches[0];
-  const { response } = await getAssertion(req, msg.origin, chosen, { uv: recent || !!decision.verified });
+  const { response } = await getAssertion(req, msg.origin, chosen, { uv: true });
   return { result: response };
 }
 
