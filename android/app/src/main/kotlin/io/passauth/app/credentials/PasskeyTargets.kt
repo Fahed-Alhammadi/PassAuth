@@ -31,7 +31,9 @@ object PasskeyTargets {
      * Logins a new passkey can be saved in: ones you can edit whose website is this exact host,
      * the RP ID, or a subdomain of the RP ID (where the passkey also works). Never just "the
      * same base domain": cloudy.example.com and bazarr.example.com are different sites.
-     * Best first: this exact host, then a matching user name, then by name.
+     * Logins in your own vault come first, then ones in vaults somebody shared (listed with
+     * their vault's name, never preselected: see [defaultTarget]); within each: this exact
+     * host, then a matching user name, then by name.
      */
     fun saveTargets(vault: VaultData, host: String, rpId: String, userName: String, displayName: String = ""): List<Entry> {
         val rp = rpId.lowercase()
@@ -39,17 +41,28 @@ object PasskeyTargets {
         fun score(e: Entry): Int {
             val user = e.item.login?.username.orEmpty().trim().lowercase()
             val userMatch = user.isNotEmpty() && names.any { it == user || it == user.substringBefore("@") }
-            return (if (host in loginHosts(e)) 2 else 0) + (if (userMatch) 1 else 0)
+            return (if (vault.isOwn(e)) 4 else 0) + (if (host in loginHosts(e)) 2 else 0) + (if (userMatch) 1 else 0)
         }
         return vault.entries
-            .filter { it.item.login != null && vault.canWrite(it) }
+            .filter { it.item.login != null && vault.canWrite(it) && vault.vaults.any { v -> v.id == it.vaultId } }
             .filter { e -> loginHosts(e).any { it == host || it == rp || it.endsWith(".$rp") } }
             .sortedWith(compareByDescending<Entry> { score(it) }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.item.name })
     }
 
-    /** The preselected target: the best login for this exact host, else a new login. */
-    fun defaultTarget(targets: List<Entry>, host: String): String =
-        targets.firstOrNull { host in loginHosts(it) }?.id ?: NEW_LOGIN
+    /**
+     * The preselected target: the best login for this exact host in the user's OWN vault, else
+     * a new login. Never a login in a shared vault: anyone on the server can share a vault with
+     * this account and put a login for the site in it, and the passkey's private key would then
+     * go to that vault's members by default. Such a login can still be chosen.
+     */
+    fun defaultTarget(vault: VaultData, targets: List<Entry>, host: String): String =
+        targets.firstOrNull { vault.isOwn(it) && host in loginHosts(it) }?.id ?: NEW_LOGIN
+
+    /** The row text under a target's name: its user name, and the vault's name when somebody shared it. */
+    fun detail(vault: VaultData, e: Entry): String {
+        val user = e.item.login?.username.orEmpty().ifEmpty { "No user name" }
+        return if (vault.isOwn(e)) user else "$user · ${vault.vaultName(e.vaultId)}"
+    }
 
     sealed interface Plan {
         data class Attach(val entry: Entry, val item: Item) : Plan

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.AutoFixHigh
@@ -37,7 +38,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -54,7 +54,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.passauth.app.BuildConfig
 import io.passauth.app.data.BACKGROUND_SYNC_DEFAULT
@@ -65,6 +64,13 @@ import io.passauth.app.data.TimeoutAction
 import io.passauth.app.data.UrlMatch
 import io.passauth.app.data.VaultTimeout
 import io.passauth.app.data.secondsLabel
+import io.passauth.app.ui.auth.LogoutSheet
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.permissions.PermissionsSettings
@@ -83,6 +89,7 @@ import io.passauth.app.ui.components.ValueText
 import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.Brand
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Space
 import kotlinx.coroutines.launch
 
 private val MATCHES = listOf(
@@ -135,11 +142,12 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
             Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
                 CardSection(null) {
                     SECTIONS.forEachIndexed { n, s ->
-                        if (n > 0) HorizontalDivider(color = PassAuthTheme.colors.line)
+                        // Inset to the text column, like every list in the app.
+                        if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
                         Row(
-                            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = 14.dp),
+                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = Space.m),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(Space.m),
                         ) {
                             Icon(s.icon, null, tint = MaterialTheme.colorScheme.primary)
                             Text(s.title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
@@ -392,7 +400,7 @@ private fun ColumnScope.About(ctx: UiCtx) {
                 append("Pass")
                 withStyle(androidx.compose.ui.text.SpanStyle(color = Brand.Blue)) { append("Auth") }
             },
-            fontSize = 24.sp, fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
         )
         Muted("Version ${BuildConfig.VERSION_NAME}")
         Muted("© Fahed Alhammadi")
@@ -400,10 +408,13 @@ private fun ColumnScope.About(ctx: UiCtx) {
     KeyValue("Signed in as") { ValueText(ctx.state.email) }
     KeyValue("Server") { ValueText(ctx.state.server) }
     Muted("To use another PassAuth server, log out and choose \"Change server\" on the sign-in screen.")
-    Button(
-        onClick = { ctx.launch { ctx.repo.logout() } },
-        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
-    ) { Text("Log out") }
+    var loggingOut by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { loggingOut = true }) {
+        Icon(Icons.AutoMirrored.Outlined.Logout, null, Modifier.size(18.dp))
+        Spacer(Modifier.size(8.dp))
+        Text("Log out")
+    }
+    if (loggingOut) LogoutSheet(ctx) { loggingOut = false }
     HorizontalDivider(color = PassAuthTheme.colors.line)
     Text("Delete account", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
     Muted("Permanently delete ${ctx.state.email} from ${hostOf(ctx.state.server)}, with every vault you own and every item in them.")
@@ -447,29 +458,29 @@ private fun DeleteAccountDialog(ctx: UiCtx, close: () -> Unit) {
             }
         }
     }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = { if (!busy) close() },
-        icon = { Icon(Icons.Outlined.Warning, null, tint = MaterialTheme.colorScheme.error) },
-        title = { Text("Delete your account?") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "This permanently deletes ${ctx.state.email} from your PassAuth server, with every vault you own and every item in them. " +
-                        "People you shared those vaults with lose access too. Vaults others shared with you are not deleted.",
-                )
-                Alert("This can't be undone. Export your vault first if you want to keep a copy.", AlertKind.Error)
-                io.passauth.app.ui.components.PasswordField(password, { password = it }, "Master password", onImeAction = ::submit)
-                if (needsSecretKey) {
-                    io.passauth.app.ui.components.TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
-                }
-                io.passauth.app.ui.components.ErrorText(error)
-            }
+    DecisionSheet(
+        onDismiss = close,
+        title = "Delete your account?",
+        subtitle = "${ctx.state.email} · ${hostOf(ctx.state.server)}",
+        tile = { Tile(icon = Icons.Outlined.Warning, danger = true) },
+        error = error,
+        dismissable = !busy,
+        actions = {
+            PrimaryButton(if (busy) "Deleting…" else "Delete account", ::submit, enabled = password.isNotEmpty(), busy = busy, danger = true)
+            QuietActions { QuietButton("Cancel", close, enabled = !busy) }
         },
-        confirmButton = {
-            TextButton(onClick = ::submit, enabled = !busy) {
-                Text(if (busy) "Deleting…" else "Delete account", color = MaterialTheme.colorScheme.error)
+    ) {
+        PromptText(
+            "This permanently deletes your account from your PassAuth server, with every vault you own and every item in them. " +
+                "People you shared those vaults with lose access too. Vaults others shared with you are not deleted.",
+        )
+        Alert("This can't be undone. Export your vault first if you want to keep a copy.", AlertKind.Error)
+        // Verification sits right above the actions.
+        Column(verticalArrangement = Arrangement.spacedBy(Space.m)) {
+            io.passauth.app.ui.components.PasswordField(password, { password = it; error = null }, "Master password", onImeAction = ::submit)
+            if (needsSecretKey) {
+                io.passauth.app.ui.components.TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
             }
-        },
-        dismissButton = { TextButton(onClick = close, enabled = !busy) { Text("Cancel") } },
-    )
+        }
+    }
 }

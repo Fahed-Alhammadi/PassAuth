@@ -42,7 +42,7 @@ import io.passauth.app.data.UrlMatcher
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.theme.PassAuthTheme
 
-/** Page header in the brand's navy: back button or logo, title, actions. */
+/** Page header in the page colour: back button or logo, title, actions. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PageBar(title: String, onBack: (() -> Unit)? = null, brand: Boolean = false, actions: @Composable RowScope.() -> Unit = {}) {
@@ -86,6 +86,7 @@ private fun statusLabel(s: Status) = when (s) {
 fun AccountMenu(ctx: UiCtx) {
     val state = ctx.state
     var open by remember { mutableStateOf(false) }
+    var loggingOut by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "Account menu: ${state.name.ifEmpty { state.email }}" }) {
         Avatar(initials(state.name, state.email), 32.dp, Modifier.clearAndSetSemantics { })
     }
@@ -129,7 +130,8 @@ fun AccountMenu(ctx: UiCtx) {
         DropdownMenuItem(
             leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Logout, null, tint = MaterialTheme.colorScheme.error) },
             text = { Text("Log out", color = MaterialTheme.colorScheme.error) },
-            onClick = { open = false; ctx.launch { ctx.repo.logout() } },
+            onClick = { open = false; loggingOut = true },
         )
     }
+    if (loggingOut) io.passauth.app.ui.auth.LogoutSheet(ctx) { loggingOut = false }
 }

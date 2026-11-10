@@ -6,12 +6,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.graphics.drawable.Icon
+import android.service.autofill.BatchUpdates
+import android.service.autofill.CustomDescription
 import android.service.autofill.Dataset
 import android.service.autofill.Field
 import android.service.autofill.FillResponse
 import android.service.autofill.InlinePresentation
 import android.service.autofill.Presentations
+import android.service.autofill.RegexValidator
 import android.service.autofill.SaveInfo
+import android.service.autofill.Validators
 import android.view.autofill.AutofillId
 import android.view.autofill.AutofillValue
 import android.view.inputmethod.InlineSuggestionsRequest
@@ -23,6 +27,7 @@ import io.passauth.app.MainActivity
 import io.passauth.app.R
 import io.passauth.app.data.Entry
 import io.passauth.app.data.Settings
+import java.util.regex.Pattern
 
 /** Builds autofill responses: datasets with drop-down and keyboard (inline) presentations. */
 class AutofillResponses(private val context: Context, private val inline: InlineSuggestionsRequest?) {
@@ -104,8 +109,12 @@ class AutofillResponses(private val context: Context, private val inline: Inline
     private fun text(v: String) = Field.Builder().setValue(AutofillValue.forText(v)).build()
 
     companion object {
-        /** Login fields to save (password required, username optional), with "Never" adding the site to the never-save list. */
-        fun saveInfo(form: LoginForm<AutofillId>, never: IntentSender?): SaveInfo? {
+        /**
+         * Login fields to save (password required, username optional), with "Never" adding the
+         * site to the never-save list. With a [hint], Android's save dialog also says what
+         * PassAuth will do with what was typed: update a saved login, or save a new one.
+         */
+        fun saveInfo(context: Context, form: LoginForm<AutofillId>, never: IntentSender?, hint: SaveRule.Hint? = null): SaveInfo? {
             val pw = form.password ?: return null
             var type = SaveInfo.SAVE_DATA_TYPE_PASSWORD
             if (form.username != null) type = type or SaveInfo.SAVE_DATA_TYPE_USERNAME
@@ -114,7 +123,44 @@ class AutofillResponses(private val context: Context, private val inline: Inline
                 // Many apps don't finish the activity after signing in; save when the form disappears.
                 .setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
                 .apply { if (never != null) setNegativeAction(SaveInfo.NEGATIVE_BUTTON_STYLE_NEVER, never) }
+                .apply { if (hint != null) runCatching { saveDescription(context, form.username?.id, hint) }.getOrNull()?.let(::setCustomDescription) }
                 .build()
+        }
+
+        /**
+         * One line under the save dialog's title. The dialog is Android's, so the text is
+         * chosen by conditions on the typed user name that Android checks itself (the same
+         * ones as [SaveRule.updates] / [SaveRule.asks] / [SaveRule.viewOnly]); saved passwords
+         * are not part of it.
+         */
+        private fun saveDescription(context: Context, username: AutofillId?, hint: SaveRule.Hint): CustomDescription {
+            fun line(text: String) = RemoteViews(context.packageName, R.layout.autofill_save_hint).apply { setTextViewText(R.id.text, text) }
+            val one = hint.onlyTarget?.takeIf { it.isNotBlank() }
+            val create = "PassAuth will save this as a new login."
+            val update = one?.let { "PassAuth will update your saved login “$it”, not add a second one." }
+                ?: "PassAuth will update the login you already saved here, not add a second one."
+            // No user name typed and one login of the user's own: PassAuth's sheet follows.
+            val ask = one?.let { "PassAuth will ask before it updates your saved login “$it”." }
+                ?: "PassAuth will ask before it updates a saved login."
+            val viewOnly = "This login is in a vault you can only view, so PassAuth won't change it."
+            // A form without a user-name field: the typed user name is always empty.
+            if (username == null) {
+                return CustomDescription.Builder(line(if (hint.updateWhenBlank) update else if (hint.askWhenBlank) ask else create)).build()
+            }
+            val typed = RegexValidator(username, Pattern.compile("[\\s\\S]*\\S[\\s\\S]*"))
+            val blank = Validators.not(typed)
+            fun named(regex: String?) = regex?.let { RegexValidator(username, Regex(it, SaveRule.HINT_OPTIONS).toPattern()) }
+            val b = CustomDescription.Builder(line(create))
+            val updates = named(hint.updateUser)
+            when {
+                updates != null && hint.updateWhenBlank -> Validators.or(updates, blank)
+                updates != null -> updates
+                hint.updateWhenBlank -> blank
+                else -> null
+            }?.let { b.batchUpdate(it, BatchUpdates.Builder().updateTemplate(line(update)).build()) }
+            if (hint.askWhenBlank) b.batchUpdate(blank, BatchUpdates.Builder().updateTemplate(line(ask)).build())
+            named(hint.viewOnlyUser)?.let { b.batchUpdate(it, BatchUpdates.Builder().updateTemplate(line(viewOnly)).build()) }
+            return b.build()
         }
 
         /** Should a login with a verification code go through PassAuth on selection? */

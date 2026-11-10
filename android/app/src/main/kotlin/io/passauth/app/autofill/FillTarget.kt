@@ -102,29 +102,16 @@ object AutofillMatcher {
         is FillTarget.App -> target.uri
     }
 
-    sealed interface SavePlan<out K> {
-        data object Nothing : SavePlan<kotlin.Nothing>
-        data object New : SavePlan<kotlin.Nothing>
-        data class Update<K>(val id: K) : SavePlan<K>
-    }
+    /** Where a login lives, for the save rule: can it be edited, is it in the user's own vault, and the vault's name. */
+    data class Place(val writable: Boolean, val personal: Boolean, val vault: String = "")
 
-    /**
-     * What to do with submitted credentials (the extension's `onSubmitted`): update
-     * the password of the same site's login with the same username, save a new login,
-     * or nothing (unchanged password, read-only vault, no password).
-     */
-    fun <K> planSave(
+    /** The matching logins of [target] as [SaveRule] candidates (id, name, login), keeping the matcher's order. */
+    fun <K> saveCandidates(
         target: FillTarget,
-        username: String,
-        password: String,
-        logins: List<Pair<K, Login>>,
+        logins: List<Triple<K, String, Login>>,
         defaultMatch: UrlMatch,
-        canWrite: (K) -> Boolean,
-    ): SavePlan<K> {
-        if (password.isEmpty()) return SavePlan.Nothing
-        val sameUser = candidates(target, logins, defaultMatch).firstOrNull { (_, l) -> l.username.equals(username, ignoreCase = true) }
-            ?: return SavePlan.New
-        if (sameUser.second.password == password || !canWrite(sameUser.first)) return SavePlan.Nothing
-        return SavePlan.Update(sameUser.first)
-    }
+        place: (K) -> Place,
+    ): List<SaveRule.Candidate<K>> =
+        logins.filter { (_, _, l) -> matches(target, l, defaultMatch) }
+            .map { (id, name, l) -> place(id).let { SaveRule.Candidate(id, name, l.username, l.password, it.writable, it.personal, it.vault) } }
 }

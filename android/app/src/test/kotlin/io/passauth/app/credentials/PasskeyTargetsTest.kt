@@ -38,10 +38,10 @@ class PasskeyTargetsTest {
     fun anotherSubdomainOfTheSameBaseDomainIsNeverOffered() {
         val t = PasskeyTargets.saveTargets(vault, "cloudy.example.com", "cloudy.example.com", "fahed")
         assertEquals(listOf("c"), t.map { it.id })
-        assertEquals("c", PasskeyTargets.defaultTarget(t, "cloudy.example.com"))
+        assertEquals("c", PasskeyTargets.defaultTarget(vault, t, "cloudy.example.com"))
         val n = PasskeyTargets.saveTargets(vault, "new.example.com", "new.example.com", "fahed")
         assertTrue(n.isEmpty())
-        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(n, "new.example.com"))
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(vault, n, "new.example.com"))
     }
 
     @Test
@@ -55,7 +55,7 @@ class PasskeyTargetsTest {
     fun githubUserNameMatchesTheEmailsUserPart() {
         val t = PasskeyTargets.saveTargets(vault, "github.com", "github.com", "fahed", "Fahed")
         assertEquals(listOf("g", "g2"), t.map { it.id })
-        assertEquals("g", PasskeyTargets.defaultTarget(t, "github.com"))
+        assertEquals("g", PasskeyTargets.defaultTarget(vault, t, "github.com"))
     }
 
     @Test
@@ -70,6 +70,45 @@ class PasskeyTargetsTest {
             assertEquals(listOf(LoginUrl("https://cloudy.example.com", UrlMatch.Default)), create.item.login?.urls)
             assertEquals(listOf(p), create.item.login?.passkeys)
         }
+    }
+
+    // ---- shared vaults: anyone on the server can share one and plant a login for the site in it
+
+    private val planted = entry("p", "Cloudy", "fahed", "https://cloudy.example.com", vault = "team")
+    private val withPlanted = VaultData(
+        entries = listOf(planted, cloudy, apex),
+        vaults = listOf(VaultInfo("v1", "Personal", Role.Owner), VaultInfo("team", "Team", Role.Write, keyKind = "vault")),
+    )
+
+    @Test
+    fun aSharedVaultLoginIsNeverThePreselectedPlaceForAPasskey() {
+        // Only a planted login for the exact host: listed (it can be chosen), but the default is a new login.
+        val onlyPlanted = withPlanted.copy(entries = listOf(planted))
+        val t = PasskeyTargets.saveTargets(onlyPlanted, "cloudy.example.com", "cloudy.example.com", "fahed")
+        assertEquals(listOf("p"), t.map { it.id })
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(onlyPlanted, t, "cloudy.example.com"))
+        assertEquals("fahed · Team", PasskeyTargets.detail(onlyPlanted, planted))
+    }
+
+    @Test
+    fun yourOwnLoginComesFirstAndIsPreselected() {
+        // Same host and user name in both vaults: the user's own login wins, the shared one follows.
+        val t = PasskeyTargets.saveTargets(withPlanted, "cloudy.example.com", "cloudy.example.com", "fahed")
+        assertEquals(listOf("c", "p"), t.map { it.id })
+        assertEquals("c", PasskeyTargets.defaultTarget(withPlanted, t, "cloudy.example.com"))
+        assertEquals("fahed", PasskeyTargets.detail(withPlanted, cloudy))
+        // Your own login for another host of the RP still isn't preselected over "New login"...
+        val sub = PasskeyTargets.saveTargets(withPlanted.copy(entries = listOf(planted, apex)), "cloudy.example.com", "example.com", "fahed")
+        assertEquals(listOf("a", "p"), sub.map { it.id })
+        // ...and neither is the planted exact-host one.
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(withPlanted, sub, "cloudy.example.com"))
+    }
+
+    @Test
+    fun aSharedVaultLoginCanStillBeChosen() {
+        val p = Passkey(rpId = "cloudy.example.com", userName = "fahed")
+        val attach = PasskeyTargets.plan(withPlanted, p, "cloudy.example.com", "p") as PasskeyTargets.Plan.Attach
+        assertEquals("p", attach.entry.id)
     }
 
     @Test

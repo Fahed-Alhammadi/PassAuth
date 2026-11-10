@@ -1,25 +1,19 @@
 package io.passauth.app.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,14 +26,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.passauth.app.ui.auth.StrengthMeter
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.ui.Alignment
+import io.passauth.app.ui.components.GroupCard
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.theme.Space
 import io.passauth.app.ui.components.AccountMenu
 import io.passauth.app.ui.components.CardSection
 import io.passauth.app.ui.components.PageBar
 import io.passauth.app.ui.components.TextInput
 import io.passauth.app.ui.components.ToggleRow
-import io.passauth.app.ui.theme.PassAuthTheme
 import io.passauth.core.generatePassphrase
 import io.passauth.core.generatePassword
 import kotlin.math.roundToInt
@@ -87,23 +88,18 @@ fun GeneratorScreen(ctx: UiCtx) {
                 SegmentedButton(!passphrase, { passphrase = false }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("Password") }
                 SegmentedButton(passphrase, { passphrase = true }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("Passphrase") }
             }
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                border = BorderStroke(1.dp, PassAuthTheme.colors.line),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
+            GroupCard {
                 SelectionContainer {
                     Text(
-                        value, fontFamily = FontFamily.Monospace, fontSize = 20.sp, textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(20.dp).fillMaxWidth(),
+                        value, style = MaterialTheme.typography.titleLarge, fontFamily = FontFamily.Monospace, textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(Space.xl).fillMaxWidth(),
                     )
                 }
             }
             StrengthMeter(value)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { ctx.copy(value, if (passphrase) "Passphrase" else "Password") }, modifier = Modifier.weight(1f)) { Text("Copy") }
-                OutlinedButton(onClick = { seed++ }, modifier = Modifier.weight(1f)) { Text("Regenerate") }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                PrimaryButton(if (passphrase) "Copy passphrase" else "Copy password", { ctx.copy(value, if (passphrase) "Passphrase" else "Password") }, icon = Icons.Outlined.ContentCopy)
+                QuietActions { QuietButton("Regenerate", { seed++ }, icon = Icons.Outlined.Refresh) }
             }
             CardSection("Options") {
                 Column(Modifier.padding(vertical = 8.dp)) {

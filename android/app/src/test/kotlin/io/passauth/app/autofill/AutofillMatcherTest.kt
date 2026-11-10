@@ -79,14 +79,24 @@ class AutofillMatcherTest {
     }
 
     @Test
-    fun planSave() {
-        val logins = listOf("a" to login("androidapp://com.example.app", user = "Me", pw = "old"), "b" to login("https://example.com", user = "me", pw = "x"))
-        val all = { _: String -> true }
-        assertEquals(AutofillMatcher.SavePlan.Update("a"), AutofillMatcher.planSave(app, "me", "new", logins, UrlMatch.Domain, all))
-        assertEquals(AutofillMatcher.SavePlan.Nothing, AutofillMatcher.planSave(app, "me", "old", logins, UrlMatch.Domain, all))
-        assertEquals(AutofillMatcher.SavePlan.New, AutofillMatcher.planSave(app, "other", "new", logins, UrlMatch.Domain, all))
-        assertEquals(AutofillMatcher.SavePlan.Nothing, AutofillMatcher.planSave(app, "me", "new", logins, UrlMatch.Domain) { false })
-        assertEquals(AutofillMatcher.SavePlan.Nothing, AutofillMatcher.planSave(app, "me", "", logins, UrlMatch.Domain, all))
-        assertEquals(AutofillMatcher.SavePlan.Update("b"), AutofillMatcher.planSave(web, "ME", "y", logins, UrlMatch.Domain, all))
+    fun saveCandidatesAreTheMatchingLoginsWithTheirVault() {
+        val logins = listOf(
+            Triple("a", "App", login("androidapp://com.example.app", user = "Me", pw = "old")),
+            Triple("b", "Site", login("https://example.com", user = "me", pw = "x")),
+            Triple("s", "Planted", login("androidapp://com.example.app", user = "", pw = "y")),
+        )
+        val place = { id: String -> if (id == "s") AutofillMatcher.Place(writable = true, personal = false, vault = "Team") else AutofillMatcher.Place(true, true, "Personal") }
+        val forApp = AutofillMatcher.saveCandidates(app, logins, UrlMatch.Domain, place)
+        assertEquals(listOf("a", "s"), forApp.map { it.id })
+        assertEquals(listOf(true, false), forApp.map { it.own })
+        assertEquals("Team", forApp[1].vault)
+        // The rule over them: the same user name is updated, a new one is a new login (never the planted blank one).
+        assertEquals(SaveRule.Plan.Update("a", SaveRule.Reason.Same), SaveRule.plan(forApp, "me", "new"))
+        assertEquals(SaveRule.Plan.Nothing, SaveRule.plan(forApp, "me", "old"))
+        assertEquals(SaveRule.Plan.New, SaveRule.plan(forApp, "other", "new"))
+        assertEquals(SaveRule.Plan.Nothing, SaveRule.plan(forApp, "me", ""))
+        val forWeb = AutofillMatcher.saveCandidates(web, logins, UrlMatch.Domain, place)
+        assertEquals(listOf("b"), forWeb.map { it.id })
+        assertEquals(SaveRule.Plan.Update("b", SaveRule.Reason.Same), SaveRule.plan(forWeb, "ME", "y"))
     }
 }

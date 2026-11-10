@@ -9,11 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Star
@@ -35,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,6 +48,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -58,8 +63,10 @@ import io.passauth.app.ui.components.Alert
 import io.passauth.app.ui.components.PageBar
 import io.passauth.app.ui.components.SelectField
 import io.passauth.app.ui.components.SiteIcon
+import io.passauth.app.ui.components.cardSegment
 import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Space
 import io.passauth.core.totpCode
 import kotlinx.coroutines.launch
 
@@ -142,7 +149,7 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
             },
             modifier = Modifier.padding(padding).fillMaxSize(),
         ) {
-            LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxSize()) {
+            LazyColumn(contentPadding = PaddingValues(Space.l), modifier = Modifier.fillMaxSize()) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(
@@ -201,15 +208,21 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                             (!filter.favorites || s.item.favorite)
                     }
                     section(ctx, if (q.isNotEmpty()) "Search results" else "Filtered items", found) {
-                        Text("No items match. Try another search or clear the filters.", color = PassAuthTheme.colors.muted, modifier = Modifier.padding(vertical = 16.dp))
+                        Column(Modifier.fillMaxWidth().padding(vertical = Space.xl), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("No items match.", style = MaterialTheme.typography.bodyLarge)
+                            Text("Try another search, or clear the filters.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.size(Space.s))
+                            TextButton(onClick = { setFilter(ListFilter()) }) { Text("Clear search and filters") }
+                        }
                     }
                 } else {
                     val favorites = all.filter { it.item.favorite }
                     if (favorites.isNotEmpty()) section(ctx, "Favorites", favorites)
                     section(ctx, "All items", all) {
-                        Column(Modifier.fillMaxWidth().padding(vertical = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("Your vault is empty.", color = PassAuthTheme.colors.muted)
-                            Spacer(Modifier.size(12.dp))
+                        Column(Modifier.fillMaxWidth().padding(vertical = Space.xl), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("Your vault is empty.", style = MaterialTheme.typography.bodyLarge)
+                            Text("Add your first login to fill it in apps and websites.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.size(Space.l))
                             Button(onClick = { ctx.go(Route.New(ItemKind.Login)) }) {
                                 Icon(Icons.Outlined.Add, null)
                                 Spacer(Modifier.size(6.dp))
@@ -225,45 +238,53 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
 
 private fun LazyListScope.section(ctx: UiCtx, title: String, items: List<ItemSummary>, empty: (@Composable () -> Unit)? = null) {
     item(key = "h:$title") {
-        Row(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp, start = 4.dp, end = 4.dp)) {
-            Text(title, style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted, modifier = Modifier.weight(1f))
-            Text("${items.size}", style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
+        Row(Modifier.fillMaxWidth().padding(top = Space.l, bottom = Space.s, start = Space.xs, end = Space.xs)) {
+            Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f).semantics { heading() })
+            Text("${items.size}", style = MaterialTheme.typography.labelLarge, color = PassAuthTheme.colors.muted, modifier = Modifier.semantics { contentDescription = if (items.size == 1) "1 item" else "${items.size} items" })
         }
     }
     if (items.isEmpty()) {
         if (empty != null) item(key = "e:$title") { empty() }
     } else {
-        items(items, key = { "$title:${it.entry.id}" }) { ItemRow(ctx, it) }
+        // One grouped card per section; each row draws its own part of it, so long lists stay lazy.
+        itemsIndexed(items, key = { _, it -> "$title:${it.entry.id}" }) { n, it -> ItemRow(ctx, it, first = n == 0, last = n == items.lastIndex) }
     }
 }
 
 @Composable
-private fun ItemRow(ctx: UiCtx, s: ItemSummary) {
+private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
     val open = { ctx.go(Route.ItemView(s.entry.id)) }
     val login = s.item.login
     var copyMenu by remember { mutableStateOf(false) }
     var moreMenu by remember { mutableStateOf(false) }
+    val quiet = PassAuthTheme.colors.muted
+    // Large text: the name gets the room, and "Open website" moves into the More menu.
+    val roomy = LocalDensity.current.fontScale < 1.3f
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = open).padding(vertical = 8.dp, horizontal = 4.dp),
+        Modifier.fillMaxWidth()
+            .cardSegment(first, last, MaterialTheme.colorScheme.surfaceContainer, PassAuthTheme.colors.line, dividerInset = Space.l + 40.dp + Space.m)
+            .clickable(onClick = open)
+            .heightIn(min = 64.dp)
+            .padding(start = Space.l, end = Space.xs, top = Space.s, bottom = Space.s),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons)
-        Column(Modifier.weight(1f)) {
+        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 40.dp)
+        Column(Modifier.weight(1f).padding(start = Space.m, end = Space.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(s.name, style = MaterialTheme.typography.bodyLarge, maxLines = if (LocalDensity.current.fontScale > 1.3f) 2 else 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                if (s.item.favorite) Icon(Icons.Filled.Star, "Favorite", Modifier.padding(start = 4.dp).size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                Text(s.name, style = MaterialTheme.typography.bodyLarge, maxLines = if (roomy) 1 else 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                if (s.item.favorite) Icon(Icons.Filled.Star, "Favorite", Modifier.padding(start = Space.xs).size(14.dp), tint = MaterialTheme.colorScheme.primary)
             }
             if (s.subtitle.isNotEmpty()) {
-                Text(s.subtitle, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(s.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        if (s.url.isNotEmpty()) {
-            IconButton(onClick = { ctx.openUrl(s.url) }) { Icon(Icons.AutoMirrored.Outlined.OpenInNew, "Open ${s.host}") }
+        // Quick actions stay on the row, quiet: the row itself is the primary action.
+        if (s.url.isNotEmpty() && roomy) {
+            QuietIconButton(Icons.AutoMirrored.Outlined.OpenInNew, "Open ${s.host}", quiet) { ctx.openUrl(s.url) }
         }
         if (login != null && (login.username.isNotEmpty() || login.password.isNotEmpty() || login.totp != null)) {
             Box {
-                IconButton(onClick = { copyMenu = true }) { Icon(Icons.Outlined.ContentCopy, "Copy from ${s.name}") }
+                QuietIconButton(Icons.Outlined.ContentCopy, "Copy from ${s.name}", quiet) { copyMenu = true }
                 DropdownMenu(expanded = copyMenu, onDismissRequest = { copyMenu = false }) {
                     if (login.username.isNotEmpty()) {
                         DropdownMenuItem(text = { Text("Copy username") }, onClick = { copyMenu = false; ctx.copy(login.username, "Username") })
@@ -281,10 +302,13 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary) {
             }
         }
         Box {
-            IconButton(onClick = { moreMenu = true }) { Icon(Icons.Outlined.MoreVert, "More options for ${s.name}") }
+            QuietIconButton(Icons.Outlined.MoreVert, "More options for ${s.name}", quiet) { moreMenu = true }
             DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
                 DropdownMenuItem(text = { Text("View") }, onClick = { moreMenu = false; open() })
                 DropdownMenuItem(text = { Text("Edit") }, onClick = { moreMenu = false; ctx.go(Route.Edit(s.entry.id)) })
+                if (s.url.isNotEmpty() && !roomy) {
+                    DropdownMenuItem(text = { Text("Open ${s.host}") }, onClick = { moreMenu = false; ctx.openUrl(s.url) })
+                }
                 DropdownMenuItem(
                     text = { Text(if (s.item.favorite) "Remove from favorites" else "Add to favorites") },
                     onClick = {
@@ -297,5 +321,13 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary) {
                 )
             }
         }
+    }
+}
+
+/** A trailing row action: a 20 dp glyph in a 44 × 48 dp target, in the quiet colour. */
+@Composable
+private fun QuietIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, tint: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(width = 44.dp, height = 48.dp)) {
+        Icon(icon, description, Modifier.size(20.dp), tint = tint)
     }
 }

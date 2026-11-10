@@ -46,6 +46,19 @@ class AppGraph(app: Application) {
     /** Restoring a "never" vault-timeout session after the process starts (the services wait for it). */
     var restoreJob: Job? = null
 
+    init {
+        // A typed login waiting to be saved (autofill) belongs to one unlocked session of one account:
+        // locking, logging out or switching account takes it out of memory.
+        scope.launch {
+            var before: Pair<String, Boolean>? = null
+            repo.state.filter { it.loaded }.map { it.activeId to (it.status == Status.Unlocked) }.distinctUntilChanged().collect { now ->
+                val was = before
+                if (was != null && (was.first != now.first || (was.second && !now.second))) io.passauth.app.autofill.AutofillEngine.clearPendingSaves()
+                before = now
+            }
+        }
+    }
+
     /** App state once the encrypted store has been read (the services may have just started the process). */
     suspend fun loadedState(): io.passauth.app.data.AppState =
         withTimeoutOrNull(3_000) { repo.state.first { it.loaded } } ?: repo.state.value

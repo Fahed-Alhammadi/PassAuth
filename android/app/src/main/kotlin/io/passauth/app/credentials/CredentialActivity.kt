@@ -88,6 +88,12 @@ class CredentialActivity : ServiceActivity() {
         if (show) message("Can't sign in with this passkey", errorMessage(e)) else cancel()
     }
 
+    /** The app's name as Android shows it, with its package name when they differ (the name alone could be anyone's). */
+    private fun appName(packageName: String): String {
+        val label = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(packageName, 0)).toString() }.getOrNull()
+        return if (label.isNullOrBlank() || label == packageName) packageName else "$label ($packageName)"
+    }
+
     private fun done(r: Intent) {
         setResult(RESULT_OK, r)
         finish()
@@ -105,7 +111,7 @@ class CredentialActivity : ServiceActivity() {
         } catch (e: Exception) {
             return failCreate(e)
         }
-        withVault("Unlock to save a passkey") { vault, unlockedHere ->
+        withVault("Unlock to save a passkey", "Your vault is locked. Unlock it to save this passkey in PassAuth.") { vault, unlockedHere ->
             val checked = try {
                 Origins.check(this, graph, request.callingAppInfo, options.rpId)
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -117,17 +123,18 @@ class CredentialActivity : ServiceActivity() {
             val host = PasskeyTargets.hostOf(checked.origin, checked.rpId)
             val targets = PasskeyTargets.saveTargets(vault, host, checked.rpId, options.userName, options.userDisplayName)
             val choices = targets.map {
-                ServiceActivity.Choice(it.id, it.item.name.ifEmpty { host }, it.item.login?.username.orEmpty().ifEmpty { "No user name" })
-            } + ServiceActivity.Choice(PasskeyTargets.NEW_LOGIN, "New login", host)
+                ServiceActivity.Choice(it.id, it.item.name.ifEmpty { host }, PasskeyTargets.detail(vault, it))
+            } + ServiceActivity.Choice(PasskeyTargets.NEW_LOGIN, "New login", host, ServiceActivity.Symbol.New)
+            val email = graph.repo.state.value.email
             confirm(
-                title = "Save a passkey?",
-                subtitle = checked.rpId,
-                body = "For $who on ${checked.rpId}" + (if (checked.app) " (requested by ${request.callingAppInfo.packageName})" else "") +
-                    ". PassAuth keeps it in your vault (${graph.repo.state.value.email}).",
-                action = "Save passkey",
+                title = { "Save a passkey" },
+                place = checked.rpId,
+                body = { "For $who" + (if (checked.app) ", requested by the app ${appName(request.callingAppInfo.packageName)}." else ".") },
+                action = { "Save passkey" },
                 choicesLabel = "Save in",
                 choices = if (targets.isEmpty()) emptyList() else choices,
-                initialChoice = PasskeyTargets.defaultTarget(targets, host),
+                initialChoice = PasskeyTargets.defaultTarget(vault, targets, host),
+                footnote = if (targets.isEmpty()) "Saved as a new login for $host in your vault ($email)." else "The passkey is kept with that login in your vault ($email).",
             ) {
                 if (!unlockedHere && deviceAuthAvailable(this)) {
                     if (!verifyUser("Save passkey", "$who · ${checked.rpId}")) return@confirm
@@ -171,7 +178,7 @@ class CredentialActivity : ServiceActivity() {
         } catch (e: Exception) {
             return failGet(e)
         }
-        withVault("Unlock to sign in") { vault, unlockedHere ->
+        withVault("Unlock to sign in", "Your vault is locked. Unlock it to sign in with your passkey.") { vault, unlockedHere ->
             try {
                 val checked = Origins.check(this, graph, request.callingAppInfo, options.rpId)
                 val entry = vault.get(entryId) ?: throw WebAuthnException(WebAuthnException.Kind.NotAllowed, "This passkey is no longer in your vault.")
@@ -186,7 +193,14 @@ class CredentialActivity : ServiceActivity() {
                         if (!verifyUser("Sign in with passkey", "$who · ${checked.rpId}")) return@withVault cancel()
                     } else {
                         // No screen lock to verify with: at least ask for an explicit tap.
-                        return@withVault confirm("Sign in with passkey?", checked.rpId, "As $who.", "Sign in") { assert(option, options, checked, p) }
+                        return@withVault confirm(
+                            title = { "Sign in with a passkey" },
+                            place = checked.rpId,
+                            body = { null },
+                            action = { "Sign in" },
+                            choices = listOf(ServiceActivity.Choice(p.credentialId, who, "Passkey in ${entry.item.name.ifEmpty { checked.rpId }}", ServiceActivity.Symbol.Person)),
+                            initialChoice = p.credentialId,
+                        ) { assert(option, options, checked, p) }
                     }
                 }
                 assert(option, options, checked, p)
@@ -215,7 +229,7 @@ class CredentialActivity : ServiceActivity() {
         val request = PendingIntentHandler.retrieveProviderGetCredentialRequest(intent) ?: return cancel()
         if (request.credentialOptions.none { it is GetPasswordOption }) return cancel()
         val entryId = intent.getStringExtra(EXTRA_ENTRY) ?: return cancel()
-        withVault("Unlock to sign in") { vault, _ ->
+        withVault("Unlock to sign in", "Your vault is locked. Unlock it to sign in with your saved password.") { vault, _ ->
             val target = PassAuthCredentialService.passwordTarget(this, request.callingAppInfo)
             val entry = vault.get(entryId)
             val login = entry?.item?.login
@@ -242,7 +256,7 @@ class CredentialActivity : ServiceActivity() {
 
     private fun unlock() {
         val request = PendingIntentHandler.retrieveBeginGetCredentialRequest(intent) ?: return cancel()
-        withVault("Unlock PassAuth") { _, _ ->
+        withVault("Unlock PassAuth", "Your vault is locked. Unlock it to see your passkeys and passwords for this app.") { _, _ ->
             val response = PassAuthCredentialService.beginGet(this, request)
             val r = Intent()
             PendingIntentHandler.setBeginGetCredentialResponse(r, response)

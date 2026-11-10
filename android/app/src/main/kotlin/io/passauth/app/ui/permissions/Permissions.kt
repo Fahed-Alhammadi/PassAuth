@@ -10,7 +10,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -24,12 +31,9 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.PhotoCamera
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,25 +55,52 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.passauth.app.data.Keystore
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.GroupCard
+import io.passauth.app.ui.components.LogoMark
+import io.passauth.app.ui.components.PromptHeader
+import io.passauth.app.ui.theme.Space
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.UiCtx
-import io.passauth.app.ui.auth.AuthFrame
 import io.passauth.app.ui.authenticate
 import io.passauth.app.ui.biometricsAvailable
-import io.passauth.app.ui.components.CardSection
 import io.passauth.app.ui.settings.SystemServices
 import io.passauth.app.ui.theme.PassAuthTheme
 
-/** First launch, before connecting to a server: what PassAuth may use, each one optional. */
+/**
+ * First launch, before connecting to a server: what PassAuth may use, each one optional.
+ * A decision page: brand bar, what is being decided, one card of choices, and the actions
+ * pinned at the bottom.
+ */
 @Composable
 fun PermissionsIntroScreen(ctx: UiCtx) {
     val finish = { ctx.launch { ctx.repo.updateOnboarding { it.copy(permissionsShown = true) } }.let { } }
-    AuthFrame(
-        "Set up PassAuth",
-        "Choose what PassAuth may use. Everything is optional, and you can change it later in Settings → Permissions.",
-    ) {
-        CardSection(null) { PermissionList(ctx, intro = true) }
-        Button(onClick = finish, modifier = Modifier.fillMaxWidth()) { Text("Continue") }
-        TextButton(onClick = finish) { Text("Skip for now") }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(
+            Modifier.widthIn(max = 560.dp).weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = Space.l),
+            verticalArrangement = Arrangement.spacedBy(Space.l),
+        ) {
+            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                LogoMark(26.dp)
+                Spacer(Modifier.size(Space.s))
+                Text("PassAuth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            }
+            PromptHeader("Set up PassAuth", "Choose what PassAuth may use on this phone.")
+            GroupCard { Column(Modifier.padding(horizontal = Space.l, vertical = Space.xs)) { PermissionList(ctx, intro = true) } }
+            PromptText("Everything is optional. You can change it later in Settings → Permissions.", Modifier.padding(horizontal = Space.xs))
+        }
+        Column(
+            Modifier.widthIn(max = 560.dp).padding(start = Space.l, end = Space.l, top = Space.m, bottom = Space.s),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(Space.xs),
+        ) {
+            PrimaryButton("Continue", finish)
+            QuietActions { QuietButton("Skip for now", finish) }
+        }
     }
 }
 
@@ -121,7 +152,8 @@ private fun PermissionList(ctx: UiCtx, intro: Boolean) {
         ),
     )
     rows.forEachIndexed { n, (feature, access) ->
-        if (n > 0) HorizontalDivider(color = PassAuthTheme.colors.line)
+        // Inset to the text column (past the icon), like every list in the app.
+        if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
         PermissionRow(feature, access, intro) { action ->
             when (action) {
                 Action.Request -> if (feature == Feature.Camera) requestCamera.launch(Manifest.permission.CAMERA) else ctx.turnOnBiometricUnlock()
@@ -159,9 +191,10 @@ private fun PermissionRow(feature: Feature, access: Access, intro: Boolean, onAc
         val label = PermissionModel.actionLabel(feature, access)
         val action = PermissionModel.action(feature, access, intro)
         when {
-            label != null && action != Action.None -> OutlinedButton(
+            // Quiet: the page's one filled button is "Continue".
+            label != null && action != Action.None -> TextButton(
                 onClick = { onAction(action) },
-                modifier = Modifier.semantics { contentDescription = "$label: $title" },
+                modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "$label: $title" },
             ) { Text(label) }
             access == Access.On || access == Access.Chosen -> Row(
                 Modifier.heightIn(min = 40.dp),
@@ -177,14 +210,14 @@ private fun PermissionRow(feature: Feature, access: Access, intro: Boolean, onAc
         // Settings' card column already spaces its children.
         Modifier.fillMaxWidth().padding(vertical = if (intro) 12.dp else 2.dp),
         verticalAlignment = if (stacked) Alignment.Top else Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(Space.m),
     ) {
         Icon(icon(feature), null, tint = MaterialTheme.colorScheme.primary)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // Title, reason and status are read as one ("Camera, Scan …, Not asked"), then the button.
             Column(Modifier.semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(title, style = MaterialTheme.typography.bodyLarge)
-                Text(PermissionModel.reason(feature), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+                Text(PermissionModel.reason(feature), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (showStatus) {
                     Text(
                         PermissionModel.status(feature, access),
@@ -244,17 +277,17 @@ fun BiometricOffer(ctx: UiCtx) {
         LaunchedEffect(Unit) { clear() }
         return
     }
-    AlertDialog(
-        onDismissRequest = clear,
-        icon = { Icon(Icons.Outlined.Fingerprint, null) },
-        title = { Text("Turn on fingerprint or face unlock?") },
-        text = { Text("You chose this when setting up PassAuth. Confirm once to unlock ${st.email} without typing your master password.") },
-        confirmButton = {
-            TextButton(onClick = {
+    DecisionSheet(
+        onDismiss = clear,
+        title = "Turn on fingerprint or face unlock?",
+        subtitle = st.email,
+        tile = { Tile(icon = Icons.Outlined.Fingerprint) },
+        actions = {
+            PrimaryButton("Turn on", {
                 clear()
                 ctx.turnOnBiometricUnlock()
-            }) { Text("Turn on") }
+            })
+            QuietActions { QuietButton("Not now", clear) }
         },
-        dismissButton = { TextButton(onClick = clear) { Text("Not now") } },
-    )
+    ) { PromptText("You chose this when setting up PassAuth. Confirm once to unlock your vault without typing your master password.") }
 }

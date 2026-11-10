@@ -17,14 +17,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +52,11 @@ import io.passauth.app.data.OtpAuth
 import io.passauth.app.data.OtpParse
 import io.passauth.app.data.SshKey
 import io.passauth.app.data.UrlMatch
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.auth.StrengthMeter
@@ -176,19 +178,21 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
     }
 
     conflict?.let { mine ->
-        AlertDialog(
-            onDismissRequest = { conflict = null },
-            title = { Text("This item changed on another device") },
-            text = { Text("Keep your changes to replace the other version, or discard them and use the other version.") },
-            confirmButton = { TextButton(onClick = { keepMine(mine) }) { Text("Keep my version") } },
-            dismissButton = {
-                TextButton(onClick = {
-                    conflict = null
-                    ctx.launch { ctx.repo.sync() }
-                    done(entry?.id)
-                }) { Text("Use the other version") }
+        DecisionSheet(
+            onDismiss = { conflict = null },
+            title = "This item changed on another device",
+            subtitle = mine.name.ifEmpty { "Untitled" },
+            actions = {
+                PrimaryButton("Keep my version", { keepMine(mine) })
+                QuietActions {
+                    QuietButton("Use the other version", {
+                        conflict = null
+                        ctx.launch { ctx.repo.sync() }
+                        done(entry?.id)
+                    })
+                }
             },
-        )
+        ) { PromptText("Keep your changes to replace the other version, or discard them and use the other version.") }
     }
 
     Scaffold(
@@ -358,9 +362,10 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
             }
 
             ErrorText(error)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = ::save, enabled = !busy) { Text(if (busy) "Saving…" else if (entry == null) "Save item" else "Save changes") }
-                OutlinedButton(onClick = { done(entry?.id) }) { Text("Cancel") }
+            // The same action as "Save" in the top bar, within reach at the end of the form.
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                PrimaryButton(if (busy) "Saving…" else "Save", ::save, busy = busy)
+                QuietActions { QuietButton("Cancel", { done(entry?.id) }, enabled = !busy) }
             }
         }
     }

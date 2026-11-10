@@ -25,10 +25,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Fingerprint
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
@@ -39,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,6 +65,12 @@ import io.passauth.app.ui.components.Alert
 import io.passauth.app.ui.components.AlertKind
 import io.passauth.app.ui.components.Avatar
 import io.passauth.app.ui.components.CheckRow
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.components.ErrorText
 import io.passauth.app.ui.components.LogoMark
 import io.passauth.app.ui.components.PasswordField
@@ -73,6 +78,7 @@ import io.passauth.app.ui.components.TextInput
 import io.passauth.app.ui.components.initials
 import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Radius
 import io.passauth.core.estimateBits
 import kotlinx.coroutines.launch
 
@@ -132,10 +138,8 @@ fun SetupScreen(ctx: UiCtx, initial: String = "", onCancel: (() -> Unit)? = null
             style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
         )
         ErrorText(error)
-        Button(onClick = ::submit, enabled = !busy && url.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Checking…" else "Connect")
-        }
-        if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel") }
+        PrimaryButton(if (busy) "Checking…" else "Connect", ::submit, enabled = url.isNotBlank(), busy = busy)
+        if (onCancel != null) QuietActions { QuietButton("Cancel", onCancel) }
         OtherAccounts(ctx)
     }
 }
@@ -203,9 +207,7 @@ fun LoginScreen(ctx: UiCtx) {
             TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true, placeholder = "PA1-XXXXXX-…", imeAction = ImeAction.Done, onImeAction = ::submit)
         }
         ErrorText(error)
-        Button(onClick = ::submit, enabled = !busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Signing in…" else "Sign in")
-        }
+        PrimaryButton(if (busy) "Signing in…" else "Sign in", ::submit, enabled = email.isNotBlank() && password.isNotEmpty(), busy = busy)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(host(state.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
             TextButton(onClick = { changingServer = true }) { Text("Change server") }
@@ -292,10 +294,8 @@ private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: S
         CheckRow("Remember this device", remember, { remember = it }, help = "Skip two-step login on this device for a while.")
         note?.let { Alert(it, AlertKind.Ok) }
         ErrorText(error)
-        Button(onClick = ::verify, enabled = !busy && code.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Verifying…" else "Verify and sign in")
-        }
-        TextButton(onClick = onCancel) { Text("Back") }
+        PrimaryButton(if (busy) "Verifying…" else "Verify and sign in", ::verify, enabled = code.isNotBlank(), busy = busy)
+        QuietActions { QuietButton("Back", onCancel) }
     }
 }
 
@@ -335,7 +335,7 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Surface(
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RoundedCornerShape(Radius.control),
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     border = BorderStroke(1.dp, PassAuthTheme.colors.line),
                     modifier = Modifier.fillMaxWidth(),
@@ -352,11 +352,11 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
             }
             if (d.emailVerificationRequired) Alert("We sent a verification link to $email. Open it, then sign in.", AlertKind.Ok)
             ErrorText(error)
-            Button(
-                onClick = { onSignIn(email, if (d.emailVerificationRequired) null else password, d.secretKey) },
+            PrimaryButton(
+                if (d.emailVerificationRequired) "Go to sign in" else "Open my vault",
+                { onSignIn(email, if (d.emailVerificationRequired) null else password, d.secretKey) },
                 enabled = d.secretKey == null || saved,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(if (d.emailVerificationRequired) "Go to sign in" else "Open my vault") }
+            )
         }
     }
 
@@ -394,9 +394,7 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
             help = "A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password. You'll enter it once on each new device.",
         )
         ErrorText(error)
-        Button(onClick = ::submit, enabled = !busy && email.isNotBlank() && password.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Creating account…" else "Create account")
-        }
+        PrimaryButton(if (busy) "Creating account…" else "Create account", ::submit, enabled = email.isNotBlank() && password.isNotEmpty(), busy = busy)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Already have an account?", style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
             TextButton(onClick = onBack) { Text("Sign in") }
@@ -460,15 +458,19 @@ fun StrengthMeter(password: String, master: Boolean = false) {
 
 // ----------------------------------------------------------------- unlock
 
-@Composable
-fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth", embedded: Boolean = false) {
-    val state = ctx.state
-    var password by remember { mutableStateOf("") }
-    var secretKey by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val needKey = state.secretKeyRequired && !state.secretKeyStored
-    val canBio = state.biometricEnabled && biometricsAvailable(ctx.activity)
+/** The unlock form's state and actions, shared by the app's lock screen and the prompts over other apps. */
+@Stable
+class UnlockUi internal constructor(ctx: UiCtx) {
+    internal var ctx: UiCtx = ctx
+    var password by mutableStateOf("")
+    var secretKey by mutableStateOf("")
+    var busy by mutableStateOf(false)
+        private set
+    var error by mutableStateOf<String?>(null)
+        private set
+    private val state get() = ctx.state
+    val needKey: Boolean get() = state.secretKeyRequired && !state.secretKeyStored
+    val canBio: Boolean get() = state.biometricEnabled && biometricsAvailable(ctx.activity)
 
     fun submit() {
         if (busy || password.isEmpty()) return
@@ -509,48 +511,67 @@ fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth", embedded: Boolea
             }
         }
     }
-    LaunchedEffect(Unit) { if (canBio) biometric() }
+}
+
+/** The unlock form for [ctx]; asks for biometrics straight away when they are on. */
+@Composable
+fun rememberUnlockUi(ctx: UiCtx): UnlockUi {
+    val ui = remember { UnlockUi(ctx) }
+    ui.ctx = ctx
+    LaunchedEffect(Unit) { if (ui.canBio) ui.biometric() }
+    return ui
+}
+
+/** The fields of the unlock form: master password and, on a device without it, the Secret Key. */
+@Composable
+fun UnlockFields(ui: UnlockUi, modifier: Modifier = Modifier) {
+    PasswordField(
+        ui.password, { ui.password = it }, "Master password", modifier = modifier,
+        imeAction = if (ui.needKey) ImeAction.Next else ImeAction.Done, onImeAction = { if (!ui.needKey) ui.submit() },
+    )
+    if (ui.needKey) TextInput(ui.secretKey, { ui.secretKey = it }, "Secret Key", mono = true, imeAction = ImeAction.Done, onImeAction = ui::submit)
+}
+
+@Composable
+fun UnlockScreen(ctx: UiCtx, title: String = "Unlock PassAuth") {
+    val state = ctx.state
+    val ui = rememberUnlockUi(ctx)
     var confirmLogout by remember { mutableStateOf(false) }
 
     AuthFrame(title, state.email) {
-        PasswordField(
-            password, { password = it }, "Master password",
-            imeAction = if (needKey) ImeAction.Next else ImeAction.Done, onImeAction = { if (!needKey) submit() },
-        )
-        if (needKey) TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true, imeAction = ImeAction.Done, onImeAction = ::submit)
-        ErrorText(error)
-        Button(onClick = ::submit, enabled = !busy && password.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
-            Text(if (busy) "Unlocking…" else "Unlock")
+        UnlockFields(ui)
+        ErrorText(ui.error)
+        PrimaryButton(if (ui.busy) "Unlocking…" else "Unlock", ui::submit, enabled = ui.password.isNotEmpty(), busy = ui.busy)
+        QuietActions {
+            if (ui.canBio) QuietButton("Use biometrics", ui::biometric, enabled = !ui.busy, icon = Icons.Outlined.Fingerprint)
+            QuietButton("Log out", { confirmLogout = true })
         }
-        if (canBio) {
-            OutlinedButton(onClick = ::biometric, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Outlined.Fingerprint, null, Modifier.size(18.dp))
-                Spacer(Modifier.size(8.dp))
-                Text("Unlock with biometrics")
-            }
-        }
-        // Started from autofill or a passkey request: no logging out here.
-        if (!embedded) TextButton(onClick = { confirmLogout = true }) { Text("Log out") }
         OtherAccounts(ctx)
     }
-    if (confirmLogout) {
-        val many = state.accounts.size > 1
-        AlertDialog(
-            onDismissRequest = { confirmLogout = false },
-            title = { Text("Log out of ${state.email}?") },
-            text = {
-                Text(
-                    if (many) "This account, its offline copy and biometric unlock are removed from this device. Your vault stays on your server."
-                    else "You'll need your master password to sign in again. Your vault stays on your server.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmLogout = false
-                    ctx.launch { ctx.repo.logout() }
-                }) { Text("Log out", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
+    if (confirmLogout) LogoutSheet(ctx) { confirmLogout = false }
+}
+
+/** "Log out?": what it removes from this device, with the account it applies to. */
+@Composable
+fun LogoutSheet(ctx: UiCtx, close: () -> Unit) {
+    val state = ctx.state
+    val many = state.accounts.size > 1
+    DecisionSheet(
+        onDismiss = close,
+        title = "Log out?",
+        subtitle = state.email,
+        tile = { Tile(icon = Icons.AutoMirrored.Outlined.Logout) },
+        actions = {
+            PrimaryButton("Log out", {
+                close()
+                ctx.launch { ctx.repo.logout() }
+            }, danger = true)
+            QuietActions { QuietButton("Cancel", close) }
+        },
+    ) {
+        PromptText(
+            if (many) "This account, its offline copy and biometric unlock are removed from this device. Your vault stays on your server."
+            else "You'll need your master password to sign in again. Your vault stays on your server.",
         )
     }
 }

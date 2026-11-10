@@ -2,7 +2,9 @@ package io.passauth.app.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -12,6 +14,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
 import io.passauth.app.data.ThemeMode
 
 /** Brand colours from assets/passauth-logo.svg and the web vault's CSS tokens (web/src/styles/app.css). */
@@ -23,6 +26,33 @@ object Brand {
     val ringBrush get() = Brush.linearGradient(listOf(Blue, Cyan))
 }
 
+/** The spacing scale every screen uses (4 / 8 / 12 / 16 / 24 / 32). */
+object Space {
+    val xs = 4.dp
+    val s = 8.dp
+    val m = 12.dp
+    val l = 16.dp
+    val xl = 24.dp
+    val xxl = 32.dp
+}
+
+/** Corner radii: 8 for controls (text boxes, tiles, notices), 12 for grouped cards, 16 for sheets and dialogs. */
+object Radius {
+    val control = 8.dp
+    val card = 12.dp
+    val sheet = 16.dp
+}
+
+// Material components pick their corners from here: text boxes and menus 8, cards 12, dialogs and
+// bottom sheets 16. Buttons keep Material's full rounding.
+private val PassAuthShapes = Shapes(
+    extraSmall = RoundedCornerShape(Radius.control),
+    small = RoundedCornerShape(Radius.control),
+    medium = RoundedCornerShape(Radius.card),
+    large = RoundedCornerShape(Radius.sheet),
+    extraLarge = RoundedCornerShape(Radius.sheet),
+)
+
 /** Extra tokens Material 3 has no slot for. */
 @Immutable
 data class PassAuthColors(
@@ -33,6 +63,15 @@ data class PassAuthColors(
     val ok: Color,
     val okSoft: Color,
     val warn: Color,
+    /** Floating surfaces (sheets, prompts over other apps): one style, raised from the page in dark mode. */
+    val sheet: Color,
+    /** A grouped card on a sheet, and its hairline. */
+    val sheetCard: Color,
+    val sheetLine: Color,
+    /** Behind a sheet. */
+    val scrim: Color,
+    /** Letter and symbol tiles on the page or a sheet (on a card they use surfaceVariant). */
+    val tile: Color,
 )
 
 // Neutral surfaces like the iOS app (light: gray page with white cards; dark: true black with
@@ -100,10 +139,14 @@ private val DarkScheme = darkColorScheme(
 private val LightExtra = PassAuthColors(
     header = Color(0xFFF2F2F7), onHeader = Color(0xFF1C1C1E), muted = Color(0xFF6C6C72), line = Color(0xFFD8D8DE),
     ok = Color(0xFF1F7A35), okSoft = Color(0xFFE3F3E6), warn = Color(0xFF965A00),
+    sheet = Color(0xFFF2F2F7), sheetCard = Color.White, sheetLine = Color(0xFFD8D8DE),
+    scrim = Color(0x66000000), tile = Color(0xFFE5E5EA),
 )
 private val DarkExtra = PassAuthColors(
     header = Color.Black, onHeader = Color(0xFFF2F2F7), muted = Color(0xFF9B9BA1), line = Color(0xFF38383A),
     ok = Color(0xFF4CD964), okSoft = Color(0xFF15301B), warn = Color(0xFFFFB340),
+    sheet = Color(0xFF1C1C1E), sheetCard = Color(0xFF2C2C2E), sheetLine = Color(0xFF48484A),
+    scrim = Color(0x99000000), tile = Color(0xFF3A3A3C),
 )
 
 val LocalPassAuthColors = staticCompositionLocalOf { LightExtra }
@@ -124,6 +167,6 @@ fun PassAuthTheme(mode: ThemeMode, content: @Composable () -> Unit) {
     val dark = isDark(mode)
     val scheme: ColorScheme = if (dark) DarkScheme else LightScheme
     CompositionLocalProvider(LocalPassAuthColors provides if (dark) DarkExtra else LightExtra) {
-        MaterialTheme(colorScheme = scheme, typography = Typography(), content = content)
+        MaterialTheme(colorScheme = scheme, typography = Typography(), shapes = PassAuthShapes, content = content)
     }
 }

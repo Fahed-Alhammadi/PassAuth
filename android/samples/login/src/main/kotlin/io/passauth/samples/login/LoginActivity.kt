@@ -17,6 +17,16 @@ class LoginActivity : Activity() {
             // Finishing the form ends the autofill session, which shows the save prompt.
             finish()
         }
+        // Like a single-activity app: the form goes away but the activity stays. The autofill service
+        // saves when the fields disappear, and can still show its own screen over this one.
+        findViewById<android.view.View>(R.id.sign_in_here).setOnClickListener {
+            val user = findViewById<EditText>(R.id.username).text.toString()
+            findViewById<android.view.View>(R.id.form).visibility = android.view.View.GONE
+            findViewById<TextView>(R.id.signed_in).apply {
+                text = "Signed in as $user"
+                visibility = android.view.View.VISIBLE
+            }
+        }
         findViewById<android.view.View>(R.id.passkeys).setOnClickListener {
             startActivity(Intent(this, PasskeyActivity::class.java))
         }

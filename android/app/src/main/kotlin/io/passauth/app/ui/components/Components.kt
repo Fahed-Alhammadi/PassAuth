@@ -43,13 +43,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -63,6 +63,8 @@ import io.passauth.app.R
 import io.passauth.app.data.IconLoader
 import io.passauth.app.ui.theme.Brand
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Radius
+import io.passauth.app.ui.theme.Space
 
 /** Text sized in dp: drawn inside fixed-size shapes, so it must not grow with the system font scale. */
 @Composable
@@ -271,8 +273,8 @@ fun Alert(text: String, kind: AlertKind = AlertKind.Info, modifier: Modifier = M
         AlertKind.Ok -> PassAuthTheme.colors.okSoft to PassAuthTheme.colors.ok
         AlertKind.Error -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
     }
-    Surface(color = bg, contentColor = fg, shape = RoundedCornerShape(10.dp), modifier = modifier.fillMaxWidth()) {
-        Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(12.dp))
+    Surface(color = bg, contentColor = fg, shape = RoundedCornerShape(Radius.control), modifier = modifier.fillMaxWidth()) {
+        Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(Space.m))
     }
 }
 
@@ -281,27 +283,51 @@ fun ErrorText(error: String?) {
     if (error != null) Alert(error, AlertKind.Error)
 }
 
-/** A titled card, like the extension's item page groups. */
+/** A titled grouped card (sentence-case title above, hairline, no shadow), like the other clients' groups. */
 @Composable
 fun CardSection(title: String?, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Column(modifier.fillMaxWidth()) {
-        if (title != null) {
-            Text(
-                title,
-                style = MaterialTheme.typography.labelMedium,
-                color = PassAuthTheme.colors.muted,
-                modifier = Modifier.padding(start = 4.dp, bottom = 6.dp).semantics { heading() },
-            )
-        }
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer,
-            border = androidx.compose.foundation.BorderStroke(1.dp, PassAuthTheme.colors.line),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), content = content)
-        }
+        if (title != null) GroupLabel(title, Modifier.padding(bottom = Space.s))
+        GroupCard { Column(Modifier.padding(horizontal = Space.l, vertical = Space.s), content = content) }
     }
+}
+
+/**
+ * One row's part of a grouped card in a lazy list: the card's fill and hairline for this
+ * row (rounded at the first and last row), and the divider above it, inset to the text column.
+ */
+fun Modifier.cardSegment(first: Boolean, last: Boolean, fill: Color, line: Color, dividerInset: Dp, radius: Dp = Radius.card): Modifier {
+    val top = if (first) radius else 0.dp
+    val bottom = if (last) radius else 0.dp
+    return this
+        .clip(RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom))
+        .drawBehind {
+            val w = size.width
+            val h = size.height
+            val sw = 1.dp.toPx()
+            val half = sw / 2
+            val t = top.toPx()
+            val b = bottom.toPx()
+            drawRect(fill)
+            val p = androidx.compose.ui.graphics.Path()
+            p.moveTo(half, if (last) h - b else h)
+            p.lineTo(half, if (first) t else 0f)
+            if (first) {
+                p.arcTo(androidx.compose.ui.geometry.Rect(half, half, 2 * t - half, 2 * t - half), 180f, 90f, false)
+                p.lineTo(w - t, half)
+                p.arcTo(androidx.compose.ui.geometry.Rect(w - 2 * t + half, half, w - half, 2 * t - half), 270f, 90f, false)
+            } else {
+                p.moveTo(w - half, 0f)
+            }
+            p.lineTo(w - half, if (last) h - b else h)
+            if (last) {
+                p.arcTo(androidx.compose.ui.geometry.Rect(w - 2 * b + half, h - 2 * b + half, w - half, h - half), 0f, 90f, false)
+                p.lineTo(b, h - half)
+                p.arcTo(androidx.compose.ui.geometry.Rect(half, h - 2 * b + half, 2 * b - half, h - half), 90f, 90f, false)
+            }
+            drawPath(p, line, style = Stroke(sw))
+            if (!first) drawLine(line, androidx.compose.ui.geometry.Offset(dividerInset.toPx(), half), androidx.compose.ui.geometry.Offset(w - sw, half), sw)
+        }
 }
 
 /** One labelled value with actions, inside a card. */
@@ -310,7 +336,7 @@ fun KeyValue(label: String, actions: @Composable RowScope.() -> Unit = {}, conte
     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         // Label and value are read together ("Username, alice"), then the actions.
         Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
-            Text(label, style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             content()
         }
         Row(verticalAlignment = Alignment.CenterVertically, content = actions)

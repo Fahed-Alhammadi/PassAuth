@@ -40,11 +40,11 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Password
 import androidx.compose.material.icons.outlined.PhonelinkLock
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Warning
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -84,7 +84,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.passauth.app.data.EmergencyKit
 import io.passauth.app.data.MasterPasswordRules
@@ -92,6 +91,13 @@ import io.passauth.app.data.QrEncoder
 import io.passauth.app.data.SecretKeyChoice
 import io.passauth.app.data.ShowOnce
 import io.passauth.app.data.TwoFactor
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.LocalOnSheet
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.SecureWindow
 import io.passauth.app.ui.UiCtx
@@ -105,6 +111,8 @@ import io.passauth.app.ui.components.PageBar
 import io.passauth.app.ui.components.PasswordField
 import io.passauth.app.ui.components.TextInput
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Radius
+import io.passauth.app.ui.theme.Space
 import io.passauth.core.estimateBits
 import java.text.DateFormat
 import java.util.Date
@@ -345,40 +353,30 @@ private fun ShownOnceDialogs(ctx: UiCtx, vm: SecurityViewModel) {
     if (vm.newSecretKey == null) vm.recovery?.let { once -> RecoveryCodesDialog(ctx, once, { vm.recovery = it }) { vm.recovery = null } }
 }
 
-private val ONCE = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
-
 @Composable
 private fun SecretKeyDialog(ctx: UiCtx, once: ShowOnce<String>, update: (ShowOnce<String>) -> Unit, close: () -> Unit) {
     val saveKit = rememberKitSaver(ctx)
-    AlertDialog(
-        onDismissRequest = { if (once.mayClose()) close() },
-        properties = ONCE,
-        icon = { Icon(Icons.Outlined.Key, null) },
-        title = { Text("Save your new Secret Key") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "This is the only time PassAuth shows your Secret Key. Any older Secret Key no longer works. " +
-                        "Save it now: without it, you can't sign in on a new device. This phone remembers it.",
-                )
-                SecretBox(once.value, "Secret Key")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { saveKit(once.value) }) {
-                        Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Save Emergency Kit")
-                    }
-                    OutlinedButton(onClick = { ctx.copy(once.value, "Secret Key") }) {
-                        Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Copy")
-                    }
-                }
-                CheckRow("I saved my Secret Key", once.saved, { update(once.confirmSaved(it)) })
+    // Shown once: it stays open until the key is saved somewhere.
+    DecisionSheet(
+        onDismiss = { if (once.mayClose()) close() },
+        title = "Save your new Secret Key",
+        tile = { Tile(icon = Icons.Outlined.Key) },
+        dismissable = false,
+        actions = { PrimaryButton("Done", { if (once.mayClose()) close() }, enabled = once.saved) },
+    ) {
+        PromptText(
+            "This is the only time PassAuth shows your Secret Key. Any older Secret Key no longer works. " +
+                "Save it now: without it, you can't sign in on a new device. This phone remembers it.",
+        )
+        Column {
+            SecretBox(once.value, "Secret Key")
+            QuietActions {
+                QuietButton("Save Emergency Kit", { saveKit(once.value) }, icon = Icons.Outlined.Download)
+                QuietButton("Copy", { ctx.copy(once.value, "Secret Key") }, icon = Icons.Outlined.ContentCopy)
             }
-        },
-        confirmButton = { TextButton(onClick = { if (once.mayClose()) close() }, enabled = once.saved) { Text("Done") } },
-    )
+        }
+        CheckRow("I saved my Secret Key", once.saved, { update(once.confirmSaved(it)) })
+    }
 }
 
 @Composable
@@ -393,68 +391,57 @@ private fun RecoveryCodesDialog(ctx: UiCtx, once: ShowOnce<List<String>>, update
             }.onSuccess { ctx.notify("Recovery codes saved.") }.onFailure { ctx.notify("Couldn't save the recovery codes.") }
         }
     }
-    AlertDialog(
-        onDismissRequest = { if (once.mayClose()) close() },
-        properties = ONCE,
-        title = { Text("Save your recovery codes") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "If you lose your phone or can't get email, a recovery code lets you sign in. Each code works once. " +
-                        "This is the only time PassAuth shows them.",
-                )
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    border = BorderStroke(1.dp, PassAuthTheme.colors.line),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SelectionContainer {
-                        Column(Modifier.padding(14.dp).semantics(mergeDescendants = true) { contentDescription = "Recovery codes: " + once.value.joinToString(", ") }) {
-                            once.value.forEach { Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge) }
-                        }
+    DecisionSheet(
+        onDismiss = { if (once.mayClose()) close() },
+        title = "Save your recovery codes",
+        tile = { Tile(icon = Icons.Outlined.Key) },
+        dismissable = false,
+        actions = { PrimaryButton("Done", { if (once.mayClose()) close() }, enabled = once.saved) },
+    ) {
+        PromptText(
+            "If you lose your phone or can't get email, a recovery code lets you sign in. Each code works once. " +
+                "This is the only time PassAuth shows them.",
+        )
+        Column {
+            Surface(
+                shape = RoundedCornerShape(Radius.control),
+                color = PassAuthTheme.colors.sheetCard,
+                border = BorderStroke(1.dp, PassAuthTheme.colors.sheetLine),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                SelectionContainer {
+                    Column(Modifier.padding(Space.l).semantics(mergeDescendants = true) { contentDescription = "Recovery codes: " + once.value.joinToString(", ") }) {
+                        once.value.forEach { Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyLarge) }
                     }
                 }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { ctx.copy(once.value.joinToString("\n"), "Recovery codes") }) {
-                        Icon(Icons.Outlined.ContentCopy, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Copy all")
-                    }
-                    OutlinedButton(onClick = {
-                        ctx.graph.lock.expectSystemScreen()
-                        val send = Intent(Intent.ACTION_SEND).setType("text/plain")
-                            .putExtra(Intent.EXTRA_SUBJECT, "PassAuth recovery codes")
-                            .putExtra(Intent.EXTRA_TEXT, text)
-                        runCatching { ctx.activity.startActivity(Intent.createChooser(send, "Share recovery codes")) }
-                            .onFailure { ctx.notify("No app can share these codes. Copy them instead.") }
-                    }) {
-                        Icon(Icons.Outlined.Share, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Share")
-                    }
-                    OutlinedButton(onClick = {
-                        ctx.graph.lock.expectSystemScreen()
-                        save.launch("PassAuth recovery codes.txt")
-                    }) {
-                        Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
-                        Spacer(Modifier.size(8.dp))
-                        Text("Save")
-                    }
-                }
-                CheckRow("I saved my recovery codes", once.saved, { update(once.confirmSaved(it)) })
             }
-        },
-        confirmButton = { TextButton(onClick = { if (once.mayClose()) close() }, enabled = once.saved) { Text("Done") } },
-    )
+            QuietActions {
+                QuietButton("Copy all", { ctx.copy(once.value.joinToString("\n"), "Recovery codes") }, icon = Icons.Outlined.ContentCopy)
+                QuietButton("Share", {
+                    ctx.graph.lock.expectSystemScreen()
+                    val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "PassAuth recovery codes")
+                        .putExtra(Intent.EXTRA_TEXT, text)
+                    runCatching { ctx.activity.startActivity(Intent.createChooser(send, "Share recovery codes")) }
+                        .onFailure { ctx.notify("No app can share these codes. Copy them instead.") }
+                }, icon = Icons.Outlined.Share)
+                QuietButton("Save", {
+                    ctx.graph.lock.expectSystemScreen()
+                    save.launch("PassAuth recovery codes.txt")
+                }, icon = Icons.Outlined.Download)
+            }
+        }
+        CheckRow("I saved my recovery codes", once.saved, { update(once.confirmSaved(it)) })
+    }
 }
 
 @Composable
 private fun SecretBox(value: String, label: String) {
+    val sheet = LocalOnSheet.current
     Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        border = BorderStroke(1.dp, PassAuthTheme.colors.line),
+        shape = RoundedCornerShape(Radius.control),
+        color = if (sheet) PassAuthTheme.colors.sheetCard else MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(1.dp, if (sheet) PassAuthTheme.colors.sheetLine else PassAuthTheme.colors.line),
         modifier = Modifier.fillMaxWidth(),
     ) {
         SelectionContainer {
@@ -719,23 +706,23 @@ private fun ConfirmPasswordDialog(ctx: UiCtx, vm: SecurityViewModel, title: Stri
     var secretKey by remember { mutableStateOf("") }
     val needsSecretKey = ctx.state.secretKeyRequired && !ctx.state.secretKeyStored
     val submit = { vm.confirmDialog(password, secretKey.ifBlank { null }, ctx.state.secretKeyRequired) }
-    AlertDialog(
-        onDismissRequest = vm::closeDialog,
-        icon = if (danger) ({ Icon(Icons.Outlined.Warning, null, tint = MaterialTheme.colorScheme.error) }) else null,
-        title = { Text(title) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(text)
-                PasswordField(password, { password = it; vm.dialogError = null }, "Master password", onImeAction = submit)
-                if (needsSecretKey) TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
-                ErrorText(vm.dialogError)
-            }
+    DecisionSheet(
+        onDismiss = vm::closeDialog,
+        title = title,
+        subtitle = ctx.state.email,
+        tile = { Tile(icon = if (danger) Icons.Outlined.Warning else Icons.Outlined.Lock, danger = danger) },
+        error = vm.dialogError,
+        dismissable = !vm.dialogBusy,
+        actions = {
+            PrimaryButton(if (vm.dialogBusy) "Checking…" else action, submit, enabled = password.isNotEmpty(), busy = vm.dialogBusy, danger = danger)
+            QuietActions { QuietButton("Cancel", vm::closeDialog, enabled = !vm.dialogBusy) }
         },
-        confirmButton = {
-            TextButton(onClick = submit, enabled = !vm.dialogBusy) {
-                Text(if (vm.dialogBusy) "Checking…" else action, color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-            }
-        },
-        dismissButton = { TextButton(onClick = vm::closeDialog, enabled = !vm.dialogBusy) { Text("Cancel") } },
-    )
+    ) {
+        PromptText(text)
+        // Verification sits right above the actions.
+        Column(verticalArrangement = Arrangement.spacedBy(Space.m)) {
+            PasswordField(password, { password = it; vm.dialogError = null }, "Master password", onImeAction = submit)
+            if (needsSecretKey) TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
+        }
+    }
 }

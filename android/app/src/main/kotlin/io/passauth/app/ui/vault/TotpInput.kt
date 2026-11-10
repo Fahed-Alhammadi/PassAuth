@@ -34,13 +34,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.QrCodeScanner
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +64,12 @@ import io.passauth.app.data.OtpAuth
 import io.passauth.app.data.OtpKey
 import io.passauth.app.data.OtpParse
 import io.passauth.app.data.QrDecoder
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.components.TextInput
 import io.passauth.app.ui.theme.PassAuthTheme
@@ -123,28 +127,28 @@ fun TotpInput(ctx: UiCtx, value: String, onChange: (String) -> Unit) {
         QrScanDialog(onKey = { scanning = false; accept(it) }, onDismiss = { scanning = false })
     }
     if (denied) {
-        AlertDialog(
-            onDismissRequest = { denied = false },
-            title = { Text("Camera access is off") },
-            text = {
-                Text(
-                    "PassAuth uses the camera only to read the QR code and never keeps pictures. " +
-                        "Allow camera access in Android settings, or type or paste the key instead: " +
-                        "on the website, look for \"Can't scan?\" or \"Enter a setup key\".",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
+        DecisionSheet(
+            onDismiss = { denied = false },
+            title = "Camera access is off",
+            tile = { Tile(icon = Icons.Outlined.QrCodeScanner) },
+            actions = {
+                PrimaryButton("Open Android settings", {
                     denied = false
                     runCatching {
                         context.startActivity(
                             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)),
                         )
                     }
-                }) { Text("Open settings") }
+                })
+                QuietActions { QuietButton("Type the key instead", { denied = false }) }
             },
-            dismissButton = { TextButton(onClick = { denied = false }) { Text("Type the key") } },
-        )
+        ) {
+            PromptText(
+                "PassAuth uses the camera only to read the QR code and never keeps pictures. " +
+                    "Allow camera access in Android settings, or type or paste the key instead: " +
+                    "on the website, look for \"Can't scan?\" or \"Enter a setup key\".",
+            )
+        }
     }
 }
 

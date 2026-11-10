@@ -6,6 +6,20 @@
     android:orientation="vertical"
     android:padding="24dp">
 
+    <!-- Shown by "Sign in on this screen" in place of the form. -->
+    <TextView
+        android:id="@+id/signed_in"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textSize="22sp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/form"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -37,8 +51,15 @@
         android:text="Sign in" />
 
     <Button
+        android:id="@+id/sign_in_here"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Sign in on this screen" />
+
+    <Button
         android:id="@+id/passkeys"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Passkey tests" />
+    </LinearLayout>
 </LinearLayout>

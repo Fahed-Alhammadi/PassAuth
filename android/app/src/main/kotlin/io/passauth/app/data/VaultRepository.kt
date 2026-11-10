@@ -110,6 +110,13 @@ data class VaultData(
     fun get(id: String) = entries.firstOrNull { it.id == id }
     fun vaultName(id: String) = vaults.firstOrNull { it.id == id }?.name ?: "Vault"
     fun canWrite(e: Entry) = vaults.firstOrNull { it.id == e.vaultId }?.role != Role.Read
+
+    /**
+     * Is [e] in the account's own vault, and editable? Only such logins may become the default
+     * place a typed login or a new passkey is saved: anyone on the server can share a vault with
+     * this account and put a login for a site in it.
+     */
+    fun isOwn(e: Entry) = vaults.firstOrNull { it.id == e.vaultId }?.let { it.personal && it.role != Role.Read } == true
     val writable: List<VaultInfo> get() = vaults.filter { it.role != Role.Read }
     val defaultVault: VaultInfo? get() = VaultInfo.defaultSaveVault(vaults)
 }

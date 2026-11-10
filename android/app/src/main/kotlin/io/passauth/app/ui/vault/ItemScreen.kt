@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -33,12 +32,10 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,7 +57,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.data.Entry
 import io.passauth.app.data.FieldType
@@ -72,6 +68,18 @@ import io.passauth.app.data.UrlMatcher
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.components.CardSection
+import io.passauth.app.ui.components.ChoiceRow
+import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.GroupCard
+import io.passauth.app.ui.components.GroupLabel
+import io.passauth.app.ui.components.PrimaryButton
+import io.passauth.app.ui.components.PromptText
+import io.passauth.app.ui.components.QuietActions
+import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.components.RowDivider
+import io.passauth.app.ui.components.Tile
+import io.passauth.app.ui.components.TileRowInset
+import io.passauth.app.ui.components.largeText
 import io.passauth.app.ui.components.KeyValue
 import io.passauth.app.ui.components.PageBar
 import io.passauth.app.ui.components.SiteIcon
@@ -117,22 +125,23 @@ fun ItemScreen(ctx: UiCtx, id: String) {
     }
 
     if (confirmDelete) {
-        AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("Move to trash?") },
-            text = { Text("Move this item to the trash?") },
-            confirmButton = {
-                TextButton(onClick = {
+        DecisionSheet(
+            onDismiss = { confirmDelete = false },
+            title = "Move to trash?",
+            subtitle = i.name.ifEmpty { "Untitled" },
+            tile = { SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 40.dp) },
+            actions = {
+                PrimaryButton("Move to trash", {
                     confirmDelete = false
                     ctx.launch {
                         ctx.repo.trashItem(entry)
                         ctx.notify("Moved to trash. You can restore it from the web vault.")
                         back()
                     }
-                }) { Text("Move to trash", color = MaterialTheme.colorScheme.error) }
+                }, danger = true)
+                QuietActions { QuietButton("Cancel", { confirmDelete = false }) }
             },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
-        )
+        ) { PromptText("It stays in the trash until you restore or delete it in the web vault.") }
     }
 
     if (moving) {
@@ -221,7 +230,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
                         }) {
                             Text(
                                 if (c.code.length == 6) "${c.code.take(3)} ${c.code.drop(3)}" else c.code,
-                                fontFamily = FontFamily.Monospace, fontSize = 24.sp, fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.primary,
                             )
                         }
@@ -338,35 +347,15 @@ private fun MoveDialog(ctx: UiCtx, entry: Entry, from: String, targets: List<Vau
     var selected by rememberSaveable { mutableStateOf(targets.firstOrNull()?.id.orEmpty()) }
     var busy by remember { mutableStateOf(false) }
     val target = targets.firstOrNull { it.id == selected }
-    AlertDialog(
-        onDismissRequest = { if (!busy) close() },
-        title = { Text("Move to another vault") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()).selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Now in $from.", style = MaterialTheme.typography.bodyMedium)
-                targets.forEach { t ->
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .selectable(selected = t.id == selected, role = androidx.compose.ui.semantics.Role.RadioButton) { selected = t.id },
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(selected = t.id == selected, onClick = null)
-                        Spacer(Modifier.size(10.dp))
-                        Column {
-                            Text(t.name, style = MaterialTheme.typography.bodyLarge)
-                            Text(roleLabel(t), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
-                        }
-                    }
-                }
-                Text(
-                    "Everyone who can open ${target?.name ?: "the new vault"} will see this item, and people who can only open $from lose access to it.",
-                    style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(enabled = !busy && target != null, onClick = {
-                val t = target ?: return@TextButton
+    DecisionSheet(
+        onDismiss = close,
+        title = "Move to another vault",
+        subtitle = "${entry.item.name.ifEmpty { "Untitled" }} · now in $from",
+        tile = { Tile(icon = Icons.AutoMirrored.Outlined.DriveFileMove) },
+        dismissable = !busy,
+        actions = {
+            PrimaryButton(if (busy) "Moving…" else "Move item", {
+                val t = target ?: return@PrimaryButton
                 busy = true
                 ctx.launch {
                     try {
@@ -377,10 +366,21 @@ private fun MoveDialog(ctx: UiCtx, entry: Entry, from: String, targets: List<Vau
                         close()
                     }
                 }
-            }) { Text(if (busy) "Moving…" else "Move") }
+            }, enabled = target != null, busy = busy)
+            QuietActions { QuietButton("Cancel", close, enabled = !busy) }
         },
-        dismissButton = { TextButton(enabled = !busy, onClick = close) { Text("Cancel") } },
-    )
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            GroupLabel("Move to")
+            GroupCard(Modifier.selectableGroup()) {
+                targets.forEachIndexed { n, t ->
+                    if (n > 0) RowDivider(if (largeText()) 16.dp else TileRowInset)
+                    ChoiceRow(t.name, roleLabel(t), selected = t.id == selected, onClick = { selected = t.id }, enabled = !busy, icon = Icons.Outlined.Lock)
+                }
+            }
+            PromptText("Everyone who can open ${target?.name ?: "the new vault"} will see this item, and people who can only open $from lose access to it.")
+        }
+    }
 }
 
 private fun roleLabel(v: io.passauth.app.data.VaultInfo) = when (v.role) {

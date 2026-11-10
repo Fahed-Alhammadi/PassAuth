@@ -1,2 +1,4 @@
-• Choose where a new passkey is saved: PassAuth lists your logins for that exact site under "Save in", plus "New login". The matching login is picked for you, so no second login is created.
-• A passkey is never saved in a login for another site that only shares the main domain (e.g. cloudy.example.com vs bazarr.example.com).
+• No more duplicate logins: if PassAuth already has a login for the app or site (even one with only a user name or only a password), it is updated instead. Android's save prompt says which will happen, and PassAuth asks first when it isn't sure which login you mean.
+• Passkey, unlock and save prompts open as a tidy sheet over the app you are in.
+• Cleaner vault list and clearer confirmations; Log out now asks first.
+• Shared-vault logins are never picked for you.
