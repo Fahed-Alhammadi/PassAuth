@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/core-ffi", "crates/core-wasm", "crates/server"]
+exclude = ["crates/vendor"]
 
 [workspace.package]
 version = "0.6.1"
@@ -20,3 +21,9 @@ strip = true
 [profile.release.package.passauth-core-wasm]
 strip = false
 opt-level = 3
+
+# sqlx 0.9.0 caps libsqlite3-sys < 0.38, which bundles SQLite with
+# RUSTSEC-2026-0459. Same crate with only that bound raised (see
+# crates/vendor/README.md). Remove once sqlx releases the fix.
+[patch.crates-io]
+sqlx-sqlite = { path = "crates/vendor/sqlx-sqlite" }
