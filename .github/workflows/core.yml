@@ -75,6 +75,8 @@ jobs:
     permissions:
       contents: read
       checks: write
+      # Scheduled runs open an issue for each new advisory.
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2

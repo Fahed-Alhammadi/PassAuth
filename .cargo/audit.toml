@@ -8,4 +8,11 @@
 # via webauthn-rs -> crypto-glue). The server only verifies RS256 signatures of
 # security keys with their public keys; it never holds or uses an RSA private
 # key, so there is no secret to recover. No fixed release exists yet.
-ignore = ["RUSTSEC-2026-0387", "RUSTSEC-2023-0071"]
+#
+# RUSTSEC-2026-0459: bundled SQLite < 3.54 can leak uninitialized memory when it
+# opens a database together with a crafted `-wal` file (via sqlx 0.9.0 ->
+# sqlx-sqlite, which caps libsqlite3-sys < 0.38). The server only opens its own
+# database in its private data directory; whoever can plant files there already
+# controls the server. Remove once sqlx releases a patch allowing
+# libsqlite3-sys >= 0.39 (launchbadge/sqlx#4516), then `cargo update -p sqlx`.
+ignore = ["RUSTSEC-2026-0387", "RUSTSEC-2023-0071", "RUSTSEC-2026-0459"]
