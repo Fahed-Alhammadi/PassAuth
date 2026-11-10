@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.7.0 (2026-11-10)
+
+- Web vault and desktop: redesigned dialogs, sign-in and settings; changing the master password keeps this device signed in (f4526f7)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.6.4...server-0.7.0)
+
 ## 0.6.4 (2026-11-10)
 
 - Admin 2FA reset, remove member with key change in one step, doc fixes (6b89ffa)
