@@ -18,6 +18,7 @@ final class Phase3UITests: UITestBase {
         button("Sign in").tap()
         if let totp {
             wait(app.staticTexts["Two-step login"], 60)
+            declineSystemPasswordSave()
             let code = try totp()
             type(app.textFields["6-digit code"], code)
             shot("p3-01-two-step")
@@ -25,6 +26,17 @@ final class Phase3UITests: UITestBase {
             button("Verify and sign in").tap()
         }
         wait(app.navigationBars["Vault"], 60)
+        declineSystemPasswordSave()
+    }
+
+    /// iOS's own "Save Password?" sheet for the sign-in form (when the system's password
+    /// manager is on in the simulator) covers the app: answer "Not Now".
+    private func declineSystemPasswordSave() {
+        let board = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for candidate in [board.buttons["Not Now"].firstMatch, app.buttons["Not Now"].firstMatch] where candidate.waitForExistence(timeout: 3) {
+            candidate.tap()
+            return
+        }
     }
 
     private func scrollTo(_ e: XCUIElement, max: Int = 8) {
@@ -39,6 +51,8 @@ final class Phase3UITests: UITestBase {
         tab("Settings")
         // Back to the category list if a page is still open.
         while !app.buttons["settings.\(id)"].exists && app.navigationBars.buttons.count > 0 && !app.navigationBars["Settings"].exists { back() }
+        // Large text: the lower categories are only loaded once scrolled to.
+        scrollTo(app.buttons["settings.\(id)"])
         wait(app.buttons["settings.\(id)"]).tap()
     }
 
@@ -85,6 +99,9 @@ final class Phase3UITests: UITestBase {
         shot("p3-04-edit-totp")
         app.buttons["edit.save"].tap()
         wait(app.navigationBars["View login"], 30)
+        // The editor sheet is still sliding away over the bar's Edit button.
+        wait(app.staticTexts["totpCode"])
+        sleep(1)
         button("Edit").tap()
         replace(app.secureTextFields["edit.password"], "second-Pass-222")
         app.buttons["edit.save"].tap()
@@ -289,6 +306,7 @@ final class Phase3UITests: UITestBase {
         back()
         settingsPage("vault")
         shot("big-07-vault-options")
+        scrollTo(app.buttons["settings.export"])
         wait(app.buttons["settings.export"]).tap()
         shot("big-08-export")
         app.swipeUp(velocity: .slow)

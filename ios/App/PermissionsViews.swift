@@ -275,7 +275,7 @@ struct PermissionRow: View {
                     .font(.title3)
                     .foregroundStyle(Color.paAccent)
                     .frame(width: 40, height: 40)
-                    .background(Color.paAccentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Color.paAccentSoft, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(p.title(kind)).font(.headline).foregroundStyle(Color.paInk)
@@ -354,23 +354,33 @@ struct PermissionsIntroView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        AuthFrame(title: "Set up PassAuth", subtitle: "Choose what PassAuth may use. Allow only what you need; you can change it later in Settings → Permissions.") {
-            VStack(spacing: 0) {
-                ForEach(Array(PermissionKind.allCases.enumerated()), id: \.element) { i, k in
-                    if i > 0 { Divider().overlay(Color.paLine).padding(.leading, 52) }
-                    PermissionRow(kind: k, intro: true)
+        NavigationStack {
+            PromptScaffold {
+                Section {
+                    VStack(alignment: .leading, spacing: PA.Space.s) {
+                        Text("Set up PassAuth").font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
+                            .accessibilityAddTraits(.isHeader)
+                        Text("Choose what PassAuth may use. Allow only what you need; you can change it later in Settings → Permissions.")
+                            .font(.subheadline).foregroundStyle(Color.paMuted)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .promptPlainRow()
+                }
+                Section {
+                    ForEach(PermissionKind.allCases) { k in
+                        PermissionRow(kind: k, intro: true)
+                    }
+                }
+                .paRow()
+            } actions: {
+                PrimaryButton(title: "Continue") { finish() }
+                    .accessibilityIdentifier("perm.continue")
+                QuietActions {
+                    QuietButton(title: "Skip for now") { finish() }
+                        .accessibilityIdentifier("perm.skip")
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(Color.paSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Color.paLine, lineWidth: 0.5))
-            PrimaryButton(title: "Continue") { finish() }
-                .accessibilityIdentifier("perm.continue")
-                .padding(.top, 6)
-            Button("Skip for now") { finish() }
-                .font(.subheadline.weight(.medium))
-                .accessibilityIdentifier("perm.skip")
+            .promptBar()
         }
         .task(id: scenePhase) {
             if scenePhase == .active { await model.permissions.refresh() }

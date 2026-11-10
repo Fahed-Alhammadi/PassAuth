@@ -34,11 +34,11 @@ final class AutofillTests: XCTestCase {
         // Another subdomain of the same base domain is never offered.
         let c = PasskeyLogic.saveTargets(v, rpId: "cloudy.example.com", userName: "fahed")
         XCTAssertEqual(c.map(\.id), ["c"])
-        XCTAssertEqual(PasskeyLogic.defaultTarget(c, rpId: "cloudy.example.com"), "c")
+        XCTAssertEqual(PasskeyLogic.defaultTarget(c, rpId: "cloudy.example.com", in: v), "c")
         // No login for this host: nothing to pick, a new login is preselected.
         let n = PasskeyLogic.saveTargets(v, rpId: "new.example.com", userName: "fahed")
         XCTAssertTrue(n.isEmpty)
-        XCTAssertEqual(PasskeyLogic.defaultTarget(n, rpId: "new.example.com"), PasskeyLogic.newLogin)
+        XCTAssertEqual(PasskeyLogic.defaultTarget(n, rpId: "new.example.com", in: v), PasskeyLogic.newLogin)
         // RP ID = the base domain: its subdomains are offered, the exact host first.
         let e = PasskeyLogic.saveTargets(v, rpId: "example.com", userName: "fahed")
         XCTAssertEqual(e.first?.id, "a")
@@ -46,13 +46,54 @@ final class AutofillTests: XCTestCase {
         // GitHub sends the GitHub user name, the login has the email: still preselected (user part of the email).
         let g = PasskeyLogic.saveTargets(v, rpId: "github.com", userName: "fahed")
         XCTAssertEqual(g.map(\.id), ["g", "g2"])
-        XCTAssertEqual(PasskeyLogic.defaultTarget(g, rpId: "github.com"), "g")
+        XCTAssertEqual(PasskeyLogic.defaultTarget(g, rpId: "github.com", in: v), "g")
         // A stale choice for another site isn't used.
         var p = Passkey()
         p.rpId = "cloudy.example.com"
         guard case .create = PasskeyLogic.storePlan(v, p, target: "b") else { return XCTFail("bazarr must not get cloudy's passkey") }
         guard case .attach(let t, _) = PasskeyLogic.storePlan(v, p, target: "c") else { return XCTFail("expected cloudy") }
         XCTAssertEqual(t.id, "c")
+    }
+
+    /// A login for the exact host in a vault somebody shared (anyone can share one and put a
+    /// login in it) is never the preselected place for a new passkey; it can still be chosen,
+    /// and the row names its vault. A login in the user's own vault is preselected as before.
+    func testPasskeyDefaultTargetIsNeverInASharedVault() {
+        func vault(_ entries: [Entry]) -> VaultData {
+            var v = VaultData()
+            v.entries = entries
+            v.vaults = [VaultInfo(id: "v1", name: "Personal", role: .owner), VaultInfo(id: "team", name: "Team", role: .write, keyKind: "sealed")]
+            return v
+        }
+        let planted = entry("planted", name: "Cloudy", user: "fahed", urls: [("https://cloudy.example.com", .default)], vault: "team")
+        // Only the planted login: listed (with its vault), but "New login" is preselected.
+        var v = vault([planted])
+        var t = PasskeyLogic.saveTargets(v, rpId: "cloudy.example.com", userName: "fahed")
+        XCTAssertEqual(t.map(\.id), ["planted"])
+        XCTAssertEqual(PasskeyLogic.defaultTarget(t, rpId: "cloudy.example.com", in: v), PasskeyLogic.newLogin)
+        XCTAssertEqual(v.sharedVaultName(planted), "Team")
+        // The user's own login for the host is preselected and listed first, even when the
+        // planted one matches the user name and the own one doesn't.
+        let mine = entry("mine", name: "Cloudy (mine)", user: "other", urls: [("https://cloudy.example.com", .default)])
+        v = vault([planted, mine])
+        t = PasskeyLogic.saveTargets(v, rpId: "cloudy.example.com", userName: "fahed")
+        XCTAssertEqual(t.map(\.id), ["mine", "planted"])
+        XCTAssertEqual(PasskeyLogic.defaultTarget(t, rpId: "cloudy.example.com", in: v), "mine")
+        XCTAssertNil(v.sharedVaultName(mine))
+        // An own login for a subdomain only isn't the exact host: still "New login", not the shared one.
+        let sub = entry("sub", name: "Files", user: "fahed", urls: [("https://files.cloudy.example.com", .default)])
+        v = vault([planted, sub])
+        t = PasskeyLogic.saveTargets(v, rpId: "cloudy.example.com", userName: "fahed")
+        XCTAssertEqual(t.map(\.id), ["sub", "planted"])
+        XCTAssertEqual(PasskeyLogic.defaultTarget(t, rpId: "cloudy.example.com", in: v), PasskeyLogic.newLogin)
+        // The shared login remains an explicit choice.
+        var p = Passkey()
+        p.rpId = "cloudy.example.com"
+        guard case .attach(let chosen, _) = PasskeyLogic.storePlan(v, p, target: "planted") else { return XCTFail("an explicit choice of the shared login is kept") }
+        XCTAssertEqual(chosen.id, "planted")
+        guard case .create = PasskeyLogic.storePlan(v, p, target: PasskeyLogic.defaultTarget(t, rpId: "cloudy.example.com", in: v)) else {
+            return XCTFail("the default is a new login")
+        }
     }
 
     func testPagesFromServiceIdentifiers() {

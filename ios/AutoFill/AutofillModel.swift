@@ -9,7 +9,7 @@ import os
 enum AutofillRequest {
     /// The password (and passkey) list: the key button in the QuickType bar, or "PassAuth" in
     /// the passkey sheet when no saved identity matched.
-    case list(pages: [String], passkey: ASPasskeyCredentialRequestParameters?)
+    case list(pages: [String], passkey: PasskeyQuery?)
     /// Verification codes (iOS 18).
     case oneTimeCodes(pages: [String])
     /// A QuickType / passkey sheet suggestion that needs the vault unlocked or the user verified.
@@ -23,6 +23,24 @@ enum AutofillRequest {
     case generate(GenerateInfo)
 }
 
+/// An `ASPasskeyCredentialRequestParameters` (a website asking to sign in with a passkey), as plain values.
+struct PasskeyQuery {
+    let rpId: String
+    /// The credential ids the website accepts; empty: any discoverable passkey.
+    let allowed: [Data]
+    let clientDataHash: Data
+
+    init(rpId: String, allowed: [Data], clientDataHash: Data) {
+        self.rpId = rpId
+        self.allowed = allowed
+        self.clientDataHash = clientDataHash
+    }
+
+    init(_ p: ASPasskeyCredentialRequestParameters) {
+        self.init(rpId: p.relyingPartyIdentifier, allowed: p.allowedCredentials, clientDataHash: p.clientDataHash)
+    }
+}
+
 /// An `ASSavePasswordRequest`, as plain values (no iOS 26.2 types in the model).
 struct SaveInfo {
     enum Event { case userInitiated, formDidDisappear, generatedPasswordFilled }
@@ -31,6 +49,13 @@ struct SaveInfo {
     let username: String
     let password: String
     let event: Event
+
+    init(page: String?, username: String, password: String, event: Event) {
+        self.page = page
+        self.username = username
+        self.password = password
+        self.event = event
+    }
 
     #if os(iOS)
     @available(iOS 26.2, *)
@@ -51,6 +76,11 @@ struct SaveInfo {
 struct GenerateInfo {
     let page: String?
     let rules: PasswordRules?
+
+    init(page: String?, rules: PasswordRules?) {
+        self.page = page
+        self.rules = rules
+    }
 
     #if os(iOS)
     @available(iOS 26.2, *)
@@ -89,6 +119,12 @@ final class AutofillModel {
     /// Passkey registration: logins it can be saved in, and the chosen one (an entry id or `PasskeyLogic.newLogin`).
     var passkeyTargets: [Entry] = []
     var passkeyTarget = PasskeyLogic.newLogin
+    /// Saving a login: the logins for the site it can update, and the chosen one (an entry id or
+    /// `SaveLogic.newLogin`), preselected from the default plan.
+    private(set) var saveTargets: [Entry] = []
+    private(set) var saveTarget = SaveLogic.newLogin
+    /// The user picked the target themselves (kept when the vault catches up with the server).
+    @ObservationIgnored private var saveTargetPicked = false
     /// Debug builds: memory measured around unlocking (for the extension memory limit).
     private(set) var memoryNote = ""
     @ObservationIgnored weak var context: ASCredentialProviderExtensionContext?
@@ -191,6 +227,43 @@ final class AutofillModel {
     }
     #endif
 
+    // MARK: What the prompt is about
+
+    /// The site the request is about (its host), if it names one.
+    var requestHost: String? {
+        switch request {
+        case .list(let pages, let passkey):
+            return pages.first.map(AutofillMatcher.displayHost) ?? passkey?.rpId
+        case .oneTimeCodes(let pages):
+            return pages.first.map(AutofillMatcher.displayHost)
+        case .credential(let r):
+            if let id = r.credentialIdentity as? ASPasskeyCredentialIdentity { return id.relyingPartyIdentifier }
+            return AutofillMatcher.page(r.credentialIdentity.serviceIdentifier).map(AutofillMatcher.displayHost)
+        case .registerPasskey:
+            return registration?.rpId
+        case .save:
+            return saveHost.isEmpty ? nil : saveHost
+        case .generate(let info):
+            return info.page.map(AutofillMatcher.displayHost)
+        case .configuration:
+            return nil
+        }
+    }
+
+    /// Why the vault has to be unlocked, as the unlock prompt's title.
+    var unlockTitle: String {
+        switch request {
+        case .list(_, let passkey): passkey == nil ? "Unlock to fill your login" : "Unlock to sign in"
+        case .oneTimeCodes: "Unlock to fill your code"
+        case .credential(let r):
+            r.credentialIdentity is ASPasskeyCredentialIdentity ? "Unlock to sign in"
+                : isOneTimeCode(r) ? "Unlock to fill your code" : "Unlock to fill your login"
+        case .registerPasskey: "Unlock to save a passkey"
+        case .save: "Unlock to save this login"
+        case .configuration, .generate: "Unlock PassAuth"
+        }
+    }
+
     // MARK: Unlock
 
     /// Master password unlock runs Argon2id with the account's memory cost inside the
@@ -269,7 +342,7 @@ final class AutofillModel {
         case .registerPasskey:
             if let r = registration, let v = repo.vault {
                 passkeyTargets = PasskeyLogic.saveTargets(v, rpId: r.rpId, userName: r.user)
-                passkeyTarget = PasskeyLogic.defaultTarget(passkeyTargets, rpId: r.rpId)
+                passkeyTarget = PasskeyLogic.defaultTarget(passkeyTargets, rpId: r.rpId, in: v)
             }
             screen = .confirmPasskey
         case .credential(let r):
@@ -277,11 +350,21 @@ final class AutofillModel {
         case .save:
             switch savePlan {
             case .unchanged?: completeSave()
+            case .noPassword?: cancel()
             case .readOnly(let e)?:
                 message("Can't update this login", "\(e.item.name) is in \(repo.vault?.vaultName(e.vaultId) ?? "a vault") that you can only view.")
             default:
+                resetSaveChoice()
                 screen = .confirmSave
-                Task { await repo.refreshIfStale() }
+                Task {
+                    // Offered from the copy on the device; the server may know more logins.
+                    let before = repo.vault?.revision
+                    await repo.refreshIfStale()
+                    guard repo.vault?.revision != before, !busy else { return }
+                    resetSaveChoice()
+                    // Saved from another device in the meantime: nothing left to ask.
+                    if case .unchanged? = savePlan, !saveTargetPicked { completeSave() }
+                }
             }
         case .generate:
             screen = .generate
@@ -294,7 +377,7 @@ final class AutofillModel {
             guard let id = pk.credentialIdentity as? ASPasskeyCredentialIdentity else { return cancel(.credentialIdentityNotFound) }
             let found = repo.passkeysFor(id.relyingPartyIdentifier).first { _, p in PasskeyLogic.b64urlDecode(p.credentialId) == id.credentialID }
             guard let (entry, passkey) = found else {
-                return message("Passkey not found", "This passkey is no longer in your PassAuth vault.")
+                return message("Passkey not found", "This passkey is no longer in your PassAuth vault. Sign in another way, then save a new passkey for this site.")
             }
             await assertPasskey(entry, passkey, rpId: id.relyingPartyIdentifier, clientDataHash: pk.clientDataHash)
             return
@@ -341,12 +424,12 @@ final class AutofillModel {
     /// Passkeys offered in the list for a passkey request.
     var passkeyChoices: [(Entry, Passkey)] {
         guard case .list(_, let p?) = request else { return [] }
-        return PasskeyLogic.matching(rpId: p.relyingPartyIdentifier, allowed: p.allowedCredentials, repo.passkeysFor(p.relyingPartyIdentifier))
+        return PasskeyLogic.matching(rpId: p.rpId, allowed: p.allowed, repo.passkeysFor(p.rpId))
             .sorted { $0.1.createdAt > $1.1.createdAt } // newest first
     }
 
     var passkeyRpId: String? {
-        if case .list(_, let p?) = request { return p.relyingPartyIdentifier }
+        if case .list(_, let p?) = request { return p.rpId }
         return nil
     }
 
@@ -356,7 +439,7 @@ final class AutofillModel {
 
     func pickPasskey(_ e: Entry, _ p: Passkey) {
         guard case .list(_, let params?) = request else { return }
-        Task { await assertPasskey(e, p, rpId: params.relyingPartyIdentifier, clientDataHash: params.clientDataHash) }
+        Task { await assertPasskey(e, p, rpId: params.rpId, clientDataHash: params.clientDataHash) }
     }
 
     // MARK: Fill
@@ -371,7 +454,7 @@ final class AutofillModel {
 
     func fillCode(_ e: Entry) {
         guard let code = Clipboard.totp(e.item.login?.totp) else {
-            return message("No verification code", "This login has no valid authenticator key.")
+            return message("No verification code", "This login has no valid authenticator key. Open the login in PassAuth and add the key again.")
         }
         if #available(iOS 18.0, macOS 15.0, *) {
             complete { ctx in ctx.completeOneTimeCodeRequest(using: ASOneTimeCodeCredential(code: code), completionHandler: nil) }
@@ -396,7 +479,7 @@ final class AutofillModel {
     private func assertPasskey(_ e: Entry, _ p: Passkey, rpId: String, clientDataHash: Data) async {
         guard await verifyUser("Sign in with your passkey") else { return }
         guard let key = PasskeyLogic.b64urlDecode(p.privateKey), let cid = PasskeyLogic.b64urlDecode(p.credentialId) else {
-            return message("Can't use this passkey", "The saved passkey is damaged.")
+            return message("Can't use this passkey", "The saved passkey is damaged. Sign in another way, then save a new passkey for this site.")
         }
         do {
             let rp = rpId.lowercased()
@@ -456,10 +539,38 @@ final class AutofillModel {
         SaveLogic.blocked(page: info.page, password: info.password, settings: state.settings)
     }
 
-    /// What saving would do, on the vault as currently open (the save itself syncs first).
+    /// What saving would do by default, on the vault as currently open (the save itself syncs first).
     var savePlan: SaveLogic.Plan? {
         guard let info = saveInfo, let page = info.page, let v = repo.vault else { return nil }
         return SaveLogic.plan(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch)
+    }
+
+    /// The login the sheet's "Save in" choice updates; nil for a new login.
+    var saveUpdates: Entry? {
+        saveTargets.first { $0.id == saveTarget }
+    }
+
+    func chooseSaveTarget(_ id: String) {
+        guard !busy else { return }
+        saveTarget = id
+        saveTargetPicked = true
+    }
+
+    /// The name of the shared vault a "Save in" login (for a login or a passkey) is in, shown on
+    /// its row; nil for the account's own vault.
+    func sharedVaultName(_ e: Entry) -> String? {
+        repo.vault?.sharedVaultName(e)
+    }
+
+    /// "Save in" for the vault as currently open: the logins for the site in the account's own
+    /// vault (plus the same-user-name login of a shared vault, when that is the default), with
+    /// the default plan's one selected, unless the user picked one that is still possible.
+    private func resetSaveChoice() {
+        guard let info = saveInfo, let page = info.page, let v = repo.vault else { return }
+        saveTargets = SaveLogic.targets(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch)
+        if saveTargetPicked && (saveTarget == SaveLogic.newLogin || saveTargets.contains { $0.id == saveTarget }) { return }
+        saveTargetPicked = false
+        saveTarget = savePlan.map(SaveLogic.defaultTarget) ?? SaveLogic.newLogin
     }
 
     var saveHost: String {
@@ -468,7 +579,9 @@ final class AutofillModel {
 
     /// Without a sheet: nothing to do (not offered, already saved), or the user already asked
     /// iOS to save and the vault opens without them (vault timeout "Never"). Everything else
-    /// (locked vault, a save iOS didn't ask the user about) goes to the confirmation sheet.
+    /// (locked vault, a save iOS didn't ask the user about, and an update of "the only login for
+    /// the site" when no user name was typed: the user must see which login changes) goes to
+    /// the confirmation sheet.
     /// A generated password just filled into a form isn't saved yet: the submit that follows
     /// brings the user name too.
     static func saveWithoutUserInteraction(_ info: SaveInfo, context: ASCredentialProviderExtensionContext) async {
@@ -482,10 +595,13 @@ final class AutofillModel {
         guard model.repo.isUnlocked, let plan = model.savePlan else { return model.cancel(.userInteractionRequired) }
         switch plan {
         case .unchanged: model.completeSave()
-        case .readOnly: model.cancel()
+        case .readOnly, .noPassword: model.cancel()
+        case .update(_, .only): model.cancel(.userInteractionRequired)
         case .create, .update:
             guard info.event == .userInitiated, let page = info.page else { return model.cancel(.userInteractionRequired) }
             do {
+                // No target: the default plan of the synced vault; `saveLogin` refuses a rule-3
+                // update there too (the sheet is shown instead).
                 _ = try await model.repo.saveLogin(page: page, username: info.username, password: info.password)
                 await model.repo.identities.flush()
                 model.completeSave()
@@ -502,12 +618,27 @@ final class AutofillModel {
         Task {
             defer { busy = false }
             do {
-                _ = try await repo.saveLogin(page: page, username: info.username, password: info.password)
+                // Exactly what the sheet shows is applied. If the synced vault no longer allows
+                // it (or would have made another default), nothing is written.
+                _ = try await repo.saveLogin(page: page, username: info.username, password: info.password, target: saveTarget, isDefault: !saveTargetPicked)
                 // iOS leaves the identity store to the provider: the new login is suggested next time.
                 await repo.identities.flush()
                 completeSave()
+            } catch is VaultRepository.SaveChoiceChanged {
+                // Show the choices of the vault as it is now and let the user confirm again.
+                saveTargetPicked = false
+                resetSaveChoice()
+                switch savePlan {
+                case .unchanged?: completeSave()
+                case .readOnly(let e)?:
+                    message("Can't update this login", "\(e.item.name) is in \(repo.vault?.vaultName(e.vaultId) ?? "a vault") that you can only view.")
+                default:
+                    self.error = "Your vault changed while this was open. Check “Save in”, then confirm again."
+                }
             } catch {
                 self.error = errorMessage(error)
+                // The save synced first: the choices are those of the vault as it is now.
+                resetSaveChoice()
             }
         }
     }

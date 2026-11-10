@@ -724,10 +724,16 @@ private struct ReauthSheet: View {
 
     private var confirmLabel: String {
         switch action {
-        case .disable: "Turn off"
+        case .disable(let p): p == .email ? "Turn off email codes" : "Turn off authenticator app"
         case .regenerate: "Generate new codes"
-        case .removeKey: "Remove"
+        case .removeKey: "Remove security key"
         }
+    }
+
+    /// Turning a method off or removing a key takes something away; new codes replace old ones.
+    private var isDestructive: Bool {
+        if case .regenerate = action { return false }
+        return true
     }
 
     private var explanation: String {
@@ -747,38 +753,35 @@ private struct ReauthSheet: View {
     var body: some View {
         let s = model.state
         NavigationStack {
-            Form {
+            Group {
                 if !codes.value.isEmpty {
-                    RecoveryCodesView(once: $codes) { if codes.close() { dismiss() } }
+                    Form {
+                        RecoveryCodesView(once: $codes) { if codes.close() { dismiss() } }
+                    }
+                    .paList()
                 } else {
-                    Section {
-                        Text(explanation).foregroundStyle(Color.paInk)
-                    }
-                    .paRow()
-                    Section {
-                        SecretInput(label: "Master password", text: $password, mono: false, identifier: "reauth.password")
-                        if s.secretKeyRequired && !s.secretKeyStored {
-                            LabeledInput(label: "Secret Key", text: $typedKey, mono: true, autocap: .characters, identifier: "reauth.secretKey")
+                    // What happens, the master password right above the one action, errors between them.
+                    PromptScaffold(error: error) {
+                        Section {
+                            Text(explanation).foregroundStyle(Color.paInk)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .promptPlainRow()
                         }
-                    } footer: {
-                        Text("Your server checks your master password first.")
-                    }
-                    .paRow()
-                    Section {
-                        ErrorText(text: error)
-                        Button(role: .destructive, action: confirm) {
-                            HStack {
-                                Text(busy ? "Working…" : confirmLabel).fontWeight(.semibold)
-                                if busy { Spacer(); ProgressView() }
+                        Section {
+                            SecretInput(label: "Master password", text: $password, mono: false, identifier: "reauth.password", submit: confirm)
+                            if s.secretKeyRequired && !s.secretKeyStored {
+                                LabeledInput(label: "Secret Key", text: $typedKey, mono: true, autocap: .characters, identifier: "reauth.secretKey")
                             }
+                        } footer: {
+                            Text("Your server checks your master password first.")
                         }
-                        .disabled(busy)
-                        .accessibilityIdentifier("reauth.confirm")
+                        .paRow()
+                    } actions: {
+                        PrimaryButton(title: busy ? "Working…" : confirmLabel, busy: busy, destructive: isDestructive, action: confirm)
+                            .accessibilityIdentifier("reauth.confirm")
                     }
-                    .paRow()
                 }
             }
-            .paList()
             .navigationTitle(codes.value.isEmpty ? title : "Save your recovery codes")
             .navigationBarTitleDisplayMode(.inline)
             .paNavBar()

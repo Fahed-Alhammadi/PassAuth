@@ -37,6 +37,8 @@ extension Color {
     /// Fill behind white text (filled buttons): the brand blue in both modes, since white on the
     /// lighter dark-mode accent is only 3.3:1 (this is 4.9:1).
     static let paAccentFill = fixed(0x0866ED)
+    /// Fill behind white text for the one destructive action of a confirmation (5.6:1 in both modes).
+    static let paDangerFill = fixed(0xC4251B)
     static let paAccentInk = dyn(0x0553C9, 0x8EC2FF)
     static let paAccentSoft = dyn(0xE7F0FE, 0x1C2633)
     static let paBackground = dyn(0xF2F2F7, 0x000000)
@@ -63,6 +65,30 @@ extension PlatformColor {
     }
 }
 
+// MARK: Layout tokens
+
+/// Spacing scale (4 / 8 / 12 / 16 / 24 / 32) and corner radii of PassAuth's own surfaces.
+/// System lists, sheets and buttons keep the platform's own metrics.
+enum PA {
+    enum Space {
+        static let xs: CGFloat = 4
+        static let s: CGFloat = 8
+        static let m: CGFloat = 12
+        static let l: CGFloat = 16
+        static let xl: CGFloat = 24
+        static let xxl: CGFloat = 32
+    }
+
+    enum Radius {
+        /// Text boxes, tiles, notices.
+        static let control: CGFloat = 8
+        /// Grouped cards.
+        static let card: CGFloat = 12
+        /// Sheets and floating windows.
+        static let sheet: CGFloat = 16
+    }
+}
+
 // MARK: Screen chrome
 
 extension View {
@@ -79,8 +105,10 @@ extension View {
         scrollContentBackground(.hidden).background(Color.paBackground)
     }
 
+    /// A row (or a section's rows) on a card. Section titles keep their sentence case on the
+    /// iOS versions that would capitalise them.
     func paRow() -> some View {
-        listRowBackground(Color.paSurface)
+        listRowBackground(Color.paSurface).textCase(nil)
     }
 }
 
@@ -180,11 +208,98 @@ struct Avatar: View {
     }
 }
 
+/// A square tile for a site or login in lists and prompts: its first letter, or a symbol.
+struct InitialTile: View {
+    var text = ""
+    var symbol: String? = nil
+    @ScaledMetric(relativeTo: .body) var size: CGFloat = 36
+    /// On the page itself (not on a card): the card colour, so the tile stands out.
+    var onPage = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous)
+            .fill(onPage ? Color.paSurface : Color.paSurface2)
+            .frame(width: size, height: size)
+            .overlay {
+                if let symbol {
+                    Image(systemName: symbol).font(.body.weight(.medium)).foregroundStyle(Color.paAccent)
+                } else {
+                    Text(String(text.trimmingCharacters(in: .whitespaces).first ?? "?").uppercased())
+                        .font(.body.weight(.semibold)).foregroundStyle(Color.paAccent)
+                }
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+/// The radio mark at the end of a choice row: a filled check when selected, an empty ring
+/// otherwise (shape and colour, never colour alone).
+struct SelectionMark: View {
+    let selected: Bool
+
+    var body: some View {
+        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+            .font(.title3)
+            .foregroundStyle(selected ? Color.paAccent : Color.paMuted)
+            .accessibilityHidden(true)
+    }
+}
+
+/// The context row of a prompt: what is being decided and for which site, leading-aligned.
+struct PromptHeader: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    /// The site (its first letter is shown), unless `symbol` is set.
+    var site = ""
+    var symbol: String? = nil
+    let title: String
+    var subtitle: String? = nil
+    #if os(macOS)
+    private static let tile: CGFloat = 36
+    /// The sheet's window colour is close to the card colour: the tile keeps its own grey.
+    private static let onPage = false
+    #else
+    private static let tile: CGFloat = 44
+    private static let onPage = true
+    #endif
+
+    var body: some View {
+        HStack(alignment: .center, spacing: PA.Space.m) {
+            // Large text: the words get the whole width.
+            if !typeSize.isAccessibilitySize { InitialTile(text: site, symbol: symbol, size: Self.tile, onPage: Self.onPage) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.title3.weight(.semibold)).foregroundStyle(Color.paInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle).font(.subheadline).foregroundStyle(Color.paMuted)
+                        .lineLimit(typeSize.isAccessibilitySize ? nil : 2).truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// The logo mark and "PassAuth", at the leading edge of a prompt's bar.
+struct BrandMark: View {
+    var body: some View {
+        HStack(spacing: PA.Space.s) {
+            LogoMark(height: 22)
+            Text("PassAuth").font(.headline).foregroundStyle(Color.paInk).lineLimit(1)
+        }
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("PassAuth")
+    }
+}
+
 /// Countdown for a verification code, drawn in the PassAuth shield gradient.
 struct TotpRing: View {
     let remaining: Int
     let period: Int
-    var size: CGFloat = 28
+    /// Grows with the text size setting, so the seconds stay readable.
+    @ScaledMetric(relativeTo: .body) var size: CGFloat = 28
 
     var body: some View {
         let low = remaining <= 5
@@ -294,7 +409,12 @@ struct SecretInput: View {
     var content: UITextContentType? = .password
     var onGenerate: (() -> Void)? = nil
     var identifier: String? = nil
+    /// Return key (prompts: the field's own action).
+    var submit: (() -> Void)? = nil
+    /// Lets the screen put the keyboard focus here.
+    var focus: FocusState<Bool>.Binding? = nil
     @State private var reveal = false
+    @FocusState private var ownFocus: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -310,6 +430,9 @@ struct SecretInput: View {
                 .textContentType(content)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .focused(focus ?? $ownFocus)
+                .submitLabel(submit == nil ? .return : .go)
+                .onSubmit { submit?() }
                 .accessibilityLabel(label)
                 .accessibilityIdentifier(identifier ?? label)
                 Button { reveal.toggle() } label: {
@@ -365,21 +488,23 @@ struct AuthField: View {
                         .accessibilityLabel(reveal ? "Hide \(label.lowercased())" : "Show \(label.lowercased())")
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, PA.Space.m)
             .frame(minHeight: 48)
-            .background(Color.paSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.paLine))
+            .background(Color.paSurface, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous).stroke(Color.paLine))
         }
     }
 }
 
 #endif
 
-/// Full-width brand button.
+/// The one filled button of a screen or prompt: full width, the brand blue (red when it
+/// confirms something destructive).
 struct PrimaryButton: View {
     let title: String
     var busy = false
     var enabled = true
+    var destructive = false
     let action: () -> Void
 
     var body: some View {
@@ -391,7 +516,7 @@ struct PrimaryButton: View {
             .frame(maxWidth: .infinity, minHeight: 30)
         }
         .buttonStyle(.borderedProminent)
-        .tint(Color.paAccentFill)
+        .tint(destructive ? Color.paDangerFill : Color.paAccentFill)
         .controlSize(.large)
         .disabled(!enabled || busy)
     }
@@ -410,8 +535,8 @@ struct Notice: View {
         }
         .font(.subheadline)
         .foregroundStyle(kind == .error ? Color.paDanger : kind == .ok ? Color.paOk : Color.paAccentInk)
-        .padding(12)
-        .background(kind == .error ? Color.paDanger.opacity(0.12) : kind == .ok ? Color.paOk.opacity(0.12) : Color.paAccentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(PA.Space.m)
+        .background(kind == .error ? Color.paDanger.opacity(0.12) : kind == .ok ? Color.paOk.opacity(0.12) : Color.paAccentSoft, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
         .accessibilityElement(children: .combine)
     }
 }

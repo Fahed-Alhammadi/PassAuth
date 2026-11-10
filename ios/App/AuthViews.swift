@@ -37,7 +37,7 @@ struct SetupView: View {
                 .font(.footnote).foregroundStyle(Color.paMuted).frame(maxWidth: .infinity, alignment: .leading)
             ErrorText(text: error)
             PrimaryButton(title: busy ? "Checking…" : "Connect", busy: busy, enabled: !url.trimmingCharacters(in: .whitespaces).isEmpty, action: submit)
-            if let onCancel { Button("Cancel", action: onCancel) }
+            if let onCancel { QuietActions { QuietButton(title: "Cancel", action: onCancel) } }
             OtherAccounts()
         }
         .onAppear { if url.isEmpty { url = initial } }
@@ -190,8 +190,11 @@ struct TwoStepView: View {
                             note = "Code sent to \(email)."
                         } catch { self.error = errorMessage(error) }
                     }
-                } label: { Text("Email me a code").frame(maxWidth: .infinity) }
-                    .buttonStyle(.bordered).controlSize(.large)
+                } label: {
+                    Label("Email me a code", systemImage: "envelope").frame(minHeight: 44)
+                }
+                .buttonStyle(.borderless).font(.subheadline.weight(.medium))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             Toggle(isOn: $remember) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -202,7 +205,7 @@ struct TwoStepView: View {
             if let note { Notice(text: note, kind: .ok) }
             ErrorText(text: error)
             PrimaryButton(title: busy ? "Verifying…" : "Verify and sign in", busy: busy, enabled: !code.trimmingCharacters(in: .whitespaces).isEmpty, action: verify)
-            Button("Back", action: onCancel)
+            QuietActions { QuietButton(title: "Back", action: onCancel) }
         }
         .onAppear { if provider.isEmpty { provider = choices[0] } }
     }
@@ -263,14 +266,13 @@ struct RegisterView: View {
                         .textSelection(.enabled)
                         .padding(14)
                         .frame(maxWidth: .infinity)
-                        .background(Color.paSurface2, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.paLine))
+                        .background(Color.paSurface2, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous).stroke(Color.paLine))
                         .accessibilityIdentifier("secretKey")
-                    VStack(spacing: 10) {
-                        Button { exporting = true } label: { Label("Save Emergency Kit", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity) }
-                        Button { model.copy(sk, "Secret Key") } label: { Label("Copy Secret Key", systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                    QuietActions {
+                        QuietButton(title: "Save Emergency Kit", symbol: "square.and.arrow.down") { exporting = true }
+                        QuietButton(title: "Copy Secret Key", symbol: "doc.on.doc") { model.copy(sk, "Secret Key") }
                     }
-                    .buttonStyle(.bordered).controlSize(.large)
                     Toggle("I saved my Secret Key somewhere safe", isOn: $saved).accessibilityIdentifier("savedToggle")
                 }
                 if d.emailVerificationRequired {
@@ -355,22 +357,19 @@ struct UnlockView: View {
             if needKey { AuthField(label: "Secret Key", text: $secretKey, mono: true, submit: submit) }
             ErrorText(text: error)
             PrimaryButton(title: busy ? "Unlocking…" : "Unlock", busy: busy, enabled: !password.isEmpty, action: submit)
-            if canBio {
-                Button(action: biometric) {
-                    Label("Unlock with \(bio.name)", systemImage: bio.symbol).frame(maxWidth: .infinity)
+            QuietActions {
+                if canBio {
+                    QuietButton(title: "Use \(bio.name)", symbol: bio.symbol, action: biometric).disabled(busy)
                 }
-                .buttonStyle(.bordered).controlSize(.large).disabled(busy)
+                QuietButton(title: "Log out") { confirmLogout = true }
             }
-            Button("Log out", role: .destructive) { confirmLogout = true }
             OtherAccounts()
         }
-        .confirmationDialog("Log out of \(state.email)?", isPresented: $confirmLogout, titleVisibility: .visible) {
+        .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(state.accounts.count > 1
-                ? "This account, its offline copy and Face ID unlock are removed from this device. Your vault stays on your server."
-                : "You'll need your master password to sign in again. Your vault stays on your server.")
+            Text(LogoutCopy.message(email: state.email, others: state.accounts.count > 1))
         }
         // Offer Face ID / Touch ID right away, once, and only while the app is on screen (with
         // "Immediately" the vault locks as the app goes to the background, where the Keychain
@@ -412,6 +411,15 @@ struct UnlockView: View {
             } catch { self.error = errorMessage(error) }
             busy = false
         }
+    }
+}
+
+/// The log-out confirmation, in the same words wherever it is asked.
+enum LogoutCopy {
+    static func message(email: String, others: Bool) -> String {
+        others
+            ? "This removes \(email) from this device, with its offline copy and biometric unlock. Your vault stays on your server."
+            : "This device forgets the offline copy of your vault, and you'll need your master password to sign in again. Your vault stays on your server."
     }
 }
 

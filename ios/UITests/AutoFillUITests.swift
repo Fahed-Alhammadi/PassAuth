@@ -253,7 +253,7 @@ final class AutoFillUITests: XCTestCase {
         dump(safari, "safari-passwords")
         shot("af-20-passwords-sheet")
         // iOS may ask which provider to use.
-        if extensionElement({ $0.staticTexts["Unlock PassAuth"] }, timeout: 3) == nil,
+        if extensionElement({ $0.secureTextFields["Master password"] }, timeout: 3) == nil,
            let pa = extensionElement({ first($0.buttons, "label CONTAINS 'PassAuth'") }, timeout: 3) {
             pa.tap()
             sleep(2)
@@ -324,7 +324,9 @@ final class AutoFillUITests: XCTestCase {
         if let row = extensionElement({ $0.buttons["passkey-alice@localhost"].firstMatch }, timeout: 20) {
             sleep(1)
             shot("af-33b-passkey-list")
+            // Choose the account (the newest passkey is preselected), then the one button.
             row.tap()
+            extensionElement({ $0.buttons["passkeySignIn"] }, timeout: 5)?.tap()
         }
         let signed = wait(first(safari.webViews.staticTexts, "label BEGINSWITH 'signed in'"), 60)
         shot("af-34-signed-in")
@@ -451,7 +453,7 @@ final class AutoFillUITests: XCTestCase {
         confirmField.typeText("Changed-Pass_456")
         let revealed = submitAndOpenSaveSheet("update")
         XCTAssertEqual(revealed, "Changed-Pass_456")
-        XCTAssertNotNil(extensionElement({ $0.staticTexts["Update the password?"] }, timeout: 5))
+        XCTAssertNotNil(extensionElement({ $0.staticTexts["Update login?"] }, timeout: 5))
         shot("af-50-update-sheet")
         tapSaveAndWaitForClose()
 

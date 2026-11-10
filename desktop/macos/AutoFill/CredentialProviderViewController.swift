@@ -57,7 +57,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier], requestParameters: ASPasskeyCredentialRequestParameters) {
-        show(.list(pages: AutofillMatcher.pages(serviceIdentifiers), passkey: requestParameters))
+        show(.list(pages: AutofillMatcher.pages(serviceIdentifiers), passkey: PasskeyQuery(requestParameters)))
     }
 
     @available(macOS 15.0, *)

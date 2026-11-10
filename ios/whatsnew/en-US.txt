@@ -1,4 +1,13 @@
-New in 0.5.6
-• Choose where a new passkey is saved. When a website asks to save a passkey, PassAuth now lists your logins for that exact site under "Save in", plus "New login". The matching login is picked for you, so you no longer get a second login for a site you already have.
-• A passkey is never saved in a login for a different site that only shares the same main domain (for example cloudy.example.com and bazarr.example.com).
-Please test: create a passkey on a site you already have a login for and check it is added to that login; then try a site with no login and check a new login is created.
+New in 0.6.0
+• No more duplicate logins. If PassAuth already has a login for a site, it is updated instead of saving a second one. This also works when the saved login has only a username or only a password: PassAuth offers "Update login?" and fills in the missing part.
+• "Save in" when saving a login. Before you save, you can pick which of your logins for the site to update, or choose "New login". The right one is picked for you.
+• Redesigned AutoFill sheets: sign in with a passkey (choose the account, then Sign in), save a passkey, save or update a login, unlock, and choose a login or verification code. Each one shows the site at the top, one clear main button and quieter secondary actions, and reads properly at large text sizes.
+• Safer defaults with shared vaults: a new passkey or an updated login is only suggested for logins in your own vault. A login in a shared vault is shown with the vault's name and is never picked for you.
+• The account menu now asks before logging out. Trash and delete confirmations appear next to the item they belong to.
+• Refreshed "Set up PassAuth" screen, move-item sheet, and Generator ("Copy password" is the main button).
+
+Please test:
+1. Save a login with only a password (no username) for a site, then sign in on that site in Safari with a username and that password. PassAuth should offer "Update login?" and afterwards there should still be one login with both fields.
+2. Sign in to a site with a passkey and create a new passkey on a site you already have a login for.
+3. Unlock from AutoFill with Face ID and with the master password.
+4. Try the app with a large text size (Settings → Accessibility → Display & Text Size).

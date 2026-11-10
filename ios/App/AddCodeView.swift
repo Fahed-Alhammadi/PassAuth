@@ -12,6 +12,7 @@ struct AddCodeSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let key: OtpKey
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var query = ""
     @State private var target: EditTarget?
 
@@ -52,32 +53,43 @@ struct AddCodeSheet: View {
         NavigationStack {
             List {
                 Section {
-                    Text(key.label.isEmpty ? "Choose the login this verification code belongs to." : "Choose the login for \(key.label).")
-                        .font(.subheadline).foregroundStyle(Color.paMuted)
+                    PromptHeader(site: key.issuer, symbol: key.issuer.isEmpty ? "clock" : nil,
+                                 title: key.issuer.isEmpty ? "New verification code" : "Verification code for \(key.issuer)",
+                                 subtitle: key.account.isEmpty ? "Choose the login it belongs to." : key.account)
+                        .promptPlainRow()
+                }
+                Section {
                     Button { target = .new(.login) } label: {
-                        Label("New login", systemImage: "plus.circle")
+                        HStack(spacing: PA.Space.m) {
+                            if !typeSize.isAccessibilitySize { InitialTile(symbol: "plus") }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("New login").foregroundStyle(Color.paInk)
+                                Text("Create a login with this code").font(.subheadline).foregroundStyle(Color.paMuted)
+                            }
+                        }
                     }
                     .accessibilityIdentifier("addcode.new")
-                }
-                .paRow()
-                Section("Add to a login") {
                     let items = logins
                     if items.isEmpty {
-                        Text("No logins found.").foregroundStyle(Color.paMuted)
+                        Text(query.trimmingCharacters(in: .whitespaces).isEmpty ? "No logins in your vault yet." : "No login matches your search.")
+                            .font(.subheadline).foregroundStyle(Color.paMuted)
                     }
                     ForEach(items) { s in
                         Button { target = .edit(s.id) } label: { ItemRow(summary: s) }
                     }
+                } header: {
+                    Text("Add to")
                 }
                 .paRow()
             }
+            .listSectionSpacing(.compact)
             .paList()
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search logins")
             .navigationTitle("Add verification code")
             .navigationBarTitleDisplayMode(.inline)
             .paNavBar()
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.accessibilityIdentifier("addcode.cancel") }
             }
         }
     }

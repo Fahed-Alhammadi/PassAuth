@@ -13,7 +13,12 @@ final class SaveGenerateTests: XCTestCase {
     private func vault(_ entries: [Entry]) -> VaultData {
         var v = VaultData()
         v.entries = entries
-        v.vaults = [VaultInfo(id: "v1", name: "Personal", role: .owner), VaultInfo(id: "ro", name: "Shared", role: .read)]
+        v.vaults = [
+            VaultInfo(id: "v1", name: "Personal", role: .owner),
+            VaultInfo(id: "ro", name: "Shared", role: .read, keyKind: "sealed"),
+            // A vault somebody shared with write access (nobody has to accept a share).
+            VaultInfo(id: "team", name: "Team", role: .write, keyKind: "sealed"),
+        ]
         return v
     }
 
@@ -77,14 +82,151 @@ final class SaveGenerateTests: XCTestCase {
             entry("bob", user: "bob", password: "b", url: "https://example.com"),
             entry("alice", user: "Alice", password: "old", url: "https://www.example.com/login"),
         ])
-        guard case .update(let e) = plan(v, user: "alice", password: "new") else { return XCTFail("update") }
+        guard case .update(let e, let why) = plan(v, user: "alice", password: "new") else { return XCTFail("update") }
         XCTAssertEqual(e.id, "alice", "same base domain, user name case-insensitive")
-        let item = SaveLogic.updatedItem(e, password: "new")
+        XCTAssertEqual(why, .same)
+        let item = SaveLogic.updatedItem(e, username: " alice ", password: "new")
         XCTAssertEqual(item.login?.password, "new")
-        XCTAssertEqual(item.login?.username, "Alice")
+        XCTAssertEqual(item.login?.username, "alice", "the user name as typed (trimmed)")
         XCTAssertEqual(item.passwordHistory, [], "the repository's updateItem adds the old password to the history")
         guard case .unchanged = plan(v, user: "alice", password: "old") else { return XCTFail("same password: nothing to do") }
         guard case .create = plan(v, user: "carol", password: "x") else { return XCTFail("other user: new login") }
+    }
+
+    /// Rule 1: only the user name was saved (no password yet) → that login gets the password.
+    func testPlanOnlyUserNameSaved() {
+        let v = vault([entry("a", user: "alice", password: "", url: "https://example.com")])
+        guard case .update(let e, _) = plan(v, user: "Alice", password: "new") else { return XCTFail("update, not a second login") }
+        XCTAssertEqual(e.id, "a")
+        let item = SaveLogic.updatedItem(e, username: "Alice", password: "new")
+        XCTAssertEqual(item.login?.username, "Alice")
+        XCTAssertEqual(item.login?.password, "new")
+        XCTAssertEqual(item.login?.urls, e.item.login?.urls)
+        XCTAssertEqual(item.name, "a")
+    }
+
+    /// Rule 2: only a password was saved (no user name) → that login gets the user name too.
+    func testPlanOnlyPasswordSaved() {
+        let v = vault([
+            entry("bob", user: "bob", password: "b", url: "https://example.com"),
+            entry("bare", user: " ", password: "old", url: "https://example.com"),
+        ])
+        guard case .update(let e, let why) = plan(v, user: "alice", password: "new") else { return XCTFail("update the login without a user name") }
+        XCTAssertEqual(e.id, "bare")
+        XCTAssertEqual(why, .blank)
+        let item = SaveLogic.updatedItem(e, username: " alice ", password: "new")
+        XCTAssertEqual(item.login?.username, "alice")
+        XCTAssertEqual(item.login?.password, "new")
+        // The same password: still an update, the user name gets filled in.
+        let p = plan(v, user: "alice", password: "old")
+        guard case .update(let same, _) = p else { return XCTFail("update even with the saved password") }
+        XCTAssertEqual(same.id, "bare")
+        XCTAssertTrue(p.isChange)
+        XCTAssertEqual(SaveLogic.updatedItem(same, username: "alice", password: "old").login?.username, "alice")
+    }
+
+    /// Rule 2 with several logins that have no user name: the one with the typed password, else the first.
+    func testPlanSeveralWithoutUserName() {
+        let v = vault([
+            entry("one", user: "", password: "p1", url: "https://example.com"),
+            entry("two", user: "", password: "p2", url: "https://example.com"),
+        ])
+        guard case .update(let match, _) = plan(v, user: "alice", password: "p2") else { return XCTFail("update") }
+        XCTAssertEqual(match.id, "two", "the one that already has this password")
+        guard case .update(let first, _) = plan(v, user: "alice", password: "p3") else { return XCTFail("update") }
+        XCTAssertEqual(first.id, "one", "else the first")
+        // A view-only login without a user name isn't a target: new login.
+        let ro = vault([entry("r", user: "", password: "p1", url: "https://example.com", vault: "ro")])
+        guard case .create = plan(ro, user: "alice", password: "p1") else { return XCTFail("read-only: new login") }
+        // The editable one wins over a view-only one, even when that has the password.
+        let both = vault([entry("r", user: "", password: "p2", url: "https://example.com", vault: "ro"), entry("w", user: "", password: "p1", url: "https://example.com")])
+        guard case .update(let w, _) = plan(both, user: "alice", password: "p2") else { return XCTFail("update") }
+        XCTAssertEqual(w.id, "w")
+    }
+
+    /// No user name typed, and logins without a user name exist (rule 1 with an empty user name).
+    func testPlanNoUserNameTypedBareLogins() {
+        let v = vault([
+            entry("alice", user: "alice", password: "a", url: "https://example.com"),
+            entry("bare", user: "", password: "old", url: "https://example.com"),
+        ])
+        guard case .update(let e, _) = plan(v, user: "  ", password: "new") else { return XCTFail("update the password-only login") }
+        XCTAssertEqual(e.id, "bare")
+        XCTAssertEqual(SaveLogic.updatedItem(e, username: "", password: "new").login?.username, "")
+        guard case .unchanged(let u) = plan(v, user: "", password: "old") else { return XCTFail("already saved") }
+        XCTAssertEqual(u.id, "bare")
+        // "alice" has this password, but the password-only login is the one that decides.
+        guard case .update = plan(v, user: "", password: "a") else { return XCTFail("update the password-only login") }
+        // A view-only login without a user name in a shared vault: not "the same login" (new login);
+        // its password still counts as saved.
+        let ro = vault([entry("r", user: "", password: "old", url: "https://example.com", vault: "ro")])
+        guard case .create = plan(ro, user: "", password: "new") else { return XCTFail("shared, no user name: new login") }
+        guard case .unchanged = plan(ro, user: "", password: "old") else { return XCTFail("already saved") }
+    }
+
+    /// Rule 3: no user name typed and every login for the site has one.
+    func testPlanNoUserNameTyped() {
+        let one = vault([entry("alice", user: "alice", password: "old", url: "https://example.com")])
+        guard case .update(let e, let why) = plan(one, user: "", password: "new") else { return XCTFail("the only login: update") }
+        XCTAssertEqual(e.id, "alice")
+        XCTAssertEqual(why, .only, "the rule that is never applied without the sheet")
+        let item = SaveLogic.updatedItem(e, username: "", password: "new")
+        XCTAssertEqual(item.login?.username, "alice", "user name kept")
+        XCTAssertEqual(item.login?.password, "new")
+        guard case .unchanged = plan(one, user: "", password: "old") else { return XCTFail("password already saved") }
+
+        let two = vault([
+            entry("alice", user: "alice", password: "a", url: "https://example.com"),
+            entry("bob", user: "bob", password: "b", url: "https://example.com"),
+        ])
+        guard case .create = plan(two, user: "", password: "new") else { return XCTFail("two logins: can't tell which, new login") }
+        guard case .unchanged(let b) = plan(two, user: "", password: "b") else { return XCTFail("one of them has the password") }
+        XCTAssertEqual(b.id, "bob")
+
+        // View-only logins don't count as "the one login", but their password does count as saved.
+        let ro = vault([entry("r", user: "alice", password: "old", url: "https://example.com", vault: "ro")])
+        guard case .create = plan(ro, user: "", password: "new") else { return XCTFail("no editable login: new login") }
+        guard case .unchanged = plan(ro, user: "", password: "old") else { return XCTFail("already saved (view-only)") }
+        let mixed = vault([
+            entry("r", user: "alice", password: "a", url: "https://example.com", vault: "ro"),
+            entry("w", user: "bob", password: "b", url: "https://example.com"),
+        ])
+        guard case .update(let w, _) = plan(mixed, user: "", password: "new") else { return XCTFail("exactly one editable login") }
+        XCTAssertEqual(w.id, "w")
+        // Nothing for the site at all.
+        guard case .create = plan(vault([]), user: "", password: "new") else { return XCTFail("new login") }
+    }
+
+    /// "Save in": the editable logins for the page, the preselection and the user's choice.
+    func testSaveTargetsAndChoice() {
+        let v = vault([
+            entry("bob", user: "bob", password: "b", url: "https://example.com"),
+            entry("r", user: "alice", password: "a", url: "https://example.com", vault: "ro"),
+            entry("alice", user: "alice", password: "a", url: "https://www.example.com"),
+            entry("other", user: "alice", password: "a", url: "https://example.org"),
+        ])
+        let page = "https://login.example.com/signup"
+        func targets(_ vault: VaultData, user: String, password: String) -> [String] {
+            SaveLogic.targets(page: page, username: user, password: password, vault: vault, defaultMatch: .domain).map(\.id)
+        }
+        XCTAssertEqual(targets(v, user: "carol", password: "new"), ["bob", "alice"], "the user's own logins for the page, in matching order")
+        XCTAssertEqual(SaveLogic.defaultTarget(plan(v, user: "bob", password: "new")), "bob")
+        XCTAssertEqual(SaveLogic.defaultTarget(plan(v, user: "carol", password: "new")), SaveLogic.newLogin)
+        XCTAssertEqual(SaveLogic.defaultTarget(plan(v, user: "bob", password: "b")), SaveLogic.newLogin, "unchanged: nothing preselected")
+
+        func chosen(_ target: String, user: String, password: String) -> SaveLogic.Plan? {
+            SaveLogic.plan(target: target, page: page, username: user, password: password, vault: v, defaultMatch: .domain)
+        }
+        guard case .create? = chosen(SaveLogic.newLogin, user: "bob", password: "new") else { return XCTFail("the user chose a new login") }
+        guard case .update(let e, _)? = chosen("alice", user: "carol", password: "new") else { return XCTFail("the user chose a login") }
+        XCTAssertEqual(e.id, "alice")
+        XCTAssertEqual(SaveLogic.updatedItem(e, username: "carol", password: "new").login?.username, "carol", "the typed user name replaces another one")
+        guard case .unchanged? = chosen("alice", user: "Alice", password: "a") else { return XCTFail("nothing to change") }
+        guard case .unchanged? = chosen("alice", user: "", password: "a") else { return XCTFail("nothing to change without a user name") }
+        guard case .update? = chosen("alice", user: "carol", password: "a") else { return XCTFail("same password, other user name: update") }
+        XCTAssertNil(chosen("r", user: "alice", password: "new"), "view-only logins can't be chosen")
+        XCTAssertNil(chosen("other", user: "alice", password: "new"), "a login for another site can't be chosen")
+        XCTAssertNil(chosen("gone", user: "alice", password: "new"))
     }
 
     func testPlanRespectsMatchingAndVaultRoles() {
@@ -97,11 +239,98 @@ final class SaveGenerateTests: XCTestCase {
         XCTAssertFalse(plan(ro, user: "alice", password: "new").isChange)
         // A writable copy wins over the read-only one.
         let both = vault([entry("r", user: "alice", password: "old", url: "https://example.com", vault: "ro"), entry("w", user: "alice", password: "old", url: "https://example.com")])
-        guard case .update(let e) = plan(both, user: "alice", password: "new") else { return XCTFail("update") }
+        guard case .update(let e, _) = plan(both, user: "alice", password: "new") else { return XCTFail("update") }
         XCTAssertEqual(e.id, "w")
         // An https login isn't updated from an http page (never downgrade).
         let https = vault([entry("s", user: "alice", password: "old", url: "https://example.com")])
         guard case .create = plan(https, page: "http://example.com/signup", user: "alice", password: "new") else { return XCTFail("http page") }
+    }
+
+    // MARK: Save: shared vaults (somebody can share a vault and plant a login in it)
+
+    /// A login without a user name planted in a shared vault with write access is never the
+    /// default place a typed user name and password go to, and can't be chosen in "Save in".
+    func testPlantedSharedLoginIsNeverTheTarget() {
+        let page = "https://login.example.com/signup"
+        func targets(_ v: VaultData, user: String, password: String) -> [String] {
+            SaveLogic.targets(page: page, username: user, password: password, vault: v, defaultMatch: .domain).map(\.id)
+        }
+        func chosen(_ v: VaultData, _ target: String, user: String, password: String) -> SaveLogic.Plan? {
+            SaveLogic.plan(target: target, page: page, username: user, password: password, vault: v, defaultMatch: .domain)
+        }
+        let planted = entry("planted", user: "", password: "x", url: "https://example.com", vault: "team")
+
+        // Rule 2 (a user name was typed): a new login, not the planted one.
+        let only = vault([planted])
+        guard case .create = plan(only, user: "alice", password: "secret") else { return XCTFail("rule 2 must not pick a shared-vault login") }
+        XCTAssertEqual(targets(only, user: "alice", password: "secret"), [], "not offered in “Save in”")
+        XCTAssertNil(chosen(only, "planted", user: "alice", password: "secret"), "and not accepted as a choice")
+        // … even when the planted login already has the typed password.
+        guard case .create = plan(vault([entry("planted", user: "", password: "secret", url: "https://example.com", vault: "team")]), user: "alice", password: "secret") else {
+            return XCTFail("rule 2 must not pick a shared-vault login by its password")
+        }
+        // The user's own login without a user name wins, whatever the planted one's password is.
+        let both = vault([entry("planted", user: "", password: "secret", url: "https://example.com", vault: "team"), entry("mine", user: "", password: "old", url: "https://example.com")])
+        guard case .update(let e, let why) = plan(both, user: "alice", password: "secret") else { return XCTFail("update my own login") }
+        XCTAssertEqual(e.id, "mine")
+        XCTAssertEqual(why, .blank)
+        XCTAssertEqual(targets(both, user: "alice", password: "secret"), ["mine"])
+
+        // Rule 3 (no user name typed): the planted login doesn't count as "the only login" …
+        let withMine = vault([planted, entry("mine", user: "alice", password: "old", url: "https://example.com")])
+        guard case .update(let mine, let reason) = plan(withMine, user: "", password: "secret") else { return XCTFail("my only own login") }
+        XCTAssertEqual(mine.id, "mine", "the planted login is neither rule 1's “same user name” nor rule 3's only login")
+        XCTAssertEqual(reason, .only)
+        XCTAssertEqual(targets(withMine, user: "", password: "secret"), ["mine"])
+        XCTAssertNil(chosen(withMine, "planted", user: "", password: "secret"))
+        // … and alone it gives a new login (never an update of the shared one).
+        guard case .create = plan(only, user: "", password: "secret") else { return XCTFail("no user name typed: not the planted login") }
+        XCTAssertEqual(targets(only, user: "", password: "secret"), [])
+        // A shared login with another user name isn't "the only login" either.
+        let other = vault([entry("theirs", user: "bob", password: "x", url: "https://example.com", vault: "team")])
+        guard case .create = plan(other, user: "", password: "secret") else { return XCTFail("rule 3 counts own logins only") }
+        guard case .create = plan(other, user: "alice", password: "secret") else { return XCTFail("another user name: new login") }
+        XCTAssertEqual(targets(other, user: "alice", password: "secret"), [])
+    }
+
+    /// Rule 1 is unchanged for a typed user name: a shared-vault login with exactly that user
+    /// name is updated, is shown as the selection (with its vault), and only then can be chosen.
+    func testSharedLoginWithTheSameUserNameIsStillUpdated() {
+        let page = "https://login.example.com/signup"
+        let v = vault([
+            entry("mine", user: "bob", password: "b", url: "https://example.com"),
+            entry("shared", user: "Alice", password: "old", url: "https://example.com", vault: "team"),
+        ])
+        guard case .update(let e, let why) = plan(v, user: "alice", password: "new") else { return XCTFail("rule 1 updates it") }
+        XCTAssertEqual(e.id, "shared")
+        XCTAssertEqual(why, .same)
+        XCTAssertEqual(v.sharedVaultName(e), "Team", "its row shows the vault's name")
+        XCTAssertNil(v.sharedVaultName(v.entries[0]))
+        XCTAssertEqual(SaveLogic.targets(page: page, username: "alice", password: "new", vault: v, defaultMatch: .domain).map(\.id), ["mine", "shared"],
+                       "own logins plus the preselected shared one")
+        guard case .update(let c, _)? = SaveLogic.plan(target: "shared", page: page, username: "alice", password: "new", vault: v, defaultMatch: .domain) else {
+            return XCTFail("the displayed selection is accepted")
+        }
+        XCTAssertEqual(c.id, "shared")
+        // For another user name it is not offered and not accepted.
+        XCTAssertEqual(SaveLogic.targets(page: page, username: "carol", password: "new", vault: v, defaultMatch: .domain).map(\.id), ["mine"])
+        XCTAssertNil(SaveLogic.plan(target: "shared", page: page, username: "carol", password: "new", vault: v, defaultMatch: .domain))
+        guard case .unchanged = plan(v, user: "alice", password: "old") else { return XCTFail("already saved there") }
+    }
+
+    /// No password: nothing to save, whatever the caller checked before.
+    func testPlanWithoutPassword() {
+        let v = vault([entry("a", user: "alice", password: "old", url: "https://example.com")])
+        guard case .noPassword = plan(v, user: "alice", password: "") else { return XCTFail("no password: nothing") }
+        XCTAssertFalse(plan(v, user: "alice", password: "").isChange)
+        guard case .noPassword = plan(v, user: "", password: "") else { return XCTFail("no password: nothing") }
+        guard case .noPassword? = SaveLogic.plan(target: "a", page: "https://example.com/", username: "alice", password: "", vault: v, defaultMatch: .domain) else {
+            return XCTFail("a chosen login is never blanked")
+        }
+        guard case .noPassword? = SaveLogic.plan(target: SaveLogic.newLogin, page: "https://example.com/", username: "alice", password: "", vault: v, defaultMatch: .domain) else {
+            return XCTFail("no empty new login")
+        }
+        XCTAssertEqual(SaveLogic.defaultTarget(plan(v, user: "alice", password: "")), SaveLogic.newLogin)
     }
 
     // MARK: Password rules
@@ -262,9 +491,19 @@ final class SaveLoginRepoTests: XCTestCase {
         item.login?.urls = [LoginUrl(url: "https://example.com", match: .default)]
         let itemId = try newId()
         let enc = try ka.key.encryptItem(itemJson: ItemCodec.encode(item), id: itemId, vaultId: a)
+        // A login saved with only a password.
+        var bare = Item.empty(.login, now: 1_700_000_000)
+        bare.name = "Bare"
+        bare.login?.password = "only-pw"
+        bare.login?.urls = [LoginUrl(url: "https://bare.example.net", match: .default)]
+        let bareId = try newId()
+        let bareEnc = try ka.key.encryptItem(itemJson: ItemCodec.encode(bare), id: bareId, vaultId: a)
         RecordingServer.syncBody = try JSONSerialization.data(withJSONObject: [
             "vaults": [["id": a, "wrapped_key": ka.wrapped, "key_kind": "account", "meta": try ka.key.encryptMeta(vaultId: a, metaJson: #"{"name":"Personal"}"#), "role": "owner"]],
-            "items": [["id": itemId, "vault_id": a, "item_key": enc.key, "data": enc.data, "revision": 2]],
+            "items": [
+                ["id": itemId, "vault_id": a, "item_key": enc.key, "data": enc.data, "revision": 2],
+                ["id": bareId, "vault_id": a, "item_key": bareEnc.key, "data": bareEnc.data, "revision": 2],
+            ],
             "revision": 2,
         ] as [String: Any])
         let store = SecureStore(directory: dir, role: .app)
@@ -309,6 +548,86 @@ final class SaveLoginRepoTests: XCTestCase {
         XCTAssertEqual(newItem.login?.username, "bob")
         XCTAssertEqual(newItem.login?.password, "pw-b")
         XCTAssertEqual(newItem.login?.urls, [LoginUrl(url: "https://shop.example.com", match: .default)])
+
+        // Only a password was saved for the site: the typed user name goes into that login
+        // (no second login); the password is the same, so nothing goes to the history.
+        RecordingServer.requests = []
+        let filled = try await repo.saveLogin(page: "https://bare.example.net/login", username: " carol ", password: "only-pw")
+        XCTAssertEqual(filled, .updated)
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "POST" && $0.path == "/api/items" })
+        let barePut = try XCTUnwrap(RecordingServer.requests.first { $0.method == "PUT" })
+        XCTAssertEqual(barePut.path, "/api/items/\(bareId)")
+        let bareSaved = try decrypt(barePut.body, id: bareId)
+        XCTAssertEqual(bareSaved.login?.username, "carol")
+        XCTAssertEqual(bareSaved.login?.password, "only-pw")
+        XCTAssertEqual(bareSaved.passwordHistory, [])
+        XCTAssertEqual(bareSaved.name, "Bare")
+
+        // "Save in" → New login: a new login although the default plan would update.
+        RecordingServer.requests = []
+        let forced = try await repo.saveLogin(page: "https://www.example.com/password", username: "alice", password: "pw-3", target: SaveLogic.newLogin)
+        XCTAssertEqual(forced, .created)
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "PUT" })
+        XCTAssertNotNil(RecordingServer.requests.first { $0.method == "POST" && $0.path == "/api/items" })
+
+        // "Save in" → a chosen login: updated with the typed user name and password.
+        RecordingServer.requests = []
+        let picked = try await repo.saveLogin(page: "https://www.example.com/password", username: "dave", password: "pw-4", target: itemId)
+        XCTAssertEqual(picked, .updated)
+        let pickedPut = try XCTUnwrap(RecordingServer.requests.first { $0.method == "PUT" })
+        let pickedItem = try decrypt(pickedPut.body, id: itemId)
+        XCTAssertEqual(pickedItem.login?.username, "dave")
+        XCTAssertEqual(pickedItem.login?.password, "pw-4")
+        XCTAssertEqual(pickedItem.passwordHistory.map(\.password), ["pw-1"])
+
+        // No user name typed and one login for the site (rule 3): never without the sheet …
+        RecordingServer.requests = []
+        do {
+            _ = try await repo.saveLogin(page: "https://www.example.com/password", username: "", password: "pw-7")
+            XCTFail("a rule-3 update needs the sheet")
+        } catch let e {
+            XCTAssertTrue(e is VaultRepository.SaveChoiceChanged, "\(e)")
+        }
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "PUT" || $0.method == "POST" })
+        // … but applied once the sheet showed it as the selection: the password only, the user name kept.
+        let only = try await repo.saveLogin(page: "https://www.example.com/password", username: "", password: "pw-7", target: itemId, isDefault: true)
+        XCTAssertEqual(only, .updated)
+        let onlyItem = try decrypt(try XCTUnwrap(RecordingServer.requests.first { $0.method == "PUT" }).body, id: itemId)
+        XCTAssertEqual(onlyItem.login?.username, "alice")
+        XCTAssertEqual(onlyItem.login?.password, "pw-7")
+
+        // The sheet's untouched default no longer is the synced vault's default (it showed "New
+        // login", the vault has this user's login by now): nothing is written, the sheet asks again.
+        RecordingServer.requests = []
+        do {
+            _ = try await repo.saveLogin(page: "https://www.example.com/password", username: "alice", password: "pw-8", target: SaveLogic.newLogin, isDefault: true)
+            XCTFail("the displayed default is stale")
+        } catch let e {
+            XCTAssertTrue(e is VaultRepository.SaveChoiceChanged, "\(e)")
+        }
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "PUT" || $0.method == "POST" })
+        // Saved meanwhile with this very password: nothing to do, no second login.
+        let already = try await repo.saveLogin(page: "https://www.example.com/password", username: "alice", password: "pw-1", target: SaveLogic.newLogin, isDefault: true)
+        XCTAssertEqual(already, .unchanged)
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "PUT" || $0.method == "POST" })
+
+        // No password: refused before anything is asked of the server (a saved one is never blanked).
+        RecordingServer.requests = []
+        for target in [nil, itemId, SaveLogic.newLogin] {
+            do {
+                _ = try await repo.saveLogin(page: "https://www.example.com/password", username: "alice", password: "", target: target)
+                XCTFail("no password to save")
+            } catch {}
+        }
+        XCTAssertTrue(RecordingServer.requests.isEmpty)
+
+        // A chosen login that isn't for this page (or is gone): refused, nothing sent.
+        RecordingServer.requests = []
+        do {
+            _ = try await repo.saveLogin(page: "https://www.example.com/password", username: "alice", password: "pw-5", target: bareId)
+            XCTFail("a login for another site can't be the target")
+        } catch {}
+        XCTAssertNil(RecordingServer.requests.first { $0.method == "PUT" || $0.method == "POST" })
     }
 
     /// The extension declares the iOS 26.2 save / generate capabilities.

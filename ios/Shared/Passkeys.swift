@@ -81,14 +81,16 @@ public enum PasskeyLogic {
     /// Logins a new passkey can be saved in (the extension's `saveTargets`): ones you can edit
     /// whose website is the RP ID or a subdomain of it (where the passkey also works). Never just
     /// "the same base domain": cloudy.example.com and bazarr.example.com are different sites.
-    /// Best first: the RP ID's exact host, then a matching user name, then by name.
+    /// Logins in your own vault come first, then ones in vaults somebody shared (listed with
+    /// their vault's name, never preselected: see `defaultTarget`); within each: the RP ID's
+    /// exact host, then a matching user name, then by name.
     public static func saveTargets(_ vault: VaultData, rpId: String, userName: String) -> [Entry] {
         let rp = rpId.lowercased()
         let name = userName.trimmingCharacters(in: .whitespaces).lowercased()
         func score(_ e: Entry) -> Int {
             let user = (e.item.login?.username ?? "").trimmingCharacters(in: .whitespaces).lowercased()
             let userMatch = !user.isEmpty && !name.isEmpty && (name == user || name == user.split(separator: "@").first.map(String.init))
-            return (isExactSite(e, rpId: rp) ? 2 : 0) + (userMatch ? 1 : 0)
+            return (vault.isOwn(e) ? 4 : 0) + (isExactSite(e, rpId: rp) ? 2 : 0) + (userMatch ? 1 : 0)
         }
         return vault.entries
             .filter { $0.item.login != nil && vault.canWrite($0) }
@@ -99,9 +101,12 @@ public enum PasskeyLogic {
             }
     }
 
-    /// The preselected save target: the best login for the RP ID's exact host, else a new login.
-    public static func defaultTarget(_ targets: [Entry], rpId: String) -> String {
-        targets.first { isExactSite($0, rpId: rpId) }?.id ?? newLogin
+    /// The preselected save target: the best login for the RP ID's exact host in the user's OWN
+    /// vault, else a new login. Never a login in a shared vault: anyone on the server can share a
+    /// vault with this account and put a login for the site in it, and the passkey's private key
+    /// would then go to that vault's members by default. Such a login can still be chosen.
+    public static func defaultTarget(_ targets: [Entry], rpId: String, in vault: VaultData) -> String {
+        targets.first { vault.isOwn($0) && isExactSite($0, rpId: rpId) }?.id ?? newLogin
     }
 
     /// Where a new passkey goes: the login the user chose (still one they can edit for this

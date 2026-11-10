@@ -25,16 +25,14 @@ struct GeneratorTab: View {
         Binding(get: { Double(g.words) }, set: { g.words = Int($0) })
     }
 
+    /// One filled action (copy); regenerating is the quiet one beneath it.
     @ViewBuilder
     private var actions: some View {
-        Button { model.copy(value, passphrase ? "Passphrase" : "Password") } label: {
-            Text("Copy").lineLimit(1).frame(maxWidth: .infinity)
+        PrimaryButton(title: passphrase ? "Copy passphrase" : "Copy password") { model.copy(value, passphrase ? "Passphrase" : "Password") }
+            .accessibilityIdentifier("generator.copy")
+        QuietActions {
+            QuietButton(title: "Regenerate", symbol: "arrow.clockwise") { seed += 1 }
         }
-        .buttonStyle(.borderedProminent)
-        Button { seed += 1 } label: {
-            Text("Regenerate").lineLimit(1).frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
     }
 
     var body: some View {
@@ -59,12 +57,8 @@ struct GeneratorTab: View {
                         .textSelection(.enabled)
                         .accessibilityIdentifier("generated")
                     StrengthMeter(password: value)
-                    // Side by side, or stacked when large text doesn't fit.
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) { actions.fixedSize(horizontal: false, vertical: true) }
-                        VStack(spacing: 10) { actions }
-                    }
-                    .controlSize(.large)
+                    VStack(spacing: PA.Space.xs) { actions }
+                        .listRowSeparator(.hidden, edges: .top)
                 }
                 .paRow()
                 Section("Options") {

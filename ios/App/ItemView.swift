@@ -197,11 +197,13 @@ struct ItemView: View {
                     dismiss()
                 }
             }
-        } message: { Text("You can restore it from the trash later.") }
+            Button("Cancel", role: .cancel) {}
+        } message: { Text("“\(i.name.isEmpty ? "Untitled" : i.name)” can be restored from the trash.") }
         .confirmationDialog("Delete forever?", isPresented: $confirmPurge, titleVisibility: .visible) {
             Button("Delete forever", role: .destructive) {
                 run { try await model.repo.purgeItem(entry); model.notify("Item deleted.") }
             }
+            Button("Cancel", role: .cancel) {}
         } message: { Text("“\(i.name)” will be deleted for good. This can't be undone.") }
     }
 
@@ -410,46 +412,32 @@ private struct MoveSheet: View {
     var body: some View {
         let target = targets.first { $0.id == selected }
         NavigationStack {
-            Form {
+            PromptScaffold(error: error) {
+                Section {
+                    PromptHeader(symbol: "folder", title: "Move “\(entry.item.name.isEmpty ? "Untitled" : entry.item.name)”", subtitle: "Now in \(from)")
+                        .promptPlainRow()
+                }
                 Section {
                     ForEach(targets) { t in
-                        Button { selected = t.id } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(t.name).foregroundStyle(Color.paInk)
-                                    Text(roleLabel(t)).font(.footnote).foregroundStyle(Color.paMuted)
-                                }
-                                Spacer()
-                                if t.id == selected { Image(systemName: "checkmark").foregroundStyle(Color.paAccent).fontWeight(.semibold) }
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityAddTraits(t.id == selected ? [.isButton, .isSelected] : .isButton)
-                        .accessibilityIdentifier("vault:\(t.name)")
+                        ChoiceRow(title: t.name, detail: roleLabel(t), symbol: "lock.rectangle.stack", selected: t.id == selected) { selected = t.id }
+                            .accessibilityIdentifier("vault:\(t.name)")
                     }
                 } header: {
-                    Text("Now in \(from)")
+                    Text("Move to")
                 } footer: {
                     Text("Everyone who can open \(target?.name ?? "the new vault") will see this item, and people who can only open \(from) lose access to it.")
                 }
                 .paRow()
-                if let error { Section { ErrorText(text: error) }.paRow() }
+                .disabled(busy)
+            } actions: {
+                PrimaryButton(title: busy ? "Moving…" : "Move item", busy: busy, enabled: target != nil) { move(target) }
+                    .accessibilityIdentifier("move.confirm")
             }
-            .paList()
             .navigationTitle("Move item")
             .navigationBarTitleDisplayMode(.inline)
             .paNavBar()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() }.disabled(busy) }
-                ToolbarItem(placement: .confirmationAction) {
-                    if busy {
-                        ProgressView().tint(Color.paAccent)
-                    } else {
-                        Button("Move") { move(target) }.fontWeight(.semibold).disabled(target == nil).accessibilityIdentifier("move.confirm")
-                    }
-                }
             }
             .interactiveDismissDisabled(busy)
             .onAppear { if selected.isEmpty { selected = targets.first?.id ?? "" } }

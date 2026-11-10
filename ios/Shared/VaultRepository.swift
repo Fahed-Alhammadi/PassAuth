@@ -102,6 +102,11 @@ public struct VaultData: Sendable {
     public func vaultName(_ id: String) -> String { vaults.first { $0.id == id }?.name ?? "Vault" }
     public var defaultVault: VaultInfo? { VaultInfo.defaultSaveVault(vaults) }
     public func canWrite(_ e: Entry) -> Bool { vaults.first { $0.id == e.vaultId }.map { $0.role != .read } ?? false }
+    /// In the account's own vault (not one somebody shared) and editable: the only logins that
+    /// are picked as a default place to write to (`SaveLogic`).
+    public func isOwn(_ e: Entry) -> Bool { vaults.first { $0.id == e.vaultId }.map { $0.personal && $0.role != .read } ?? false }
+    /// The name of the entry's vault when it is one somebody shared; nil for the account's own.
+    public func sharedVaultName(_ e: Entry) -> String? { vaults.first { $0.id == e.vaultId }.flatMap { $0.personal ? nil : $0.name } }
     public var writable: [VaultInfo] { vaults.filter { $0.role != .read } }
 }
 
@@ -1161,24 +1166,64 @@ public final class VaultRepository {
 
     public enum SaveOutcome: Sendable { case created, updated, unchanged }
 
-    /// Save a login AutoFill was handed (`SaveLogic`): update the same site and user name's
-    /// password (old one into the history), or create a new login. Syncs first, so the plan is
-    /// made on the server's current items and revisions, not the offline copy.
-    public func saveLogin(page: String, username: String, password: String) async throws -> SaveOutcome {
+    /// The vault no longer allows what was about to be saved the way it was shown or decided
+    /// (the chosen login is gone or not offered any more, the default changed, or the default
+    /// needs the user to see it): nothing was written; show the choices again.
+    public struct SaveChoiceChanged: Error, Equatable {
+        public init() {}
+    }
+
+    /// Save a login AutoFill was handed (`SaveLogic`): update a login already saved for the
+    /// site (password, and the user name if one was typed; the old password goes into the
+    /// history), or create a new login. Syncs first, so it works on the server's current items
+    /// and revisions, not the offline copy, and then applies exactly `target`:
+    ///
+    /// - `target`: the "Save in" choice that was shown or decided (an entry id or
+    ///   `SaveLogic.newLogin`). After the sync it must still be one of `SaveLogic.targets`,
+    ///   else `SaveChoiceChanged` is thrown and nothing is written. It is never swapped for
+    ///   another login.
+    /// - `isDefault`: `target` is the default plan's choice, not one the user picked. If the
+    ///   synced vault makes another default (say the login was saved on another device
+    ///   meanwhile), nothing is written either: already saved → `.unchanged`, otherwise
+    ///   `SaveChoiceChanged`.
+    /// - `target == nil`: the default plan of the synced vault, without any sheet. A rule-3
+    ///   update ("no user name typed, the only login for the site") is refused here with
+    ///   `SaveChoiceChanged`: it is only applied after the user saw which login changes.
+    public func saveLogin(page: String, username: String, password: String, target: String? = nil, isDefault: Bool = false) async throws -> SaveOutcome {
+        guard !password.isEmpty else { throw UserError("There is no password to save.") }
         try await sync()
         guard let v = vault else { throw UserError("Your vault is locked.") }
-        let s = store.get()
-        switch SaveLogic.plan(page: page, username: username, password: password, vault: v, defaultMatch: s.settings.defaultMatch) {
+        let match = store.get().settings.defaultMatch
+        let fresh = SaveLogic.plan(page: page, username: username, password: password, vault: v, defaultMatch: match)
+        let plan: SaveLogic.Plan
+        if let target {
+            if isDefault && SaveLogic.defaultTarget(fresh) != target {
+                if case .unchanged = fresh { return .unchanged }
+                throw SaveChoiceChanged()
+            }
+            guard let chosen = SaveLogic.plan(target: target, page: page, username: username, password: password, vault: v, defaultMatch: match) else {
+                throw SaveChoiceChanged()
+            }
+            // The default "New login" of a credential that is in the vault by now: nothing to add.
+            if isDefault, case .create = chosen, case .unchanged = fresh { return .unchanged }
+            plan = chosen
+        } else {
+            if case .update(_, .only) = fresh { throw SaveChoiceChanged() }
+            plan = fresh
+        }
+        switch plan {
         case .create:
             try await createItem(SaveLogic.newItem(page: page, username: username, password: password), vaultId: nil)
             return .created
-        case .update(let e):
-            try await updateItem(e, SaveLogic.updatedItem(e, password: password))
+        case .update(let e, _):
+            try await updateItem(e, SaveLogic.updatedItem(e, username: username, password: password))
             return .updated
         case .unchanged:
             return .unchanged
         case .readOnly(let e):
             throw UserError("This login is in \(v.vaultName(e.vaultId)), which you can only view.")
+        case .noPassword:
+            throw UserError("There is no password to save.")
         }
     }
 

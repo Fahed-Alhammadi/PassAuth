@@ -270,8 +270,8 @@ private struct MacTwoStep: View {
                             note = "Code sent to \(email)."
                         } catch { self.error = errorMessage(error) }
                     }
-                } label: { Text("Email me a code").frame(maxWidth: .infinity) }
-                    .controlSize(.large)
+                } label: { Label("Email me a code", systemImage: "envelope") }
+                    .buttonStyle(.link)
             }
             Toggle(isOn: $remember) {
                 VStack(alignment: .leading, spacing: 2) {

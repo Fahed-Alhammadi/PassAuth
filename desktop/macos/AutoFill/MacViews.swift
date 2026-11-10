@@ -5,7 +5,10 @@ import os
 
 // The macOS AutoFill sheet: native macOS controls (rounded text fields, grouped forms, push
 // buttons) with the PassAuth accent and logo from ios/UI/Theme.swift. Same screens as the iOS
-// extension, plus sign-in and the extension's own settings.
+// extension, plus sign-in and the extension's own settings. Every prompt has the same anatomy:
+// brand bar (logo, settings, close), a centred column with the context row (what is decided,
+// for which site) leading-aligned, the choices on one card, then one primary button with the
+// quiet actions on a row beneath it.
 
 struct MacAutofillRoot: View {
     @Bindable var model: AutofillModel
@@ -13,7 +16,7 @@ struct MacAutofillRoot: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            bar
             Divider()
             Group {
                 if settings {
@@ -23,8 +26,16 @@ struct MacAutofillRoot: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            footer
+            if model.screen == .configured {
+                Divider()
+                HStack {
+                    Spacer()
+                    Button("Done") { model.finishConfiguration() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, PA.Space.l)
+                .padding(.vertical, 10)
+            }
         }
         .frame(minWidth: 420, idealWidth: 460, minHeight: 480, idealHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -36,50 +47,37 @@ struct MacAutofillRoot: View {
         return s == .locked || s == .unlocked
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            LogoMark(height: 22)
-            Text(title).font(.headline)
+    /// Brand at the leading edge; settings and close at the trailing edge.
+    private var bar: some View {
+        HStack(spacing: PA.Space.s) {
+            LogoMark(height: 20)
+            Text(settings ? "PassAuth settings" : model.screen == .configured ? "PassAuth AutoFill" : "PassAuth").font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Spacer()
             if signedIn && model.screen != .configured && model.screen != .loading {
                 Button { settings.toggle() } label: {
-                    Image(systemName: settings ? "chevron.backward" : "gearshape")
+                    Image(systemName: settings ? "chevron.backward" : "gearshape").frame(width: 28, height: 28).contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
                 .help(settings ? "Back" : "PassAuth AutoFill settings")
                 .accessibilityLabel(settings ? "Back" : "Settings")
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    private var title: String {
-        if settings { return "Settings" }
-        switch model.screen {
-        case .list: return model.onlyCodes ? "Verification codes" : "PassAuth"
-        case .confirmPasskey: return "Save passkey"
-        case .configured: return "PassAuth AutoFill"
-        default: return "PassAuth"
-        }
-    }
-
-    private var footer: some View {
-        HStack {
-            if model.repo.vault?.offline == true && model.screen == .list {
-                Text("Showing the copy on this Mac.").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if model.screen == .configured {
-                Button("Done") { model.finishConfiguration() }
-                    .keyboardShortcut(.defaultAction)
-            } else {
-                Button("Cancel") { model.cancel() }
-                    .keyboardShortcut(.cancelAction)
+            if model.screen != .configured {
+                Button { model.cancel() } label: {
+                    Image(systemName: "xmark").frame(width: 28, height: 28).contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .keyboardShortcut(.cancelAction)
+                .help("Close")
+                .accessibilityLabel("Cancel")
+                .accessibilityIdentifier("autofillCancel")
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.leading, PA.Space.l)
+        .padding(.trailing, PA.Space.s)
+        .padding(.vertical, 6)
     }
 
     @ViewBuilder private var content: some View {
@@ -95,19 +93,130 @@ struct MacAutofillRoot: View {
         case .confirmPasskey:
             MacPasskey(model: model)
         case .message(let title, let text):
-            MacInfo(symbol: "exclamationmark.triangle", title: title, text: text)
+            MacInfo(model: model, symbol: "exclamationmark.triangle", title: title, text: text)
         case .configured:
             MacSettings(model: model, onBack: nil)
         case .confirmSave, .generate:
             // iOS only (macOS has no save / generate requests).
-            MacInfo(symbol: "exclamationmark.triangle", title: "Not available", text: "This request isn't supported on macOS.")
+            MacInfo(model: model, symbol: "exclamationmark.triangle", title: "Not available", text: "This request isn't supported on macOS.")
         }
     }
 }
 
 // MARK: Building blocks
 
-/// A centered column with the logo and a title (sign-in, unlock, confirmations).
+/// The width of the centred content column.
+private let columnWidth: CGFloat = 360
+
+/// A prompt: the context row and content in a centred column that scrolls, the actions (one
+/// primary button, quiet ones beneath) fixed under it, errors just above the actions.
+struct MacPrompt<Content: View, Actions: View>: View {
+    /// The site (its first letter is shown), unless `symbol` is set.
+    var site = ""
+    var symbol: String? = nil
+    let title: String
+    var subtitle: String? = nil
+    var error: String? = nil
+    @ViewBuilder let content: Content
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: PA.Space.l) {
+                    PromptHeader(site: site, symbol: symbol, title: title, subtitle: subtitle)
+                    content
+                }
+                .frame(maxWidth: columnWidth, alignment: .leading)
+                .padding(.horizontal, PA.Space.xl)
+                .padding(.top, PA.Space.xl)
+                .padding(.bottom, PA.Space.m)
+                .frame(maxWidth: .infinity)
+            }
+            VStack(spacing: PA.Space.s) {
+                ErrorText(text: error)
+                actions
+            }
+            .frame(maxWidth: columnWidth)
+            .padding(.horizontal, PA.Space.xl)
+            .padding(.top, PA.Space.s)
+            .padding(.bottom, PA.Space.l)
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// The quiet actions under the primary button: link-style buttons on one row.
+struct MacQuietActions<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: PA.Space.xl) { content }
+            .buttonStyle(.link)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 24)
+    }
+}
+
+/// One card of choice rows (dividers inset to the text column).
+struct MacChoiceCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: PA.Radius.card, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: PA.Radius.card, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+            .clipShape(RoundedRectangle(cornerRadius: PA.Radius.card, style: .continuous))
+    }
+}
+
+/// A row of a choice card: tile, title, detail and the radio mark of the selected row.
+struct MacChoiceRow: View {
+    let title: String
+    var detail = ""
+    var symbol: String? = nil
+    let selected: Bool
+    /// No divider under the last row.
+    var last = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                InitialTile(text: title, symbol: symbol, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).lineLimit(1).truncationMode(.middle)
+                    if !detail.isEmpty { Text(detail).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle) }
+                }
+                Spacer(minLength: PA.Space.s)
+                SelectionMark(selected: selected)
+            }
+            .padding(.horizontal, PA.Space.m)
+            .padding(.vertical, PA.Space.s)
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .overlay(alignment: .bottom) {
+            if !last { Divider().padding(.leading, PA.Space.m + 28 + 10) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// Small title above a card ("Save in").
+private struct MacSectionTitle: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+            .padding(.bottom, -PA.Space.s)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// A sign-in step: title and one line under it, leading-aligned, in the centred column.
 struct MacFrame<Content: View>: View {
     let title: String
     var subtitle: String? = nil
@@ -115,18 +224,22 @@ struct MacFrame<Content: View>: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 14) {
-                LogoMark(height: 44).padding(.top, 20)
-                Text(title).font(.title2.weight(.semibold)).multilineTextAlignment(.center)
-                    .accessibilityAddTraits(.isHeader)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: PA.Space.m) {
+                VStack(alignment: .leading, spacing: PA.Space.xs) {
+                    Text(title).font(.title2.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                VStack(alignment: .leading, spacing: 12) { content }.padding(.top, 4)
+                .padding(.bottom, PA.Space.xs)
+                content
             }
-            .frame(maxWidth: 340)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 20)
+            .frame(maxWidth: columnWidth, alignment: .leading)
+            .padding(.horizontal, PA.Space.xl)
+            .padding(.top, PA.Space.xl)
+            .padding(.bottom, PA.Space.l)
             .frame(maxWidth: .infinity)
         }
     }
@@ -159,6 +272,7 @@ struct MacField: View {
                     }
                 }
                 .textFieldStyle(.roundedBorder)
+                .controlSize(.large)
                 .textContentType(content)
                 .autocorrectionDisabled()
                 .focused($focused)
@@ -168,10 +282,12 @@ struct MacField: View {
                 .onAppear { if autofocus { takeFocus() } }
                 .onChange(of: autofocus) { if autofocus { takeFocus() } }
                 if secure {
-                    Button { reveal.toggle() } label: { Image(systemName: reveal ? "eye.slash" : "eye") }
-                        .buttonStyle(.borderless)
-                        .help(reveal ? "Hide" : "Show")
-                        .accessibilityLabel(reveal ? "Hide \(label.lowercased())" : "Show \(label.lowercased())")
+                    Button { reveal.toggle() } label: {
+                        Image(systemName: reveal ? "eye.slash" : "eye").frame(width: 28, height: 28).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .help(reveal ? "Hide" : "Show")
+                    .accessibilityLabel(reveal ? "Hide \(label.lowercased())" : "Show \(label.lowercased())")
                 }
             }
         }
@@ -209,18 +325,29 @@ struct MacPrimaryButton: View {
     }
 }
 
+/// A state with nothing to decide (something went wrong): centred, like an empty state, with a way out.
 struct MacInfo: View {
+    @Bindable var model: AutofillModel
     let symbol: String
     let title: String
     let text: String
 
     var body: some View {
-        MacFrame(title: title) {
-            Image(systemName: symbol).font(.system(size: 30)).foregroundStyle(Color.paAccent)
-                .frame(maxWidth: .infinity).accessibilityHidden(true)
-            Text(text).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
+        VStack(spacing: PA.Space.m) {
+            Image(systemName: symbol).font(.largeTitle).foregroundStyle(.secondary).accessibilityHidden(true)
+            Text(title).font(.title3.weight(.semibold)).multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isHeader)
+            Text(text).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("autofillMessage")
+            Button("Close") { model.cancel() }
+                .keyboardShortcut(.defaultAction)
+                .controlSize(.large)
+                .padding(.top, PA.Space.s)
         }
+        .frame(maxWidth: columnWidth)
+        .padding(PA.Space.xl)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -237,17 +364,21 @@ struct MacUnlock: View {
         let needKey = state.secretKeyRequired && !state.secretKeyStored
         let bio = BiometryKind.current
         let canBio = state.biometricEnabled && bio.available
-        MacFrame(title: "Unlock PassAuth", subtitle: state.email) {
+        let host = model.requestHost
+        MacPrompt(site: host ?? "", symbol: host == nil ? "lock.fill" : nil, title: model.unlockTitle, subtitle: host ?? state.email, error: model.error) {
             MacField(label: "Master password", text: $password, secure: true, content: .password, submit: { if !needKey { submit() } }, autofocus: true)
             if needKey { MacField(label: "Secret Key", text: $secretKey, mono: true, submit: submit) }
-            ErrorText(text: model.error)
+            Text("Your vault is locked. Enter the master password for \(state.email).")
+                .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        } actions: {
             MacPrimaryButton(title: model.busy ? "Unlocking…" : "Unlock", busy: model.busy, enabled: !password.isEmpty, action: submit)
-            if canBio {
-                Button { model.unlockWithBiometric() } label: {
-                    Label("Unlock with \(bio.name)", systemImage: bio.symbol).frame(maxWidth: .infinity)
+            MacQuietActions {
+                if canBio {
+                    Button { model.unlockWithBiometric() } label: { Label("Use \(bio.name)", systemImage: bio.symbol) }
+                        .disabled(model.busy)
+                        .accessibilityIdentifier("autofillBiometric")
                 }
-                .controlSize(.large).disabled(model.busy)
-                .accessibilityIdentifier("autofillBiometric")
+                Button("Cancel") { model.cancel() }
             }
         }
         .task {
@@ -264,7 +395,14 @@ struct MacUnlock: View {
     }
 }
 
-// MARK: List
+// MARK: List (choose a login, a passkey or a verification code)
+
+/// "Lumen Mail · 29 Oct 2026": the login a passkey is in and the day it was saved.
+private func passkeyDetail(_ e: Entry, _ p: Passkey) -> String {
+    guard p.createdAt > 0 else { return e.item.name }
+    let day = Date(timeIntervalSince1970: TimeInterval(p.createdAt)).formatted(date: .abbreviated, time: .omitted)
+    return e.item.name.isEmpty ? "Saved \(day)" : "\(e.item.name) · \(day)"
+}
 
 struct MacList: View {
     @Bindable var model: AutofillModel
@@ -274,6 +412,10 @@ struct MacList: View {
     /// when the list appears and when the vault or the match setting changes, not per render.
     @State private var suggestions: [Entry] = []
     @State private var passkeys: [(Entry, Passkey)] = []
+    @State private var loaded = false
+    /// A website asked for a passkey and the vault has some: choose one and sign in. Off once
+    /// the user asks for a password instead.
+    @State private var passkeyPrompt = true
 
     /// What the suggestions depend on.
     private struct Inputs: Equatable {
@@ -289,31 +431,54 @@ struct MacList: View {
     private static let log = Logger(subsystem: "io.passauth.autofill", category: "list")
 
     var body: some View {
-        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
-        VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search logins", text: $query)
-                    .textFieldStyle(.plain)
-                    .focused($searchFocused)
-                    .accessibilityIdentifier("search")
-                if !query.isEmpty {
-                    Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                        .buttonStyle(.borderless).accessibilityLabel("Clear search")
-                }
+        Group {
+            if !loaded {
+                Color.clear
+            } else if passkeyPrompt && !passkeys.isEmpty {
+                MacPasskeySignIn(model: model, passkeys: passkeys) { passkeyPrompt = false }
+            } else {
+                picker
             }
-            .padding(.horizontal, 10).padding(.vertical, 7)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor)))
-            .padding(.horizontal, 16).padding(.vertical, 10)
+        }
+        .onAppear {
+            recompute()
+            loaded = true
+            Self.log.notice("list: \(model.pages.count) pages, \(suggestions.count) suggestions, \(model.repo.vault?.entries.count ?? -1) entries")
+            searchFocused = suggestions.isEmpty && passkeys.isEmpty
+        }
+        .onChange(of: inputs) { recompute() }
+    }
+
+    private var picker: some View {
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        let host = model.requestHost
+        return VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: PA.Space.m) {
+                PromptHeader(site: host ?? "", symbol: host == nil ? (model.onlyCodes ? "clock" : "key.fill") : nil,
+                             title: model.onlyCodes ? "Choose a verification code" : "Choose a login", subtitle: host)
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search logins", text: $query)
+                        .textFieldStyle(.plain)
+                        .focused($searchFocused)
+                        .accessibilityIdentifier("search")
+                    if !query.isEmpty {
+                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                            .buttonStyle(.borderless).accessibilityLabel("Clear search")
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+            }
+            .padding(.horizontal, PA.Space.l).padding(.top, PA.Space.l).padding(.bottom, PA.Space.s)
 
             List {
                 if !searching && !passkeys.isEmpty {
-                    Section("Passkeys for \(model.passkeyRpId ?? "")") {
+                    Section("Passkeys") {
                         ForEach(passkeys, id: \.1.credentialId) { e, p in
                             Button { model.pickPasskey(e, p) } label: {
-                                MacRow(title: p.userName.isEmpty ? e.item.name : p.userName,
-                                       subtitle: p.createdAt > 0 ? "\(e.item.name) · saved \(formatDate(p.createdAt))" : e.item.name, symbol: "person.badge.key")
+                                MacRow(title: p.userName.isEmpty ? e.item.name : p.userName, subtitle: passkeyDetail(e, p), symbol: "person.badge.key")
                             }
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("passkey-\(p.userName)")
@@ -321,9 +486,9 @@ struct MacList: View {
                     }
                 }
                 if !searching && !model.pages.isEmpty {
-                    Section(model.pages.first.map { "Suggestions for \(AutofillMatcher.displayHost($0))" } ?? "Suggestions") {
+                    Section("For this site") {
                         if suggestions.isEmpty {
-                            Text(model.onlyCodes ? "No login with a verification code for this website." : "No saved login for this website. Search all logins.")
+                            Text(model.onlyCodes ? "No login with a verification code for this site. Search your other logins." : "No login saved for this site. Search your other logins.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(suggestions) { e in entryRow(e) }
@@ -333,19 +498,19 @@ struct MacList: View {
                 let results = model.searchResults(query).filter { searching || !shown.contains($0.id) }
                 if searching || !results.isEmpty {
                     Section(searching ? "Results" : model.pages.isEmpty ? "All logins" : "Other logins") {
-                        if results.isEmpty { Text("No logins found.").foregroundStyle(.secondary) }
+                        if results.isEmpty { Text("No login matches “\(query.trimmingCharacters(in: .whitespaces))”.").foregroundStyle(.secondary) }
                         ForEach(results) { e in entryRow(e) }
                     }
                 }
             }
             .listStyle(.inset)
+            if model.repo.vault?.offline == true {
+                Divider()
+                Text("Showing the copy on this Mac.").font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
+            }
         }
-        .onAppear {
-            recompute()
-            Self.log.notice("list: \(model.pages.count) pages, \(suggestions.count) suggestions, \(model.repo.vault?.entries.count ?? -1) entries")
-            searchFocused = suggestions.isEmpty && passkeys.isEmpty
-        }
-        .onChange(of: inputs) { recompute() }
     }
 
     private func recompute() {
@@ -362,6 +527,48 @@ struct MacList: View {
     }
 }
 
+/// Sign in with a passkey: choose the account (the newest passkey is preselected), one button.
+private struct MacPasskeySignIn: View {
+    @Bindable var model: AutofillModel
+    let passkeys: [(Entry, Passkey)]
+    let usePassword: () -> Void
+    @State private var chosen = ""
+
+    private var selectedIndex: Int { passkeys.firstIndex { $0.1.credentialId == chosen } ?? 0 }
+
+    var body: some View {
+        let selected = passkeys.indices.contains(selectedIndex) ? passkeys[selectedIndex] : nil
+        MacPrompt(site: model.passkeyRpId ?? "", title: "Sign in with a passkey", subtitle: model.passkeyRpId, error: model.error) {
+            if passkeys.count > 1 { MacSectionTitle("Choose an account") }
+            MacChoiceCard {
+                ForEach(Array(passkeys.enumerated()), id: \.element.1.credentialId) { n, pair in
+                    let (e, p) = pair
+                    MacChoiceRow(title: p.userName.isEmpty ? e.item.name : p.userName, detail: passkeyDetail(e, p), symbol: "person.badge.key",
+                                 selected: n == selectedIndex, last: n == passkeys.count - 1) { chosen = p.credentialId }
+                        .accessibilityIdentifier("passkey-\(p.userName)")
+                }
+            }
+            // Arrow keys move the choice; Return signs in.
+            .focusable()
+            .focusEffectDisabled()
+            .onMoveCommand { direction in
+                let next = direction == .up ? selectedIndex - 1 : direction == .down ? selectedIndex + 1 : selectedIndex
+                if passkeys.indices.contains(next) { chosen = passkeys[next].1.credentialId }
+            }
+        } actions: {
+            MacPrimaryButton(title: model.busy ? "Signing in…" : "Sign in", busy: model.busy, enabled: selected != nil) {
+                if let (e, p) = selected { model.pickPasskey(e, p) }
+            }
+            .accessibilityIdentifier("passkeySignIn")
+            MacQuietActions {
+                Button("Use a password instead", action: usePassword)
+                    .accessibilityIdentifier("passkeyUsePassword")
+                Button("Cancel") { model.cancel() }
+            }
+        }
+    }
+}
+
 private struct MacRow: View {
     let title: String
     let subtitle: String
@@ -371,18 +578,7 @@ private struct MacRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.paAccent.opacity(0.12))
-                .frame(width: 28, height: 28)
-                .overlay {
-                    if let symbol {
-                        Image(systemName: symbol).foregroundStyle(Color.paAccent)
-                    } else {
-                        Text(String(letter.trimmingCharacters(in: .whitespaces).first ?? "?").uppercased())
-                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.paAccent)
-                    }
-                }
-                .accessibilityHidden(true)
+            InitialTile(text: letter, symbol: symbol, size: 28)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title.isEmpty ? "Untitled" : title).lineLimit(1)
                 if !subtitle.isEmpty { Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
@@ -406,23 +602,63 @@ struct MacPasskey: View {
 
     var body: some View {
         let r = model.registration
-        MacFrame(title: "Save a passkey?", subtitle: r?.rpId) {
-            Text("For \(r?.user ?? "") on \(r?.rpId ?? ""). PassAuth keeps it in your vault (\(model.state.email)).")
-                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
-            if !model.passkeyTargets.isEmpty {
-                Picker("Save in", selection: $model.passkeyTarget) {
-                    ForEach(model.passkeyTargets, id: \.id) { e in
-                        let user = e.item.login?.username ?? ""
-                        Text(user.isEmpty ? e.item.name : "\(e.item.name) · \(user)").tag(e.id)
+        let rp = r?.rpId ?? ""
+        let targets = model.passkeyTargets
+        MacPrompt(site: rp, title: "Save a passkey", subtitle: rp, error: model.error) {
+            MacChoiceCard {
+                HStack(spacing: 10) {
+                    InitialTile(symbol: "person.badge.key", size: 28)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Passkey for").font(.callout).foregroundStyle(.secondary)
+                        Text((r?.user ?? "").isEmpty ? rp : r?.user ?? "").lineLimit(1).truncationMode(.middle)
                     }
-                    Text("New login").tag(PasskeyLogic.newLogin)
+                    Spacer(minLength: 0)
                 }
-                .pickerStyle(.radioGroup)
-                .accessibilityIdentifier("saveIn")
+                .padding(.horizontal, PA.Space.m).padding(.vertical, PA.Space.s)
+                .frame(minHeight: 44)
+                .accessibilityElement(children: .combine)
             }
-            ErrorText(text: model.error)
+            if targets.isEmpty {
+                Text("Saved as a new login for \(rp) in your vault (\(model.state.email)).")
+                    .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                MacSectionTitle("Save in")
+                MacChoiceCard {
+                    ForEach(targets, id: \.id) { e in
+                        // A login in a vault somebody shared says so (its vault's name); it is never preselected.
+                        let user = (e.item.login?.username ?? "").isEmpty ? "No username" : e.item.login?.username ?? ""
+                        MacChoiceRow(title: e.item.name.isEmpty ? rp : e.item.name,
+                                     detail: model.sharedVaultName(e).map { "\(user) · shared vault \($0)" } ?? user,
+                                     selected: model.passkeyTarget == e.id) { model.passkeyTarget = e.id }
+                            .accessibilityIdentifier("saveIn-\(e.id)")
+                    }
+                    MacChoiceRow(title: "New login", detail: rp, symbol: "plus", selected: model.passkeyTarget == PasskeyLogic.newLogin, last: true) {
+                        model.passkeyTarget = PasskeyLogic.newLogin
+                    }
+                    .accessibilityIdentifier("saveInNew")
+                }
+                .disabled(model.busy)
+                .focusable()
+                .focusEffectDisabled()
+                .onMoveCommand { direction in
+                    let ids = targets.map(\.id) + [PasskeyLogic.newLogin]
+                    let at = ids.firstIndex(of: model.passkeyTarget) ?? 0
+                    let next = direction == .up ? at - 1 : direction == .down ? at + 1 : at
+                    if ids.indices.contains(next) { model.passkeyTarget = ids[next] }
+                }
+                .accessibilityIdentifier("saveIn")
+                let shared = targets.first { $0.id == model.passkeyTarget }.flatMap(model.sharedVaultName)
+                Text(shared.map { "The passkey is kept with that login in the shared vault \($0); its members can use it too." }
+                     ?? "The passkey is kept with that login in your vault (\(model.state.email)).")
+                    .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, -PA.Space.s)
+            }
+        } actions: {
             MacPrimaryButton(title: model.busy ? "Saving…" : "Save passkey", busy: model.busy, action: model.savePasskey)
                 .accessibilityIdentifier("savePasskey")
+            MacQuietActions {
+                Button("Cancel") { model.cancel() }.disabled(model.busy)
+            }
         }
     }
 }
@@ -460,7 +696,7 @@ struct MacSettings: View {
             if onBack == nil {
                 Section {
                     Label {
-                        Text("PassAuth fills your logins, passkeys and verification codes in Safari and apps. Your vault stays encrypted: macOS only learns the website and user name of each login.")
+                        Text("PassAuth fills your logins, passkeys and verification codes in Safari and apps. Your vault stays encrypted: macOS only learns the website and username of each login.")
                             .foregroundStyle(.secondary)
                     } icon: {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.paOk)

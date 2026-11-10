@@ -189,8 +189,11 @@ private struct AccountPage: View {
             Text("Logging out removes this account's vault from this device.")
         }
         .paRow()
-        .confirmationDialog("Log out of \(s.email)?", isPresented: $confirmLogout, titleVisibility: .visible) {
+        .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
         }
     }
 }
@@ -531,8 +534,11 @@ private struct AboutPage: View {
             Button("Log out", role: .destructive) { confirmLogout = true }
         }
         .paRow()
-        .confirmationDialog("Log out of \(s.email)?", isPresented: $confirmLogout, titleVisibility: .visible) {
+        .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
         }
         Section {
             NavigationLink {
@@ -563,37 +569,28 @@ private struct DeleteAccountPage: View {
     var body: some View {
         let s = model.state
         let needsSecretKey = s.secretKeyRequired && !s.secretKeyStored
-        Form {
-                Section {
+        PromptScaffold(error: error) {
+            Section {
+                VStack(alignment: .leading, spacing: PA.Space.m) {
                     Text("This permanently deletes \(s.email) from your PassAuth server, with every vault you own and every item in them. People you shared those vaults with lose access too. Vaults others shared with you are not deleted.")
                         .foregroundStyle(Color.paInk)
                     Notice(text: "This can't be undone. Export your vault first if you want to keep a copy.", kind: .error)
-                        .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
                 }
-                .paRow()
-                Section {
-                    SecretInput(label: "Master password", text: $password, mono: false, identifier: "delete.password")
-                    if needsSecretKey {
-                        LabeledInput(label: "Secret Key", text: $secretKey, mono: true, autocap: .characters)
-                    }
-                } footer: {
-                    Text("Your server checks the master password before it deletes anything.")
-                }
-                .paRow()
-                Section {
-                    ErrorText(text: error)
-                    Button(role: .destructive, action: submit) {
-                        HStack {
-                            Text(busy ? "Deleting…" : "Delete account").fontWeight(.semibold)
-                            if busy { Spacer(); ProgressView() }
-                        }
-                    }
-                    .disabled(busy)
-                    .accessibilityIdentifier("delete.confirm")
-                }
-                .paRow()
+                .promptPlainRow()
             }
-            .paList()
+            Section {
+                SecretInput(label: "Master password", text: $password, mono: false, identifier: "delete.password", submit: submit)
+                if needsSecretKey {
+                    LabeledInput(label: "Secret Key", text: $secretKey, mono: true, autocap: .characters)
+                }
+            } footer: {
+                Text("Your server checks the master password before it deletes anything.")
+            }
+            .paRow()
+        } actions: {
+            PrimaryButton(title: busy ? "Deleting…" : "Delete account", busy: busy, destructive: true, action: submit)
+                .accessibilityIdentifier("delete.confirm")
+        }
             .navigationTitle("Delete account")
             .navigationBarTitleDisplayMode(.inline)
             .paNavBar()

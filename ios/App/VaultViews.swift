@@ -100,6 +100,8 @@ private struct VaultList: View {
     @Binding var editing: EditTarget?
     @State private var trashing: Entry?
     @State private var purging: Entry?
+    /// The section of the row that asked (a favorite is listed twice; one row shows the dialog).
+    @State private var askingIn = ""
 
     var body: some View {
         let v = model.repo.vault
@@ -185,26 +187,11 @@ private struct VaultList: View {
                 AccountMenu()
             }
         }
-        .confirmationDialog("Move to trash?", isPresented: Binding(get: { trashing != nil }, set: { if !$0 { trashing = nil } }), titleVisibility: .visible, presenting: trashing) { e in
-            Button("Move to trash", role: .destructive) {
-                model.run {
-                    try await model.repo.trashItem(e)
-                    model.notify("Moved to trash.")
-                }
-            }
-        } message: { e in
-            Text("“\(e.item.name)” can be restored from the trash.")
-        }
-        .confirmationDialog("Delete forever?", isPresented: Binding(get: { purging != nil }, set: { if !$0 { purging = nil } }), titleVisibility: .visible, presenting: purging) { e in
-            Button("Delete forever", role: .destructive) {
-                model.run {
-                    try await model.repo.purgeItem(e)
-                    model.notify("Item deleted.")
-                }
-            }
-        } message: { e in
-            Text("“\(e.item.name)” will be deleted for good. This can't be undone.")
-        }
+    }
+
+    /// Whether `e` is the entry a confirmation is open for (the dialog hangs off its row).
+    private func asking(_ which: Binding<Entry?>, _ e: Entry, in section: String) -> Binding<Bool> {
+        Binding(get: { which.wrappedValue?.id == e.id && askingIn == section }, set: { if !$0 { which.wrappedValue = nil } })
     }
 
     private func filterSummary(_ v: VaultData?) -> String {
@@ -224,7 +211,7 @@ private struct VaultList: View {
     private func section(_ title: String, _ items: [ItemSummary]) -> some View {
         if !items.isEmpty {
             Section {
-                ForEach(items) { s in row(s) }
+                ForEach(items) { s in row(s, in: title) }
             } header: {
                 HStack {
                     Text(title)
@@ -235,7 +222,7 @@ private struct VaultList: View {
         }
     }
 
-    private func row(_ s: ItemSummary) -> some View {
+    private func row(_ s: ItemSummary, in section: String) -> some View {
         let canWrite = model.repo.vault?.canWrite(s.entry) ?? false
         let login = s.item.login
         let trashed = s.entry.deletedAt != nil
@@ -254,7 +241,8 @@ private struct VaultList: View {
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if canWrite {
                 if trashed {
-                    Button(role: .destructive) { purging = s.entry } label: { Label("Delete forever", systemImage: "trash.slash") }
+                    // Not the destructive role: these ask first, the row stays where it is.
+                    Button { askingIn = section; purging = s.entry } label: { Label("Delete forever", systemImage: "trash.slash") }.tint(Color.paDanger)
                     Button {
                         model.run {
                             try await model.repo.restoreItem(s.entry)
@@ -262,7 +250,7 @@ private struct VaultList: View {
                         }
                     } label: { Label("Restore", systemImage: "arrow.uturn.backward") }.tint(Color.paOk)
                 } else {
-                    Button(role: .destructive) { trashing = s.entry } label: { Label("Move to trash", systemImage: "trash") }
+                    Button { askingIn = section; trashing = s.entry } label: { Label("Move to trash", systemImage: "trash") }.tint(Color.paDanger)
                     Button {
                         model.run { try await model.repo.setFavorite(s.entry, !s.item.favorite) }
                     } label: {
@@ -270,6 +258,28 @@ private struct VaultList: View {
                     }.tint(.orange)
                 }
             }
+        }
+        .confirmationDialog("Move to trash?", isPresented: asking($trashing, s.entry, in: section), titleVisibility: .visible) {
+            Button("Move to trash", role: .destructive) {
+                model.run {
+                    try await model.repo.trashItem(s.entry)
+                    model.notify("Moved to trash.")
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("“\(s.name)” can be restored from the trash.")
+        }
+        .confirmationDialog("Delete forever?", isPresented: asking($purging, s.entry, in: section), titleVisibility: .visible) {
+            Button("Delete forever", role: .destructive) {
+                model.run {
+                    try await model.repo.purgeItem(s.entry)
+                    model.notify("Item deleted.")
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("“\(s.name)” will be deleted for good. This can't be undone.")
         }
         .contextMenu {
             if !trashed {
@@ -285,7 +295,7 @@ private struct VaultList: View {
                     Button { model.run { try await model.repo.setFavorite(s.entry, !s.item.favorite) } } label: {
                         Label(s.item.favorite ? "Remove from favorites" : "Add to favorites", systemImage: s.item.favorite ? "star.slash" : "star")
                     }
-                    Button(role: .destructive) { trashing = s.entry } label: { Label("Move to trash", systemImage: "trash") }
+                    Button(role: .destructive) { askingIn = section; trashing = s.entry } label: { Label("Move to trash", systemImage: "trash") }
                 }
             } else if canWrite {
                 Button {
@@ -294,27 +304,30 @@ private struct VaultList: View {
                         model.notify("Item restored.")
                     }
                 } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
-                Button(role: .destructive) { purging = s.entry } label: { Label("Delete forever", systemImage: "trash.slash") }
+                Button(role: .destructive) { askingIn = section; purging = s.entry } label: { Label("Delete forever", systemImage: "trash.slash") }
             }
         }
     }
 }
 
 struct ItemRow: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let summary: ItemSummary
 
     var body: some View {
-        HStack(spacing: 12) {
+        // Large text: the name and the user name wrap instead of being cut off.
+        let lines: Int? = typeSize.isAccessibilitySize ? nil : 1
+        HStack(spacing: PA.Space.m) {
             SiteIcon(host: summary.host, name: summary.name, kind: summary.item.kind)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
-                    Text(summary.name).foregroundStyle(Color.paInk).lineLimit(1)
+                    Text(summary.name).foregroundStyle(Color.paInk).lineLimit(lines)
                     if summary.item.favorite {
                         Image(systemName: "star.fill").font(.caption2).foregroundStyle(Color.paAccent).accessibilityLabel("Favorite")
                     }
                 }
                 if !summary.subtitle.isEmpty {
-                    Text(summary.subtitle).font(.subheadline).foregroundStyle(Color.paMuted).lineLimit(1)
+                    Text(summary.subtitle).font(.subheadline).foregroundStyle(Color.paMuted).lineLimit(lines)
                 }
             }
         }
@@ -377,6 +390,7 @@ private struct FilterMenu: View {
 /// Account menu: who is signed in, other accounts to switch to, add account, lock, web vault, log out.
 struct AccountMenu: View {
     @Environment(AppModel.self) private var model
+    @State private var confirmLogout = false
 
     var body: some View {
         let s = model.state
@@ -402,11 +416,17 @@ struct AccountMenu: View {
             Divider()
             Button { model.run { await model.repo.lockActive() } } label: { Label("Lock", systemImage: "lock") }
             Button { model.openWebVault() } label: { Label("Open web vault", systemImage: "safari") }
-            Button(role: .destructive) { model.run { await model.repo.logout() } } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
+            Button(role: .destructive) { confirmLogout = true } label: { Label("Log out…", systemImage: "rectangle.portrait.and.arrow.right") }
         } label: {
             Avatar(text: initials(s.name, s.email), size: 30)
         }
         .accessibilityLabel("Account menu: \(s.name.isEmpty ? s.email : s.name)")
         .accessibilityIdentifier("accountMenu")
+        .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
+            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
+        }
     }
 }
