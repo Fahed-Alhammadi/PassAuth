@@ -3,12 +3,15 @@ import { LogoMark } from "@web/components/Logo";
 import { Icon } from "@web/components/ui";
 import { send } from "../shared/messages";
 
+/** Save target "create a new login" (matches NEW_LOGIN in background/passkey-handler.ts). */
+const NEW_LOGIN = "new";
+
 interface Info {
   kind: "create" | "get";
   origin: string;
   rpId: string;
   userName: string;
-  candidates: { credentialId: string; userName: string; itemName: string }[];
+  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean }[];
   /** The site requires user verification: confirm with the master password. */
   needsPassword: boolean;
 }
@@ -24,7 +27,8 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
   useEffect(() => {
     send<Info | null>({ type: "passkey:pending", requestId }).then((i) => {
       setInfo(i);
-      setChoice(i?.candidates[0]?.credentialId);
+      // Saving: the best matching login for this exact site is preselected, else a new login.
+      setChoice(i?.kind === "create" ? (i.candidates.find((c) => c.preferred)?.credentialId ?? NEW_LOGIN) : i?.candidates[0]?.credentialId);
     });
   }, [requestId]);
 
@@ -72,7 +76,29 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
             "The passkey is stored encrypted in your vault and works on every device where you use PassAuth."
           )}
         </p>
-      ) : (
+      ) : null}
+      {info.kind === "create" && info.candidates.length > 0 && (
+        <div className="stack-s" role="radiogroup" aria-label="Save the passkey in">
+          <span className="small muted">Save in</span>
+          {info.candidates.map((c) => (
+            <button key={c.credentialId} type="button" role="radio" className="pk-choice" aria-checked={choice === c.credentialId} aria-pressed={choice === c.credentialId} onClick={() => setChoice(c.credentialId)}>
+              <Icon name="key" />
+              <span className="grow">
+                <span style={{ display: "block", fontWeight: 500 }}>{c.itemName}</span>
+                <span className="small muted">{c.userName || "No user name"}</span>
+              </span>
+            </button>
+          ))}
+          <button type="button" role="radio" className="pk-choice" aria-checked={choice === NEW_LOGIN} aria-pressed={choice === NEW_LOGIN} onClick={() => setChoice(NEW_LOGIN)}>
+            <Icon name="plus" />
+            <span className="grow">
+              <span style={{ display: "block", fontWeight: 500 }}>New login</span>
+              <span className="small muted">{info.rpId}</span>
+            </span>
+          </button>
+        </div>
+      )}
+      {info.kind === "get" && (
         <div className="stack-s" role="radiogroup" aria-label="Choose an account">
           {info.candidates.map((c) => (
             <button key={c.credentialId} type="button" className="pk-choice" aria-pressed={choice === c.credentialId} onClick={() => setChoice(c.credentialId)}>

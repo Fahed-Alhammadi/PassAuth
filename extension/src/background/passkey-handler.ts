@@ -18,9 +18,12 @@ import {
 } from "./passkeys";
 import type { CreateRequest, GetRequest } from "../shared/passkey-types";
 import { allEntries, canWrite, createItem, ensureUnlocked, updateItem, verifyMasterPassword, type Entry } from "./vault";
-import { baseDomain } from "./urls";
 
+/** `credentialId`: for sign-in the chosen passkey; for creation the login to save it in (an item id, or `NEW_LOGIN`). */
 type Decision = { accept: boolean; credentialId?: string; fallback?: boolean; verified?: boolean };
+
+/** Save target meaning "create a new login" (never an item id: those are UUIDs). */
+export const NEW_LOGIN = "new";
 type Reply = { result: unknown } | { fallback: true } | { error: { name: string; message: string } };
 
 export interface PasskeyMessage {
@@ -39,7 +42,8 @@ interface Pending {
   origin: string;
   rpId: string;
   userName: string;
-  candidates: { credentialId: string; userName: string; itemName: string }[];
+  /** Sign-in: matching passkeys. Creation: logins to save in (`preferred` = this exact site, preselected). */
+  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean }[];
   /** The site requires user verification and the master password wasn't entered recently. */
   needsPassword: boolean;
   tabId: number;
@@ -94,14 +98,22 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   if (kind === "create") {
     const req = msg.options as CreateRequest;
     if (!supportsCreateRequest(req)) return FALLBACK;
-    const decision = await confirm({ ...base, kind, userName: req.user?.name ?? "", candidates: [] }, wait);
+    const host = new URL(msg.origin).hostname.toLowerCase();
+    const targets = saveTargets(host, rpId, req.user?.name ?? "", req.user?.displayName ?? "");
+    const candidates = targets.map((e) => ({
+      credentialId: e.id,
+      userName: e.item.login!.username,
+      itemName: e.item.name || host,
+      preferred: loginHosts(e).includes(host),
+    }));
+    const decision = await confirm({ ...base, kind, userName: req.user?.name ?? "", candidates }, wait);
     if (!decision.accept) return decision.fallback ? FALLBACK : notAllowed();
     // Checked after the user's consent so a site can't silently probe the vault.
     if (excludedPasskeyExists(req, msg.origin, allPasskeys().map((x) => x.passkey))) {
       return { error: { name: "InvalidStateError", message: "A passkey for this account is already saved in PassAuth." } };
     }
     const { passkey, response } = await createPasskey(req, msg.origin, { uv: true });
-    await storePasskey(passkey, req.rp?.name ?? rpId);
+    await storePasskey(passkey, req.rp?.name ?? rpId, host, decision.credentialId ?? NEW_LOGIN);
     return { result: response };
   }
 
@@ -131,25 +143,43 @@ function allPasskeys(): { entry: Entry; passkey: Passkey }[] {
   return allEntries().flatMap((entry) => (entry.item.login?.passkeys ?? []).map((passkey) => ({ entry, passkey })));
 }
 
-/** Attach to an existing login you can edit for the same site and username, or create one in your own vault. */
-async function storePasskey(passkey: Passkey, rpName: string) {
-  const site = baseDomain(passkey.rp_id);
-  const existing = allEntries().find(
-    (e) =>
-      e.item.login &&
-      canWrite(e) &&
-      e.item.login.username.toLowerCase() === passkey.user_name.toLowerCase() &&
-      e.item.login.urls.some((u) => {
-        try {
-          return baseDomain(new URL(u.url.includes("://") ? u.url : `https://${u.url}`).hostname) === site;
-        } catch {
-          return false;
-        }
-      }),
-  );
-  if (existing) {
-    const login = existing.item.login!;
-    await updateItem(existing, { ...existing.item, login: { ...login, passkeys: [...login.passkeys, passkey] } });
+/** Hostnames of a login's URLs (scheme optional), lowercase, without a trailing dot. */
+function loginHosts(e: Entry): string[] {
+  return (e.item.login?.urls ?? []).flatMap((u) => {
+    try {
+      return [new URL(u.url.includes("://") ? u.url : `https://${u.url}`).hostname.toLowerCase().replace(/\.$/, "")];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/**
+ * Logins a new passkey can be saved in: ones you can edit whose website is this
+ * exact host, the RP ID, or a subdomain of the RP ID (where the passkey also works).
+ * Never just "the same base domain": cloudy.example.com and bazarr.example.com are
+ * different sites. Best first: this exact host, then a matching user name.
+ */
+function saveTargets(host: string, rpId: string, userName: string, displayName: string): Entry[] {
+  const rp = rpId.toLowerCase();
+  const names = [userName, displayName].map((n) => n.trim().toLowerCase()).filter(Boolean);
+  const score = (e: Entry) => {
+    const hosts = loginHosts(e);
+    const user = e.item.login!.username.trim().toLowerCase();
+    return (hosts.includes(host) ? 2 : 0) + (user && names.some((n) => n === user || n === user.split("@")[0]) ? 1 : 0);
+  };
+  return allEntries()
+    .filter((e) => e.item.login && canWrite(e))
+    .filter((e) => loginHosts(e).some((h) => h === host || h === rp || h.endsWith(`.${rp}`)))
+    .sort((a, b) => score(b) - score(a) || a.item.name.localeCompare(b.item.name));
+}
+
+/** Save the passkey in the login the user chose (still one they can edit for this site), or in a new login in their own vault. */
+async function storePasskey(passkey: Passkey, rpName: string, host: string, targetId: string) {
+  const target = targetId === NEW_LOGIN ? undefined : saveTargets(host, passkey.rp_id, "", "").find((e) => e.id === targetId);
+  if (target) {
+    const login = target.item.login!;
+    await updateItem(target, { ...target.item, login: { ...login, passkeys: [...login.passkeys, passkey] } });
     return;
   }
   const now = Math.floor(Date.now() / 1000);
@@ -159,7 +189,7 @@ async function storePasskey(passkey: Passkey, rpName: string) {
     favorite: false,
     folder: null,
     tags: [],
-    login: { username: passkey.user_name, password: "", urls: [{ url: `https://${passkey.rp_id}`, match: "default" }], totp: null, passkeys: [passkey] },
+    login: { username: passkey.user_name, password: "", urls: [{ url: `https://${host}`, match: "default" }], totp: null, passkeys: [passkey] },
     card: null,
     identity: null,
     ssh_key: null,
@@ -169,6 +199,12 @@ async function storePasskey(passkey: Passkey, rpName: string) {
     updated_at: now,
   };
   await createItem(item);
+}
+
+/** Room for the password field and the account / "Save in" list (capped; the window scrolls beyond that). */
+function windowHeight(p: Omit<Pending, "decide">): number {
+  const rows = Math.min(p.candidates.length + (p.kind === "create" && p.candidates.length ? 1 : 0), 5);
+  return Math.min(760, (p.needsPassword ? 600 : 520) + rows * 60);
 }
 
 /**
@@ -194,7 +230,7 @@ async function confirm(p: Omit<Pending, "decide">, timeoutMs: number): Promise<D
     chrome.windows.onRemoved.addListener(onRemoved);
     pending.set(id, { ...p, decide: (d) => finish(d) });
     chrome.windows
-      .create({ url: chrome.runtime.getURL(`popup.html#passkey=${id}`), type: "popup", width: 380, height: p.needsPassword ? 600 : 520, focused: true })
+      .create({ url: chrome.runtime.getURL(`popup.html#passkey=${id}`), type: "popup", width: 380, height: windowHeight(p), focused: true })
       .then(
         (win) => {
           winId = win?.id;
