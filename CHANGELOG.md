@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.6.3 (2026-11-10)
+
+- Delete saved passkeys and two-step security keys in every app (095d97f)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.6.2...server-0.6.3)
+
 ## 0.6.2 (2026-11-10)
 
 - server: bundle SQLite 3.54.1 (fixes RUSTSEC-2026-0459) (f8843d6)

@@ -4,7 +4,7 @@ members = ["crates/core", "crates/core-ffi", "crates/core-wasm", "crates/server"
 exclude = ["crates/vendor"]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Fahed-Alhammadi/PassAuth"
