@@ -30,6 +30,10 @@ pub fn routes() -> Router<AppState> {
         .route("/vaults/{id}", put(update_vault).delete(delete_vault))
         .route("/vaults/{id}/members", get(list_members).post(add_member))
         .route("/vaults/{id}/members/{user_id}", delete(remove_member))
+        .route(
+            "/vaults/{id}/members/{user_id}/remove",
+            post(remove_member_and_rotate).layer(bulk()),
+        )
         .route("/vaults/{id}/rotate", post(rotate_vault).layer(bulk()))
         .route("/users/lookup", get(lookup_user))
         .route("/items", post(create_item))
@@ -221,6 +225,8 @@ struct VaultRow {
     role: String,
     wrapped_key: String,
     key_kind: String,
+    /// 1 = someone who knew the key left: an admin's client must rotate it.
+    rotation_pending: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -250,7 +256,7 @@ async fn sync(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<V
             .fetch_one(&mut *tx)
             .await?;
     let vaults: Vec<VaultRow> = sqlx::query_as(
-        "SELECT v.id, v.meta, m.role, m.wrapped_key, m.key_kind FROM vaults v
+        "SELECT v.id, v.meta, m.role, m.wrapped_key, m.key_kind, v.rotation_pending FROM vaults v
          JOIN vault_members m ON m.vault_id = v.id WHERE m.user_id = $1 ORDER BY v.created_at",
     )
     .bind(&user.user_id)
@@ -498,12 +504,20 @@ async fn remove_member(
             .bind(&id)
             .fetch_all(&state.db)
             .await?;
+    let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM vault_members WHERE vault_id = $1 AND user_id = $2")
         .bind(&id)
         .bind(&member)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    // The removed member still knows the old key; clients must call /rotate next.
+    // The removed member still knows the old key. Recorded on the vault, so any
+    // admin's client finishes the rotation even if this one never does (a member
+    // leaving can't rotate: they lose access). Prefer `.../remove`, which does both.
+    sqlx::query("UPDATE vaults SET rotation_pending = 1 WHERE id = $1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(Json(
         json!({ "revision": touch_users(&state, &before, &user.user_id).await?, "rotation_required": true }),
     ))
@@ -537,11 +551,70 @@ async fn rotate_vault(
     Path(id): Path<String>,
     Json(b): Json<Rotate>,
 ) -> ApiResult<Json<Value>> {
+    check_rotation(&b, &id, &user.user_id)?;
+    let mut tx = state.db.begin().await?;
+    lock_vault(&mut tx, &id).await?;
+    require_in(&mut tx, &user.user_id, &id, Role::Admin).await?;
+    apply_rotation(&mut tx, &id, &b).await?;
+    tx.commit().await?;
+    Ok(Json(
+        json!({ "revision": touch_vault(&state, &id, &user.user_id).await? }),
+    ))
+}
+
+/// Remove a member and replace the vault key in one transaction, so a removal
+/// never happens without its rotation. The body is a [`Rotate`] for the members
+/// who remain.
+async fn remove_member_and_rotate(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, member)): Path<(String, String)>,
+    Json(b): Json<Rotate>,
+) -> ApiResult<Json<Value>> {
+    if member == user.user_id {
+        return Err(ApiError::bad(
+            "to leave a vault, remove yourself; an admin replaces the key",
+        ));
+    }
+    check_rotation(&b, &id, &user.user_id)?;
+    let mut tx = state.db.begin().await?;
+    lock_vault(&mut tx, &id).await?;
+    let mine = require_in(&mut tx, &user.user_id, &id, Role::Admin).await?;
+    let target = member_role(&mut tx, &member, &id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if target == Role::Owner {
+        return Err(ApiError::Forbidden("the owner cannot be removed".into()));
+    }
+    if target >= mine {
+        return Err(ApiError::Forbidden(
+            "you can't remove a member at or above your own role".into(),
+        ));
+    }
+    let before: Vec<String> =
+        sqlx::query_scalar("SELECT user_id FROM vault_members WHERE vault_id = $1")
+            .bind(&id)
+            .fetch_all(&mut *tx)
+            .await?;
+    sqlx::query("DELETE FROM vault_members WHERE vault_id = $1 AND user_id = $2")
+        .bind(&id)
+        .bind(&member)
+        .execute(&mut *tx)
+        .await?;
+    apply_rotation(&mut tx, &id, &b).await?;
+    tx.commit().await?;
+    Ok(Json(
+        json!({ "revision": touch_users(&state, &before, &user.user_id).await? }),
+    ))
+}
+
+/// Shape checks of a rotation body that need no database.
+fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
     for k in &b.keys {
         check_blob(&k.wrapped_key)?;
         match k.key_kind.as_str() {
             // Only the member themselves can wrap a key with their account key.
-            "account" if k.user_id == user.user_id => {}
+            "account" if k.user_id == me => {}
             "sealed" => {}
             _ => {
                 return Err(ApiError::bad(
@@ -563,13 +636,16 @@ async fn rotate_vault(
     if let Some(meta) = &b.meta {
         check_blob(meta)?;
     }
+    Ok(())
+}
 
-    let mut tx = state.db.begin().await?;
-    lock_vault(&mut tx, &id).await?;
-    require_in(&mut tx, &user.user_id, &id, Role::Admin).await?;
+/// Write a rotation inside a transaction that has locked the vault and checked
+/// the caller's role: new keys for exactly the current members, every item
+/// re-encrypted once, and the pending-rotation mark cleared.
+async fn apply_rotation(tx: &mut sqlx::AnyConnection, id: &str, b: &Rotate) -> ApiResult<()> {
     let members: Vec<String> =
         sqlx::query_scalar("SELECT user_id FROM vault_members WHERE vault_id = $1")
-            .bind(&id)
+            .bind(id)
             .fetch_all(&mut *tx)
             .await?;
     let mut given: Vec<&str> = b.keys.iter().map(|k| k.user_id.as_str()).collect();
@@ -582,7 +658,7 @@ async fn rotate_vault(
         ));
     }
     let item_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE vault_id = $1")
-        .bind(&id)
+        .bind(id)
         .fetch_one(&mut *tx)
         .await?;
     if b.items.len() as i64 != item_count {
@@ -595,7 +671,7 @@ async fn rotate_vault(
         sqlx::query("UPDATE vault_members SET wrapped_key = $1, key_kind = $2 WHERE vault_id = $3 AND user_id = $4")
             .bind(&k.wrapped_key)
             .bind(&k.key_kind)
-            .bind(&id)
+            .bind(id)
             .bind(&k.user_id)
             .execute(&mut *tx)
             .await?;
@@ -608,7 +684,7 @@ async fn rotate_vault(
                 .bind(rev)
                 .bind(now())
                 .bind(&i.id)
-                .bind(&id)
+                .bind(id)
                 .bind(r)
                 .execute(&mut *tx)
                 .await?,
@@ -618,7 +694,7 @@ async fn rotate_vault(
                 .bind(rev)
                 .bind(now())
                 .bind(&i.id)
-                .bind(&id)
+                .bind(id)
                 .execute(&mut *tx)
                 .await?,
         };
@@ -634,14 +710,15 @@ async fn rotate_vault(
     if let Some(meta) = &b.meta {
         sqlx::query("UPDATE vaults SET meta = $1 WHERE id = $2")
             .bind(meta)
-            .bind(&id)
+            .bind(id)
             .execute(&mut *tx)
             .await?;
     }
-    tx.commit().await?;
-    Ok(Json(
-        json!({ "revision": touch_vault(&state, &id, &user.user_id).await? }),
-    ))
+    sqlx::query("UPDATE vaults SET rotation_pending = 0 WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
 }
 
 // ------------------------------------------------------------------- items

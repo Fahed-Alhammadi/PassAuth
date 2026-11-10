@@ -1507,3 +1507,214 @@ async fn passkey_challenges_are_rate_limited() {
     .await;
     assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "token kept: {v}");
 }
+
+#[tokio::test]
+async fn admin_resets_two_step_login() {
+    let app = app().await;
+    register(&app, "lost@example.com", "pw-lost-123").await;
+    let t = token(&app, "lost@example.com", "pw-lost-123").await;
+    let (_, setup) = call(
+        &app,
+        Method::POST,
+        "/api/account/2fa/totp/setup",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    let totp = Totp::parse(setup["uri"].as_str().unwrap()).unwrap();
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/account/2fa/totp/enable",
+        Some(&t),
+        json!({ "code": totp.generate(crate::db::now() as u64) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, l) = login(&app, "lost@example.com", "pw-lost-123", "new-phone").await;
+    assert_eq!(l["two_factor_required"], true);
+
+    let (_, users) = call(
+        &app,
+        Method::GET,
+        "/api/admin/users",
+        Some("test-admin"),
+        json!(null),
+    )
+    .await;
+    let user = users["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["email"] == "lost@example.com")
+        .unwrap()
+        .clone();
+    assert_eq!(user["two_factor"], 1);
+    let path = format!(
+        "/api/admin/users/{}/two-factor/reset",
+        user["id"].as_str().unwrap()
+    );
+    // Only the admin can do it; the user's own token is not enough.
+    let (s, _) = call(&app, Method::POST, &path, Some(&t), json!({})).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, v) = call(&app, Method::POST, &path, Some("test-admin"), json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/users/nobody/two-factor/reset",
+        Some("test-admin"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Signing in now needs only the master password, and nothing is left behind.
+    let (s, l) = login(&app, "lost@example.com", "pw-lost-123", "new-phone-2").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(l["access_token"].is_string(), "{l}");
+    let (_, acct) = call(&app, Method::GET, "/api/account", Some(&t), json!(null)).await;
+    assert_eq!(acct["two_factor"], json!([]));
+    assert_eq!(acct["recovery_codes_left"], 0);
+    assert_eq!(acct["passkeys"], json!([]));
+}
+
+#[tokio::test]
+async fn removing_a_member_rotates_in_one_step_and_leaving_marks_the_vault() {
+    let app = app().await;
+    let alice = register(&app, "rm-a@example.com", "pw-alice-1").await;
+    register(&app, "rm-b@example.com", "pw-bobby-1").await;
+    register(&app, "rm-c@example.com", "pw-carol-1").await;
+    let ta = token(&app, "rm-a@example.com", "pw-alice-1").await;
+    let tb = token(&app, "rm-b@example.com", "pw-bobby-1").await;
+    let tc = token(&app, "rm-c@example.com", "pw-carol-1").await;
+    assert_eq!(
+        share(&app, &alice, &ta, "rm-b@example.com", "write")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        share(&app, &alice, &ta, "rm-c@example.com", "read").await.0,
+        StatusCode::OK
+    );
+    let (id, enc) = encrypted(&alice, "shared");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/items",
+        Some(&ta),
+        json!({ "id": id, "vault_id": alice.vault_id, "key": enc.key, "data": enc.data }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let uid = |t: &str| {
+        let app = app.clone();
+        let t = t.to_owned();
+        async move {
+            call(&app, Method::GET, "/api/account", Some(&t), json!(null))
+                .await
+                .1["user_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let (a, b, c) = (uid(&ta).await, uid(&tb).await, uid(&tc).await);
+    let key = |u: &str| json!({ "user_id": u, "wrapped_key": "a2V5", "key_kind": if u == a { "account" } else { "sealed" } });
+    let items = json!([{ "id": id, "vault_id": alice.vault_id, "key": enc.key, "data": enc.data }]);
+    let remove = |u: &str| format!("/api/vaults/{}/members/{u}/remove", alice.vault_id);
+    let pending = |t: &str| {
+        let app = app.clone();
+        let t = t.to_owned();
+        async move {
+            call(&app, Method::GET, "/api/sync", Some(&t), json!(null))
+                .await
+                .1["vaults"][0]["rotation_pending"]
+                .clone()
+        }
+    };
+
+    // A key for the removed member too: rejected, and nobody is removed.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &remove(&c),
+        Some(&ta),
+        json!({ "keys": [key(&a), key(&b), key(&c)], "items": items }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let in_vault = |t: &str| {
+        let app = app.clone();
+        let (t, v) = (t.to_owned(), alice.vault_id.clone());
+        async move {
+            call(&app, Method::GET, "/api/sync", Some(&t), json!(null))
+                .await
+                .1["vaults"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["id"] == v.as_str())
+        }
+    };
+    assert!(in_vault(&tc).await);
+    // A writer can't remove anyone, and nobody removes themselves this way.
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &remove(&c),
+        Some(&tb),
+        json!({ "keys": [
+            { "user_id": a, "wrapped_key": "a2V5", "key_kind": "sealed" },
+            { "user_id": b, "wrapped_key": "a2V5", "key_kind": "account" },
+        ], "items": items }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        &remove(&a),
+        Some(&ta),
+        json!({ "keys": [key(&b), key(&c)], "items": items }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Removal and rotation in one step: Carol is out, nothing is left pending.
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &remove(&c),
+        Some(&ta),
+        json!({ "keys": [key(&a), key(&b)], "items": items }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!in_vault(&tc).await);
+    assert_eq!(pending(&ta).await, 0);
+
+    // Bob leaves on his own (he can't rotate): the vault is marked for an admin.
+    let (s, v) = call(
+        &app,
+        Method::DELETE,
+        &format!("/api/vaults/{}/members/{b}", alice.vault_id),
+        Some(&tb),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["rotation_required"], true);
+    assert_eq!(pending(&ta).await, 1);
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        &format!("/api/vaults/{}/rotate", alice.vault_id),
+        Some(&ta),
+        json!({ "keys": [key(&a)], "items": items }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(pending(&ta).await, 0, "rotating clears the mark");
+}

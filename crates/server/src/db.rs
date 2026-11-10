@@ -134,6 +134,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (2, SCHEMA_V2),
     (3, SCHEMA_V3),
     (4, SCHEMA_V4),
+    (5, SCHEMA_V5),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -164,6 +165,11 @@ const SCHEMA_V4: &[&str] = &[
         last_used_at BIGINT)",
     "CREATE INDEX IF NOT EXISTS passkey_credentials_user ON passkey_credentials (user_id)",
 ];
+
+/// A vault whose key must be replaced because someone who knew it left or was
+/// removed without a rotation; any admin's client finishes it (`/rotate`).
+const SCHEMA_V5: &[&str] =
+    &["ALTER TABLE vaults ADD COLUMN rotation_pending BIGINT NOT NULL DEFAULT 0"];
 
 async fn migrate(db: &Db) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")

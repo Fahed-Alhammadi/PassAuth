@@ -242,8 +242,8 @@ export function Notices() {
         <div className="alert alert-warn small notice" role="alert">
           <div className="grow">
             <span>
-              Someone was removed from {rotating.map((v) => `"${v.name}"`).join(", ")}, but the vault key wasn't replaced yet, so they could still read new
-              items.
+              Someone left or was removed from {rotating.map((v) => `"${v.name}"`).join(", ")}, but the vault key wasn't replaced yet, so they could still
+              read new items.
             </span>
             <div className="row">
               <Link to="/settings/vaults">Finish securing the vault</Link>

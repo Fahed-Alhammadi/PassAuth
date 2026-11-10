@@ -1481,7 +1481,7 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         <div className="alert alert-warn stack-s" role="alert">
           <strong>Finish securing this vault</strong>
           <span>
-            Someone was removed, but the vault key wasn't replaced yet, so they could still read items added from now on. Replace the key to re-encrypt
+            Someone left or was removed, but the vault key wasn't replaced yet, so they could still read items added from now on. Replace the key to re-encrypt
             every item for the remaining members.
           </span>
           <ErrorText error={secureError} />

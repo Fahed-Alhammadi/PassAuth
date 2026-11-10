@@ -25,6 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/users/{id}/disable", post(disable_user))
         .route("/users/{id}/enable", post(enable_user))
         .route("/users/{id}/sessions/revoke", post(revoke_sessions))
+        .route("/users/{id}/two-factor/reset", post(reset_two_factor))
         .route("/invites", get(list_invites).post(invite))
         .route("/invites/{email}", delete(delete_invite))
         .route("/smtp/test", post(smtp_test))
@@ -192,6 +193,48 @@ async fn revoke_sessions(
         .await?;
     state.notify_logout(&id);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Turn off every two-step login method of a user who lost them all (authenticator,
+/// email codes, security keys, recovery codes), forget their "remember this device"
+/// tokens and lockout, and tell them by email. Their master password still guards the
+/// account and the vault stays encrypted; nothing else changes.
+async fn reset_two_factor(
+    State(state): State<AppState>,
+    _: Admin,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+    let Some(email) = email else {
+        return Err(ApiError::NotFound);
+    };
+    let mut tx = state.db.begin().await?;
+    for stmt in [
+        "DELETE FROM two_factor WHERE user_id = $1",
+        "DELETE FROM passkey_credentials WHERE user_id = $1",
+        "DELETE FROM two_factor_failures WHERE user_id = $1",
+        "UPDATE devices SET remember_hash = NULL, remember_expires = NULL WHERE user_id = $1",
+    ] {
+        sqlx::query(stmt).bind(&id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    tracing::warn!(user = %id, "admin reset two-step login");
+    state.mailer.send_later(
+        email,
+        Email {
+            subject: "Two-step login was turned off".into(),
+            heading: "Your two-step login was reset".into(),
+            body: "Your PassAuth server administrator turned off two-step login for your account, so signing in now needs only your master password (and Secret Key, if you use one). Turn two-step login on again in Settings. If you didn't ask for this, contact your administrator and change your master password.".into(),
+            action: Some(("Open PassAuth".into(), format!("{}/settings", state.config.domain))),
+            code: None,
+        },
+    );
+    Ok(Json(
+        json!({ "ok": true, "email_sent": state.mailer.enabled() }),
+    ))
 }
 
 async fn delete_user(

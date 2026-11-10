@@ -429,6 +429,7 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<User | null>(null);
+  const [resetting, setResetting] = useState<User | null>(null);
 
   async function act(u: User, path: string, done: string) {
     setBusy(u.id);
@@ -510,6 +511,11 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
                       >
                         Sign out everywhere
                       </button>
+                      {u.two_factor > 0 && (
+                        <button type="button" className="btn" disabled={busy === u.id} onClick={() => setResetting(u)}>
+                          Reset two-step login
+                        </button>
+                      )}
                       <button type="button" className="btn btn-danger" disabled={busy === u.id} onClick={() => setDeleting(u)}>
                         Delete
                       </button>
@@ -522,7 +528,61 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
         </div>
       )}
       {deleting && <DeleteUserModal user={deleting} call={call} onClose={() => setDeleting(null)} onDeleted={reload} />}
+      {resetting && <ResetTwoFactorModal user={resetting} call={call} onClose={() => setResetting(null)} onDone={reload} />}
     </section>
+  );
+}
+
+/** Turn off every two-step method of a user who lost them all, after the admin confirms who asked. */
+function ResetTwoFactorModal({ user, call, onClose, onDone }: { user: User; call: Call; onClose: () => void; onDone: () => Promise<void> }) {
+  const [checked, setChecked] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!checked) return setError("Confirm that the account owner asked for this.");
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await call<{ email_sent?: boolean }>(`/users/${encodeURIComponent(user.id)}/two-factor/reset`, { method: "POST" });
+      toast(r?.email_sent ? `Two-step login turned off for ${user.email}. They were emailed.` : `Two-step login turned off for ${user.email}`);
+      onClose();
+      await onDone();
+    } catch (err) {
+      setBusy(false);
+      if (err instanceof AdminError && err.status === 404) setError(`${user.email} no longer exists.`);
+      else if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
+    }
+  }
+
+  return (
+    <Modal title="Reset two-step login" onClose={onClose}>
+      <form className="stack" onSubmit={submit}>
+        <p>
+          This turns off every two-step method for <strong>{user.email}</strong>: authenticator app, email codes, security keys and recovery codes,
+          and forgets the devices they marked as trusted. They can then sign in with their master password (and Secret Key, if they use one) and
+          turn two-step login on again. Their vault stays encrypted and nothing else changes.
+        </p>
+        <p className="small muted">
+          Only do this when you're sure the request comes from the account owner, for example in person or over a channel you already trust. They
+          get an email about it if this server can send email.
+        </p>
+        <label className="check">
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+          <span>I confirmed this request with the account owner</span>
+        </label>
+        <ErrorText error={error} />
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="btn btn-danger" disabled={!checked || busy}>
+            {busy ? "Resetting" : "Reset two-step login"}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

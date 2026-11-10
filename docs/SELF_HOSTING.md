@@ -70,6 +70,8 @@ printf '%s\n' 'YOUR-TOKEN' | docker compose run --rm -T passauth hash-admin-toke
 
 To turn the admin page off again, remove `ADMIN_TOKEN` from `.env` and run `docker compose up -d`.
 
+If someone loses every two-step method (phone, email access and recovery codes), use **Reset two-step login** next to their account on the admin page. It turns off all their two-step methods so they can sign in with their master password (and Secret Key) and set them up again, and emails them about it. Only do this once you're sure the request really comes from them.
+
 ### 5. Email (optional, recommended)
 
 With email set up, PassAuth sends sign-up verification, new-device alerts, two-step codes by email and invitations. Fill in the `SMTP_*` settings in `.env`:

@@ -164,6 +164,8 @@ export interface SyncVaultRow {
   role: Role;
   wrapped_key: string;
   key_kind: KeyKind;
+  /** 1 when someone who knew the key left: an admin must replace it (older servers omit it). */
+  rotation_pending?: number;
 }
 
 export interface SyncItemRow {

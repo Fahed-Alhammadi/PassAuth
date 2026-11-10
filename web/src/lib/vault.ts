@@ -461,7 +461,13 @@ async function doSync() {
     warnings,
     name: data.user.name,
     emailVerified: data.user.email_verified,
-    pendingRotations: readPendingRotations(data.user.id).filter((id) => byId.has(id)),
+    pendingRotations: [
+      ...new Set([
+        ...readPendingRotations(data.user.id).filter((id) => byId.has(id)),
+        // Marked by the server when someone left or was removed without a key change; only admins can replace it.
+        ...data.vaults.filter((v) => v.rotation_pending && (v.role === "owner" || v.role === "admin")).map((v) => v.id),
+      ]),
+    ],
   });
 }
 
@@ -687,21 +693,42 @@ export async function removeMember(vaultId: string, userId: string) {
       "Some items in this vault can't be decrypted, so PassAuth can't replace the vault key after removing this person. Nobody was removed.",
     );
   }
-  const r = await api<{ rotation_required?: boolean }>(`/vaults/${vaultId}/members/${userId}`, { method: "DELETE" });
-  if (r?.rotation_required === false) return sync();
-  setPendingRotation(vaultId, true);
-  await rotateVaultKey(vaultId);
+  // Removal and the new key in one request, so nobody is ever removed without the key change.
+  try {
+    await sendRotation(vaultId, `/vaults/${vaultId}/members/${userId}/remove`, userId);
+  } catch (e) {
+    // Servers before 0.6.4 don't have the combined request: remove, then replace the key.
+    if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) throw e;
+    const r = await api<{ rotation_required?: boolean }>(`/vaults/${vaultId}/members/${userId}`, { method: "DELETE" });
+    if (r?.rotation_required === false) return sync();
+    setPendingRotation(vaultId, true);
+    await rotateVaultKey(vaultId);
+    return;
+  }
+  setPendingRotation(vaultId, false);
+  await sync();
 }
 
 /** Replace a vault's key and re-encrypt its items (finishes a member removal). */
 export async function rotateVaultKey(vaultId: string) {
+  await sendRotation(vaultId, `/vaults/${vaultId}/rotate`);
+  setPendingRotation(vaultId, false);
+  await sync();
+}
+
+/**
+ * Make a new vault key, seal it to every member except `without`, re-encrypt all
+ * items and the vault name with it, and POST that to `path` (rotate, or remove + rotate).
+ */
+async function sendRotation(vaultId: string, path: string, without?: string) {
   if (!account) throw new Error("Vault is locked.");
   const gen = generation;
   await sync();
   if (gen !== generation || !account) throw new Error("The vault was locked. Unlock it and try again.");
   if (undecryptable.get(vaultId)) throw new Error("Some items in this vault can't be decrypted, so its key can't be replaced yet.");
-  const { members } = await api<{ members: MemberRow[] }>(`/vaults/${vaultId}/members`);
+  const { members: all } = await api<{ members: MemberRow[] }>(`/vaults/${vaultId}/members`);
   if (gen !== generation || !account) throw new Error("The vault was locked. Unlock it and try again.");
+  const members = all.filter((m) => m.user_id !== without);
   const nv = account.newVaultKey(vaultId);
   const fresh = nv.takeKey();
   try {
@@ -713,13 +740,11 @@ export async function rotateVaultKey(vaultId: string) {
     const items = state.items.filter((e) => e.vaultId === vaultId).map((e) => fresh.encryptItem(e.item, e.id, vaultId));
     const v = state.vaults.find((x) => x.id === vaultId);
     const meta = v ? fresh.encryptMeta(vaultId, { name: v.name }) : undefined;
-    await api(`/vaults/${vaultId}/rotate`, { body: { keys, items, meta } });
-    if (meta) await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
+    await api(path, { body: { keys, items, meta } });
+    if (meta && !without) await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
   } finally {
     fresh.free();
   }
-  setPendingRotation(vaultId, false);
-  await sync();
 }
 
 // ---------------------------------------------------- password / Secret Key

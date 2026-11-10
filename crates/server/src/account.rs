@@ -526,6 +526,8 @@ pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
         }
     }
     for stmt in [
+        // Shared vaults that stay: the deleted user knew their keys.
+        "UPDATE vaults SET rotation_pending = 1 WHERE id IN (SELECT vault_id FROM vault_members WHERE user_id = $1)",
         "DELETE FROM vault_members WHERE user_id = $1",
         "DELETE FROM sessions WHERE user_id = $1",
         "DELETE FROM devices WHERE user_id = $1",
