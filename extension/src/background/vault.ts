@@ -379,8 +379,20 @@ async function openVault(id: string) {
   await sync();
 }
 
+/**
+ * Called whenever an account's keys are dropped on purpose (lock, sign-out,
+ * switching or adding accounts, vault timeout): short-lived state that belongs
+ * to the unlocked account, like a typed login waiting to be saved, goes too.
+ * Not called when the service worker merely reloads the keys from the session.
+ */
+let keysDropped: () => void = () => {};
+export function setKeysDroppedHandler(fn: () => void) {
+  keysDropped = fn;
+}
+
 /** Drop the keys of `id` (default: the active account), in memory, in the session and on disk. */
 async function clearUnlocked(id?: string) {
+  keysDropped();
   const aid = id ?? (await activeId());
   if (!id || aid === currentId) unload();
   await session.clear(aid);
@@ -425,11 +437,13 @@ export async function switchAccount(id: string) {
   const { accounts, activeId } = await local.get();
   if (!accounts[id]?.server) throw new Error("That account isn't on this device any more.");
   if (id === activeId) return;
+  keysDropped();
   unload();
   await local.setActive(id);
 }
 
 export async function addAccount() {
+  keysDropped();
   unload();
   await local.addAccount();
 }
@@ -438,12 +452,14 @@ export async function addAccount() {
 export async function cancelAddAccount() {
   const { activeId, tokens, accounts } = await local.get();
   if (tokens || !Object.values(accounts).some((a) => a.tokens)) return;
+  keysDropped();
   unload();
   await local.removeAccount(activeId);
 }
 
 /** Vault timeout: lock every account. */
 export async function lockAll() {
+  keysDropped();
   const { accounts } = await local.get();
   unload();
   for (const id of Object.keys(accounts)) await session.clear(id);
@@ -637,6 +653,11 @@ export function editorInfo() {
 
 export function canWrite(entry: Entry) {
   return vaults.find((v) => v.id === entry.vaultId)?.role !== "read";
+}
+
+/** In one of the user's own vaults (key wrapped with their account key), not a vault somebody shared with them. */
+export function isPersonal(entry: Entry) {
+  return vaults.find((v) => v.id === entry.vaultId)?.kind === "account";
 }
 
 /** Weak if it would take few guesses (same threshold as the web vault's "easy to guess"). */

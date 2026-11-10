@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
-import { ErrorText, Icon, PasswordInput } from "@web/components/ui";
+import { ErrorText, Icon, PasswordInput, SheetActions } from "@web/components/ui";
 import { send, type PopupState, type TwoFactorChallenge } from "../shared/messages";
 import { msg, seconds, type CopyRequest, type Ctx, type Route } from "./ctx";
 import { GeneratorPage } from "./generator";
 import { SettingsPage } from "./settings";
+import { Choices, Tile } from "./sheet";
 import { OtherAccounts } from "./shell";
 import { EditPage, ItemPage, VaultList, type ListFilter } from "./vault";
 
@@ -32,6 +33,17 @@ export function App() {
   return <Main key={state.activeId} state={state} onChange={reload} />;
 }
 
+/** Lock screen, sign-in and setup share one centred header: the mark, what to do, and for which account or server. */
+function AuthHead({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div className="auth-head">
+      <LogoMark size={48} />
+      <h1>{title}</h1>
+      {sub && <p className="auth-sub">{sub}</p>}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------------ setup
 
 function Setup({ onDone, initial = "" }: { onDone: () => void; initial?: string }) {
@@ -52,18 +64,17 @@ function Setup({ onDone, initial = "" }: { onDone: () => void; initial?: string 
   }
   return (
     <form className="pop-auth" onSubmit={submit}>
-      <div className="logo">
-        <LogoMark size={48} />
-      </div>
-      <h1>Connect to your PassAuth server</h1>
+      <AuthHead title="Connect to your server" sub="PassAuth keeps your vault on a server you run." />
       <label className="field">
         <span>Server address</span>
-        <input className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://vault.example.com" autoFocus required />
+        <input className="input" inputMode="url" autoCapitalize="off" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://vault.example.com" spellCheck={false} autoFocus required />
       </label>
       <ErrorText error={error} />
-      <button className="btn btn-accent btn-block" disabled={busy || !url}>
-        {busy ? "Checking…" : "Connect"}
-      </button>
+      <SheetActions>
+        <button className="btn btn-primary btn-block" disabled={busy || !url}>
+          {busy ? "Connecting…" : "Connect"}
+        </button>
+      </SheetActions>
     </form>
   );
 }
@@ -132,47 +143,58 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
   if (challenge) {
     return (
       <form className="pop-auth" onSubmit={verify}>
-        <h1>Two-step login</h1>
+        <AuthHead title="Two-step login" sub={email} />
         {challenge.providers.length > 1 && (
-          <label className="field">
-            <span>Verify with</span>
-            <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
-              {challenge.providers.map((p) => (
-                <option key={p} value={p}>
-                  {p === "totp" ? "Authenticator app" : p === "email" ? "Email code" : "Recovery code"}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Choices
+            compact
+            label="Verify with"
+            value={provider}
+            onChange={setProvider}
+            options={challenge.providers.map((p) => ({
+              id: p,
+              title: p === "totp" ? "Authenticator app" : p === "email" ? "Email code" : "Recovery code",
+              icon: (
+                <Tile>
+                  <Icon name={p === "totp" ? "phone" : p === "email" ? "mail" : "key"} />
+                </Tile>
+              ),
+            }))}
+          />
         )}
         <label className="field">
           <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
           <input className="input mono" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" autoFocus required />
         </label>
-        {provider === "email" && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => send({ type: "email2fa", token: challenge.token }).then(() => setNote(`Code sent to ${email}.`), (e) => setError(msg(e)))}
-          >
-            Email me a code
-          </button>
+        {note && (
+          <div className="alert alert-info" role="status">
+            {note}
+          </div>
         )}
-        {note && <div className="alert alert-ok">{note}</div>}
         <ErrorText error={error} />
-        <button className="btn btn-accent btn-block" disabled={busy || !code}>
-          {busy ? "Verifying…" : "Verify and sign in"}
-        </button>
+        <SheetActions
+          quiet={
+            provider === "email" && (
+              <button
+                type="button"
+                className="btn btn-text"
+                onClick={() => send({ type: "email2fa", token: challenge.token }).then(() => setNote(`Code sent to ${email}.`), (e) => setError(msg(e)))}
+              >
+                Email me a code
+              </button>
+            )
+          }
+        >
+          <button className="btn btn-primary btn-block" disabled={busy || !code}>
+            {busy ? "Verifying…" : "Verify and sign in"}
+          </button>
+        </SheetActions>
       </form>
     );
   }
 
   return (
     <form className="pop-auth" onSubmit={submit}>
-      <div className="logo">
-        <LogoMark size={48} />
-      </div>
-      <h1>Sign in to PassAuth</h1>
+      <AuthHead title="Sign in to PassAuth" sub={new URL(state.server).host} />
       <label className="field">
         <span>Email</span>
         <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus={!email} />
@@ -188,15 +210,17 @@ function Login({ state, onDone }: { state: PopupState; onDone: () => void }) {
         </label>
       )}
       <ErrorText error={error} />
-      <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
-        {busy ? "Signing in…" : "Sign in"}
-      </button>
-      <p className="small muted" style={{ textAlign: "center" }}>
-        {new URL(state.server).host}{" "}
-        <button type="button" className="link" onClick={() => setChangingServer(true)}>
-          Change server
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={() => setChangingServer(true)}>
+            Change server
+          </button>
+        }
+      >
+        <button className="btn btn-primary btn-block" disabled={busy || !email || !password}>
+          {busy ? "Signing in…" : "Sign in"}
         </button>
-      </p>
+      </SheetActions>
     </form>
   );
 }
@@ -221,13 +245,7 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
   }
   return (
     <form className="pop-auth" onSubmit={submit}>
-      <div className="logo">
-        <LogoMark size={48} />
-      </div>
-      <h1>Unlock PassAuth</h1>
-      <p className="muted small" style={{ textAlign: "center" }}>
-        {state.email}
-      </p>
+      <AuthHead title="Unlock PassAuth" sub={state.email} />
       <label className="field">
         <span>Master password</span>
         <PasswordInput value={password} onChange={setPassword} autoFocus />
@@ -239,12 +257,17 @@ function Unlock({ state, onDone }: { state: PopupState; onDone: () => void }) {
         </label>
       )}
       <ErrorText error={error} />
-      <button className="btn btn-accent btn-block" disabled={busy || !password}>
-        {busy ? "Unlocking…" : "Unlock"}
-      </button>
-      <button type="button" className="btn btn-ghost" onClick={() => send({ type: "logout" }).then(onDone)}>
-        Sign out
-      </button>
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={() => send({ type: "logout" }).then(onDone)}>
+            Sign out
+          </button>
+        }
+      >
+        <button className="btn btn-primary btn-block" disabled={busy || !password}>
+          {busy ? "Unlocking…" : "Unlock"}
+        </button>
+      </SheetActions>
     </form>
   );
 }
@@ -285,7 +308,7 @@ function Main({ state, onChange }: { state: PopupState; onChange: () => void }) 
       {route.tab === "generator" && <GeneratorPage key={visit} ctx={ctx} />}
       {route.tab === "settings" && <SettingsPage key={visit} ctx={ctx} section={route.section} />}
       {note && (
-        <div className={`pop-note${inItem ? " above-foot" : ""}`} role="status">
+        <div className="pop-note" role="status">
           {note}
         </div>
       )}

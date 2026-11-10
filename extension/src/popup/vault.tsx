@@ -1,7 +1,7 @@
 /** Vault tab: item list, item page, editor. */
 import { useEffect, useState, type ReactNode } from "react";
 import { ItemEditor } from "@web/components/ItemEditor";
-import { ErrorText, Icon, SiteIcon } from "@web/components/ui";
+import { ConfirmDialog, ErrorText, Icon, SiteIcon } from "@web/components/ui";
 import { emptyItem, KIND_LABEL, kindOf, type Item, type ItemKind } from "@web/lib/types";
 import { send, type ItemSummary } from "../shared/messages";
 import { activeTab, formatDate, msg, type Ctx } from "./ctx";
@@ -123,24 +123,43 @@ export function VaultList({ ctx, filter, setFilter }: { ctx: Ctx; filter: ListFi
       <ErrorText error={error} />
       {data &&
         (filtering ? (
-          section(q ? "Search results" : "Filtered items", data.all.filter(keep), <p className="empty">No items match. Try another search or clear the filters.</p>)
+          section(
+            q ? "Search results" : "Filtered items",
+            data.all.filter(keep),
+            <div className="empty">
+              <p className="empty-title">{q ? `No items match "${filter.query.trim()}"` : "No items match these filters"}</p>
+              <p>Check the spelling, or search by name, user name or website.</p>
+              <button type="button" className="btn btn-text" onClick={() => setFilter({ query: "", kind: "", folder: null })}>
+                {q && !filter.kind && filter.folder === null ? "Clear search" : "Clear search and filters"}
+              </button>
+            </div>,
+          )
         ) : (
           <>
             {host &&
               section(
                 "Autofill suggestions",
                 data.suggested,
-                <p className="empty">No logins saved for {host}. Sign in on the page and PassAuth will offer to save it.</p>,
+                <div className="empty">
+                  <p className="empty-title">No logins for {host}</p>
+                  <p>Sign in on the page and PassAuth offers to save the login.</p>
+                </div>,
               )}
             {data.all.some((i) => i.favorite) && section("Favorites", data.all.filter((i) => i.favorite))}
             {section(
               "All items",
               data.all,
               <div className="empty">
-                <p>Your vault is empty.</p>
-                <button className="btn btn-accent" onClick={() => ctx.go({ tab: "vault", page: "new", kind: "login" })}>
-                  <Icon name="plus" /> New login
-                </button>
+                <span className="tile" aria-hidden="true">
+                  <Icon name="vault" size={22} />
+                </span>
+                <p className="empty-title">Your vault is empty</p>
+                <p>Add your first login, or import your passwords in the web vault.</p>
+                <div className="empty-actions">
+                  <button className="btn btn-primary" onClick={() => ctx.go({ tab: "vault", page: "new", kind: "login" })}>
+                    <Icon name="plus" /> New login
+                  </button>
+                </div>
               </div>,
             )}
           </>
@@ -158,14 +177,14 @@ function ItemRow({ item: i, ctx, canFill, onFill }: { item: ItemSummary; ctx: Ct
         <SiteIcon host={i.host} name={i.name} server={server} enabled={settings.showIcons} />
         <span className="txt">
           <span className="title">
-            {i.name}
+            <span>{i.name}</span>
             {i.favorite && <Icon name="star" size={12} />}
           </span>
           {i.subtitle && <span className="sub">{i.subtitle}</span>}
         </span>
       </button>
       {canFill && i.hasPassword ? (
-        <button className="btn btn-fill" onClick={onFill}>
+        <button className="btn btn-fill" aria-label={`Fill ${i.name}`} onClick={onFill}>
           Fill
         </button>
       ) : i.url ? (
@@ -290,31 +309,18 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
   const l = i?.login;
   const host = l?.urls.map((u) => u.url).find((u) => /^https?:\/\//i.test(u)) ?? "";
 
+  const canFill = tabId !== null && !!l?.password;
+  // One filled button per page: "Fill on this page" when the item matches the site, else Edit.
   const footer = data?.canWrite ? (
-    confirmDelete ? (
-      <>
-        <span className="grow small">Move this item to the trash?</span>
-        <button className="btn" onClick={() => setConfirmDelete(false)}>
-          Cancel
-        </button>
-        <button
-          className="btn btn-danger"
-          onClick={() => send({ type: "trashItem", id }).then(() => (ctx.notify("Moved to trash. You can restore it from the web vault."), back()), (e) => ctx.notify(msg(e)))}
-        >
-          Move to trash
-        </button>
-      </>
-    ) : (
-      <>
-        <button className="btn btn-accent" onClick={() => ctx.go({ tab: "vault", page: "edit", id })}>
-          Edit
-        </button>
-        <span className="grow" />
-        <button className="btn btn-icon danger" aria-label="Move to trash" title="Move to trash" onClick={() => setConfirmDelete(true)}>
-          <Icon name="trash" />
-        </button>
-      </>
-    )
+    <>
+      <button className={canFill ? "btn" : "btn btn-primary"} onClick={() => ctx.go({ tab: "vault", page: "edit", id })}>
+        <Icon name="edit" /> Edit
+      </button>
+      <span className="grow" />
+      <button className="btn btn-icon danger" aria-label="Move to trash" title="Move to trash" onClick={() => setConfirmDelete(true)}>
+        <Icon name="trash" />
+      </button>
+    </>
   ) : undefined;
 
   return (
@@ -335,8 +341,8 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
                 <Icon name="vault" size={15} /> {data.vaultName}
               </span>
             </div>
-            {tabId !== null && l?.password && (
-              <button className="btn btn-accent btn-block" onClick={() => send({ type: "fill", id, tabId }).then(() => window.close(), (e) => ctx.notify(msg(e)))}>
+            {canFill && (
+              <button className="btn btn-accent btn-block" onClick={() => send({ type: "fill", id, tabId: tabId! }).then(() => window.close(), (e) => ctx.notify(msg(e)))}>
                 Fill on this page
               </button>
             )}
@@ -485,6 +491,24 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
               {i.password_history[0] && <span>Password changed {formatDate(i.password_history[0].changed_at)}</span>}
             </p>
           </Card>
+
+          {confirmDelete && (
+            <ConfirmDialog
+              title="Move to trash?"
+              subtitle={i.name}
+              icon="trash"
+              action="Move to trash"
+              busyAction="Moving to trash…"
+              onClose={() => setConfirmDelete(false)}
+              onConfirm={async () => {
+                await send({ type: "trashItem", id });
+                ctx.notify("Moved to trash. You can restore it from the web vault.");
+                back();
+              }}
+            >
+              <p className="card-text">The item leaves your vault on every device. You can restore it from the trash in the web vault.</p>
+            </ConfirmDialog>
+          )}
         </>
       )}
     </Page>

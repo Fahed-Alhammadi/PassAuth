@@ -1,5 +1,8 @@
 /** Messages between popup, content scripts and the background service worker. */
 import type { Item, ItemKind, LoginUrl, UrlMatch } from "@web/lib/types";
+import type { SaveTarget } from "../background/save-plan";
+
+export type { SaveTarget };
 
 export type Status = "setup" | "logged-out" | "locked" | "unlocked";
 
@@ -124,19 +127,48 @@ export type Request =
   /** The submitted login form disappeared without a page load. */
   | { type: "page:formDone" }
   | { type: "page:pendingSave" }
-  | { type: "page:save"; accept: "save" | "never" | "dismiss"; nonce: string }
+  /** The save prompt was dismissed from the page side (Escape): the only thing a page-side script can do to a pending save. */
+  | { type: "page:saveDismiss"; nonce: string }
+  // save prompt (extension frame inside the page) → background
+  | { type: "save:offer"; nonce: string }
+  /** `target`: the login shown as selected under "Save in" (an id from the offer's `targets`, or "new"). */
+  | { type: "save:answer"; nonce: string; accept: "save" | "never" | "dismiss"; target?: string }
+  /** The prompt's content changed height. */
+  | { type: "save:resize"; nonce: string; height: number }
   /** This frame has a login form for a fill offer. */
   | { type: "page:fillClaim"; token: string }
   | { type: "page:inlineInfo" }
   | { type: "page:inlineOpen" };
 
-/** A save prompt to show: `nonce` must come back with the answer. */
+/**
+ * All the page side ever learns about a save prompt: the nonce that binds the
+ * prompt frame to the pending save, and how tall to make the frame.
+ */
+export interface SavePrompt {
+  nonce: string;
+  height: number;
+}
+
+/** What the save prompt shows. Only the prompt frame (an extension page) gets it, never the content script. */
 export interface SaveOffer {
   host: string;
-  update: boolean;
+  /** The user name that was typed ("" when the page had no user-name field). */
   username: string;
-  nonce: string;
+  /** The choices under "Save in", besides "New login": the user's own logins for this site (see save-plan.ts). */
+  targets: SaveTarget[];
+  /** Preselected: one of `targets` (update it) or "new" (save a new login). */
+  selected: string;
+  theme: Settings["theme"];
 }
+
+/** The background's reply to the prompt's answer. */
+export type SaveAnswer =
+  /** Applied or dismissed: the prompt closes. */
+  | { done: true }
+  /** Nothing was saved. `retry`: the user can try again from the same prompt. */
+  | { error: string; retry: boolean }
+  /** The login that was shown as the target is gone or read-only now: show these choices and ask again. */
+  | { again: SaveOffer; notice: string };
 
 export interface InlineInfo {
   mode: Settings["inlineMenu"];
@@ -162,9 +194,12 @@ export type ContentCommand =
   | { type: "fill"; username: string; password: string; totp?: string; site: string; urls: LoginUrl[]; defaultMatch: Exclude<UrlMatch, "default">; focused: boolean }
   /** No secrets: frames with a matching login form answer with page:fillClaim. */
   | { type: "fill:offer"; token: string; site: string; urls: LoginUrl[]; defaultMatch: Exclude<UrlMatch, "default"> }
-  | { type: "toast"; text: string }
+  /** `text` is shown inside the page: generic wording and the site's own host only, never vault data. */
+  | { type: "toast"; text: string; theme?: Settings["theme"] }
   | { type: "inline:close" }
-  | ({ type: "showSave" } & SaveOffer);
+  | ({ type: "showSave" } & SavePrompt)
+  | { type: "save:size"; height: number }
+  | { type: "save:close" };
 
 export type Reply<T = unknown> = { ok: true; data: T } | { ok: false; error: string };
 

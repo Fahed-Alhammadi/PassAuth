@@ -1,0 +1,37 @@
+/*
+ * Save prompt: PassAuth's "decision sheet" in a frame in the corner of the
+ * page. The look is the shared one (@web/styles/app.css, loaded first: brand
+ * bar, context row, a card of choices, one primary action with the quiet ones
+ * beneath); this file only fits it to the frame. The frame is as tall as the
+ * sheet: the vertical measures are pinned here in whole pixels and mirrored by
+ * promptHeight() in shared/save-layout.ts.
+ */
+html, body { margin: 0; height: auto; background: transparent; }
+/* The frame takes the sheet's height (main.ts reports it). Only in a window too small for it does the sheet scroll, without a scrollbar's width. */
+html { overflow-y: auto; scrollbar-width: none; }
+main { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-l); overflow: hidden; }
+/* The dialog itself takes the first focus (so no button can be triggered by a key press in flight); it shows no ring, its controls do. */
+main:focus, main:focus-visible { outline: none; }
+.sheet-bar { height: 48px; min-height: 0; padding: 0 6px 0 var(--space-4); }
+.sheet-bar .btn-icon { width: 36px; height: 36px; min-width: 0; min-height: 0; }
+.modal-body { overflow: visible; padding: 4px var(--space-4) 16px; gap: 16px; }
+.sheet-context { min-height: 40px; }
+.sheet-title { line-height: 22px; }
+.sheet-sub { line-height: 18px; }
+.sheet-note { font-size: var(--text-caption); line-height: 20px; color: var(--ink-2); overflow-wrap: anywhere; }
+.sheet-note strong { color: var(--ink); }
+.alert { margin: 0; font-size: var(--text-caption); }
+fieldset.choice-group > legend { line-height: 20px; margin-bottom: 8px; }
+/* At most 4½ rows show: the half row says there is more, and the actions stay in view. */
+.choices { flex: none; max-height: 254px; overscroll-behavior: contain; }
+.choice { min-height: 56px; padding-block: 8px; }
+.choice-title, .choice-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.choice-title { line-height: 22px; }
+.choice-sub { line-height: 18px; }
+.sheet-actions { flex: none; gap: 4px; margin-bottom: -8px; }
+.sheet-actions .btn { min-height: 0; }
+.sheet-actions .btn-block { height: 40px; }
+/* Two quiet actions share the row, their labels lined up with the primary button's edges; one alone is centred. */
+.sheet-quiet { flex-wrap: nowrap; justify-content: space-between; gap: 0; margin: 0 calc(-1 * var(--space-3)); }
+.sheet-quiet .btn { height: 36px; }
+.sheet-quiet > :only-child { margin: 0 auto; }

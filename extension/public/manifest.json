@@ -29,7 +29,7 @@
       "all_frames": true
     }
   ],
-  "web_accessible_resources": [{ "resources": ["inline-menu.html"], "matches": ["http://*/*", "https://*/*"] }],
+  "web_accessible_resources": [{ "resources": ["inline-menu.html", "save-prompt.html"], "matches": ["http://*/*", "https://*/*"] }],
   "commands": {
     "_execute_action": {
       "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" },

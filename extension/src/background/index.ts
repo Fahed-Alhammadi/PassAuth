@@ -1,10 +1,13 @@
 /** PassAuth extension service worker: message router, autofill, inline menu, save prompts, vault timeout. */
-import type { ContentCommand, InlineInfo, InlineItems, Request, Reply, SaveOffer, Settings } from "../shared/messages";
+import type { ContentCommand, InlineInfo, InlineItems, Request, Reply, SaveAnswer, SaveOffer, SavePrompt, Settings } from "../shared/messages";
 import type { LoginUrl } from "@web/lib/types";
 import { copy } from "./clipboard";
 import { getSettings, local, scratch } from "./storage";
 import { cancelPasskey, decide, handlePasskey, pendingRequest } from "./passkey-handler";
+import { applyToLogin, chosenTarget, NEW_LOGIN, planSave, type SaveTarget } from "./save-plan";
 import { baseDomain, downgrade, matchesUrl, parse } from "./urls";
+import { clampPromptHeight, promptHeight } from "../shared/save-layout";
+import { openCentered, POPUP_WINDOW } from "../shared/windows";
 import * as vault from "./vault";
 
 // The service worker sleeps after ~30 s idle and loses everything in memory.
@@ -109,10 +112,15 @@ async function matching(url: string) {
 // ------------------------------------------------------------- save prompts
 
 interface PendingSave {
+  /** The account that was active when this was typed: it is never saved into another account's vault. */
+  accountId: string;
   url: string;
   username: string;
   password: string;
-  updateId?: string;
+  /** Preselected under "Save in": the login to update, or `NEW_LOGIN`. */
+  target: string;
+  /** The logins the user may pick instead (their own ones for this site; see save-plan.ts). */
+  targets: SaveTarget[];
   /** Ties the prompt the user sees to this pending save. */
   nonce: string;
   expires: number;
@@ -135,6 +143,16 @@ async function putSave(tabId: number, p: PendingSave | null) {
   else delete all[tabId];
   await scratch.set(SAVES, all);
 }
+const closePrompt = (tabId: number) => chrome.tabs.sendMessage(tabId, { type: "save:close" } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
+
+/** Lock, sign-out, account switch: what was typed and not yet saved is forgotten, and open prompts close. */
+async function dropSaves() {
+  const all = (await scratch.get<Saves>(SAVES)) ?? {};
+  await scratch.remove(SAVES);
+  for (const tabId of Object.keys(all)) void closePrompt(Number(tabId));
+}
+vault.setKeysDroppedHandler(() => void dropSaves().catch(() => {}));
+
 async function forgetTab(tabId: number) {
   await putSave(tabId, null);
   const users = (await scratch.get<LastUsers>(LAST_USERS)) ?? {};
@@ -160,77 +178,202 @@ async function rememberUser(sender: chrome.runtime.MessageSender, username: stri
   await scratch.set(LAST_USERS, users);
 }
 
+const MAX_SAVE_TARGETS = 12;
+
+/** The default target and the "Save in" choices for what was typed (save-plan.ts), or null when there is nothing to offer. */
+async function planFor(url: string, username: string, password: string): Promise<Pick<PendingSave, "target" | "targets"> | null> {
+  const host = parse(url)?.hostname ?? "";
+  const candidates = (await matching(url)).map((e) => ({
+    id: e.id,
+    name: (e.item.name || host).slice(0, 120),
+    username: e.item.login!.username,
+    password: e.item.login!.password,
+    writable: vault.canWrite(e),
+    personal: vault.isPersonal(e),
+    vault: vault.vaultName(e.vaultId).slice(0, 60),
+  }));
+  const plan = planSave(candidates, username, password);
+  if (plan.action === "none") return null;
+  // The prompt lists a handful; the preselected login is always among them.
+  const targets = [...plan.targets.filter((t) => t.id === plan.target), ...plan.targets.filter((t) => t.id !== plan.target)]
+    .slice(0, MAX_SAVE_TARGETS)
+    .map((t) => ({ ...t, username: t.username.slice(0, 256) }));
+  return { target: plan.target, targets };
+}
+
 async function onSubmitted(sender: chrome.runtime.MessageSender, username: string, password: string): Promise<boolean> {
   const tabId = sender.tab?.id;
   const url = sender.url ?? "";
   if (tabId === undefined || !password || !sameSiteAsTab(sender) || !(await vault.ensureUnlocked().catch(() => false))) return false;
   const host = parse(url)?.hostname ?? "";
-  const { neverSave, settings } = await local.get();
+  const { neverSave, settings, activeId } = await local.get();
   if (!settings.askToSave || !host || neverSave.includes(baseDomain(host))) return false;
   if (!username) {
     // Identifier-first logins ask for the password on a second step without the username field.
     const last = ((await scratch.get<LastUsers>(LAST_USERS)) ?? {})[tabId];
     if (last && last.expires > Date.now() && last.site === baseDomain(host)) username = last.username;
   }
-  const sameSite = await matching(url);
-  const sameUser = sameSite.find((e) => e.item.login!.username.toLowerCase() === username.toLowerCase());
-  if (sameUser?.item.login!.password === password) return false;
-  if (sameUser && !vault.canWrite(sameUser)) return false;
-  await putSave(tabId, { url, username, password, updateId: sameUser?.id, nonce: crypto.randomUUID(), expires: Date.now() + 120_000 });
+  username = username.trim().slice(0, 256);
+  // Update a login the vault already has for this site instead of saving a second one.
+  const plan = await planFor(url, username, password);
+  if (!plan) return false;
+  await putSave(tabId, { accountId: activeId, url, username, password, ...plan, nonce: crypto.randomUUID(), expires: Date.now() + 120_000 });
   return true;
 }
 
-const offerOf = (p: PendingSave): SaveOffer => ({ host: parse(p.url)?.hostname ?? "", update: !!p.updateId, username: p.username, nonce: p.nonce });
+/** What the page side gets: the nonce for the prompt frame and a first height for it. Nothing from the vault. */
+const promptOf = (p: PendingSave): SavePrompt => ({ nonce: p.nonce, height: promptHeight(p.targets.length) });
 
-/** The prompt is shown only in the top frame, on the same site as the login. */
-async function pendingSaveFor(sender: chrome.runtime.MessageSender): Promise<SaveOffer | null> {
-  const tabId = sender.tab?.id;
-  if (tabId === undefined || sender.frameId !== 0) return null;
-  const p = await getSave(tabId);
-  const here = parse(sender.url ?? "")?.hostname ?? "";
-  return p && baseDomain(here) === baseDomain(parse(p.url)?.hostname ?? "") ? offerOf(p) : null;
+/** What the prompt frame shows. */
+async function offerOf(p: PendingSave): Promise<SaveOffer> {
+  const { theme } = await getSettings();
+  return { host: parse(p.url)?.hostname ?? "", username: p.username, targets: p.targets, selected: p.target, theme };
 }
 
-async function applySave(sender: chrome.runtime.MessageSender, accept: "save" | "never" | "dismiss", nonce: string) {
+/**
+ * The pending save of `sender`'s tab, if it belongs to the account that is
+ * active now and the tab's top page is still on the site the login was typed on.
+ */
+async function saveForTab(sender: chrome.runtime.MessageSender): Promise<PendingSave | undefined> {
   const tabId = sender.tab?.id;
-  if (tabId === undefined || sender.frameId !== 0) return;
+  if (tabId === undefined) return undefined;
   const p = await getSave(tabId);
-  if (!p || p.nonce !== nonce) return;
-  await putSave(tabId, null);
-  const host = parse(p.url)?.hostname ?? "";
+  if (!p) return undefined;
+  // Typed under another account (or stored by an older version of the extension): gone, not carried over.
+  if (!p.accountId || p.accountId !== (await local.get()).activeId || !Array.isArray(p.targets) || typeof p.target !== "string") {
+    await putSave(tabId, null);
+    return undefined;
+  }
+  const top = parse(sender.tab?.url ?? "")?.hostname ?? "";
+  return baseDomain(top) === baseDomain(parse(p.url)?.hostname ?? "") ? p : undefined;
+}
+
+/** The prompt is shown only in the top frame, on the same site as the login. */
+async function pendingSaveFor(sender: chrome.runtime.MessageSender): Promise<SavePrompt | null> {
+  if (sender.frameId !== 0) return null;
+  const p = await saveForTab(sender);
+  const here = parse(sender.url ?? "")?.hostname ?? "";
+  return p && baseDomain(here) === baseDomain(parse(p.url)?.hostname ?? "") ? promptOf(p) : null;
+}
+
+/** Escape pressed in the page while the prompt is open: the one thing the page side may do to a pending save. */
+async function dismissFromPage(sender: chrome.runtime.MessageSender, nonce: string) {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined || sender.frameId !== 0) return null;
+  const p = await saveForTab(sender);
+  if (p && p.nonce === nonce) await putSave(tabId, null);
+  return null;
+}
+
+/**
+ * The save prompt is an extension page in a frame the content script places in
+ * the top-right corner of the page (like the inline menu), so the website can
+ * read neither the logins listed in it nor what the user picks. The pending
+ * save's nonce ties the frame to the tab; the frame gets only these requests.
+ */
+async function handleSavePrompt(req: Request, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  const tabId = sender.tab?.id;
+  // Only as a frame inside a tab's page, never opened as a page of its own.
+  if (tabId === undefined || !sender.frameId) throw new Error("Not allowed.");
+  if (req.type !== "save:offer" && req.type !== "save:answer" && req.type !== "save:resize") throw new Error("Not allowed.");
+  const p = await saveForTab(sender);
+  if (!p || p.nonce !== req.nonce) {
+    await closePrompt(tabId);
+    throw new Error("This prompt has expired.");
+  }
+  switch (req.type) {
+    case "save:offer":
+      return offerOf(p);
+    case "save:resize":
+      await chrome.tabs.sendMessage(tabId, { type: "save:size", height: clampPromptHeight(req.height) } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
+      return null;
+    case "save:answer":
+      return answerSave(tabId, p, req.accept, req.target);
+  }
+}
+
+/** Saves being written right now, by nonce: a second click can't apply one twice. */
+const applying = new Set<string>();
+
+/**
+ * The user's answer in the prompt. What is applied is the target the prompt
+ * displayed (`target`, which must be one this pending save offered); the
+ * pending save is removed on every way out except a failure the user can retry.
+ */
+async function answerSave(tabId: number, p: PendingSave, accept: "save" | "never" | "dismiss", target: unknown): Promise<SaveAnswer> {
+  const host = (parse(p.url)?.hostname ?? "").replace(/^www\./, "");
+  const finish = async (toast?: string): Promise<SaveAnswer> => {
+    await putSave(tabId, null);
+    await closePrompt(tabId);
+    if (toast) await notifyTab(tabId, toast);
+    return { done: true };
+  };
   if (accept === "never") {
     const l = await local.get();
-    await local.set({ neverSave: [...new Set([...l.neverSave, baseDomain(host)])] });
-    return;
+    await local.set({ neverSave: [...new Set([...l.neverSave, baseDomain(parse(p.url)?.hostname ?? "")])] });
+    return finish();
   }
-  if (accept !== "save" || !(await vault.ensureUnlocked())) return;
-  const existing = p.updateId ? vault.getEntry(p.updateId) : undefined;
-  if (existing?.item.login) {
-    // updateItem moves the old password into the history.
-    await vault.updateItem(existing, { ...existing.item, login: { ...existing.item.login, password: p.password } });
-    return;
+  if (accept !== "save") return finish();
+  const choice = chosenTarget(p, target);
+  if (choice === null) {
+    await finish();
+    throw new Error("Not allowed.");
   }
-  const origin = parse(p.url)!.origin;
-  await vault.createItem({
-    name: host.replace(/^www\./, ""),
-    notes: "",
-    favorite: false,
-    folder: null,
-    tags: [],
-    login: { username: p.username, password: p.password, urls: [{ url: origin, match: "default" }], totp: null, passkeys: [] },
-    card: null,
-    identity: null,
-    ssh_key: null,
-    fields: [],
-    password_history: [],
-    created_at: 0,
-    updated_at: 0,
-  });
+  if (applying.has(p.nonce)) return { error: "Saving…", retry: true };
+  applying.add(p.nonce);
+  try {
+    if (!(await vault.ensureUnlocked().catch(() => false))) {
+      await putSave(tabId, null);
+      return { error: "PassAuth is locked, so the login wasn't saved. Unlock PassAuth, then sign in on the site again.", retry: false };
+    }
+    // Saving is the user at work in PassAuth: it restarts the vault timeout.
+    await touch();
+    if (choice !== NEW_LOGIN) {
+      const existing = vault.getEntry(choice);
+      if (!existing?.item.login || !vault.canWrite(existing)) {
+        // The login the prompt showed was removed or became read-only (a sync in between). Never save
+        // somewhere the user didn't see: work the choices out again and ask again.
+        const next = await planFor(p.url, p.username, p.password);
+        if (!next) return finish();
+        const again: PendingSave = { ...p, ...next };
+        await putSave(tabId, again);
+        return { again: await offerOf(again), notice: "That login isn't in your vault any more. Check where to save, then try again." };
+      }
+      // updateItem moves the old password into the history; everything but the password (and a typed user name) stays.
+      await vault.updateItem(existing, { ...existing.item, login: applyToLogin(existing.item.login, p.username, p.password) });
+      // Inside the page the confirmation names the site, never the vault item.
+      return finish(`Login updated for ${host}.`);
+    }
+    await vault.createItem({
+      name: host,
+      notes: "",
+      favorite: false,
+      folder: null,
+      tags: [],
+      login: { username: p.username, password: p.password, urls: [{ url: parse(p.url)!.origin, match: "default" }], totp: null, passkeys: [] },
+      card: null,
+      identity: null,
+      ssh_key: null,
+      fields: [],
+      password_history: [],
+      created_at: 0,
+      updated_at: 0,
+    });
+    return finish(`Login saved for ${host}.`);
+  } catch (e) {
+    // The pending save stays, so the user can try again from the same prompt; the reason is shown in the prompt, not in the page.
+    return { error: `PassAuth couldn't save this login. ${e instanceof Error ? e.message : String(e)}`, retry: true };
+  } finally {
+    applying.delete(p.nonce);
+  }
 }
 
 // ------------------------------------------------------------------ fill
 
 const describe = (u: LoginUrl) => (u.match === "regex" ? u.url : (parse(u.url)?.host ?? u.url));
+
+/** An error whose text names vault data: fine in PassAuth's own pages, never shown inside a web page. */
+class PrivateError extends Error {}
 
 type FillCommand = Extract<ContentCommand, { type: "fill" }>;
 
@@ -273,7 +416,7 @@ async function fill(id: string, tabId: number, frameId?: number) {
   const page = parse(url);
   if (!page || !/^https?:$/.test(page.protocol)) throw new Error("PassAuth can only fill on websites.");
   if (login.urls.length && !login.urls.some((u) => matchesUrl(url, u, settings.defaultMatch))) {
-    throw new Error(`This login is saved for ${login.urls.map(describe).join(", ")}, not for this site.`);
+    throw new PrivateError(`This login is saved for ${login.urls.map(describe).join(", ")}, not for this site.`);
   }
   if (login.urls.some((u) => downgrade(url, u))) throw new Error("This page isn't secure (http). PassAuth won't fill a login saved for an https site here.");
   const code = login.totp ? vault.totp(login.totp).code : undefined;
@@ -307,8 +450,10 @@ async function fill(id: string, tabId: number, frameId?: number) {
   }
 }
 
-const notifyTab = (tabId: number, text: string) =>
-  chrome.tabs.sendMessage(tabId, { type: "toast", text } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
+async function notifyTab(tabId: number, text: string) {
+  const { theme } = await getSettings();
+  await chrome.tabs.sendMessage(tabId, { type: "toast", text, theme } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
+}
 
 /** Keyboard shortcut / context menu: fill the single matching login, or open the popup. */
 async function fillForActiveTab(tab?: chrome.tabs.Tab) {
@@ -322,7 +467,7 @@ async function fillForActiveTab(tab?: chrome.tabs.Tab) {
     if (matches.length === 1) await fill(matches[0].id, tabId);
     else await openPopup();
   } catch (e) {
-    await notifyTab(tabId, e instanceof Error ? e.message : String(e));
+    await notifyTab(tabId, e instanceof PrivateError ? "This login isn't saved for this site. Open PassAuth to check its websites." : e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -341,7 +486,8 @@ async function openPopup() {
   try {
     await chrome.action.openPopup();
   } catch {
-    await chrome.windows.create({ url: chrome.runtime.getURL("popup.html"), type: "popup", width: 380, height: 620, focused: true });
+    // No toolbar to open from (e.g. no focused browser window): PassAuth in its own window, over the browser window.
+    await openCentered(chrome.runtime.getURL("popup.html?popout=1"), POPUP_WINDOW);
   }
 }
 
@@ -424,10 +570,10 @@ async function handleInline(req: Request, sender: chrome.runtime.MessageSender):
 async function handle(req: Request, sender: chrome.runtime.MessageSender): Promise<unknown> {
   // Extension pages (popup, even when opened in a tab) vs. content scripts on websites.
   const fromExtension = sender.id === chrome.runtime.id && (sender.url ?? "").startsWith(chrome.runtime.getURL(""));
-  // The inline menu frame sits inside web pages: it only gets the few requests it needs.
-  const fromInlineMenu = fromExtension && /^\/inline-menu\.html$/.test(new URL(sender.url!).pathname);
-
-  if (fromInlineMenu) return handleInline(req, sender);
+  // The inline menu and the save prompt are extension pages framed inside web pages: each only gets the few requests it needs.
+  const page = fromExtension ? new URL(sender.url!).pathname : "";
+  if (page === "/inline-menu.html") return handleInline(req, sender);
+  if (page === "/save-prompt.html") return handleSavePrompt(req, sender);
 
   // Page-originated messages: only the small set content scripts need.
   if (!fromExtension) {
@@ -439,14 +585,14 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       case "page:formDone": {
         // The login form went away without a page load (single-page apps): show the prompt in the top frame.
         const tabId = sender.tab?.id;
-        const p = tabId !== undefined && sameSiteAsTab(sender) ? await getSave(tabId) : undefined;
-        if (tabId !== undefined && p) await chrome.tabs.sendMessage(tabId, { type: "showSave", ...offerOf(p) } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
+        const p = sameSiteAsTab(sender) ? await saveForTab(sender) : undefined;
+        if (tabId !== undefined && p) await chrome.tabs.sendMessage(tabId, { type: "showSave", ...promptOf(p) } satisfies ContentCommand, { frameId: 0 }).catch(() => {});
         return null;
       }
       case "page:pendingSave":
         return pendingSaveFor(sender);
-      case "page:save":
-        return applySave(sender, req.accept, req.nonce);
+      case "page:saveDismiss":
+        return dismissFromPage(sender, req.nonce);
       case "page:fillClaim": {
         const c = claims.get(req.token);
         if (c && c.tabId === sender.tab?.id && sender.frameId !== undefined) c.resolve(sender.frameId);

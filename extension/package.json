@@ -7,7 +7,7 @@
   "scripts": {
     "wasm": "../scripts/build-wasm.sh extension/src/wasm",
     "build": "tsc --noEmit && node build.mjs",
-    "test": "node test/passkeys.test.mjs && node test/urls.test.mjs",
+    "test": "node test/passkeys.test.mjs && node test/urls.test.mjs && node test/save-plan.test.mjs && node test/passkey-targets.test.mjs && node test/window-place.test.mjs",
     "package": "node build.mjs && cd dist && zip -qr ../passauth-extension.zip ."
   },
   "dependencies": {

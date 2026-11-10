@@ -1,26 +1,23 @@
-:root {
-  --bg: #ffffff; --fg: #0b1a3a; --muted: #5a6a85; --hover: #eaf0f9; --line: #d6dfec; --accent: #0866ed; --fill: #0866ed;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --bg: #111b2e; --fg: #e7edf7; --muted: #8090ab; --hover: #19253b; --line: #26344d; --accent: #3d8bff; color-scheme: dark; }
-}
-:root[data-theme="dark"] { --bg: #111b2e; --fg: #e7edf7; --muted: #8090ab; --hover: #19253b; --line: #26344d; --accent: #3d8bff; color-scheme: dark; }
-* { box-sizing: border-box; }
+/*
+ * Inline autofill menu: a small PassAuth surface under the login field.
+ * Colours and radii are the shared tokens (@web/styles/app.css, loaded first);
+ * heights must match shared/inline-layout.ts, which sizes the frame.
+ */
+:root { --radius-s: 8px; --radius-m: 12px; }
 html, body { margin: 0; height: 100%; background: transparent; }
-body { font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif; color: var(--fg); -webkit-font-smoothing: antialiased; }
-main { height: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 6px; overflow-y: auto; }
-.row { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; height: 52px; padding: 6px 8px; border-radius: 7px; cursor: pointer; }
-.row:hover, .row:focus-visible { background: var(--hover); }
-.row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.ic { flex: none; width: 28px; height: 28px; border-radius: 6px; display: grid; place-items: center; background: var(--hover); color: var(--accent); font-weight: 600; overflow: hidden; }
-.ic img { width: 20px; height: 20px; }
-.txt { min-width: 0; flex: 1; }
-.name, .user { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body { font-size: 15px; line-height: 1.4; }
+main { height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; }
+.head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.head svg { flex: none; }
+.rows { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.row { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; height: 52px; padding: 0 8px; border-radius: var(--radius-s); cursor: pointer; }
+.row:hover, .row:focus-visible { background: var(--surface-2); }
+.row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.row .avatar { width: 36px; height: 36px; border-radius: var(--radius-s); }
+.txt { min-width: 0; flex: 1; display: grid; }
+.name, .user { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .name { font-weight: 500; }
-.user { font-size: 12.5px; color: var(--muted); }
-.locked { display: grid; gap: 10px; padding: 8px; }
-.locked p { margin: 0; display: flex; gap: 8px; align-items: center; font-weight: 500; }
-/* Filled buttons keep #0866ed in dark mode too: white on the lighter dark-mode accent is below 4.5:1. */
-.btn { all: unset; box-sizing: border-box; text-align: center; padding: 8px 12px; border-radius: 6px; background: var(--fill); color: #fff; font-weight: 600; cursor: pointer; }
-.btn:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.user { font-size: 13px; color: var(--ink-3); }
+.locked { flex: 1; display: grid; align-content: center; gap: 12px; padding: 12px; }
+.locked p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.locked .btn { height: 36px; }

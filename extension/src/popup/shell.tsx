@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
 import { Icon } from "@web/components/ui";
 import { send, type PopupState, type Status } from "../shared/messages";
+import { openCentered, POPUP_WINDOW } from "../shared/windows";
 
 export function Page({
   title,
@@ -121,7 +122,9 @@ export function PopOut() {
       aria-label="Open in a window"
       title="Open in a window"
       onClick={async () => {
-        await chrome.windows.create({ url: chrome.runtime.getURL("popup.html?popout=1"), type: "popup", width: 400, height: 640 });
+        // Over the browser window this popup belongs to, not in a corner of the screen.
+        const browser = await chrome.windows.getCurrent().catch(() => null);
+        await openCentered(chrome.runtime.getURL("popup.html?popout=1"), POPUP_WINDOW, { windowId: browser?.id });
         window.close();
       }}
     >
@@ -192,24 +195,26 @@ export function OtherAccounts({ state, onChange }: { state: PopupState; onChange
   const adding = state.status === "setup" || (state.status === "logged-out" && !state.accounts.some((a) => a.id === state.activeId));
   return (
     <div className="other-accounts">
-      <span className="small muted">{adding ? "Or go back to" : "Switch account"}</span>
+      <span id="other-accounts">{adding ? "Go back to" : "Switch account"}</span>
+      <div className="choices" role="group" aria-labelledby="other-accounts">
       {others.map((a) => (
         <button
           key={a.id}
           type="button"
-          className="account-item"
+          className="choice"
           onClick={() => send(adding ? { type: "account:cancelAdd" } : { type: "account:switch", id: a.id }).then(() => (adding ? send({ type: "account:switch", id: a.id }) : null)).then(onChange)}
         >
-          <span className="avatar-sm" aria-hidden="true">
+          <span className="tile avatar-round" aria-hidden="true">
             {initials(a.name, a.email)}
           </span>
-          <span className="grow">
-            <span className="title">{a.name || a.email}</span>
-            <span className="sub">{new URL(a.server).host}</span>
+          <span className="choice-text">
+            <span className="choice-title">{a.name || a.email}</span>
+            <span className="choice-sub">{new URL(a.server).host}</span>
           </span>
-          <span className="state">{STATUS_LABEL[a.status]}</span>
+          <span className="choice-trail">{STATUS_LABEL[a.status]}</span>
         </button>
       ))}
+      </div>
     </div>
   );
 }

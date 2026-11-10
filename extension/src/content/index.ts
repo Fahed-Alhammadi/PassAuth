@@ -6,15 +6,16 @@
  *   the form went away).
  * - Relays WebAuthn requests (passkey bridge).
  */
-import type { ContentCommand, SaveOffer } from "../shared/messages";
+import type { ContentCommand, SavePrompt, Settings } from "../shared/messages";
 import type { LoginUrl, UrlMatch } from "@web/lib/types";
 import { baseDomain, downgrade, matchesUrl } from "../background/urls";
 import { isLoginField, otpField, passwordFields, setValue, usernameFieldFor, visible } from "./fields";
 import { submittedPassword } from "./pick";
 import { closeInlineMenu, currentField, installInlineMenu, suppressInlineMenu } from "./inline";
 import { installPasskeyBridge } from "./passkey-bridge";
-import { logoSvg, panelCss } from "./brand";
-import { tampered, visibilityGate } from "./guard";
+import { clampPromptHeight, SAVE_PROMPT } from "../shared/save-layout";
+import { logoSvg, panelShadow, toastCss } from "./brand";
+import { tampered } from "./guard";
 
 installPasskeyBridge();
 installInlineMenu();
@@ -57,8 +58,10 @@ chrome.runtime.onMessage.addListener((cmd: ContentCommand, _sender, respond) => 
     if (frameAllowed(cmd.urls, cmd.defaultMatch, cmd.site) && (passwordFields().length || otpField())) {
       chrome.runtime.sendMessage({ type: "page:fillClaim", token: cmd.token }).catch(() => {});
     }
-  } else if (cmd.type === "showSave") showSaveBanner(cmd);
-  else if (cmd.type === "toast") showToast(cmd.text);
+  } else if (cmd.type === "showSave") showSavePrompt(cmd);
+  else if (cmd.type === "save:size") prompt && setPromptHeight(prompt.frame, cmd.height);
+  else if (cmd.type === "save:close") prompt?.close();
+  else if (cmd.type === "toast") showToast(cmd.text, cmd.theme);
   else if (cmd.type === "inline:close") closeInlineMenu();
 });
 
@@ -66,7 +69,15 @@ chrome.runtime.onMessage.addListener((cmd: ContentCommand, _sender, respond) => 
 
 let lastSent = "";
 
-function capture(form: HTMLFormElement | null) {
+/**
+ * Called from the submit / click / Enter listeners below. Only a real action
+ * by the user counts: the event must be one the browser made (not one a script
+ * dispatched), and the page must have a recent click or key press behind it
+ * (read here in the isolated world, which the page can't tamper with). So a
+ * page can't make PassAuth offer to save — and show its prompt — by itself.
+ */
+function capture(form: HTMLFormElement | null, event: Event) {
+  if (!event.isTrusted || !navigator.userActivation?.isActive) return;
   const fields = form ? passwordFields(form) : passwordFields();
   const password = submittedPassword(fields.map((f) => ({ value: f.value, autocomplete: f.autocomplete })));
   if (!password) {
@@ -103,13 +114,13 @@ function watchForm(pw: HTMLInputElement) {
   }, 400);
 }
 
-document.addEventListener("submit", (e) => capture(e.target as HTMLFormElement), true);
+document.addEventListener("submit", (e) => capture(e.target as HTMLFormElement, e), true);
 document.addEventListener(
   "click",
   (e) => {
     const btn = (e.composedPath()[0] as HTMLElement).closest?.('button, input[type="submit"], [role="button"]');
     if (btn && /log ?in|sign ?in|continue|next|submit|save|update|register|sign ?up/i.test(btn.textContent + " " + (btn as HTMLInputElement).value)) {
-      capture((btn as HTMLButtonElement).form ?? btn.closest("form"));
+      capture((btn as HTMLButtonElement).form ?? btn.closest("form"), e);
     }
   },
   true,
@@ -118,7 +129,7 @@ document.addEventListener(
   "keydown",
   (e) => {
     const t = e.composedPath()[0] as HTMLInputElement;
-    if (e.key === "Enter" && t instanceof HTMLInputElement && (t.type === "password" || isLoginField(t))) capture(t.form);
+    if (e.key === "Enter" && t instanceof HTMLInputElement && (t.type === "password" || isLoginField(t))) capture(t.form, e);
   },
   true,
 );
@@ -131,102 +142,95 @@ if (window.top === window) {
       if (passwordFields().length) return;
       chrome.runtime
         .sendMessage({ type: "page:pendingSave" })
-        .then((r) => r?.ok && r.data && showSaveBanner(r.data))
+        .then((r) => r?.ok && r.data && showSavePrompt(r.data))
         .catch(() => {});
     }, 600);
   if (document.readyState === "complete") ask();
   else addEventListener("load", ask, { once: true });
 }
 
-// ------------------------------------------------------------- save banner
+// ------------------------------------------------------------- save prompt
 
-let banner: HTMLElement | null = null;
+/**
+ * "Save login?" / "Update login?" in the top-right corner of the page. The
+ * prompt itself is an extension page in a frame (save-prompt.html, like the
+ * inline menu): this script only places and sizes the frame. It never gets the
+ * logins listed in the prompt or the user's choice — just the nonce that ties
+ * the frame to the pending save, and a height — and it cannot accept a save.
+ */
+let prompt: { nonce: string; host: HTMLElement; frame: HTMLIFrameElement; close: () => void } | null = null;
 
-function showSaveBanner(offer: SaveOffer) {
-  if (window.top !== window || banner) return;
-  const { host, update, username, nonce } = offer;
+function setPromptHeight(frame: HTMLIFrameElement, height: number) {
+  frame.style.height = `${Math.max(0, Math.min(clampPromptHeight(height), innerHeight - 2 * SAVE_PROMPT.edge))}px`;
+}
+
+function showSavePrompt({ nonce, height }: SavePrompt) {
+  if (window.top !== window || prompt || typeof nonce !== "string" || !/^[\w-]{8,64}$/.test(nonce)) return;
   const hostEl = document.createElement("passauth-save");
   const shadow = hostEl.attachShadow({ mode: "closed" });
-  shadow.innerHTML = `
-    <style>
-      :host { all: initial; position: fixed !important; top: 16px !important; right: 16px !important; z-index: 2147483647 !important;
+  // Static markup only. The page can restyle the host element; the frame checks that it is really visible before it accepts a click.
+  shadow.innerHTML = `<style>
+      :host { all: initial; position: fixed !important; top: ${SAVE_PROMPT.edge}px !important; right: ${SAVE_PROMPT.edge}px !important; z-index: 2147483647 !important;
               opacity: 1 !important; filter: none !important; clip-path: none !important; visibility: visible !important; }
-      .b { width: 320px; }
-      .a { display: flex; gap: 8px; flex-wrap: wrap; }
-      strong { color: #fff; font-weight: 600; }
-      ${panelCss}
-    </style>
-    <div class="b" role="dialog" aria-labelledby="t" aria-describedby="d">
-      <div class="t">
-        ${logoSvg(22)}
-        <span id="t">${update ? "Update saved password?" : "Save this login?"}</span>
-      </div>
-      <p id="d"></p>
-      <div class="a">
-        <button class="p" data-a="save">${update ? "Update" : "Save"}</button>
-        <button data-a="dismiss">Not now</button>
-        ${update ? "" : '<button data-a="never">Never for this site</button>'}
-      </div>
-    </div>`;
-  // Name the account, so the user can check what will be saved.
-  const p = shadow.querySelector("p")!;
-  const who = document.createElement("strong");
-  who.textContent = username || "this account";
-  p.append(update ? "PassAuth has a different password for " : "Save the password for ", who, ` on ${host} ${update ? "" : "to your PassAuth vault"}`.trimEnd() + ".");
-  const box = shadow.querySelector<HTMLElement>(".b")!;
-  const gate = visibilityGate(box);
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const close = () => {
-    clearTimeout(timer);
-    gate.stop();
-    removeEventListener("keydown", onKey, true);
-    hostEl.remove();
-    if (banner === hostEl) banner = null;
-  };
-  const answer = (accept: string) => {
-    chrome.runtime.sendMessage({ type: "page:save", accept, nonce }).catch(() => {});
+      iframe { display: block; border: 0; outline: 0; width: ${SAVE_PROMPT.width}px; max-width: calc(100vw - ${2 * SAVE_PROMPT.edge}px); border-radius: 16px; color-scheme: normal;
+               background: transparent; box-shadow: ${panelShadow}; }
+    </style>`;
+  const frame = document.createElement("iframe");
+  frame.src = `${chrome.runtime.getURL("save-prompt.html")}#${nonce}`;
+  frame.title = "PassAuth: save login";
+  frame.setAttribute("allowtransparency", "true");
+  setPromptHeight(frame, height);
+  shadow.append(frame);
+
+  // The page hid or moved the prompt: take it away rather than leave it to be clicked blind.
+  const watch = setInterval(() => tampered(hostEl) && close(), 250);
+  // Whatever happens to the frame, it never outlives the pending save (2 minutes).
+  const expire = setTimeout(() => close(), 125_000);
+  const onKey = (e: KeyboardEvent) => {
+    // Escape in the page dismisses (the frame handles Escape itself while focus is inside it).
+    if (e.key !== "Escape" || !e.isTrusted) return;
+    chrome.runtime.sendMessage({ type: "page:saveDismiss", nonce }).catch(() => {});
     close();
   };
-  // Disappears after 30 s, but not while the pointer or focus is on it.
-  const arm = () => {
-    clearTimeout(timer);
-    timer = setTimeout(close, 30_000);
-  };
-  const onKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && e.isTrusted) answer("dismiss");
-  };
-  shadow.querySelectorAll<HTMLButtonElement>("button").forEach((b) =>
-    b.addEventListener("click", (e) => {
-      // Only real clicks on a banner the user can see (not hidden or covered by the page).
-      if (!e.isTrusted || !gate.ok() || tampered(hostEl)) return;
-      answer(b.dataset.a!);
-    }),
-  );
-  box.addEventListener("pointerenter", () => clearTimeout(timer));
-  box.addEventListener("pointerleave", arm);
-  box.addEventListener("focusin", () => clearTimeout(timer));
-  box.addEventListener("focusout", arm);
+  function close() {
+    clearInterval(watch);
+    clearTimeout(expire);
+    removeEventListener("keydown", onKey, true);
+    hostEl.remove();
+    if (prompt?.host === hostEl) prompt = null;
+  }
   addEventListener("keydown", onKey, true);
+  // Focus goes to the prompt (its dialog container, never a button: a key press already on its way can't accept it).
+  frame.addEventListener("load", () => frame.focus({ preventScroll: true }), { once: true });
   (document.body ?? document.documentElement).appendChild(hostEl);
-  banner = hostEl;
-  shadow.querySelector<HTMLButtonElement>("button.p")?.focus({ preventScroll: true });
-  arm();
+  prompt = { nonce, host: hostEl, frame, close };
 }
 
 // ------------------------------------------------------------------ toast
 
-function showToast(text: string) {
+let toast: HTMLElement | null = null;
+
+/** A short note in the page. `text` comes from the background and never contains vault data (see ContentCommand). */
+function showToast(text: string, theme?: Settings["theme"]) {
   if (window.top !== window) return;
+  toast?.remove();
   const hostEl = document.createElement("passauth-toast");
   const shadow = hostEl.attachShadow({ mode: "closed" });
   shadow.innerHTML = `
     <style>
       :host { all: initial; position: fixed; top: 16px; right: 16px; z-index: 2147483647; }
-      ${panelCss}
-      .b { padding: 12px 14px; max-width: 320px; }
+      ${toastCss}
     </style>
-    <div class="b" role="status"><div class="t">${logoSvg(20)}<span></span></div></div>`;
+    <div class="b" role="status">${logoSvg(20)}<span></span></div>`;
+  const box = shadow.querySelector<HTMLElement>(".b")!;
+  if (theme === "light" || theme === "dark") box.dataset.theme = theme;
   shadow.querySelector("span")!.textContent = text;
+  // Below the save prompt when that is open, never on top of it.
+  if (prompt) hostEl.style.top = `${Math.round(prompt.host.getBoundingClientRect().bottom) + 8}px`;
   (document.body ?? document.documentElement).appendChild(hostEl);
-  setTimeout(() => hostEl.remove(), 5000);
+  toast = hostEl;
+  setTimeout(() => {
+    hostEl.remove();
+    if (toast === hostEl) toast = null;
+  }, 5000);
 }

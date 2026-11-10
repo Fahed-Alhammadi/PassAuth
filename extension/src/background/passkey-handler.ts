@@ -17,13 +17,15 @@ import {
   supportsCreateRequest,
 } from "./passkeys";
 import type { CreateRequest, GetRequest } from "../shared/passkey-types";
-import { allEntries, canWrite, createItem, ensureUnlocked, updateItem, verifyMasterPassword, type Entry } from "./vault";
+import { NEW_LOGIN } from "./save-plan";
+import { local } from "./storage";
+import { passkeySaveTargets, type PasskeyTarget } from "./passkey-targets";
+import { allEntries, canWrite, createItem, ensureUnlocked, getEntry, isPersonal, updateItem, vaultName, verifyMasterPassword, type Entry } from "./vault";
+import { openCentered } from "../shared/windows";
 
 /** `credentialId`: for sign-in the chosen passkey; for creation the login to save it in (an item id, or `NEW_LOGIN`). */
 type Decision = { accept: boolean; credentialId?: string; fallback?: boolean; verified?: boolean };
 
-/** Save target meaning "create a new login" (never an item id: those are UUIDs). */
-export const NEW_LOGIN = "new";
 type Reply = { result: unknown } | { fallback: true } | { error: { name: string; message: string } };
 
 export interface PasskeyMessage {
@@ -42,8 +44,11 @@ interface Pending {
   origin: string;
   rpId: string;
   userName: string;
-  /** Sign-in: matching passkeys. Creation: logins to save in (`preferred` = this exact site, preselected). */
-  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean }[];
+  /**
+   * Sign-in: matching passkeys. Creation: logins to save in (`preferred` = the user's own login for this exact
+   * site, preselected; `vault` = the shared vault a login lives in, shown on its row).
+   */
+  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean; vault?: string }[];
   /** The site requires user verification and the master password wasn't entered recently. */
   needsPassword: boolean;
   tabId: number;
@@ -99,14 +104,14 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
     const req = msg.options as CreateRequest;
     if (!supportsCreateRequest(req)) return FALLBACK;
     const host = new URL(msg.origin).hostname.toLowerCase();
-    const targets = saveTargets(host, rpId, req.user?.name ?? "", req.user?.displayName ?? "");
-    const candidates = targets.map((e) => ({
-      credentialId: e.id,
-      userName: e.item.login!.username,
-      itemName: e.item.name || host,
-      preferred: loginHosts(e).includes(host),
+    const candidates = saveTargets(host, rpId, req.user?.name ?? "", req.user?.displayName ?? "").map((t) => ({
+      credentialId: t.id,
+      userName: clip(t.username),
+      itemName: clip(t.name || host),
+      preferred: t.preferred,
+      vault: t.vault && clip(t.vault, 40),
     }));
-    const decision = await confirm({ ...base, kind, userName: req.user?.name ?? "", candidates }, wait);
+    const decision = await confirm({ ...base, kind, userName: clip(req.user?.name ?? ""), candidates }, wait);
     if (!decision.accept) return decision.fallback ? FALLBACK : notAllowed();
     // Checked after the user's consent so a site can't silently probe the vault.
     if (excludedPasskeyExists(req, msg.origin, allPasskeys().map((x) => x.passkey))) {
@@ -129,8 +134,8 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   if (!matches.length) return FALLBACK;
   const candidates = matches.map((p) => ({
     credentialId: p.credential_id,
-    userName: p.user_name || p.user_display_name,
-    itemName: all.find((x) => x.passkey.credential_id === p.credential_id)?.entry.item.name ?? p.rp_id,
+    userName: clip(p.user_name || p.user_display_name),
+    itemName: clip(all.find((x) => x.passkey.credential_id === p.credential_id)?.entry.item.name ?? p.rp_id),
   }));
   const decision = await confirm({ ...base, kind, userName: "", candidates }, wait);
   if (!decision.accept) return decision.fallback ? FALLBACK : notAllowed();
@@ -139,45 +144,41 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   return { result: response };
 }
 
+/**
+ * Names in the confirmation window come from the website (the passkey's user
+ * name) or were once given by one: shown shortened, so a page can't blow the
+ * window up or push its real content out of view. What is saved is never cut.
+ */
+const clip = (text: string, max = 64) => {
+  const chars = [...text.replace(/\s+/g, " ").trim()];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : chars.join("");
+};
+
 function allPasskeys(): { entry: Entry; passkey: Passkey }[] {
   return allEntries().flatMap((entry) => (entry.item.login?.passkeys ?? []).map((passkey) => ({ entry, passkey })));
 }
 
-/** Hostnames of a login's URLs (scheme optional), lowercase, without a trailing dot. */
-function loginHosts(e: Entry): string[] {
-  return (e.item.login?.urls ?? []).flatMap((u) => {
-    try {
-      return [new URL(u.url.includes("://") ? u.url : `https://${u.url}`).hostname.toLowerCase().replace(/\.$/, "")];
-    } catch {
-      return [];
-    }
-  });
-}
-
-/**
- * Logins a new passkey can be saved in: ones you can edit whose website is this
- * exact host, the RP ID, or a subdomain of the RP ID (where the passkey also works).
- * Never just "the same base domain": cloudy.example.com and bazarr.example.com are
- * different sites. Best first: this exact host, then a matching user name.
- */
-function saveTargets(host: string, rpId: string, userName: string, displayName: string): Entry[] {
-  const rp = rpId.toLowerCase();
-  const names = [userName, displayName].map((n) => n.trim().toLowerCase()).filter(Boolean);
-  const score = (e: Entry) => {
-    const hosts = loginHosts(e);
-    const user = e.item.login!.username.trim().toLowerCase();
-    return (hosts.includes(host) ? 2 : 0) + (user && names.some((n) => n === user || n === user.split("@")[0]) ? 1 : 0);
-  };
-  return allEntries()
-    .filter((e) => e.item.login && canWrite(e))
-    .filter((e) => loginHosts(e).some((h) => h === host || h === rp || h.endsWith(`.${rp}`)))
-    .sort((a, b) => score(b) - score(a) || a.item.name.localeCompare(b.item.name));
+/** The logins a new passkey can be saved in, best first (passkey-targets.ts). */
+function saveTargets(host: string, rpId: string, userName: string, displayName: string): PasskeyTarget[] {
+  const logins = allEntries()
+    .filter((e) => e.item.login)
+    .map((e) => ({
+      id: e.id,
+      name: e.item.name,
+      username: e.item.login!.username,
+      urls: e.item.login!.urls.map((u) => u.url),
+      writable: canWrite(e),
+      personal: isPersonal(e),
+      vault: vaultName(e.vaultId),
+    }));
+  return passkeySaveTargets(logins, host, rpId, userName, displayName);
 }
 
 /** Save the passkey in the login the user chose (still one they can edit for this site), or in a new login in their own vault. */
 async function storePasskey(passkey: Passkey, rpName: string, host: string, targetId: string) {
-  const target = targetId === NEW_LOGIN ? undefined : saveTargets(host, passkey.rp_id, "", "").find((e) => e.id === targetId);
-  if (target) {
+  // Only a login that is (still) one of the choices for this site; anything else becomes a new login in the user's own vault.
+  const target = targetId !== NEW_LOGIN && saveTargets(host, passkey.rp_id, "", "").some((t) => t.id === targetId) ? getEntry(targetId) : undefined;
+  if (target?.item.login) {
     const login = target.item.login!;
     await updateItem(target, { ...target.item, login: { ...login, passkeys: [...login.passkeys, passkey] } });
     return;
@@ -201,11 +202,25 @@ async function storePasskey(passkey: Passkey, rpName: string, host: string, targ
   await createItem(item);
 }
 
-/** Room for the password field and the account / "Save in" list (capped; the window scrolls beyond that). */
-function windowHeight(p: Omit<Pending, "decide">): number {
-  const rows = Math.min(p.candidates.length + (p.kind === "create" && p.candidates.length ? 1 : 0), 5);
-  return Math.min(760, (p.needsPassword ? 600 : 520) + rows * 60);
+/**
+ * Page size of the confirmation sheet, from its layout in popup.css ("decision
+ * sheet"), so the window opens at its final size; the window still measures
+ * the real sheet and corrects itself if a line wraps differently (Passkey.tsx).
+ */
+function sheetSize(p: Omit<Pending, "decide">): { width: number; height: number } {
+  const creating = p.kind === "create";
+  const rows = creating ? (p.candidates.length ? p.candidates.length + 1 : 0) : p.candidates.length;
+  // The note is ~50 characters to a line (see the text in Passkey.tsx).
+  const note = creating ? SHEET.gap + SHEET.line * Math.ceil((84 + (p.userName ? 23 + p.userName.length : 0)) / 50) : 0;
+  const list = rows ? SHEET.gap + (rows > 1 ? SHEET.legend : 0) + Math.min(rows * SHEET.row + 2, SHEET.listMax) : 0;
+  const password = p.needsPassword ? SHEET.gap + SHEET.password : 0;
+  return { width: 380, height: SHEET.base + note + list + password };
 }
+/**
+ * Heights in px, pinned in popup.css (`.sheet`). `base`: brand bar 48 + body padding 4 and 16 + context row 40 +
+ * gap 16 + actions 80 (button 40, gap 4, quiet row 36) − 8 the quiet row gives back. `listMax`: 4½ rows, then the list scrolls.
+ */
+const SHEET = { base: 196, gap: 16, line: 20, row: 56, legend: 28, listMax: 254, password: 91 };
 
 /**
  * Open the confirmation window. It keeps a port to this worker (with a
@@ -229,8 +244,8 @@ async function confirm(p: Omit<Pending, "decide">, timeoutMs: number): Promise<D
     };
     chrome.windows.onRemoved.addListener(onRemoved);
     pending.set(id, { ...p, decide: (d) => finish(d) });
-    chrome.windows
-      .create({ url: chrome.runtime.getURL(`popup.html#passkey=${id}`), type: "popup", width: 380, height: windowHeight(p), focused: true })
+    // Centred over the browser window that holds the requesting tab (and so on that window's display).
+    openCentered(chrome.runtime.getURL(`popup.html#passkey=${id}`), sheetSize(p), { tabId: p.tabId })
       .then(
         (win) => {
           winId = win?.id;
@@ -242,11 +257,15 @@ async function confirm(p: Omit<Pending, "decide">, timeoutMs: number): Promise<D
   return result;
 }
 
-export function pendingRequest(id: string) {
+export async function pendingRequest(id: string) {
   const p = pending.get(id);
   if (!p) return null;
   const { decide: _decide, tabId: _t, frameId: _f, bridgeId: _b, ...info } = p;
-  return info;
+  // The site icon comes from the user's server, which fetches it from the site. Only for a site the vault
+  // already has a login for: before the user has agreed to anything, a page must not be able to make
+  // the server fetch an icon for whatever host it names.
+  const { server, settings } = await local.get();
+  return { ...info, server, showIcons: settings.showIcons && (p.kind === "get" || p.candidates.length > 0) };
 }
 
 export async function decide(id: string, accept: boolean, credentialId?: string, fallback?: boolean, password?: string) {

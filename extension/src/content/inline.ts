@@ -10,11 +10,11 @@
  * clicks until it has been fully visible for a moment.
  */
 import type { InlineInfo } from "../shared/messages";
-import { logoSvg } from "./brand";
+import { logoSvg, panelShadow } from "./brand";
 import { deepActiveElement, isLoginField } from "./fields";
 import { tampered } from "./guard";
+import { inlineMenuHeight } from "../shared/inline-layout";
 
-const ROW = 52;
 let info: { value: InlineInfo | null; at: number } = { value: null, at: 0 };
 let field: HTMLInputElement | null = null;
 let icon: HTMLElement | null = null;
@@ -130,15 +130,15 @@ async function openMenu(i: InlineInfo) {
   if (!r?.ok || !r.data || !field || menu) return;
   const { el, shadow } = host(
     "passauth-inline-menu",
-    `iframe { border: 0; width: 100%; height: 100%; display: block; border-radius: 10px; color-scheme: normal;
-              box-shadow: 0 2px 6px rgb(0 0 0 / .12), 0 12px 32px rgb(0 0 0 / .2); background: transparent; }`,
+    `iframe { border: 0; width: 100%; height: 100%; display: block; border-radius: 12px; color-scheme: normal;
+              box-shadow: ${panelShadow}; background: transparent; }`,
   );
   const iframe = document.createElement("iframe");
   iframe.src = `${chrome.runtime.getURL("inline-menu.html")}#${r.data}`;
   iframe.title = "PassAuth";
   iframe.setAttribute("allowtransparency", "true");
   shadow.append(iframe);
-  el.dataset.height = String(i.status === "locked" ? 112 : Math.min(i.count, 4) * ROW + 12);
+  el.dataset.height = String(inlineMenuHeight(i.status === "locked", i.count));
   menu = el;
   place();
 }

@@ -1,5 +1,6 @@
 /** Generator tab. */
 import { useCallback, useEffect, useState } from "react";
+import { Icon, SheetActions } from "@web/components/ui";
 import { send } from "../shared/messages";
 import type { Ctx } from "./ctx";
 import { Account, Page, PopOut } from "./shell";
@@ -16,7 +17,7 @@ export function GeneratorPage({ ctx }: { ctx: Ctx }) {
   return (
     <Page title="Generator" brand actions={<><PopOut /><Account state={ctx.state} onChange={ctx.reload} /></>}>
       <div className="card-box gen">
-      <div className="segmented">
+      <div className="segmented" role="group" aria-label="What to generate">
         <button aria-pressed={mode === "password"} onClick={() => setMode("password")}>
           Password
         </button>
@@ -24,19 +25,24 @@ export function GeneratorPage({ ctx }: { ctx: Ctx }) {
           Passphrase
         </button>
       </div>
-      <div className="gen-out">{value}</div>
+      <div className="gen-out" aria-live="polite" aria-label={`Generated ${mode}`}>
+        {value}
+      </div>
       <label className="field">
         <span>{mode === "password" ? `Length: ${length}` : `Words: ${Math.max(3, Math.round(length / 4))}`}</span>
         <input type="range" min={mode === "password" ? 8 : 12} max={mode === "password" ? 64 : 40} value={length} onChange={(e) => setLength(+e.target.value)} />
       </label>
-      <div className="row">
-        <button className="btn btn-accent grow" onClick={() => ctx.copy({ text: value }, mode === "password" ? "Password" : "Passphrase")}>
-          Copy
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={gen}>
+            <Icon name="sync" size={16} /> Regenerate
+          </button>
+        }
+      >
+        <button className="btn btn-primary btn-block" disabled={!value} onClick={() => ctx.copy({ text: value }, mode === "password" ? "Password" : "Passphrase")}>
+          <Icon name="copy" /> Copy {mode}
         </button>
-        <button className="btn grow" onClick={gen}>
-          Regenerate
-        </button>
-      </div>
+      </SheetActions>
       </div>
     </Page>
   );

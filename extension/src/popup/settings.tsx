@@ -1,7 +1,7 @@
 /** Settings tab: a list of categories, each opening its own page. */
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
-import { ErrorText, Icon, type IconName } from "@web/components/ui";
+import { ActionRow, ErrorText, Icon, Modal, SheetActions, type IconName } from "@web/components/ui";
 import { send, type PopupState, type SecurityKey, type SecurityKeys, type Settings, type VaultTimeout } from "../shared/messages";
 import { msg, seconds, type Ctx } from "./ctx";
 import { Account, Page, PopOut } from "./shell";
@@ -104,12 +104,12 @@ const MATCH_HELP: Record<Settings["defaultMatch"], string> = {
 
 function Toggle({ label, help, checked, onChange }: { label: string; help?: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="check">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span>
-        {label}
-        {help && <span className="small muted block">{help}</span>}
+    <label className="setting">
+      <span className="setting-text">
+        <span className="setting-title">{label}</span>
+        {help && <span className="setting-desc">{help}</span>}
       </span>
+      <input type="checkbox" role="switch" className="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
     </label>
   );
 }
@@ -167,7 +167,7 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
       {loadError ? (
         <>
           <ErrorText error={loadError} />
-          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={load}>
+          <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={load}>
             Try again
           </button>
         </>
@@ -176,44 +176,52 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
       ) : data.keys.length === 0 ? (
         <p className="small muted">No security keys. You can add one in the web vault under Settings → Two-step login.</p>
       ) : (
-        data.keys.map((k) => (
-          <div key={k.id} className="row" style={{ alignItems: "center" }}>
-            <Icon name="key" />
-            <span className="grow" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
-              {k.name}
-              <span className="muted small">
-                {" "}
-                · added {new Date(k.created_at * 1000).toLocaleDateString()}
-                {k.last_used_at ? ` · last used ${new Date(k.last_used_at * 1000).toLocaleDateString()}` : " · never used"}
+        <ul className="plain-list">
+          {data.keys.map((k) => (
+            <li key={k.id}>
+              <span className="grow" style={{ overflowWrap: "anywhere" }}>
+                {k.name}
+                <span className="row-sub">
+                  Added {new Date(k.created_at * 1000).toLocaleDateString()}
+                  {k.last_used_at ? `, last used ${new Date(k.last_used_at * 1000).toLocaleDateString()}` : ", never used"}
+                </span>
               </span>
-            </span>
-            <button type="button" className="btn btn-icon" aria-label={`Remove security key ${k.name}`} onClick={() => (setRemoving(k), setPassword(""), setError(null))} disabled={busy}>
-              <Icon name="trash" />
-            </button>
-          </div>
-        ))
+              <button type="button" className="btn btn-icon" aria-label={`Remove security key ${k.name}`} title="Remove" onClick={() => (setRemoving(k), setPassword(""), setError(null))} disabled={busy}>
+                <Icon name="trash" />
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
       {removing && (
-        <form className="stack-s" onSubmit={remove}>
-          <div className={`alert ${lastMethod ? "alert-error" : "alert-warn"} small`}>
-            {lastMethod
-              ? `"${removing.name}" is your only two-step method. Removing it turns two-step login off and deletes your recovery codes.`
-              : `Remove "${removing.name}"? You can't use it to sign in any more.`}
-          </div>
-          <label className="field">
-            <span>Master password</span>
-            <input className="input" type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
-          </label>
-          <ErrorText error={error} />
-          <div className="row">
-            <button type="submit" className="btn btn-danger" disabled={busy}>
-              {busy ? "Removing…" : "Remove security key"}
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={cancel} disabled={busy}>
-              Cancel
-            </button>
-          </div>
-        </form>
+        <Modal title="Remove security key?" subtitle={removing.name} icon="key" tone="danger" onClose={() => !busy && cancel()}>
+          <form onSubmit={remove}>
+            <p className={lastMethod ? "alert alert-warn" : "card-text"}>
+              {lastMethod
+                ? "This is your only two-step method. Removing it turns two-step login off and deletes your recovery codes."
+                : "You won't be able to use this key for two-step login any more."}
+            </p>
+            <ErrorText error={error} />
+            <div className="field">
+              <label htmlFor="sk-password">Master password</label>
+              <input id="sk-password" className="input mono" type="password" autoComplete="current-password" aria-describedby="sk-reason" data-autofocus="" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} />
+              <span id="sk-reason" className="field-hint">
+                Confirms it's you before the key is removed.
+              </span>
+            </div>
+            <SheetActions
+              quiet={
+                <button type="button" className="btn btn-text" onClick={cancel} disabled={busy}>
+                  Cancel
+                </button>
+              }
+            >
+              <button type="submit" className="btn btn-danger-solid btn-block" disabled={busy}>
+                {busy ? "Removing…" : "Remove security key"}
+              </button>
+            </SheetActions>
+          </form>
+        </Modal>
       )}
     </section>
   );
@@ -230,6 +238,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
   const { state, notify } = ctx;
   const [settings, setSettings] = useState(state.settings);
   const [syncing, setSyncing] = useState(false);
+  const [synced, setSynced] = useState(false);
   const [lastSync, setLastSync] = useState(state.lastSync);
   const [neverSave, setNeverSave] = useState(state.neverSave);
 
@@ -238,11 +247,13 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
     send<Settings>({ type: "settings", patch }).then(setSettings, (e) => notify(msg(e)));
   };
   async function sync() {
+    if (syncing) return;
     setSyncing(true);
     try {
       await send({ type: "sync" });
       const s = await send<PopupState>({ type: "state" });
       setLastSync(s.lastSync);
+      setSynced(true);
       notify("Sync complete. Your vault is up to date.");
     } catch (e) {
       notify(`Sync failed: ${msg(e)}`);
@@ -253,7 +264,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
   const timeoutValue = String(settings.vaultTimeout);
   const isMac = navigator.platform.toLowerCase().includes("mac");
 
-  const sections: { key: string; title: string; icon: IconName; body: ReactNode }[] = [
+  const sections: { key: string; title: string; icon: IconName; body: ReactNode; /** The body brings its own cards. */ plain?: boolean }[] = [
     {
       key: "security",
       title: "Account security",
@@ -290,11 +301,12 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
         <p className="small muted">
           {settings.timeoutAction === "lock"
             ? "Locking keeps your encrypted vault here; unlock with your master password."
-            : "Logging out removes the vault from this browser; sign in again (with two-step login) to use it."}
+            : "Signing out removes the vault from this browser; sign in again (with two-step login) to use it."}
         </p>
         <button className="btn" onClick={() => send({ type: "lock" }).then(ctx.reload)}>
           <Icon name="lock" /> Lock now
         </button>
+        <hr />
         <SecurityKeysSettings notify={notify} />
         </>
       ),
@@ -360,22 +372,27 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
         <>
         <Toggle label="Ask to save and update logins" checked={settings.askToSave} onChange={(v) => update({ askToSave: v })} />
         {neverSave.length > 0 && (
-          <div className="stack-s">
-            <span className="small muted">Never ask on these sites:</span>
-            {neverSave.map((d) => (
-              <div className="row" key={d}>
-                <span className="grow mono small">{d}</span>
-                <button
-                  className="btn btn-ghost btn-icon"
-                  aria-label={`Ask again on ${d}`}
-                  title="Ask again on this site"
-                  onClick={() => send({ type: "neverSave:remove", domain: d }).then(() => setNeverSave(neverSave.filter((x) => x !== d)))}
-                >
-                  <Icon name="close" />
-                </button>
-              </div>
-            ))}
-          </div>
+          <section className="stack-s" aria-labelledby="never-title">
+            <hr />
+            <h3 className="section-title" id="never-title">
+              Never ask on these sites
+            </h3>
+            <ul className="plain-list">
+              {neverSave.map((d) => (
+                <li key={d}>
+                  <span className="grow clip">{d}</span>
+                  <button
+                    className="btn btn-icon"
+                    aria-label={`Ask again on ${d}`}
+                    title="Ask again on this site"
+                    onClick={() => send({ type: "neverSave:remove", domain: d }).then(() => setNeverSave(neverSave.filter((x) => x !== d)))}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
         )}
         </>
       ),
@@ -384,21 +401,13 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       key: "vault",
       title: "Vault options",
       icon: "vault",
+      plain: true,
       body: (
-        <>
-        <button className="btn" onClick={sync} disabled={syncing}>
-          <Icon name="sync" /> {syncing ? "Syncing…" : "Sync vault now"}
-        </button>
-        <p className="small muted" aria-live="polite">
-          Last sync: {formatTime(lastSync)}
-        </p>
-        <button className="btn" onClick={() => chrome.tabs.create({ url: `${state.server}/import` })}>
-          <Icon name="upload" /> Import items
-        </button>
-        <button className="btn" onClick={() => chrome.tabs.create({ url: state.server })}>
-          <Icon name="external" /> Open web vault
-        </button>
-        </>
+        <div className="choices">
+          <ActionRow icon="sync" title={syncing ? "Syncing…" : "Sync vault now"} sub={<span aria-live="polite">Last sync: {formatTime(lastSync)}</span>} done={synced && !syncing ? "Up to date" : undefined} onClick={sync} />
+          <ActionRow icon="upload" title="Import items" sub="Opens the web vault" onClick={() => chrome.tabs.create({ url: `${state.server}/import` })} />
+          <ActionRow icon="external" title="Open web vault" sub={new URL(state.server).host} onClick={() => chrome.tabs.create({ url: state.server })} />
+        </div>
       ),
     },
     {
@@ -447,20 +456,21 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       body: (
         <>
         <div className="about-brand">
-          <LogoMark size={64} />
-          <span className="wordmark">
-            <span>
-              Pass<span className="wm-auth">Auth</span>
-            </span>
-          </span>
-          <span className="small muted">Version {chrome.runtime.getManifest().version}</span>
-          <span className="small muted">© Fahed Alhammadi</span>
+          <LogoMark size={40} />
+          <div>
+            <span className="name">PassAuth</span>
+            <span className="sub">Version {chrome.runtime.getManifest().version}</span>
+            <span className="sub">© Fahed Alhammadi</span>
+          </div>
         </div>
-        <Field label="Signed in as">{state.email}</Field>
-        <Field label="Server">{state.server}</Field>
+        <hr />
+        <div>
+          <Field label="Signed in as">{state.email}</Field>
+          <Field label="Server">{state.server}</Field>
+        </div>
         <p className="small muted">To use another PassAuth server, sign out and choose "Change server" on the sign-in screen.</p>
         <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(ctx.reload)}>
-          Sign out
+          <Icon name="logout" /> Sign out
         </button>
         </>
       ),
@@ -471,19 +481,15 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
   if (open) {
     return (
       <Page title={open.title} onBack={toList} actions={<PopOut />}>
-        <div className="card-box settings-body">{open.body}</div>
+        {open.plain ? open.body : <div className="card-box settings-body">{open.body}</div>}
       </Page>
     );
   }
   return (
     <Page title="Settings" brand actions={<><PopOut /><Account state={state} onChange={ctx.reload} /></>}>
-      <nav className="settings-list" aria-label="Settings">
+      <nav className="choices" aria-label="Settings">
         {sections.map((x) => (
-          <button key={x.key} className="settings-row" onClick={() => ctx.go({ tab: "settings", section: x.key })}>
-            <Icon name={x.icon} />
-            <span className="grow">{x.title}</span>
-            <Icon name="chevron" />
-          </button>
+          <ActionRow key={x.key} icon={x.icon} title={x.title} onClick={() => ctx.go({ tab: "settings", section: x.key })} />
         ))}
       </nav>
     </Page>
