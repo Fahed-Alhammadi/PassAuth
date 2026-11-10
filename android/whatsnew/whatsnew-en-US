@@ -1,2 +1,2 @@
-• Autofill now works on your PassAuth web vault too: save a login for your server's address and it is offered on the vault's sign-in page.
-• Smaller fixes and updated help pages.
+• Delete a saved passkey: edit a login, tap the trash button next to the passkey, then Save.
+• See and remove your security keys for two-step login under Settings → Account security → Two-step login (you add them in the web vault).

@@ -8,7 +8,7 @@ import type { EncryptedItem, Item, Role } from "@web/lib/types";
 import { kindOf, siteHost } from "@web/lib/types";
 import { api, logoutRemote, setSessionLostHandler, timeoutSignal } from "./api";
 import { activeId, local, scratch, session, syncCache, type AccountData, type SessionData } from "./storage";
-import type { AccountSummary, ItemSummary, PopupState, Status, TwoFactorChallenge } from "../shared/messages";
+import type { AccountSummary, ItemSummary, PopupState, SecurityKey, SecurityKeys, Status, TwoFactorChallenge } from "../shared/messages";
 
 export interface Entry {
   id: string;
@@ -280,6 +280,53 @@ export async function verifyMasterPassword(password: string) {
   const l = await local.get();
   openBundle(bundle, password, l.secretKeys[l.email]).free();
   await markVerified();
+}
+
+/**
+ * Fresh proof of the master password for sensitive account changes: an OPAQUE
+ * login with purpose "reauth" for the active account. Returns the reauth token.
+ */
+async function reauthToken(password: string): Promise<string> {
+  await initWasm();
+  const { id: accountId } = await local.account();
+  const l = await local.get();
+  const email = l.email;
+  const sk = l.secretKeys[email.trim().toLowerCase()];
+  const pre = await api("/auth/prelogin", { body: { email }, auth: false, accountId });
+  if (pre.secret_key_required && !sk) throw new Error("Your Secret Key isn't saved in this browser. Sign out and sign in again with it.");
+  const master = core.deriveMasterKeys(password, pre.secret_key_required ? sk : undefined, pre.account_id, pre.kdf, pre.secret_key_required);
+  try {
+    const start = core.opaqueLoginStart(master);
+    const resp = await api("/auth/login/start", { body: { email, message: start.message }, auth: false, accountId });
+    let fin: string;
+    try {
+      fin = core.opaqueLoginFinish(start.state, master, resp.message);
+    } catch {
+      throw new Error("Wrong master password.");
+    }
+    const result = await api("/auth/login/finish", {
+      body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), purpose: "reauth" },
+      accountId,
+    });
+    if (!result.reauth_token) throw new Error("Your server didn't confirm your master password. Try again.");
+    return result.reauth_token as string;
+  } finally {
+    master.free();
+  }
+}
+
+/** Two-step login security keys of the active account. */
+export async function securityKeys(): Promise<SecurityKeys> {
+  const a = await api("/account");
+  const methods = ((a.two_factor ?? []) as string[]).filter((p) => p !== "recovery");
+  return { keys: (a.passkeys ?? []) as SecurityKey[], methods };
+}
+
+/** Remove a two-step login security key, after the master password. */
+export async function removeSecurityKey(id: string, password: string): Promise<SecurityKeys> {
+  const token = await reauthToken(password);
+  await api(`/account/2fa/passkey/${encodeURIComponent(id)}`, { method: "DELETE", headers: { "x-reauth-token": token } });
+  return securityKeys();
 }
 
 // ------------------------------------------------------------- restore

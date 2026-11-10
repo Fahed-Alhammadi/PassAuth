@@ -311,6 +311,46 @@ class AccountSecurityTest {
     }
 
     @Test
+    fun securityKeysListedAndRemovedAfterReauth() = runBlocking {
+        val server = FakeServer(
+            reauthAnswers().apply {
+                put("GET /account") { _ ->
+                    AppJson.parseToJsonElement(
+                        """{"email":"a@x","two_factor":["passkey"],"recovery_codes_left":10,"passkeys":[""" +
+                            """{"id":"k1","name":"YubiKey","created_at":1762000000,"last_used_at":null},""" +
+                            """{"id":"k 2","name":"Laptop","created_at":1762000100,"last_used_at":1762100000}]}""",
+                    )
+                }
+                put("DELETE /account/2fa/passkey/k%202") { r ->
+                    assertEquals("RT", r.headers[AccountSecurity.REAUTH_HEADER])
+                    buildJsonObject { put("ok", true) }
+                }
+            },
+        )
+        val sec = AccountSecurity(server, FakeCrypto(), device)
+        val s = sec.status()
+        assertEquals(listOf("k1", "k 2"), s.securityKeys.map { it.id })
+        assertEquals(null, s.securityKeys[0].lastUsedAt)
+        assertEquals(1762100000L, s.securityKeys[1].lastUsedAt)
+        assertTrue(s.anyOn)
+        assertFalse(s.isLastKey())
+        assertTrue(s.copy(securityKeys = s.securityKeys.take(1)).isLastKey())
+        assertFalse(s.copy(securityKeys = s.securityKeys.take(1), providers = listOf("passkey", "totp")).isLastKey())
+
+        server.log.clear()
+        sec.removeSecurityKey("k 2", "a@x", "current password", null)
+        assertEquals(listOf("POST /auth/prelogin", "POST /auth/login/start", "POST /auth/login/finish", "DELETE /account/2fa/passkey/k%202"), server.paths)
+        // Wrong password: nothing is removed.
+        server.log.clear()
+        try {
+            sec.removeSecurityKey("k1", "a@x", "wrong", null)
+            fail("expected wrong password")
+        } catch (_: UserException) {
+        }
+        assertTrue(server.paths.none { it.startsWith("DELETE") })
+    }
+
+    @Test
     fun shownOnceNeedsConfirmation() {
         var once = ShowOnce(listOf("a", "b"))
         assertFalse(once.mayClose())

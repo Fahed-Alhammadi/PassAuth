@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { errorMessage } from "../lib/api";
-import { KIND_LABEL, kindOf, type Field, type Item, type LoginUrl } from "../lib/types";
+import { KIND_LABEL, kindOf, type Field, type Item, type LoginUrl, type Passkey } from "../lib/types";
 import { ErrorText, Icon, PasswordField } from "./ui";
 
 type Section = "login" | "card" | "identity" | "ssh_key";
@@ -152,6 +152,11 @@ export function ItemEditor({
           <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => setUrls((urls) => [...urls, { url: "", match: "default" }])}>
             <Icon name="plus" /> Add website
           </button>
+          <PasskeysEditor
+            passkeys={item.login.passkeys}
+            removed={(initial.login?.passkeys.length ?? 0) - item.login.passkeys.length}
+            onRemove={(id) => sub("login", (l) => ({ passkeys: l.passkeys.filter((p) => p.credential_id !== id) }))}
+          />
         </div>
       )}
 
@@ -313,6 +318,38 @@ function FieldsEditor({ fields, onChange }: { fields: Field[]; onChange: (fn: (f
       <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => onChange((all) => [...all, { name: "", value: "", type: "text" }])}>
         <Icon name="plus" /> Add field
       </button>
+    </section>
+  );
+}
+
+/** Saved passkeys: shown so they can be removed (they can't be edited). Removal happens on Save. */
+function PasskeysEditor({ passkeys, removed, onRemove }: { passkeys: Passkey[]; removed: number; onRemove: (credentialId: string) => void }) {
+  if (passkeys.length === 0 && removed <= 0) return null;
+  return (
+    <section className="stack-s">
+      <h3 className="section-title">Passkeys</h3>
+      {passkeys.map((p) => {
+        const who = p.user_name || p.user_display_name;
+        return (
+          <div key={p.credential_id} className="row" style={{ alignItems: "center" }}>
+            <Icon name="key" />
+            <span className="grow" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+              {p.rp_id}
+              {who && <span className="muted small"> for {who}</span>}
+              {p.created_at > 0 && <span className="muted small"> · added {new Date(p.created_at * 1000).toLocaleDateString()}</span>}
+            </span>
+            <button type="button" className="btn btn-icon" aria-label={`Remove passkey for ${p.rp_id}${who ? ` (${who})` : ""}`} onClick={() => onRemove(p.credential_id)}>
+              <Icon name="trash" />
+            </button>
+          </div>
+        );
+      })}
+      {removed > 0 && (
+        <p className="small muted" role="status">
+          {removed === 1 ? "1 passkey is" : `${removed} passkeys are`} deleted when you save. PassAuth can't sign in with {removed === 1 ? "it" : "them"} after
+          that. The website may still list {removed === 1 ? "it" : "them"} in its security settings; remove {removed === 1 ? "it" : "them"} there too.
+        </p>
+      )}
     </section>
   );
 }

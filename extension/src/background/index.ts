@@ -488,6 +488,12 @@ async function handle(req: Request, sender: chrome.runtime.MessageSender): Promi
       return vault.logout();
     case "sync":
       return vault.sync();
+    case "securityKeys":
+      if (!(await vault.ensureUnlocked())) throw new Error("locked");
+      return vault.securityKeys();
+    case "securityKeys:remove":
+      if (!(await vault.ensureUnlocked())) throw new Error("locked");
+      return vault.removeSecurityKey(req.id, req.password);
     case "items": {
       if (!(await vault.ensureUnlocked())) throw new Error("locked");
       const suggested = req.url ? await matching(req.url) : [];

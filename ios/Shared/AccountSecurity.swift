@@ -4,6 +4,22 @@ import PassAuthCore
 // Account security in the app: change the master password / Secret Key setting and manage
 // two-step login, like the web vault's Settings → Security and Two-step login.
 
+/// A security key / passkey registered for two-step login (added in the web vault).
+public struct SecurityKeyInfo: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var name: String
+    /// Unix seconds.
+    public var createdAt: Int64
+    public var lastUsedAt: Int64?
+
+    public init(id: String, name: String, createdAt: Int64 = 0, lastUsedAt: Int64? = nil) {
+        self.id = id
+        self.name = name
+        self.createdAt = createdAt
+        self.lastUsedAt = lastUsedAt
+    }
+}
+
 /// Two-step login as `GET /api/account` reports it.
 public struct TwoFactorStatus: Equatable, Sendable {
     public var providers: [String] = []
@@ -11,12 +27,14 @@ public struct TwoFactorStatus: Equatable, Sendable {
     /// The server can send email (email codes can be turned on).
     public var emailAvailable = false
     public var email = ""
+    public var securityKeys: [SecurityKeyInfo] = []
 
-    public init(providers: [String] = [], recoveryCodesLeft: Int = 0, emailAvailable: Bool = false, email: String = "") {
+    public init(providers: [String] = [], recoveryCodesLeft: Int = 0, emailAvailable: Bool = false, email: String = "", securityKeys: [SecurityKeyInfo] = []) {
         self.providers = providers
         self.recoveryCodesLeft = recoveryCodesLeft
         self.emailAvailable = emailAvailable
         self.email = email
+        self.securityKeys = securityKeys
     }
 
     public init(json j: JSON) {
@@ -24,11 +42,20 @@ public struct TwoFactorStatus: Equatable, Sendable {
         recoveryCodesLeft = Int(j["recovery_codes_left"]?.int ?? 0)
         emailAvailable = j["email_enabled"]?.bool ?? false
         email = j.str("email")
+        securityKeys = (j["passkeys"]?.array ?? []).compactMap { k in
+            let id = k.str("id")
+            guard !id.isEmpty else { return nil }
+            let used = k["last_used_at"]?.int ?? 0
+            return SecurityKeyInfo(id: id, name: k.str("name"), createdAt: k["created_at"]?.int ?? 0, lastUsedAt: used > 0 ? used : nil)
+        }
     }
 
     public var totpOn: Bool { providers.contains(TwoFactorProvider.totp.rawValue) }
     public var emailOn: Bool { providers.contains(TwoFactorProvider.email.rawValue) }
-    public var anyOn: Bool { totpOn || emailOn }
+    public var keysOn: Bool { providers.contains("passkey") }
+    public var anyOn: Bool { totpOn || emailOn || keysOn }
+    /// Removing this key turns two-step login off: it's the only key and no other method is on.
+    public func isLastKey() -> Bool { securityKeys.count == 1 && !totpOn && !emailOn }
     /// Turning this one off leaves no method (the server then deletes the recovery codes too).
     public func isLast(_ p: TwoFactorProvider) -> Bool { providers.filter { $0 != p.rawValue && $0 != "recovery" }.isEmpty }
 }
@@ -323,6 +350,16 @@ extension VaultRepository {
 
     public func disableTwoFactor(_ provider: TwoFactorProvider, reauthToken: String) async throws {
         try await lock.run { try await disableLocked(provider, reauthToken) }
+    }
+
+    /// Remove a two-step login security key, after the master password.
+    public func removeSecurityKey(_ id: String, password: String, typedSecretKey: String?) async throws {
+        try await lock.run {
+            try requireOnline()
+            let token = try await reauthToken(activeId, password: password, secretKey: typedSecretKey)
+            let path = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id
+            _ = try await api.call(activeId, "/account/2fa/passkey/\(path)", method: "DELETE", headers: ["x-reauth-token": token])
+        }
     }
 
     private func disableLocked(_ provider: TwoFactorProvider, _ token: String) async throws {

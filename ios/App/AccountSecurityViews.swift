@@ -243,11 +243,13 @@ struct NewSecretKeySheet: View {
 private enum ReauthAction: Identifiable, Equatable {
     case disable(TwoFactorProvider)
     case regenerate
+    case removeKey(SecurityKeyInfo)
 
     var id: String {
         switch self {
         case .disable(let p): "disable-\(p.rawValue)"
         case .regenerate: "regenerate"
+        case .removeKey(let k): "remove-key-\(k.id)"
         }
     }
 }
@@ -277,6 +279,7 @@ struct TwoStepPage: View {
             if let status {
                 totpSection(status)
                 emailSection(status)
+                securityKeysSection(status)
                 recoverySection(status)
             } else if let loadError {
                 Section {
@@ -305,8 +308,11 @@ struct TwoStepPage: View {
         }
         .sheet(item: $reauth, onDismiss: { Task { await load() } }) { action in
             ReauthSheet(action: action, lastMethod: status.map { s -> Bool in
-                if case .disable(let p) = action { return s.isLast(p) }
-                return false
+                switch action {
+                case .disable(let p): return s.isLast(p)
+                case .removeKey: return s.isLastKey()
+                case .regenerate: return false
+                }
             } ?? false)
         }
         .sheet(isPresented: $showEmailCodes, onDismiss: { emailCodes = ShownOnce([]); Task { await load() } }) {
@@ -400,6 +406,43 @@ struct TwoStepPage: View {
             Text("Get a one-time code by email at \(s.email) when you sign in.")
         }
         .paRow()
+    }
+
+    /// Security keys / passkeys for two-step login: added in the web vault, listed and removed here.
+    @ViewBuilder
+    private func securityKeysSection(_ s: TwoFactorStatus) -> some View {
+        Section {
+            MethodRow(title: "Security keys", on: !s.securityKeys.isEmpty, symbol: "key.horizontal")
+            ForEach(s.securityKeys) { k in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(k.name.isEmpty ? "Security key" : k.name).foregroundStyle(Color.paInk)
+                        Text(keyDetail(k)).font(.footnote).foregroundStyle(Color.paMuted)
+                    }
+                    Spacer()
+                    Button(role: .destructive) { reauth = .removeKey(k) } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.paDanger)
+                    .accessibilityLabel("Remove security key \(k.name)")
+                    .accessibilityIdentifier("key.remove.\(k.id)")
+                }
+                .accessibilityElement(children: .combine)
+            }
+        } footer: {
+            Text(s.securityKeys.isEmpty
+                 ? "Use a hardware security key or a passkey to confirm your sign-in. Add one in the web vault under Settings → Two-step login."
+                 : "Add keys in the web vault. This app can't use a security key to sign in yet, so keep another method on if you sign in here.")
+        }
+        .paRow()
+    }
+
+    private func keyDetail(_ k: SecurityKeyInfo) -> String {
+        let f = Date.FormatStyle(date: .abbreviated, time: .omitted)
+        var t = "Added \(Date(timeIntervalSince1970: TimeInterval(k.createdAt)).formatted(f))"
+        if let u = k.lastUsedAt { t += " · last used \(Date(timeIntervalSince1970: TimeInterval(u)).formatted(f))" } else { t += " · never used" }
+        return t
     }
 
     @ViewBuilder
@@ -675,6 +718,15 @@ private struct ReauthSheet: View {
         case .disable(.totp): "Turn off authenticator app"
         case .disable(.email): "Turn off email codes"
         case .regenerate: "Generate new recovery codes"
+        case .removeKey: "Remove security key"
+        }
+    }
+
+    private var confirmLabel: String {
+        switch action {
+        case .disable: "Turn off"
+        case .regenerate: "Generate new codes"
+        case .removeKey: "Remove"
         }
     }
 
@@ -685,6 +737,10 @@ private struct ReauthSheet: View {
                 ? "This is your only two-step method. Turning it off also deletes your recovery codes, and signing in will need only your master password."
                 : "You can turn it on again at any time."
         case .regenerate: "Your current recovery codes stop working as soon as the new ones are created."
+        case .removeKey(let k):
+            lastMethod
+                ? "“\(k.name)” is your only two-step method. Removing it turns two-step login off and deletes your recovery codes."
+                : "You won't be able to use “\(k.name)” to sign in any more. You can add it again in the web vault."
         }
     }
 
@@ -712,7 +768,7 @@ private struct ReauthSheet: View {
                         ErrorText(text: error)
                         Button(role: .destructive, action: confirm) {
                             HStack {
-                                Text(busy ? "Working…" : action == .regenerate ? "Generate new codes" : "Turn off").fontWeight(.semibold)
+                                Text(busy ? "Working…" : confirmLabel).fontWeight(.semibold)
                                 if busy { Spacer(); ProgressView() }
                             }
                         }
@@ -757,6 +813,11 @@ private struct ReauthSheet: View {
                     let next = try await model.repo.regenerateRecoveryCodes(password: pw, typedSecretKey: k)
                     password = ""
                     codes = ShownOnce(next)
+                case .removeKey(let key):
+                    try await model.repo.removeSecurityKey(key.id, password: pw, typedSecretKey: k)
+                    password = ""
+                    model.notify("Security key removed.")
+                    dismiss()
                 }
             } catch {
                 self.error = securityErrorMessage(error)

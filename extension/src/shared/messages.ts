@@ -65,6 +65,20 @@ export interface ItemSummary {
 
 export type TwoFactorChallenge = { token: string; providers: string[] };
 
+/** A security key / passkey registered for two-step login (not a passkey saved in a login). */
+export interface SecurityKey {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+export interface SecurityKeys {
+  keys: SecurityKey[];
+  /** Enabled two-step methods besides recovery codes (`totp`, `email`, `passkey`). */
+  methods: string[];
+}
+
 export type Request =
   | { type: "state" }
   | { type: "setServer"; url: string }
@@ -92,6 +106,10 @@ export type Request =
   | { type: "account:add" }
   | { type: "account:switch"; id: string }
   | { type: "account:cancelAdd" }
+  /** Two-step login security keys of the active account (`GET /account`). */
+  | { type: "securityKeys" }
+  /** Remove one, after the master password (fresh reauth token). */
+  | { type: "securityKeys:remove"; id: string; password: string }
   // inline autofill menu (extension frame) → background
   | { type: "inline:items"; nonce: string }
   | { type: "inline:fill"; nonce: string; id: string }

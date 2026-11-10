@@ -1,5 +1,8 @@
 package io.passauth.app.ui.settings
 
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.outlined.Delete
+import io.passauth.app.data.SecurityKeyInfo
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -135,7 +138,7 @@ internal fun AccountSecurityLinks(ctx: UiCtx) {
     NavRow(Icons.Outlined.Password, "Change master password", "Also turns the Secret Key on or off.") {
         ctx.go(Route.Settings("password"))
     }
-    NavRow(Icons.Outlined.PhonelinkLock, "Two-step login", "Authenticator app, email codes and recovery codes.") {
+    NavRow(Icons.Outlined.PhonelinkLock, "Two-step login", "Authenticator app, email codes, security keys and recovery codes.") {
         ctx.go(Route.Settings("two-step"))
     }
 }
@@ -494,6 +497,7 @@ fun TwoStepScreen(ctx: UiCtx) {
         }
         TotpCard(ctx, vm, status.totpOn)
         EmailCard(vm, status.emailOn, status.emailAvailable, status.email)
+        SecurityKeysCard(vm, status.securityKeys)
         Card("Recovery codes") {
             if (status.anyOn) {
                 val n = status.recoveryCodesLeft
@@ -522,6 +526,20 @@ fun TwoStepScreen(ctx: UiCtx) {
                     "This is your only two-step method. Turning it off also deletes your recovery codes, and signing in will need only your master password."
                 } else {
                     "You can turn it on again at any time."
+                },
+            )
+        }
+        SecurityDialog.RemoveKey -> {
+            val name = vm.removingKey?.name?.ifEmpty { null } ?: "this security key"
+            ConfirmPasswordDialog(
+                ctx, vm,
+                title = "Remove security key",
+                action = "Remove",
+                danger = true,
+                text = if (status?.isLastKey() == true) {
+                    "“$name” is your only two-step method. Removing it turns two-step login off and deletes your recovery codes."
+                } else {
+                    "You won't be able to use “$name” to sign in any more. You can add it again in the web vault."
                 },
             )
         }
@@ -610,6 +628,42 @@ private fun EmailCard(vm: SecurityViewModel, on: Boolean, available: Boolean, em
                 ErrorText(vm.emailError)
                 Button(onClick = vm::sendEmailCode, enabled = !vm.emailBusy && !vm.working) { Text(if (vm.emailBusy) "Sending…" else "Send setup code") }
             }
+        }
+    }
+}
+
+/** Security keys / passkeys for two-step login: added in the web vault, listed and removed here. */
+@Composable
+private fun SecurityKeysCard(vm: SecurityViewModel, keys: List<SecurityKeyInfo>) {
+    Card("Security keys", keys.isNotEmpty()) {
+        if (keys.isEmpty()) {
+            Text(
+                "Use a hardware security key or a passkey to confirm your sign-in. Add one in the web vault under Settings → Two-step login.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else {
+            val fmt = remember { java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM) }
+            fun day(s: Long) = fmt.format(java.util.Date(s * 1000))
+            keys.forEach { k ->
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Outlined.Key, null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.size(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(k.name.ifEmpty { "Security key" }, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Added ${day(k.createdAt)} · " + (k.lastUsedAt?.let { "last used ${day(it)}" } ?: "never used"),
+                            style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
+                        )
+                    }
+                    IconButton(onClick = { vm.openRemoveKey(k) }, enabled = !vm.working) {
+                        Icon(Icons.Outlined.Delete, "Remove security key ${k.name}", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+            Text(
+                "Add keys in the web vault. This app can't use a security key to sign in yet, so keep another method on if you sign in here.",
+                style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
+            )
         }
     }
 }

@@ -951,6 +951,17 @@ class VaultRepository(
         }
     }
 
+    /** Remove a two-step login security key after re-authentication. */
+    suspend fun removeSecurityKey(keyId: String, password: String, secretKey: String?) {
+        mutex.withLock {
+            val s = store.get()
+            val id = s.activeId
+            val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+            val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+            withContext(Dispatchers.Default) { security(id).removeSecurityKey(keyId, a.email, password, sk) }
+        }
+    }
+
     /** The active account's Secret Key kept on this device (for its Emergency Kit), if any. */
     suspend fun storedSecretKey(): String? = store.get().let { s -> s.active?.let { s.secretKeys[it.email.lowercase()] } }
 

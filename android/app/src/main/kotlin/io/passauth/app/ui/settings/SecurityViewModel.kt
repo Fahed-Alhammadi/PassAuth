@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.passauth.app.data.SecurityKeyInfo
 import io.passauth.app.data.MasterPasswordRules
 import io.passauth.app.data.SecretKeyChoice
 import io.passauth.app.data.SecurityStatus
@@ -20,7 +21,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
 /** Password-confirmed actions of these settings. */
-enum class SecurityDialog { SecretKeyToggle, DisableTotp, DisableEmail, Regenerate }
+enum class SecurityDialog { SecretKeyToggle, DisableTotp, DisableEmail, Regenerate, RemoveKey }
 
 /**
  * State of Settings → Change master password and Two-step login. A ViewModel, so a
@@ -232,6 +233,16 @@ class SecurityViewModel(private val repo: VaultRepository) : ViewModel() {
         dialog = d
     }
 
+    /** The security key the RemoveKey dialog is about. */
+    var removingKey by mutableStateOf<SecurityKeyInfo?>(null)
+        private set
+
+    fun openRemoveKey(k: SecurityKeyInfo) {
+        if (dialogBusy) return
+        removingKey = k
+        openDialog(SecurityDialog.RemoveKey)
+    }
+
     fun closeDialog() {
         if (!dialogBusy) dialog = null
     }
@@ -260,6 +271,13 @@ class SecurityViewModel(private val repo: VaultRepository) : ViewModel() {
                     }
                     SecurityDialog.Regenerate -> {
                         recovery = ShowOnce(repo.regenerateRecoveryCodes(password, secretKey))
+                        runCatching { status = repo.securityStatus() }
+                    }
+                    SecurityDialog.RemoveKey -> {
+                        val k = removingKey ?: return@launch
+                        repo.removeSecurityKey(k.id, password, secretKey)
+                        _notices.trySend("Security key removed.")
+                        removingKey = null
                         runCatching { status = repo.securityStatus() }
                     }
                 }

@@ -241,7 +241,7 @@ private struct SecurityPage: View {
             }
             .accessibilityIdentifier("settings.changePassword")
             NavigationLink { TwoStepPage() } label: {
-                PageRow(title: "Two-step login", help: "Authenticator app, email codes and recovery codes.", symbol: "lock.rotation")
+                PageRow(title: "Two-step login", help: "Authenticator app, email codes, security keys and recovery codes.", symbol: "lock.rotation")
             }
             .accessibilityIdentifier("settings.twoStep")
         } header: {

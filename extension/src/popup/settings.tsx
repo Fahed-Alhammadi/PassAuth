@@ -1,8 +1,8 @@
 /** Settings tab: a list of categories, each opening its own page. */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { LogoMark } from "@web/components/Logo";
-import { Icon, type IconName } from "@web/components/ui";
-import { send, type PopupState, type Settings, type VaultTimeout } from "../shared/messages";
+import { ErrorText, Icon, type IconName } from "@web/components/ui";
+import { send, type PopupState, type SecurityKey, type SecurityKeys, type Settings, type VaultTimeout } from "../shared/messages";
 import { msg, seconds, type Ctx } from "./ctx";
 import { Account, Page, PopOut } from "./shell";
 import { applyTheme } from "./theme";
@@ -114,6 +114,111 @@ function Toggle({ label, help, checked, onChange }: { label: string; help?: stri
   );
 }
 
+/**
+ * Two-step login security keys (registered in the web vault): list them and
+ * remove one after the master password. Adding a key needs the web vault.
+ */
+function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
+  const [data, setData] = useState<SecurityKeys | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<SecurityKey | null>(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () =>
+    send<SecurityKeys>({ type: "securityKeys" }).then(
+      (d) => (setData(d), setLoadError(null)),
+      (e) => setLoadError(msg(e)),
+    );
+  useEffect(() => void load(), []);
+
+  function cancel() {
+    setRemoving(null);
+    setPassword("");
+    setError(null);
+  }
+
+  async function remove(e: FormEvent) {
+    e.preventDefault();
+    if (!removing || busy) return;
+    if (!password) return setError("Enter your master password to continue.");
+    setBusy(true);
+    setError(null);
+    try {
+      setData(await send<SecurityKeys>({ type: "securityKeys:remove", id: removing.id, password }));
+      notify(`Security key "${removing.name}" removed.`);
+      cancel();
+    } catch (err) {
+      setError(msg(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Removing the last key when it's the only two-step method turns two-step login off (and deletes the recovery codes).
+  const lastMethod = !!data && data.keys.length === 1 && data.methods.every((m) => m === "passkey");
+
+  return (
+    <section className="stack-s" aria-labelledby="sk-title">
+      <h3 className="section-title" id="sk-title">
+        Security keys for two-step login
+      </h3>
+      {loadError ? (
+        <>
+          <ErrorText error={loadError} />
+          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={load}>
+            Try again
+          </button>
+        </>
+      ) : !data ? (
+        <p className="small muted">Loading…</p>
+      ) : data.keys.length === 0 ? (
+        <p className="small muted">No security keys. You can add one in the web vault under Settings → Two-step login.</p>
+      ) : (
+        data.keys.map((k) => (
+          <div key={k.id} className="row" style={{ alignItems: "center" }}>
+            <Icon name="key" />
+            <span className="grow" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+              {k.name}
+              <span className="muted small">
+                {" "}
+                · added {new Date(k.created_at * 1000).toLocaleDateString()}
+                {k.last_used_at ? ` · last used ${new Date(k.last_used_at * 1000).toLocaleDateString()}` : " · never used"}
+              </span>
+            </span>
+            <button type="button" className="btn btn-icon" aria-label={`Remove security key ${k.name}`} onClick={() => (setRemoving(k), setPassword(""), setError(null))} disabled={busy}>
+              <Icon name="trash" />
+            </button>
+          </div>
+        ))
+      )}
+      {removing && (
+        <form className="stack-s" onSubmit={remove}>
+          <div className={`alert ${lastMethod ? "alert-error" : "alert-warn"} small`}>
+            {lastMethod
+              ? `"${removing.name}" is your only two-step method. Removing it turns two-step login off and deletes your recovery codes.`
+              : `Remove "${removing.name}"? You can't use it to sign in any more.`}
+          </div>
+          <label className="field">
+            <span>Master password</span>
+            <input className="input" type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
+          </label>
+          <ErrorText error={error} />
+          <div className="row">
+            <button type="submit" className="btn btn-danger" disabled={busy}>
+              {busy ? "Removing…" : "Remove security key"}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={cancel} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 function formatTime(ms: number) {
   if (!ms) return "never";
   const d = new Date(ms);
@@ -190,6 +295,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
         <button className="btn" onClick={() => send({ type: "lock" }).then(ctx.reload)}>
           <Icon name="lock" /> Lock now
         </button>
+        <SecurityKeysSettings notify={notify} />
         </>
       ),
     },

@@ -181,8 +181,26 @@ struct EditView: View {
                 }
             }
             Button { item.login?.urls.append(LoginUrl()) } label: { Label("Add website", systemImage: "plus") }
-            if let n = item.login?.passkeys.count, n > 0 {
-                Text("\(n) passkey\(n > 1 ? "s" : "") saved. Passkeys are kept when you save.").font(.footnote).foregroundStyle(Color.paMuted)
+            ForEach(item.login?.passkeys ?? [], id: \.credentialId) { p in
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Passkey").font(.caption).foregroundStyle(Color.paMuted)
+                        Text(p.userName.isEmpty ? p.rpId : p.userName).foregroundStyle(Color.paInk)
+                        Text("\(p.rpId) · Created \(formatDate(p.createdAt))").font(.caption).foregroundStyle(Color.paMuted)
+                    }
+                    Spacer()
+                    Button(role: .destructive) { item.login?.passkeys.removeAll { $0.credentialId == p.credentialId } } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.borderless).foregroundStyle(Color.paDanger)
+                    .accessibilityLabel("Remove passkey for \(p.rpId)")
+                    .accessibilityIdentifier("edit.passkey.remove")
+                }
+            }
+            let removed = (original.login?.passkeys.count ?? 0) - (item.login?.passkeys.count ?? 0)
+            if removed > 0 {
+                Text("\(removed == 1 ? "1 passkey is" : "\(removed) passkeys are") deleted when you save. PassAuth can't sign in with \(removed == 1 ? "it" : "them") after that. The website may still list \(removed == 1 ? "it" : "them") in its security settings; remove \(removed == 1 ? "it" : "them") there too.")
+                    .font(.footnote).foregroundStyle(Color.paMuted)
             }
         }
         .paRow()

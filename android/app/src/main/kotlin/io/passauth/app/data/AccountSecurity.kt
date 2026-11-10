@@ -61,6 +61,9 @@ enum class SecretKeyChoice {
     }
 }
 
+/** A security key / passkey registered for two-step login (added in the web vault). */
+data class SecurityKeyInfo(val id: String, val name: String, val createdAt: Long, val lastUsedAt: Long?)
+
 /** GET /api/account, the parts these settings use. */
 data class SecurityStatus(
     val email: String,
@@ -69,6 +72,7 @@ data class SecurityStatus(
     /** The server can send email (email codes are possible). */
     val emailAvailable: Boolean,
     val secretKeyEnabled: Boolean,
+    val securityKeys: List<SecurityKeyInfo> = emptyList(),
 ) {
     val totpOn: Boolean get() = TwoFactor.TOTP in providers
     val emailOn: Boolean get() = TwoFactor.EMAIL in providers
@@ -76,6 +80,9 @@ data class SecurityStatus(
 
     /** Turning [provider] off leaves no method: recovery codes go too. */
     fun isLast(provider: String) = providers == listOf(provider)
+
+    /** Removing a key now turns two-step login off: it's the only key and no other method is on. */
+    fun isLastKey() = securityKeys.size == 1 && providers == listOf(TwoFactor.PASSKEY)
 }
 
 /** Authenticator setup from the server: the secret (base32) and its `otpauth://` URI. */
@@ -94,6 +101,7 @@ data class KeyChange(val bundleJson: String, val secretKeyEnabled: Boolean, val 
 object TwoFactor {
     const val TOTP = "totp"
     const val EMAIL = "email"
+    const val PASSKEY = "passkey"
 
     /** Codes as typed: spaces and dashes are dropped, like the web vault. */
     fun cleanCode(code: String) = code.filterNot { it.isWhitespace() || it == '-' }
@@ -238,6 +246,11 @@ class AccountSecurity(
             recoveryCodesLeft = o.long("recovery_codes_left").toInt(),
             emailAvailable = o.bool("email_enabled"),
             secretKeyEnabled = o.bool("secret_key_enabled"),
+            securityKeys = (o["passkeys"] as? JsonArray).orEmpty().mapNotNull { e ->
+                val k = e as? JsonObject ?: return@mapNotNull null
+                val id = k.str("id").ifEmpty { return@mapNotNull null }
+                SecurityKeyInfo(id, k.str("name"), k.long("created_at"), k.long("last_used_at").takeIf { it > 0 })
+            },
         )
     }
 
@@ -275,6 +288,12 @@ class AccountSecurity(
         require(provider == TwoFactor.TOTP || provider == TwoFactor.EMAIL)
         val token = reauth(email, password, secretKey)
         api.call("/account/2fa/$provider", null, "DELETE", true, mapOf(REAUTH_HEADER to token))
+    }
+
+    /** Remove a two-step login security key, after re-authentication. */
+    suspend fun removeSecurityKey(keyId: String, email: String, password: String, secretKey: String?) {
+        val token = reauth(email, password, secretKey)
+        api.call("/account/2fa/passkey/${java.net.URLEncoder.encode(keyId, "UTF-8").replace("+", "%20")}", null, "DELETE", true, mapOf(REAUTH_HEADER to token))
     }
 
     private fun recoveryCodes(r: JsonElement): List<String>? =

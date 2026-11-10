@@ -363,6 +363,19 @@ final class AccountSecurityLogicTests: XCTestCase {
         XCTAssertFalse(TwoFactorStatus().anyOn)
     }
 
+    func testSecurityKeysFromServer() throws {
+        let j = try JSON.parse(#"{"two_factor":["passkey","recovery"],"recovery_codes_left":10,"passkeys":[{"id":"k1","name":"YubiKey","created_at":1762000000,"last_used_at":null},{"id":"k2","name":"Laptop","created_at":1762000100,"last_used_at":1762100000}]}"#)
+        let s = TwoFactorStatus(json: j)
+        XCTAssertEqual(s.securityKeys.map(\.id), ["k1", "k2"])
+        XCTAssertNil(s.securityKeys[0].lastUsedAt)
+        XCTAssertEqual(s.securityKeys[1].lastUsedAt, 1762100000)
+        XCTAssertTrue(s.keysOn && s.anyOn)
+        XCTAssertFalse(s.isLastKey(), "two keys left")
+        XCTAssertTrue(TwoFactorStatus(providers: ["passkey"], securityKeys: [SecurityKeyInfo(id: "k1", name: "Key")]).isLastKey())
+        XCTAssertFalse(TwoFactorStatus(providers: ["passkey", "totp"], securityKeys: [SecurityKeyInfo(id: "k1", name: "Key")]).isLastKey())
+        XCTAssertTrue(TwoFactorStatus(json: try JSON.parse(#"{"two_factor":[]}"#)).securityKeys.isEmpty)
+    }
+
     func testErrorMessages() {
         XCTAssertEqual(securityErrorMessage(ApiError(status: 429, code: "rate_limited", message: "too many requests")), "Too many attempts, try again later.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "bad_request", message: "invalid code")), "That code isn't right. Check it and try again.")

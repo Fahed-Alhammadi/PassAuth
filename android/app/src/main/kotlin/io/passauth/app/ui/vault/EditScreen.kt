@@ -242,9 +242,24 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                         Spacer(Modifier.size(6.dp))
                         Text("Add website")
                     }
-                    if (l.passkeys.isNotEmpty()) {
+                    l.passkeys.forEach { p ->
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Passkey", style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
+                                Text(p.userName.ifEmpty { p.rpId }, style = MaterialTheme.typography.bodyLarge)
+                                Text("${p.rpId} \u00b7 Created ${formatDate(p.createdAt)}", style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+                            }
+                            IconButton(onClick = { login { it.copy(passkeys = it.passkeys.filter { x -> x.credentialId != p.credentialId }) } }) {
+                                Icon(Icons.Outlined.Delete, "Remove passkey for ${p.rpId}")
+                            }
+                        }
+                    }
+                    val removed = (entry?.item?.login?.passkeys?.size ?: 0) - l.passkeys.size
+                    if (removed > 0) {
+                        val it1 = if (removed == 1) "it" else "them"
                         Text(
-                            "${l.passkeys.size} passkey${if (l.passkeys.size > 1) "s" else ""} saved. Passkeys are kept when you save.",
+                            "${if (removed == 1) "1 passkey is" else "$removed passkeys are"} deleted when you save. PassAuth can't sign in with $it1 after that. " +
+                                "The website may still list $it1 in its security settings; remove $it1 there too.",
                             style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
                         )
                     }
