@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.6.4 (2026-11-10)
+
+- Admin 2FA reset, remove member with key change in one step, doc fixes (6b89ffa)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.6.3...server-0.6.4)
+
 ## 0.6.3 (2026-11-10)
 
 - Delete saved passkeys and two-step security keys in every app (095d97f)
