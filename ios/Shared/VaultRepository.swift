@@ -1148,12 +1148,12 @@ public final class VaultRepository {
         store.get().active?.bundle.flatMap { try? JSON.parse($0) }?["kdf"]?["memory_kib"]?.int
     }
 
-    /// Save a new passkey (AutoFill): on the same site and user name's login, or a new login.
-    /// Syncs first, so the vault isn't the offline copy and revisions are current.
-    public func storePasskey(_ p: Passkey) async throws {
+    /// Save a new passkey (AutoFill) in the login the user chose (`PasskeyLogic.saveTargets`),
+    /// or a new login. Syncs first, so the vault isn't the offline copy and revisions are current.
+    public func storePasskey(_ p: Passkey, target: String) async throws {
         try await sync()
         guard let v = vault else { throw UserError("Your vault is locked.") }
-        switch PasskeyLogic.storePlan(v, p) {
+        switch PasskeyLogic.storePlan(v, p, target: target) {
         case .attach(let e, let item): try await updateItem(e, item)
         case .create(let item): try await createItem(item, vaultId: nil)
         }

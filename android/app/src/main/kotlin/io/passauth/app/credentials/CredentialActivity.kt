@@ -20,13 +20,7 @@ import androidx.credentials.exceptions.publickeycredential.CreatePublicKeyCreden
 import androidx.credentials.exceptions.publickeycredential.GetPublicKeyCredentialDomException
 import androidx.credentials.provider.PendingIntentHandler
 import io.passauth.app.ServiceActivity
-import io.passauth.app.data.Entry
-import io.passauth.app.data.Item
-import io.passauth.app.data.Login
-import io.passauth.app.data.LoginUrl
 import io.passauth.app.data.Passkey
-import io.passauth.app.data.UrlMatch
-import io.passauth.app.data.UrlMatcher
 import io.passauth.app.data.VaultData
 import io.passauth.app.ui.deviceAuthAvailable
 import io.passauth.app.ui.errorMessage
@@ -120,12 +114,20 @@ class CredentialActivity : ServiceActivity() {
                 return@withVault failCreate(e)
             }
             val who = options.userName.ifEmpty { options.userDisplayName }
+            val host = PasskeyTargets.hostOf(checked.origin, checked.rpId)
+            val targets = PasskeyTargets.saveTargets(vault, host, checked.rpId, options.userName, options.userDisplayName)
+            val choices = targets.map {
+                ServiceActivity.Choice(it.id, it.item.name.ifEmpty { host }, it.item.login?.username.orEmpty().ifEmpty { "No user name" })
+            } + ServiceActivity.Choice(PasskeyTargets.NEW_LOGIN, "New login", host)
             confirm(
                 title = "Save a passkey?",
                 subtitle = checked.rpId,
                 body = "For $who on ${checked.rpId}" + (if (checked.app) " (requested by ${request.callingAppInfo.packageName})" else "") +
                     ". PassAuth keeps it in your vault (${graph.repo.state.value.email}).",
                 action = "Save passkey",
+                choicesLabel = "Save in",
+                choices = if (targets.isEmpty()) emptyList() else choices,
+                initialChoice = PasskeyTargets.defaultTarget(targets, host),
             ) {
                 if (!unlockedHere && deviceAuthAvailable(this)) {
                     if (!verifyUser("Save passkey", "$who · ${checked.rpId}")) return@confirm
@@ -137,7 +139,7 @@ class CredentialActivity : ServiceActivity() {
                 }
                 val np = withContext(Dispatchers.Default) { passkeyCreate(checked.rpId) }
                 val passkey = WebAuthn.passkeyRecord(options, checked.rpId, np.credentialId, np.privateKeyPkcs8, System.currentTimeMillis() / 1000)
-                storePasskey(current, passkey)
+                storePasskey(current, passkey, host, chosen ?: PasskeyTargets.NEW_LOGIN)
                 // With a clientDataHash (browsers) the browser uses its own clientDataJSON; ours is the
                 // placeholder the provider guide asks for, built from the checked origin.
                 val cdj = passkeyClientDataJson("webauthn.create", options.challenge, checked.origin)
@@ -149,26 +151,12 @@ class CredentialActivity : ServiceActivity() {
         }
     }
 
-    /** Attach to an existing login for the same site and username, or create one (the extension's `storePasskey`). */
-    private suspend fun storePasskey(vault: VaultData, p: Passkey) {
-        val site = UrlMatcher.baseDomain(p.rpId)
-        val existing: Entry? = vault.entries.firstOrNull { e ->
-            val l = e.item.login ?: return@firstOrNull false
-            vault.canWrite(e) && l.username.equals(p.userName, ignoreCase = true) &&
-                l.urls.any { u -> UrlMatcher.parse(u.url)?.takeIf { it.scheme == "http" || it.scheme == "https" }?.let { UrlMatcher.baseDomain(it.hostname) == site } == true }
+    /** Save in the login the user chose (still one they can edit for this site), or a new login. */
+    private suspend fun storePasskey(vault: VaultData, p: Passkey, host: String, target: String) {
+        when (val plan = PasskeyTargets.plan(vault, p, host, target)) {
+            is PasskeyTargets.Plan.Attach -> graph.repo.updateItem(plan.entry, plan.item)
+            is PasskeyTargets.Plan.Create -> graph.repo.createItem(plan.item, null)
         }
-        if (existing != null) {
-            val l = existing.item.login!!
-            graph.repo.updateItem(existing, existing.item.copy(login = l.copy(passkeys = l.passkeys + p)))
-            return
-        }
-        graph.repo.createItem(
-            Item(
-                name = p.rpName.ifEmpty { p.rpId },
-                login = Login(username = p.userName, password = "", urls = listOf(LoginUrl("https://${p.rpId}", UrlMatch.Default)), passkeys = listOf(p)),
-            ),
-            null,
-        )
     }
 
     // ------------------------------------------------------------------ get

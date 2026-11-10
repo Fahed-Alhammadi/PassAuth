@@ -23,6 +23,38 @@ final class AutofillTests: XCTestCase {
 
     // MARK: Service identifiers
 
+    func testPasskeySaveTargetsMatchTheSiteNotTheBaseDomain() {
+        let cloudy = entry("c", name: "Cloudy", user: "fahed", urls: [("https://cloudy.example.com", .default)])
+        let bazarr = entry("b", name: "Bazarr", user: "fahed", urls: [("https://bazarr.example.com", .default)])
+        let gh = entry("g", name: "GitHub", user: "fahed@example.com", urls: [("github.com", .default)])
+        let ghOther = entry("g2", name: "GitHub work", user: "other", urls: [("https://github.com/login", .default)])
+        let apex = entry("a", name: "Apex", user: "x", urls: [("https://example.com", .default)])
+        let v = vault([bazarr, cloudy, gh, ghOther, apex])
+
+        // Another subdomain of the same base domain is never offered.
+        let c = PasskeyLogic.saveTargets(v, rpId: "cloudy.example.com", userName: "fahed")
+        XCTAssertEqual(c.map(\.id), ["c"])
+        XCTAssertEqual(PasskeyLogic.defaultTarget(c, rpId: "cloudy.example.com"), "c")
+        // No login for this host: nothing to pick, a new login is preselected.
+        let n = PasskeyLogic.saveTargets(v, rpId: "new.example.com", userName: "fahed")
+        XCTAssertTrue(n.isEmpty)
+        XCTAssertEqual(PasskeyLogic.defaultTarget(n, rpId: "new.example.com"), PasskeyLogic.newLogin)
+        // RP ID = the base domain: its subdomains are offered, the exact host first.
+        let e = PasskeyLogic.saveTargets(v, rpId: "example.com", userName: "fahed")
+        XCTAssertEqual(e.first?.id, "a")
+        XCTAssertEqual(Set(e.map(\.id)), ["a", "b", "c"])
+        // GitHub sends the GitHub user name, the login has the email: still preselected (user part of the email).
+        let g = PasskeyLogic.saveTargets(v, rpId: "github.com", userName: "fahed")
+        XCTAssertEqual(g.map(\.id), ["g", "g2"])
+        XCTAssertEqual(PasskeyLogic.defaultTarget(g, rpId: "github.com"), "g")
+        // A stale choice for another site isn't used.
+        var p = Passkey()
+        p.rpId = "cloudy.example.com"
+        guard case .create = PasskeyLogic.storePlan(v, p, target: "b") else { return XCTFail("bazarr must not get cloudy's passkey") }
+        guard case .attach(let t, _) = PasskeyLogic.storePlan(v, p, target: "c") else { return XCTFail("expected cloudy") }
+        XCTAssertEqual(t.id, "c")
+    }
+
     func testPagesFromServiceIdentifiers() {
         XCTAssertEqual(AutofillMatcher.page("https://login.example.com/signin?x=1", isURL: true), "https://login.example.com/signin?x=1")
         XCTAssertEqual(AutofillMatcher.page("Example.COM.", isURL: false), "https://example.com/")
@@ -218,7 +250,7 @@ final class AutofillTests: XCTestCase {
 
         // New login for https://<rpId> (no login for this site and user yet).
         let empty = vault([entry("x", name: "Other", user: "alice@localhost", urls: [("https://example.com", .default)])])
-        guard case .create(let item) = PasskeyLogic.storePlan(empty, p) else { return XCTFail("expected a new login") }
+        guard case .create(let item) = PasskeyLogic.storePlan(empty, p, target: PasskeyLogic.newLogin) else { return XCTFail("expected a new login") }
         XCTAssertEqual(item.name, "localhost")
         XCTAssertEqual(item.login?.username, "alice@localhost")
         XCTAssertEqual(item.login?.password, "")
@@ -231,14 +263,15 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(stored?.str("rp_id"), "localhost")
         XCTAssertEqual(stored?.str("user_handle"), p.userHandle)
 
-        // Same site and user name: attached to that login; read-only vaults are skipped.
+        // The chosen login gets the passkey; read-only vaults and unknown ids give a new login.
         let existing = entry("e1", name: "Local", user: "Alice@Localhost", urls: [("http://localhost:8099", .default)])
-        guard case .attach(let e, let updated) = PasskeyLogic.storePlan(vault([existing]), p) else { return XCTFail("expected attach") }
+        guard case .attach(let e, let updated) = PasskeyLogic.storePlan(vault([existing]), p, target: "e1") else { return XCTFail("expected attach") }
         XCTAssertEqual(e.id, "e1")
         XCTAssertEqual(updated.login?.passkeys.count, 1)
         XCTAssertEqual(updated.login?.password, "pw")
+        guard case .create = PasskeyLogic.storePlan(vault([existing]), p, target: PasskeyLogic.newLogin) else { return XCTFail("New login chosen") }
         let readOnly = entry("e2", name: "Local", user: "alice@localhost", urls: [("http://localhost:8099", .default)], vault: "ro")
-        guard case .create = PasskeyLogic.storePlan(vault([readOnly]), p) else { return XCTFail("read-only vault must not be used") }
+        guard case .create = PasskeyLogic.storePlan(vault([readOnly]), p, target: "e2") else { return XCTFail("read-only vault must not be used") }
 
         // excludeCredentials and allowCredentials.
         XCTAssertTrue(PasskeyLogic.excludedExists([created.credentialId], rpId: "LOCALHOST", all: [p]))

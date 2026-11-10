@@ -1,2 +1,2 @@
-• Delete a saved passkey: edit a login, tap the trash button next to the passkey, then Save.
-• See and remove your security keys for two-step login under Settings → Account security → Two-step login (you add them in the web vault).
+• Choose where a new passkey is saved: PassAuth lists your logins for that exact site under "Save in", plus "New login". The matching login is picked for you, so no second login is created.
+• A passkey is never saved in a login for another site that only shares the main domain (e.g. cloudy.example.com vs bazarr.example.com).

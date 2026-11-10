@@ -8,6 +8,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -46,6 +56,9 @@ abstract class ServiceActivity : SecureActivity() {
             val body: String?,
             val action: String,
             val onConfirm: suspend () -> Unit,
+            /** Optional single choice shown above the buttons (e.g. "Save in"); the pick is in [chosen]. */
+            val choicesLabel: String? = null,
+            val choices: List<Choice> = emptyList(),
         ) : Screen
         data class Message(val title: String, val body: String, val openApp: Boolean) : Screen
     }
@@ -54,6 +67,11 @@ abstract class ServiceActivity : SecureActivity() {
     private var busy by mutableStateOf(false)
     private var error by mutableStateOf<String?>(null)
     private var onUnlocked: (suspend (VaultData) -> Unit)? = null
+
+    data class Choice(val id: String, val title: String, val detail: String)
+
+    /** The choice picked on the confirm screen. */
+    protected var chosen by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -101,6 +119,7 @@ abstract class ServiceActivity : SecureActivity() {
             }
             is Screen.Confirm -> AuthFrame(s.title, s.subtitle) {
                 s.body?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                if (s.choices.isNotEmpty()) Choices(s.choicesLabel, s.choices)
                 ErrorText(error)
                 Button(
                     onClick = {
@@ -125,6 +144,27 @@ abstract class ServiceActivity : SecureActivity() {
                 OutlinedButton(onClick = { cancel() }, enabled = !busy, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
             }
             is Screen.Message -> MessageScreen(s)
+        }
+    }
+
+    @Composable
+    private fun Choices(label: String?, choices: List<Choice>) {
+        Column(Modifier.fillMaxWidth().selectableGroup()) {
+            label?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            choices.forEach { c ->
+                Row(
+                    Modifier.fillMaxWidth()
+                        .selectable(selected = chosen == c.id, enabled = !busy, role = Role.RadioButton, onClick = { chosen = c.id })
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = chosen == c.id, onClick = null)
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(c.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(c.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
         }
     }
 
@@ -157,9 +197,19 @@ abstract class ServiceActivity : SecureActivity() {
     }
 
     /** Ask the user to confirm; [onConfirm] errors are shown on the screen. */
-    protected fun confirm(title: String, subtitle: String?, body: String?, action: String, onConfirm: suspend () -> Unit) {
+    protected fun confirm(
+        title: String,
+        subtitle: String?,
+        body: String?,
+        action: String,
+        choicesLabel: String? = null,
+        choices: List<Choice> = emptyList(),
+        initialChoice: String? = null,
+        onConfirm: suspend () -> Unit,
+    ) {
         error = null
-        screen = Screen.Confirm(title, subtitle, body, action, onConfirm)
+        chosen = initialChoice
+        screen = Screen.Confirm(title, subtitle, body, action, onConfirm, choicesLabel, choices)
     }
 
     /** Show a message with a Close button (the request fails when closed). */

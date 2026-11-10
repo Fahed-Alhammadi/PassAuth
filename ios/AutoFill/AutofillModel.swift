@@ -86,6 +86,9 @@ final class AutofillModel {
     private(set) var unlockedHere = false
     var busy = false
     var error: String?
+    /// Passkey registration: logins it can be saved in, and the chosen one (an entry id or `PasskeyLogic.newLogin`).
+    var passkeyTargets: [Entry] = []
+    var passkeyTarget = PasskeyLogic.newLogin
     /// Debug builds: memory measured around unlocking (for the extension memory limit).
     private(set) var memoryNote = ""
     @ObservationIgnored weak var context: ASCredentialProviderExtensionContext?
@@ -264,6 +267,10 @@ final class AutofillModel {
             screen = .configured
             Task { await repo.refreshIfStale() }
         case .registerPasskey:
+            if let r = registration, let v = repo.vault {
+                passkeyTargets = PasskeyLogic.saveTargets(v, rpId: r.rpId, userName: r.user)
+                passkeyTarget = PasskeyLogic.defaultTarget(passkeyTargets, rpId: r.rpId)
+            }
             screen = .confirmPasskey
         case .credential(let r):
             await provide(r)
@@ -428,7 +435,7 @@ final class AutofillModel {
             do {
                 let created = try await Task.detached { try passkeyCreate(rpId: rp) }.value
                 let p = PasskeyLogic.record(rpId: rp, userName: id.userName, userHandle: id.userHandle, created: created, now: Int64(Date().timeIntervalSince1970))
-                try await repo.storePasskey(p)
+                try await repo.storePasskey(p, target: passkeyTarget)
                 await repo.identities.flush()
                 let cred = ASPasskeyRegistrationCredential(relyingParty: rp, clientDataHash: r.clientDataHash, credentialID: created.credentialId, attestationObject: created.attestationObject)
                 complete { ctx in ctx.completeRegistrationRequest(using: cred, completionHandler: nil) }

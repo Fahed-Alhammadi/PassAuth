@@ -409,6 +409,17 @@ struct MacPasskey: View {
         MacFrame(title: "Save a passkey?", subtitle: r?.rpId) {
             Text("For \(r?.user ?? "") on \(r?.rpId ?? ""). PassAuth keeps it in your vault (\(model.state.email)).")
                 .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: .infinity)
+            if !model.passkeyTargets.isEmpty {
+                Picker("Save in", selection: $model.passkeyTarget) {
+                    ForEach(model.passkeyTargets, id: \.id) { e in
+                        let user = e.item.login?.username ?? ""
+                        Text(user.isEmpty ? e.item.name : "\(e.item.name) · \(user)").tag(e.id)
+                    }
+                    Text("New login").tag(PasskeyLogic.newLogin)
+                }
+                .pickerStyle(.radioGroup)
+                .accessibilityIdentifier("saveIn")
+            }
             ErrorText(text: model.error)
             MacPrimaryButton(title: model.busy ? "Saving…" : "Save passkey", busy: model.busy, action: model.savePasskey)
                 .accessibilityIdentifier("savePasskey")

@@ -56,24 +56,58 @@ public enum PasskeyLogic {
     }
 
     public enum StorePlan: Sendable {
-        /// Add the passkey to this login (same site and user name).
+        /// Add the passkey to this login (the one the user chose).
         case attach(Entry, Item)
         /// A new login for `https://<rpId>`.
         case create(Item)
     }
 
-    /// Where a new passkey goes (the extension's `storePasskey`): the writable login for the same
-    /// site (base domain of the RP ID) and user name, else a new login for `https://<rpId>`.
-    public static func storePlan(_ vault: VaultData, _ p: Passkey) -> StorePlan {
-        let site = UrlMatcher.baseDomain(p.rpId)
-        let existing = vault.entries.first { e in
-            guard let l = e.item.login, vault.canWrite(e), l.username.lowercased() == p.userName.lowercased() else { return false }
-            return l.urls.contains { u in
-                guard let parsed = UrlMatcher.parse(u.url), parsed.scheme == "http" || parsed.scheme == "https" else { return false }
-                return UrlMatcher.baseDomain(parsed.hostname) == site
-            }
+    /// Save target meaning "create a new login" (never an item id: those are UUIDs).
+    public static let newLogin = "new"
+
+    /// Hostnames of a login's http(s) URLs, lowercase, without a trailing dot.
+    static func loginHosts(_ e: Entry) -> [String] {
+        (e.item.login?.urls ?? []).compactMap { u in
+            guard let p = UrlMatcher.parse(u.url), p.scheme == "http" || p.scheme == "https" else { return nil }
+            return p.hostname.hasSuffix(".") ? String(p.hostname.dropLast()) : p.hostname
         }
-        if let e = existing, var l = e.item.login {
+    }
+
+    /// Whether a login is for exactly this RP ID's host (preselected in "Save in").
+    public static func isExactSite(_ e: Entry, rpId: String) -> Bool {
+        loginHosts(e).contains(rpId.lowercased())
+    }
+
+    /// Logins a new passkey can be saved in (the extension's `saveTargets`): ones you can edit
+    /// whose website is the RP ID or a subdomain of it (where the passkey also works). Never just
+    /// "the same base domain": cloudy.example.com and bazarr.example.com are different sites.
+    /// Best first: the RP ID's exact host, then a matching user name, then by name.
+    public static func saveTargets(_ vault: VaultData, rpId: String, userName: String) -> [Entry] {
+        let rp = rpId.lowercased()
+        let name = userName.trimmingCharacters(in: .whitespaces).lowercased()
+        func score(_ e: Entry) -> Int {
+            let user = (e.item.login?.username ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            let userMatch = !user.isEmpty && !name.isEmpty && (name == user || name == user.split(separator: "@").first.map(String.init))
+            return (isExactSite(e, rpId: rp) ? 2 : 0) + (userMatch ? 1 : 0)
+        }
+        return vault.entries
+            .filter { $0.item.login != nil && vault.canWrite($0) }
+            .filter { loginHosts($0).contains { $0 == rp || $0.hasSuffix(".\(rp)") } }
+            .sorted { a, b in
+                let (sa, sb) = (score(a), score(b))
+                return sa != sb ? sa > sb : a.item.name.localizedCaseInsensitiveCompare(b.item.name) == .orderedAscending
+            }
+    }
+
+    /// The preselected save target: the best login for the RP ID's exact host, else a new login.
+    public static func defaultTarget(_ targets: [Entry], rpId: String) -> String {
+        targets.first { isExactSite($0, rpId: rpId) }?.id ?? newLogin
+    }
+
+    /// Where a new passkey goes: the login the user chose (still one they can edit for this
+    /// site), else a new login for `https://<rpId>`.
+    public static func storePlan(_ vault: VaultData, _ p: Passkey, target: String) -> StorePlan {
+        if target != newLogin, let e = saveTargets(vault, rpId: p.rpId, userName: "").first(where: { $0.id == target }), var l = e.item.login {
             var item = e.item
             l.passkeys.append(p)
             item.login = l

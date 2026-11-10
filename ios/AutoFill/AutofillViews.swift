@@ -236,10 +236,50 @@ private struct PasskeyScreen: View {
         AuthFrame(title: "Save a passkey?", subtitle: r?.rpId) {
             Text("For \(r?.user ?? "") on \(r?.rpId ?? ""). PassAuth keeps it in your vault (\(model.state.email)).")
                 .font(.subheadline).foregroundStyle(Color.paMuted).multilineTextAlignment(.center)
+            if !model.passkeyTargets.isEmpty {
+                SaveInList(model: model)
+            }
             ErrorText(text: model.error)
             PrimaryButton(title: model.busy ? "Saving…" : "Save passkey", busy: model.busy, action: model.savePasskey)
                 .accessibilityIdentifier("savePasskey")
         }
+    }
+}
+
+/// "Save in": the logins for this site the passkey can be added to, or a new login.
+private struct SaveInList: View {
+    @Bindable var model: AutofillModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Save in").font(.footnote.weight(.semibold)).foregroundStyle(Color.paMuted)
+                .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+            ForEach(model.passkeyTargets, id: \.id) { e in
+                row(id: e.id, title: e.item.name.isEmpty ? (model.registration?.rpId ?? "") : e.item.name,
+                    detail: (e.item.login?.username ?? "").isEmpty ? "No user name" : e.item.login?.username ?? "")
+                Divider().padding(.leading, 14)
+            }
+            row(id: PasskeyLogic.newLogin, title: "New login", detail: model.registration?.rpId ?? "")
+        }
+        .background(Color.paSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func row(id: String, title: String, detail: String) -> some View {
+        Button { model.passkeyTarget = id } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(Color.primary).lineLimit(1)
+                    Text(detail).font(.footnote).foregroundStyle(Color.paMuted).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if model.passkeyTarget == id { Image(systemName: "checkmark").foregroundStyle(Color.paAccent) }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(model.passkeyTarget == id ? .isSelected : [])
+        .accessibilityIdentifier(id == PasskeyLogic.newLogin ? "saveInNew" : "saveIn-\(id)")
     }
 }
 
