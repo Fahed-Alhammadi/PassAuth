@@ -32,7 +32,13 @@ export function VerifyEmailPage() {
         </div>
         {state !== "working" && (
           <div className="auth-panel stack">
-            {state === "ok" ? <p>Your email address is confirmed. You can sign in now.</p> : <div className="alert alert-error">{state}</div>}
+            {state === "ok" ? (
+              <p className="card-text">Your email address is confirmed. You can sign in now.</p>
+            ) : (
+              <div className="alert alert-error" role="alert">
+                {state}
+              </div>
+            )}
             <Link className="btn btn-accent btn-block" to="/login">
               Go to sign in
             </Link>

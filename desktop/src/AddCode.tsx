@@ -5,7 +5,7 @@
  */
 import { useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { Icon, Modal, SiteIcon, toast } from "@web/components/ui";
+import { ConfirmDialog, Icon, Modal, SheetActions, SiteIcon, toast } from "@web/components/ui";
 import { clearDraft, hasUnsavedEdit, openDraft } from "@web/lib/drafts";
 import { useShowIcons } from "@web/lib/prefs";
 import { siteHost, type VaultEntry } from "@web/lib/types";
@@ -145,59 +145,62 @@ function AddCodeDialog({ otp }: { otp: OtpKey }) {
 
   if (replacing) {
     return (
-      <Modal key="discard" title="Discard your changes?" onClose={() => setReplacing(null)}>
-        <p className="card-text">The item you're editing has changes you haven't saved. Adding the verification code opens another editor and discards them.</p>
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn" onClick={() => setReplacing(null)} data-autofocus="">
-            Go back
-          </button>
-          <button type="button" className="btn btn-primary" onClick={() => choose(replacing.entry, true)}>
-            Discard changes
-          </button>
-        </div>
-      </Modal>
+      <ConfirmDialog
+        key="discard"
+        title="Discard your changes?"
+        subtitle="The item you're editing has unsaved changes"
+        icon="edit"
+        action="Discard changes"
+        cancel="Go back"
+        onClose={() => setReplacing(null)}
+        onConfirm={() => choose(replacing.entry, true)}
+      >
+        <p className="card-text">Adding the verification code opens another editor and discards them.</p>
+      </ConfirmDialog>
     );
   }
 
   return (
-    <Modal key="pick" title="Add verification code" onClose={done}>
-      <p className="card-text">{label ? `Choose the login for ${label}.` : "Choose the login this verification code belongs to."}</p>
+    <Modal key="pick" title="Add verification code" subtitle={label ? `For ${label}` : "Choose the login it belongs to"} icon="shield" onClose={done}>
       <div className="input-group">
-        <span className="row" style={{ paddingLeft: 10, color: "var(--ink-3)" }}>
+        <span className="input-lead">
           <Icon name="search" />
         </span>
         <input className="input" type="search" placeholder="Search logins" aria-label="Search logins" value={query} onChange={(e) => setQuery(e.target.value)} />
       </div>
-      <button type="button" className="btn" style={{ justifyContent: "flex-start" }} onClick={() => choose(null)}>
-        <Icon name="plus" /> New login
-      </button>
-      <div className="list add-code-list" role="list" aria-label="Logins">
-        {logins.length === 0 ? (
-          <p className="empty">{query ? `No logins match "${query}".` : "No logins yet."}</p>
-        ) : (
-          logins.map((e) => (
-            <div role="listitem" key={e.id}>
-              <button type="button" className="list-item" onClick={() => choose(e)}>
-                <SiteIcon host={siteHost(e.item)} name={e.item.name} enabled={showIcons} />
-                <span className="grow">
-                  <span className="title" style={{ display: "block" }}>
-                    {e.item.name || "Untitled"}
-                  </span>
-                  <span className="sub" style={{ display: "block" }}>
-                    {e.item.login?.username || siteHost(e.item)}
-                  </span>
-                </span>
-                {e.item.login?.totp && <span className="muted small">Has a code</span>}
-              </button>
-            </div>
-          ))
-        )}
+      <div className="choices choices-scroll add-code-list" role="list" aria-label="Logins">
+        <div role="listitem">
+          <button type="button" className="choice" onClick={() => choose(null)}>
+            <span className="tile" aria-hidden="true">
+              <Icon name="plus" />
+            </span>
+            <span className="choice-text">
+              <span className="choice-title">New login</span>
+              <span className="choice-sub">{label ? `Create a login for ${label}` : "Create a login for this code"}</span>
+            </span>
+          </button>
+        </div>
+        {logins.map((e) => (
+          <div role="listitem" key={e.id}>
+            <button type="button" className="choice" onClick={() => choose(e)}>
+              <SiteIcon host={siteHost(e.item)} name={e.item.name} enabled={showIcons} />
+              <span className="choice-text">
+                <span className="choice-title">{e.item.name || "Untitled"}</span>
+                <span className="choice-sub">{e.item.login?.username || siteHost(e.item)}</span>
+              </span>
+              {e.item.login?.totp && <span className="choice-trail">Has a code</span>}
+            </button>
+          </div>
+        ))}
       </div>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn" onClick={done}>
-          Cancel
-        </button>
-      </div>
+      {logins.length === 0 && <p className="small muted">{query ? `No logins match "${query}".` : "You have no logins yet."}</p>}
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={done}>
+            Cancel
+          </button>
+        }
+      />
     </Modal>
   );
 }

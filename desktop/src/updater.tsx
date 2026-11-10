@@ -6,7 +6,7 @@ import { useState, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { Modal } from "@web/components/ui";
+import { Modal, SheetActions } from "@web/components/ui";
 
 const LAST_CHECK_KEY = "desktop.updateCheckedAt";
 const AUTO_CHECK_DELAY_MS = 10_000;
@@ -113,34 +113,37 @@ export function UpdateDialog() {
             : "Update check failed";
   const pct = p.kind === "downloading" && p.total ? Math.min(100, Math.round((p.downloaded / p.total) * 100)) : null;
   return (
-    <Modal title={title} onClose={close}>
-      {p.kind === "checking" && <p className="card-text muted">Looking for a newer version.</p>}
+    <Modal title={title} subtitle={p.kind === "available" || p.kind === "downloading" ? "App update" : undefined} icon={p.kind === "error" ? "info" : "download"} closable={p.kind !== "downloading"} onClose={close}>
+      {p.kind === "checking" && <p className="card-text">Looking for a newer version.</p>}
       {p.kind === "current" && (
         <>
-          <p className="card-text muted">PassAuth checks again once a day.</p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button type="button" className="btn btn-primary" onClick={close} data-autofocus="">
+          <p className="card-text">PassAuth checks again once a day.</p>
+          <SheetActions>
+            <button type="button" className="btn btn-primary btn-block" onClick={close} data-autofocus="">
               Done
             </button>
-          </div>
+          </SheetActions>
         </>
       )}
       {p.kind === "available" && (
         <>
           <p className="card-text">PassAuth closes and reopens when it's done.</p>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button type="button" className="btn" onClick={close}>
-              Not now
-            </button>
-            <button type="button" className="btn btn-primary" onClick={() => void installUpdate()} data-autofocus="">
+          <SheetActions
+            quiet={
+              <button type="button" className="btn btn-text" onClick={close}>
+                Not now
+              </button>
+            }
+          >
+            <button type="button" className="btn btn-primary btn-block" onClick={() => void installUpdate()} data-autofocus="">
               Install and restart
             </button>
-          </div>
+          </SheetActions>
         </>
       )}
       {p.kind === "downloading" && (
         <>
-          <p className="card-text muted">PassAuth closes and reopens when it's done.</p>
+          <p className="card-text">PassAuth closes and reopens when it's done.</p>
           <progress className="update-bar" value={pct ?? undefined} max={100} aria-label="Download progress" />
           <p className="small muted">{pct === null ? "Downloading…" : `${pct}%`}</p>
         </>
@@ -152,11 +155,11 @@ export function UpdateDialog() {
             <summary className="small muted">Details</summary>
             <pre className="small">{p.detail}</pre>
           </details>
-          <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button type="button" className="btn btn-primary" onClick={close} data-autofocus="">
+          <SheetActions>
+            <button type="button" className="btn btn-primary btn-block" onClick={close} data-autofocus="">
               Close
             </button>
-          </div>
+          </SheetActions>
         </>
       )}
     </Modal>

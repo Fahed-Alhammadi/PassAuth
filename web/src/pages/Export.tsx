@@ -62,43 +62,47 @@ export function ExportPage() {
         </header>
 
         <form className="card stack" onSubmit={submit}>
-          <fieldset className="stack-s" style={{ border: 0, padding: 0, margin: 0 }}>
-            <legend className="section-title">File format</legend>
-            {FORMATS.map((f) => (
-              <label key={f.value} className="check">
-                <input type="radio" name="format" checked={format === f.value} onChange={() => setFormat(f.value)} />
-                <span>
-                  {f.title}
-                  <span className="small muted block">{f.text}</span>
-                </span>
-              </label>
-            ))}
+          <fieldset className="choice-group">
+            <legend className="field-label">File format</legend>
+            <div className="choices choices-plain">
+              {FORMATS.map((f) => (
+                <label key={f.value} className="choice">
+                  <span className="choice-text">
+                    <span className="choice-title">{f.title}</span>
+                    <span className="choice-sub">{f.text}</span>
+                  </span>
+                  <input type="radio" name="format" checked={format === f.value} onChange={() => setFormat(f.value)} />
+                </label>
+              ))}
+            </div>
           </fieldset>
 
           {format === "encrypted" ? (
-            <div className="row" style={{ flexWrap: "wrap", alignItems: "flex-start" }}>
-              <div className="grow" style={{ minWidth: 200 }}>
-                <PasswordField label="Export password" value={exportPassword} onChange={setExportPassword} autoComplete="new-password" />
-              </div>
-              <div className="grow" style={{ minWidth: 200 }}>
-                <PasswordField label="Confirm export password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
-              </div>
+            <div className="field-pair">
+              <PasswordField label="Export password" value={exportPassword} onChange={setExportPassword} autoComplete="new-password" />
+              <PasswordField label="Confirm export password" value={confirm} onChange={setConfirm} autoComplete="new-password" />
             </div>
           ) : (
-            <div className="alert alert-error" role="note">
+            <div className="alert alert-warn" role="note">
               This file isn't encrypted. Anyone who gets it can read your passwords. Keep it somewhere safe and delete it when you no longer need it.
             </div>
           )}
 
-          <PasswordField label="Master password" value={master} onChange={setMaster} autoComplete="current-password" />
+          <PasswordField
+            label="Master password"
+            value={master}
+            onChange={setMaster}
+            autoComplete="current-password"
+            hint={<span className="field-hint">Confirms that it's you exporting the vault.</span>}
+          />
 
           <ErrorText error={error} />
-          <div className="row">
+          <div className="card-actions">
             <button className="btn btn-primary" disabled={busy || !master || live.length === 0}>
               <Icon name="download" /> {busy ? "Exporting…" : `Export ${live.length} ${live.length === 1 ? "item" : "items"}`}
             </button>
+            <span className="small muted">{live.length === 0 ? "There is nothing to export yet." : "Items in the trash aren't exported."}</span>
           </div>
-          <p className="small muted">Items in the trash aren't exported.</p>
         </form>
       </div>
     </div>

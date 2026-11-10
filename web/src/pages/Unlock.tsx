@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { clientName } from "../lib/platform";
 import { LogoMark } from "../components/Logo";
-import { ErrorText, PasswordField } from "../components/ui";
+import { ErrorText, PasswordField, SheetActions } from "../components/ui";
 import { friendlyError } from "../lib/api";
 import { getBundle, logout, rememberedSecretKey, unlock, useVault } from "../lib/vault";
 
@@ -44,7 +44,7 @@ export function UnlockPage() {
           <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus />
           {askKey && (
             <label className="field">
-              <span>Secret Key{stored ? ` (leave empty to use the one saved in ${clientName()})` : ""}</span>
+              <span>Secret Key</span>
               <input
                 className="input mono"
                 value={secretKey}
@@ -55,15 +55,21 @@ export function UnlockPage() {
                 autoCapitalize="characters"
                 required={!stored}
               />
+              {stored && <span className="field-hint">Leave empty to use the one saved in {clientName()}.</span>}
             </label>
           )}
           <ErrorText error={error} />
-          <button className="btn btn-accent btn-block" disabled={busy || !password}>
-            {busy ? "Unlocking…" : "Unlock"}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={logout}>
-            Sign out
-          </button>
+          <SheetActions
+            quiet={
+              <button type="button" className="btn btn-text" onClick={logout}>
+                Sign out
+              </button>
+            }
+          >
+            <button className="btn btn-accent btn-block" disabled={busy || !password}>
+              {busy ? "Unlocking…" : "Unlock"}
+            </button>
+          </SheetActions>
         </form>
       </div>
     </main>

@@ -1,47 +1,50 @@
-/* Settings page: section tabs and a few layout helpers. Tokens come from app.css. */
+/* Settings page: section tabs, cards and rows. Tokens come from app.css. */
 
-.settings-head { display: flex; flex-direction: column; gap: 16px; }
+.settings-head { display: flex; flex-direction: column; gap: var(--space-4); }
 
 .settings-tabs {
-  display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line);
+  display: flex; gap: var(--space-1); overflow-x: auto; border-bottom: 1px solid var(--line);
   scrollbar-width: none;
 }
 .settings-tabs::-webkit-scrollbar { display: none; }
 .settings-tabs a {
-  padding: 8px 12px; margin-bottom: -1px; white-space: nowrap; text-decoration: none;
+  padding: var(--space-2) var(--space-3); margin-bottom: -1px; white-space: nowrap; text-decoration: none;
   color: var(--ink-2); font-weight: 500; border-bottom: 2px solid transparent;
   border-radius: var(--radius-s) var(--radius-s) 0 0;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 .settings-tabs a:hover { color: var(--ink); background: var(--surface-2); }
-.settings-tabs a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+.settings-tabs a:focus-visible { outline-offset: -2px; }
+/* Current section: ink, weight and the underline. */
+.settings-tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
 
-.settings-section { display: flex; flex-direction: column; gap: 20px; }
-.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.card-head h2 { font-size: 1.05rem; }
-.card-text { color: var(--ink-2); font-size: 0.92rem; }
-
-.inline-form { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
-.inline-form .field { flex: 1; min-width: 200px; }
-
+.settings-section { display: flex; flex-direction: column; gap: var(--space-5); }
+.settings-intro { margin-bottom: calc(-1 * var(--space-2)); }
 .fingerprint {
-  font-family: var(--mono); font-variant-ligatures: none; font-size: 1.05rem; letter-spacing: 0.04em;
-  padding: 12px 14px; border-radius: var(--radius-s); background: var(--surface-2); word-break: break-all;
+  font-family: var(--mono); font-variant-ligatures: none; font-size: var(--text-title); letter-spacing: 0.02em;
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-s); background: var(--surface-2); word-break: break-all;
 }
-.fingerprint-s { font-family: var(--mono); font-variant-ligatures: none; font-size: 0.8rem; color: var(--ink-3); word-break: break-all; }
+.fingerprint-s { display: block; font-family: var(--mono); font-variant-ligatures: none; font-size: var(--text-caption); color: var(--ink-3); word-break: break-all; }
 
 .danger-zone { border-color: var(--danger); }
 .danger-zone h2 { color: var(--danger); }
 
-.totp-setup { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
-.totp-setup > .stack-s { flex: 1; min-width: 220px; }
+.totp-setup { display: flex; gap: var(--space-5); align-items: flex-start; flex-wrap: wrap; }
+.totp-setup > .stack-s, .totp-setup > .steps { flex: 1; min-width: 220px; }
+.totp-setup .qr { border: 1px solid var(--line); }
 .totp-setup .qr img { display: block; width: 200px; height: 200px; }
-.code-input { max-width: 180px; letter-spacing: 0.12em; }
+.steps { margin: 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: var(--space-4); }
+.steps > li { padding-left: var(--space-1); }
+.steps > li::marker { font-weight: 600; }
+.steps > li > * + * { margin-top: var(--space-1); }
+.code-input { max-width: 180px; font-size: var(--text-title); letter-spacing: 0.08em; }
 
 .table-wrap { overflow-x: auto; }
 .table .actions { text-align: right; white-space: nowrap; }
 
-.vault-manage { border-top: 1px solid var(--line); padding-top: 16px; display: flex; flex-direction: column; gap: 18px; }
-.person { padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface-2); display: flex; flex-direction: column; gap: 10px; }
+.vault-manage { border-top: 1px solid var(--line); padding-top: var(--space-4); display: flex; flex-direction: column; gap: var(--space-5); }
+.vault-manage > .setting { padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.person { padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-m); display: flex; flex-direction: column; gap: var(--space-3); }
 
-.recovery-codes { padding: 14px; border-radius: var(--radius-m); background: var(--surface-2); }
-.settings-section .field > label, .modal .field > label { font-size: 0.85rem; font-weight: 500; color: var(--ink-2); }
+.recovery-codes { padding: var(--space-3) var(--space-4); border-radius: var(--radius-s); background: var(--surface-2); }
+.settings-section .field > label, .modal .field > label { font-size: var(--text-caption); font-weight: 500; color: var(--ink-2); }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
 import { LogoMark } from "./components/Logo";
-import { ToastHost } from "./components/ui";
+import { SheetActions, ToastHost } from "./components/ui";
 import { getDesktop } from "./lib/platform";
 import { server } from "./lib/server";
 import { boot, lock, logout, useVault } from "./lib/vault";
@@ -51,21 +51,26 @@ function Unreachable() {
           </p>
         </div>
         <div className="auth-panel stack">
-          <button
-            type="button"
-            className="btn btn-accent btn-block"
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              await boot();
-              setBusy(false);
-            }}
+          <SheetActions
+            quiet={
+              <button type="button" className="btn btn-text" onClick={logout}>
+                Sign out
+              </button>
+            }
           >
-            {busy ? "Trying again…" : "Try again"}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={logout}>
-            Sign out
-          </button>
+            <button
+              type="button"
+              className="btn btn-accent btn-block"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                await boot();
+                setBusy(false);
+              }}
+            >
+              {busy ? "Trying again…" : "Try again"}
+            </button>
+          </SheetActions>
         </div>
       </div>
     </main>

@@ -217,6 +217,7 @@ export function friendlyError(e: unknown): string {
     case "Wrong master password or Secret Key.":
       return "That master password is wrong. Check it and try again.";
     case "invalid code":
+    case "invalid two-factor code":
       return "That code didn't work. Enter the code that's showing now and try again.";
     case "start setup first":
       return "The setup expired. Cancel and start setup again.";

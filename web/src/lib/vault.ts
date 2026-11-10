@@ -167,6 +167,28 @@ export async function boot() {
   }
 }
 
+/**
+ * The server announces a sign-out to every connection of the account, including the one that just changed
+ * the master password or Secret Key and keeps its session. Ask the server: a session that is gone answers
+ * 401, which signs this client out; anything but a clear "still signed in" within 10 s does the same.
+ */
+function confirmSignedOut() {
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (!settled) resetToLoggedOut();
+    settled = true;
+  }, 10_000);
+  api("/account/sessions")
+    .then(() => {
+      settled = true;
+    })
+    .catch(() => {
+      if (!settled) resetToLoggedOut();
+      settled = true;
+    })
+    .finally(() => clearTimeout(timer));
+}
+
 function resetToLoggedOut() {
   dropKeys();
   setTokens(null);
@@ -506,7 +528,7 @@ function connectSocket() {
       return;
     }
     if (msg.type === "sync" && (msg.revision ?? 0) > state.revision) sync().catch(() => {});
-    if (msg.type === "logout") resetToLoggedOut();
+    if (msg.type === "logout") confirmSignedOut();
   };
   ws.onclose = () => {
     if (socket !== ws || state.status !== "unlocked") return;

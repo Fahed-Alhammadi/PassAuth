@@ -125,7 +125,7 @@ export function GeneratorPage() {
             </span>
           </div>
           <ErrorText error={error} />
-          <div className="row">
+          <div className="card-actions">
             <button type="button" className="btn btn-accent" disabled={!value} onClick={() => copySecret(value, `${noun} copied`)}>
               <Icon name="copy" /> Copy {mode}
             </button>
@@ -137,7 +137,7 @@ export function GeneratorPage() {
 
         {mode === "password" ? (
           <section className="card" aria-labelledby="pw-opts">
-            <h2 id="pw-opts" className="section-title">
+            <h2 id="pw-opts">
               Password options
             </h2>
             <div className="field">
@@ -154,7 +154,7 @@ export function GeneratorPage() {
                   onChange={(e) => setPw({ ...pw, length: Number(e.target.value) })}
                 />
                 <input
-                  className="input mono"
+                  className="input"
                   type="number"
                   min={8}
                   max={128}
@@ -188,7 +188,7 @@ export function GeneratorPage() {
           </section>
         ) : (
           <section className="card" aria-labelledby="pp-opts">
-            <h2 id="pp-opts" className="section-title">
+            <h2 id="pp-opts">
               Passphrase options
             </h2>
             <div className="field">
@@ -198,7 +198,7 @@ export function GeneratorPage() {
               <div className="range-row">
                 <input id="gen-words" type="range" min={3} max={20} value={pp.words} onChange={(e) => setPp({ ...pp, words: Number(e.target.value) })} />
                 <input
-                  className="input mono"
+                  className="input"
                   type="number"
                   min={3}
                   max={20}
@@ -211,7 +211,7 @@ export function GeneratorPage() {
                 />
               </div>
             </div>
-            <label className="field" style={{ maxWidth: 260 }}>
+            <label className="field field-narrow">
               <span>Separator</span>
               <select className="select" value={pp.separator} onChange={(e) => setPp({ ...pp, separator: e.target.value })}>
                 {SEPARATORS.map((s) => (

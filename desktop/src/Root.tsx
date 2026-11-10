@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { App } from "@web/App";
 import { LogoMark } from "@web/components/Logo";
-import { Modal } from "@web/components/ui";
+import { Modal, SheetActions } from "@web/components/ui";
 import { SESSION_KEY } from "@web/lib/api";
 import { loadSecrets, secretStore } from "@web/lib/platform";
 import { EMAIL_KEY, boot, rememberKey, secretKeyKey, useVault } from "@web/lib/vault";
@@ -148,16 +148,19 @@ function ChangeServerDialog() {
   }, []);
   if (!open) return null;
   return (
-    <Modal title="Change server?" onClose={() => askChangeServer?.(false)}>
+    <Modal title="Change server?" subtitle={savedServer() ? new URL(savedServer()!).host : undefined} icon="globe" onClose={() => askChangeServer?.(false)}>
       <p className="card-text">You'll be signed out. Your vault stays on the server; sign in again to open it.</p>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn" onClick={() => askChangeServer?.(false)} data-autofocus="">
-          Cancel
-        </button>
-        <button type="button" className="btn btn-primary" onClick={() => askChangeServer?.(true)}>
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={() => askChangeServer?.(false)} data-autofocus="">
+            Cancel
+          </button>
+        }
+      >
+        <button type="button" className="btn btn-primary btn-block" onClick={() => askChangeServer?.(true)}>
           Change server
         </button>
-      </div>
+      </SheetActions>
     </Modal>
   );
 }

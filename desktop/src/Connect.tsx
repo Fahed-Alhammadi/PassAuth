@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { LogoMark } from "@web/components/Logo";
-import { ErrorText } from "@web/components/ui";
+import { ErrorText, SheetActions } from "@web/components/ui";
 import { ConnectError, parseServer, probeServer } from "./server";
 
 const WEBSITE = "https://fahed-alhammadi.github.io/PassAuth/";
@@ -52,15 +52,17 @@ export function Connect({ initial = "", onConnect }: { initial?: string; onConne
               autoFocus
               disabled={busy}
             />
-            <p className="small muted">
+            <span className="field-hint">
               The address you open PassAuth at in your browser, for example https://vault.example.com. Only https:// addresses work, except on this
               computer.
-            </p>
+            </span>
           </div>
           <ErrorText error={error} />
-          <button className="btn btn-accent btn-block" disabled={busy}>
-            {busy ? "Connecting…" : "Connect"}
-          </button>
+          <SheetActions>
+            <button className="btn btn-accent btn-block" disabled={busy}>
+              {busy ? "Connecting…" : "Connect"}
+            </button>
+          </SheetActions>
         </form>
         <p className="auth-foot">
           Don't have a server yet? Ask whoever set up PassAuth for you, or{" "}

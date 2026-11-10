@@ -106,7 +106,7 @@ export function ItemEditor({
             <input className="input mono" value={item.login.totp ?? ""} onChange={(e) => sub("login", { totp: e.target.value || null })} spellCheck={false} autoComplete="off" />
           </label>
           {item.login.urls.map((u, n) => (
-            <div key={n} className="row" style={{ alignItems: "flex-end" }}>
+            <div key={n} className="row editor-row">
               <label className="field grow">
                 <span>{n === 0 ? "Website" : `Website ${n + 1}`}</span>
                 <input
@@ -123,7 +123,7 @@ export function ItemEditor({
                   }}
                 />
               </label>
-              <label className="field">
+              <label className="field field-fixed">
                 <span>Match</span>
                 <select
                   className="select"
@@ -149,7 +149,7 @@ export function ItemEditor({
               )}
             </div>
           ))}
-          <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => setUrls((urls) => [...urls, { url: "", match: "default" }])}>
+          <button type="button" className="btn btn-text editor-add" onClick={() => setUrls((urls) => [...urls, { url: "", match: "default" }])}>
             <Icon name="plus" /> Add website
           </button>
           <PasskeysEditor
@@ -264,7 +264,7 @@ export function ItemEditor({
         <button className="btn btn-accent" disabled={busy}>
           {busy ? "Saving…" : isNew ? "Save item" : "Save changes"}
         </button>
-        <button type="button" className="btn" onClick={onCancel}>
+        <button type="button" className="btn btn-text" onClick={onCancel}>
           Cancel
         </button>
       </div>
@@ -276,13 +276,13 @@ function FieldsEditor({ fields, onChange }: { fields: Field[]; onChange: (fn: (f
   const set = (n: number, f: Partial<Field>) => onChange((all) => all.map((x, j) => (j === n ? { ...x, ...f } : x)));
   return (
     <section className="stack-s">
-      <h3 className="section-title">Custom fields</h3>
+      <h2 className="section-title">Custom fields</h2>
       {fields.map((f, n) => (
-        <div key={n} className="row">
+        <div key={n} className="row custom-field">
           <input className="input" aria-label={`Field ${n + 1} name`} placeholder="Name" value={f.name} onChange={(e) => set(n, { name: e.target.value })} />
           {f.type === "boolean" ? (
-            <label className="check" style={{ alignItems: "center", flex: 1, minWidth: 0 }}>
-              <input type="checkbox" checked={f.value === "true"} onChange={(e) => set(n, { value: e.target.checked ? "true" : "false" })} style={{ marginTop: 0 }} />
+            <label className="check check-center grow">
+              <input type="checkbox" checked={f.value === "true"} onChange={(e) => set(n, { value: e.target.checked ? "true" : "false" })} />
               <span>{f.value === "true" ? "Yes" : "No"}</span>
             </label>
           ) : (
@@ -298,7 +298,6 @@ function FieldsEditor({ fields, onChange }: { fields: Field[]; onChange: (fn: (f
           )}
           <select
             className="select"
-            style={{ width: 120 }}
             aria-label={`Field ${n + 1} type`}
             value={f.type}
             onChange={(e) => {
@@ -315,7 +314,7 @@ function FieldsEditor({ fields, onChange }: { fields: Field[]; onChange: (fn: (f
           </button>
         </div>
       ))}
-      <button type="button" className="btn btn-ghost" style={{ alignSelf: "flex-start" }} onClick={() => onChange((all) => [...all, { name: "", value: "", type: "text" }])}>
+      <button type="button" className="btn btn-text editor-add" onClick={() => onChange((all) => [...all, { name: "", value: "", type: "text" }])}>
         <Icon name="plus" /> Add field
       </button>
     </section>
@@ -327,23 +326,31 @@ function PasskeysEditor({ passkeys, removed, onRemove }: { passkeys: Passkey[]; 
   if (passkeys.length === 0 && removed <= 0) return null;
   return (
     <section className="stack-s">
-      <h3 className="section-title">Passkeys</h3>
-      {passkeys.map((p) => {
-        const who = p.user_name || p.user_display_name;
-        return (
-          <div key={p.credential_id} className="row" style={{ alignItems: "center" }}>
-            <Icon name="key" />
-            <span className="grow" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
-              {p.rp_id}
-              {who && <span className="muted small"> for {who}</span>}
-              {p.created_at > 0 && <span className="muted small"> · added {new Date(p.created_at * 1000).toLocaleDateString()}</span>}
-            </span>
-            <button type="button" className="btn btn-icon" aria-label={`Remove passkey for ${p.rp_id}${who ? ` (${who})` : ""}`} onClick={() => onRemove(p.credential_id)}>
-              <Icon name="trash" />
-            </button>
-          </div>
-        );
-      })}
+      <h2 className="section-title">Passkeys</h2>
+      {passkeys.length > 0 && (
+        <div className="fields">
+          {passkeys.map((p) => {
+            const who = p.user_name || p.user_display_name;
+            return (
+              <div key={p.credential_id}>
+                <span className="tile" aria-hidden="true">
+                  <Icon name="key" />
+                </span>
+                <span className="grow">
+                  <span className="block wrap-anywhere">{who || p.rp_id}</span>
+                  <span className="block small muted wrap-anywhere">
+                    {who ? p.rp_id : "Passkey"}
+                    {p.created_at > 0 && `, added ${new Date(p.created_at * 1000).toLocaleDateString(undefined, { dateStyle: "medium" })}`}
+                  </span>
+                </span>
+                <button type="button" className="btn btn-icon btn-quiet-danger" aria-label={`Remove passkey for ${p.rp_id}${who ? ` (${who})` : ""}`} title="Remove passkey" onClick={() => onRemove(p.credential_id)}>
+                  <Icon name="trash" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {removed > 0 && (
         <p className="small muted" role="status">
           {removed === 1 ? "1 passkey is" : `${removed} passkeys are`} deleted when you save. PassAuth can't sign in with {removed === 1 ? "it" : "them"} after

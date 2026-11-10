@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
 import { Wordmark } from "../components/Logo";
-import { ErrorText, Icon, Modal, PasswordInput, toast } from "../components/ui";
+import { ConfirmDialog, ErrorText, Icon, Modal, PasswordInput, SheetActions, toast } from "../components/ui";
 import "../styles/tools.css";
 
 const TOKEN_KEY = "pa.admin";
@@ -160,7 +160,7 @@ export function AdminPage() {
           <span className="muted">Server administration</span>
         </div>
         {token && (
-          <button type="button" className="btn btn-ghost" onClick={() => signOut()}>
+          <button type="button" className="btn btn-text" onClick={() => signOut()}>
             <Icon name="logout" /> Sign out
           </button>
         )}
@@ -205,22 +205,24 @@ function TokenForm({ initialError, onSignedIn }: { initialError: string | null; 
   }
 
   return (
-    <main className="auth" style={{ minHeight: 0, flex: 1 }}>
+    <main className="auth">
       <div className="auth-card">
         <div className="auth-head">
           <h1>Server administration</h1>
           <p className="muted">Manage users, invitations and email for this PassAuth server.</p>
         </div>
         <form className="auth-panel stack" onSubmit={submit}>
-          <label className="field">
-            <span>Admin token</span>
+          <div className="field">
+            <label htmlFor="admin-token">Admin token</label>
             <PasswordInput id="admin-token" value={value} onChange={setValue} autoComplete="off" autoFocus />
-          </label>
-          <p className="small muted">This is the token you set in ADMIN_TOKEN, not a user password. It is kept only in this tab and forgotten when you close it.</p>
+            <span className="field-hint">The token you set in ADMIN_TOKEN, not a user password. It is kept only in this tab and forgotten when you close it.</span>
+          </div>
           <ErrorText error={error} />
-          <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
-            {busy ? "Checking token" : "Open admin panel"}
-          </button>
+          <SheetActions>
+            <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
+              {busy ? "Checking token…" : "Open admin panel"}
+            </button>
+          </SheetActions>
         </form>
       </div>
     </main>
@@ -283,7 +285,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
           </div>
         ) : (
           <p className="muted" role="status">
-            Loading server details
+            Loading server details…
           </p>
         )}
       </main>
@@ -332,11 +334,11 @@ function OverviewCard({ o }: { o: Overview }) {
         </div>
       </div>
       <div className="card">
-        <h2 className="section-title">Configuration</h2>
+        <h2>Configuration</h2>
         <dl className="facts">
           <div>
             <dt>Domain</dt>
-            <dd className="mono small">{c.domain}</dd>
+            <dd className="wrap-anywhere">{c.domain}</dd>
           </div>
           <div>
             <dt>Database</dt>
@@ -401,23 +403,23 @@ function SignupsCard({ config, call, reload }: { config: Overview["config"]; cal
           <input type="checkbox" checked={allowed} onChange={(e) => setAllowed(e.target.checked)} />
           <span>
             Allow new accounts to sign up
-            <span className="small muted block">When off, only people you invite below can create an account. Existing accounts are not affected.</span>
+            <span className="field-hint block">When off, only people you invite below can create an account. Existing accounts are not affected.</span>
           </span>
         </label>
         {allowed && (
           <label className="field">
             <span>Only these email domains (optional)</span>
             <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com, example.org" spellCheck={false} />
-            <span className="small muted">Leave empty to allow any email address. Separate domains with commas.</span>
+            <span className="field-hint">Leave empty to allow any email address. Separate domains with commas.</span>
           </label>
         )}
         <ErrorText error={error} />
-        <div className="row">
+        <div className="card-actions">
           <button type="submit" className="btn btn-primary" disabled={busy || !changed}>
             {busy ? "Saving…" : "Save sign-up settings"}
           </button>
+          <span className="small muted">Takes effect immediately and overrides SIGNUPS_ALLOWED and SIGNUPS_DOMAINS_WHITELIST from the server configuration.</span>
         </div>
-        <p className="small muted">This overrides SIGNUPS_ALLOWED and SIGNUPS_DOMAINS_WHITELIST from the server configuration and takes effect immediately.</p>
       </form>
     </section>
   );
@@ -430,6 +432,7 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<User | null>(null);
   const [resetting, setResetting] = useState<User | null>(null);
+  const [managing, setManaging] = useState<string | null>(null);
 
   async function act(u: User, path: string, done: string) {
     setBusy(u.id);
@@ -452,7 +455,7 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
 
   return (
     <section className="card" aria-labelledby="users-title">
-      <div className="row-between">
+      <div className="card-head">
         <h2 id="users-title">Users</h2>
         <span className="small muted">{users.length === 1 ? "1 account" : `${users.length.toLocaleString()} accounts`}</span>
       </div>
@@ -461,15 +464,17 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
         <p className="muted">No one has created an account yet. Invite someone below.</p>
       ) : (
         <div className="table-wrap">
-          <table className="table">
+          <table className="table users-table">
             <thead>
               <tr>
-                <th scope="col">Email</th>
-                <th scope="col">Name</th>
-                <th scope="col">Email verified</th>
+                <th scope="col">User</th>
                 <th scope="col">Two-step login</th>
-                <th scope="col">Items</th>
-                <th scope="col">Last seen</th>
+                <th scope="col" className="col-wide">
+                  Items
+                </th>
+                <th scope="col" className="col-wide">
+                  Last seen
+                </th>
                 <th scope="col">Status</th>
                 <th scope="col">
                   <span className="sr-only">Actions</span>
@@ -477,52 +482,72 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
               </tr>
             </thead>
             <tbody>
-              {users.map((u) => (
-                <tr key={u.id}>
-                  <td style={{ overflowWrap: "anywhere" }}>{u.email}</td>
-                  <td>{u.name || <span className="muted">Not set</span>}</td>
-                  <td>{u.email_verified ? <span className="badge badge-ok">Verified</span> : <span className="badge">Not verified</span>}</td>
-                  <td>{u.two_factor ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}</td>
-                  <td>{u.items.toLocaleString()}</td>
-                  <td title={u.last_seen ? formatDateTime(u.last_seen) : undefined}>{u.last_seen ? relative(u.last_seen) : <span className="muted">Never</span>}</td>
-                  <td>{u.disabled ? <span className="badge badge-warn">Disabled</span> : <span className="badge badge-ok">Active</span>}</td>
-                  <td className="actions">
-                    <div className="row" style={{ justifyContent: "flex-end" }}>
-                      {u.disabled ? (
-                        <button type="button" className="btn" disabled={busy === u.id} onClick={() => act(u, "/enable", `${u.email} can sign in again`)}>
-                          Enable
+              {users.map((u) => {
+                const open = managing === u.id;
+                return (
+                  <Fragment key={u.id}>
+                    <tr className={open ? "is-open" : undefined}>
+                      <td>
+                        <div className="user-cell">
+                          <span className="avatar" aria-hidden="true">
+                            {((u.name || u.email).trim()[0] ?? "?").toUpperCase()}
+                          </span>
+                          <div className="grow">
+                            <div className="row-title">{u.name || u.email}</div>
+                            {u.name && <div className="row-sub">{u.email}</div>}
+                            {!u.email_verified && <div className="row-sub">Email not verified</div>}
+                          </div>
+                        </div>
+                      </td>
+                      <td>{u.two_factor ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}</td>
+                      <td className="col-wide num">{u.items.toLocaleString()}</td>
+                      <td className="col-wide" title={u.last_seen ? formatDateTime(u.last_seen) : undefined}>
+                        {u.last_seen ? relative(u.last_seen) : <span className="muted">Never</span>}
+                      </td>
+                      <td>{u.disabled ? <span className="badge badge-warn">Disabled</span> : <span className="badge badge-ok">Active</span>}</td>
+                      <td className="actions">
+                        <button type="button" className="btn btn-text btn-sm" aria-expanded={open} aria-label={`Manage ${u.email}`} onClick={() => setManaging(open ? null : u.id)}>
+                          {open ? "Done" : "Manage"}
                         </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn"
-                          disabled={busy === u.id}
-                          title="Block sign-in and end all sessions"
-                          onClick={() => act(u, "/disable", `${u.email} is disabled and signed out`)}
-                        >
-                          Disable
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="btn"
-                        disabled={busy === u.id}
-                        onClick={() => act(u, "/sessions/revoke", `${u.email} is signed out on every device`)}
-                      >
-                        Sign out everywhere
-                      </button>
-                      {u.two_factor > 0 && (
-                        <button type="button" className="btn" disabled={busy === u.id} onClick={() => setResetting(u)}>
-                          Reset two-step login
-                        </button>
-                      )}
-                      <button type="button" className="btn btn-danger" disabled={busy === u.id} onClick={() => setDeleting(u)}>
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className="row-detail">
+                        <td colSpan={6}>
+                          <div className="card-actions">
+                            {u.disabled ? (
+                              <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => act(u, "/enable", `${u.email} can sign in again`)}>
+                                Allow sign-in
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                disabled={busy === u.id}
+                                title="Block sign-in and end all sessions"
+                                onClick={() => act(u, "/disable", `${u.email} is disabled and signed out`)}
+                              >
+                                Disable account
+                              </button>
+                            )}
+                            <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => act(u, "/sessions/revoke", `${u.email} is signed out on every device`)}>
+                              Sign out everywhere
+                            </button>
+                            {u.two_factor > 0 && (
+                              <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => setResetting(u)}>
+                                Reset two-step login…
+                              </button>
+                            )}
+                            <button type="button" className="btn btn-sm btn-text btn-danger" disabled={busy === u.id} onClick={() => setDeleting(u)}>
+                              Delete account…
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -557,79 +582,67 @@ function ResetTwoFactorModal({ user, call, onClose, onDone }: { user: User; call
   }
 
   return (
-    <Modal title="Reset two-step login" onClose={onClose}>
-      <form className="stack" onSubmit={submit}>
-        <p>
-          This turns off every two-step method for <strong>{user.email}</strong>: authenticator app, email codes, security keys and recovery codes,
-          and forgets the devices they marked as trusted. They can then sign in with their master password (and Secret Key, if they use one) and
-          turn two-step login on again. Their vault stays encrypted and nothing else changes.
+    <Modal title="Reset two-step login?" subtitle={user.email} icon="shield" tone="danger" onClose={() => !busy && onClose()}>
+      <form onSubmit={submit}>
+        <p className="card-text">
+          This turns off every two-step method for this account: authenticator app, email codes, security keys and recovery codes, and forgets the
+          devices they marked as trusted. They can then sign in with their master password (and Secret Key, if they use one) and turn two-step login
+          on again. Their vault stays encrypted and nothing else changes.
         </p>
         <p className="small muted">
           Only do this when you're sure the request comes from the account owner, for example in person or over a channel you already trust. They
           get an email about it if this server can send email.
         </p>
         <label className="check">
-          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} data-autofocus="" />
           <span>I confirmed this request with the account owner</span>
         </label>
         <ErrorText error={error} />
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>
-            Cancel
+        <SheetActions
+          quiet={
+            <button type="button" className="btn btn-text" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+          }
+        >
+          <button type="submit" className="btn btn-danger-solid btn-block" disabled={!checked || busy}>
+            {busy ? "Resetting…" : "Reset two-step login"}
           </button>
-          <button type="submit" className="btn btn-danger" disabled={!checked || busy}>
-            {busy ? "Resetting" : "Reset two-step login"}
-          </button>
-        </div>
+        </SheetActions>
       </form>
     </Modal>
   );
 }
 
 function DeleteUserModal({ user, call, onClose, onDeleted }: { user: User; call: Call; onClose: () => void; onDeleted: () => Promise<void> }) {
-  const [typed, setTyped] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const matches = typed.trim().toLowerCase() === user.email.toLowerCase();
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!matches) return setError(`Type ${user.email} exactly to confirm.`);
-    setBusy(true);
-    setError(null);
-    try {
-      await call(`/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
-      toast(`${user.email} was deleted`);
-      onClose();
-      await onDeleted();
-    } catch (err) {
-      setBusy(false);
-      if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
-    }
-  }
-
   return (
-    <Modal title="Delete account" onClose={onClose}>
-      <form className="stack" onSubmit={submit}>
-        <p>
-          This permanently deletes <strong>{user.email}</strong>, every vault they own and all items in those vaults ({user.items.toLocaleString()}{" "}
-          {user.items === 1 ? "item" : "items"}). They lose access to vaults shared with them. This cannot be undone.
-        </p>
-        <label className="field">
-          <span>Type {user.email} to confirm</span>
-          <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} autoFocus />
-        </label>
-        <ErrorText error={error} />
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn btn-ghost" onClick={onClose}>
-            Cancel
-          </button>
-          <button type="submit" className="btn btn-danger" disabled={!matches || busy}>
-            {busy ? "Deleting account" : "Delete account"}
-          </button>
-        </div>
-      </form>
-    </Modal>
+    <ConfirmDialog
+      title="Delete this account?"
+      subtitle={user.email}
+      icon="trash"
+      action="Delete account"
+      busyAction="Deleting account…"
+      confirmText={user.email}
+      matchCase={false}
+      onClose={onClose}
+      onConfirm={async () => {
+        try {
+          await call(`/users/${encodeURIComponent(user.id)}`, { method: "DELETE" });
+        } catch (err) {
+          // A lost admin session already sends the admin back to the token form.
+          if (err instanceof AdminError && err.status === 401) return;
+          throw err;
+        }
+        toast(`${user.email} was deleted`);
+        onClose();
+        await onDeleted();
+      }}
+    >
+      <p className="card-text">
+        This permanently deletes the account, every vault they own and all items in those vaults ({user.items.toLocaleString()}{" "}
+        {user.items === 1 ? "item" : "items"}). They lose access to vaults shared with them. This cannot be undone.
+      </p>
+    </ConfirmDialog>
   );
 }
 
@@ -680,7 +693,7 @@ function InvitesCard({ invites, smtp, domain, call, reload }: { invites: Invite[
   return (
     <section className="card" aria-labelledby="inv-title">
       <h2 id="inv-title">Invitations</h2>
-      <p className="small muted">
+      <p className="card-text">
         Invited people can create an account even when sign-ups are closed.{" "}
         {smtp ? "They receive an email with a sign-up link." : "Email is off, so share the sign-up link with them yourself."}
       </p>
@@ -690,47 +703,36 @@ function InvitesCard({ invites, smtp, domain, call, reload }: { invites: Invite[
           <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" placeholder="name@example.com" />
         </label>
         <button type="submit" className="btn btn-primary" disabled={busy}>
-          {busy ? "Sending invitation" : smtp ? "Send invitation" : "Create invitation"}
+          {busy ? "Sending invitation…" : smtp ? "Send invitation" : "Create invitation"}
         </button>
       </form>
       <ErrorText error={error} />
       {notice && (
-        <div className="alert alert-ok" role="status" style={{ overflowWrap: "anywhere" }}>
+        <div className="alert alert-ok wrap-anywhere" role="status">
           {notice}
         </div>
       )}
       {invites.length === 0 ? (
         <p className="muted">There are no open invitations.</p>
       ) : (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Email</th>
-                <th scope="col">Invited</th>
-                <th scope="col">Expires</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {invites.map((i) => (
-                <tr key={i.email}>
-                  <td style={{ overflowWrap: "anywhere" }}>{i.email}</td>
-                  <td title={formatDateTime(i.created_at)}>{formatDate(i.created_at)}</td>
-                  <td title={formatDateTime(i.expires_at)}>
-                    {i.expires_at < now ? <span className="badge badge-warn">Expired</span> : formatDate(i.expires_at)}
-                  </td>
-                  <td className="actions">
-                    <button type="button" className="btn btn-danger" onClick={() => revoke(i.email)} aria-label={`Revoke invitation for ${i.email}`}>
-                      Revoke
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="fields" role="list" aria-label="Open invitations">
+          {invites.map((i) => (
+            <div key={i.email} role="listitem">
+              <span className="tile" aria-hidden="true">
+                <Icon name="mail" />
+              </span>
+              <span className="grow">
+                <span className="row-title">{i.email}</span>
+                <span className="row-sub" title={`Invited ${formatDateTime(i.created_at)}, expires ${formatDateTime(i.expires_at)}`}>
+                  Invited {formatDate(i.created_at)}. {i.expires_at < now ? "The invitation has expired." : `Expires ${formatDate(i.expires_at)}.`}
+                </span>
+              </span>
+              {i.expires_at < now && <span className="badge badge-warn">Expired</span>}
+              <button type="button" className="btn btn-text btn-danger btn-sm" onClick={() => revoke(i.email)} aria-label={`Revoke invitation for ${i.email}`}>
+                Revoke
+              </button>
+            </div>
+          ))}
         </div>
       )}
     </section>
@@ -767,14 +769,14 @@ function SmtpCard({ smtp, call }: { smtp: boolean; call: Call }) {
       <h2 id="smtp-title">Email delivery</h2>
       {smtp ? (
         <>
-          <p className="small muted">Send a test message to confirm the server can deliver verification codes and invitations.</p>
+          <p className="card-text">Send a test message to confirm the server can deliver verification codes and invitations.</p>
           <form className="inline-form" onSubmit={send}>
             <label className="field">
               <span>Send test email to</span>
               <input className="input" type="email" value={to} onChange={(e) => setTo(e.target.value)} autoComplete="email" placeholder="you@example.com" />
             </label>
             <button type="submit" className="btn" disabled={busy}>
-              {busy ? "Sending test email" : "Send test email"}
+              {busy ? "Sending test email…" : "Send test email"}
             </button>
           </form>
           <ErrorText error={error} />
@@ -785,7 +787,7 @@ function SmtpCard({ smtp, call }: { smtp: boolean; call: Call }) {
           )}
         </>
       ) : (
-        <p className="small muted">
+        <p className="card-text">
           Email is off. Set the SMTP settings in the server configuration and restart the server to send verification codes, invitations and test emails.
         </p>
       )}

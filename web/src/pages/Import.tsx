@@ -279,11 +279,11 @@ export function ImportPage() {
               </p>
               <PasswordField id="import-password" label="Export or database password" value={password} onChange={setPassword} autoComplete="off" autoFocus />
               <ErrorText error={error} />
-              <div className="row">
+              <div className="card-actions">
                 <button type="submit" className="btn btn-accent">
                   Unlock file
                 </button>
-                <button type="button" className="btn btn-ghost" onClick={reset}>
+                <button type="button" className="btn btn-text" onClick={reset}>
                   Choose a different file
                 </button>
               </div>
@@ -338,7 +338,7 @@ export function ImportPage() {
                 <Link className="btn btn-primary" to={filterPath(`vault:${step.vaultId}`)}>
                   Open {step.vaultName}
                 </Link>
-                <button type="button" className="btn btn-ghost" onClick={reset}>
+                <button type="button" className="btn btn-text" onClick={reset}>
                   Import another file
                 </button>
               </div>
@@ -347,9 +347,7 @@ export function ImportPage() {
         </section>
 
         <section className="card" aria-labelledby="import-help">
-          <h2 id="import-help" className="section-title">
-            How to export from another password manager
-          </h2>
+          <h2 id="import-help">How to export from another password manager</h2>
           <ul className="help-list">
             <li>
               <b>Bitwarden or Vaultwarden:</b> in the web vault open Tools, choose Export vault and pick .json (a password-protected .json works too).
@@ -398,11 +396,11 @@ function Preview({
         Review and choose a vault
       </h2>
       <div className="file-chip">
-        <span className="avatar">
+        <span className="tile" aria-hidden="true">
           <Icon name="note" />
         </span>
         <div className="grow">
-          <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{fileName}</div>
+          <div className="row-title">{fileName}</div>
           <div className="small muted">Detected as {FORMAT_LABEL[step.format] ?? "an export file"}</div>
         </div>
       </div>
@@ -440,7 +438,7 @@ function Preview({
 
       {step.warnings.length > 0 && (
         <div className="alert alert-info">
-          <p style={{ fontWeight: 500, marginBottom: 4 }}>{step.warnings.length === 1 ? "1 note about this file" : `${step.warnings.length} notes about this file`}</p>
+          <strong>{step.warnings.length === 1 ? "1 note about this file" : `${step.warnings.length} notes about this file`}</strong>
           <ul className="warn-list">
             {step.warnings.map((w, i) => (
               <li key={i}>{w}</li>
@@ -462,14 +460,14 @@ function Preview({
         <>
           <ErrorText error="You don't have a vault you can add items to. Create a vault, or ask the vault owner for write access, then come back here." />
           <div className="row">
-            <button type="button" className="btn btn-ghost" onClick={onCancel}>
+            <button type="button" className="btn btn-text" onClick={onCancel}>
               Choose a different file
             </button>
           </div>
         </>
       ) : (
         <>
-          <label className="field" style={{ maxWidth: 360 }}>
+          <label className="field field-narrow">
             <span>Import into</span>
             <select className="select" value={vaultId} onChange={(e) => setVaultId(e.target.value)}>
               {vaults.map((v) => (
@@ -484,7 +482,7 @@ function Preview({
             <button type="button" className="btn btn-accent" onClick={onImport}>
               Import {fmt(total)} {total === 1 ? "item" : "items"}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={onCancel}>
+            <button type="button" className="btn btn-text" onClick={onCancel}>
               Choose a different file
             </button>
           </div>

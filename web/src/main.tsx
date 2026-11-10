@@ -22,11 +22,13 @@ function showStartupError(e: unknown) {
   root.replaceChildren();
   const main = document.createElement("main");
   main.className = "auth";
-  main.innerHTML = `<div class="auth-card"><div class="auth-panel stack" role="alert">
-    <h1>PassAuth couldn't start</h1>
-    <p>This page couldn't load its encryption module. Check your connection and reload. If you use a reverse proxy or a content filter, make sure it allows <span class="mono">.wasm</span> files.</p>
-    <button type="button" class="btn btn-accent btn-block">Reload</button>
-  </div></div>`;
+  main.innerHTML = `<div class="auth-card">
+    <div class="auth-head"><h1>PassAuth couldn't start</h1></div>
+    <div class="auth-panel stack" role="alert">
+      <p>This page couldn't load its encryption module. Check your connection and reload. If you use a reverse proxy or a content filter, make sure it allows .wasm files.</p>
+      <button type="button" class="btn btn-accent btn-block">Reload</button>
+    </div>
+  </div>`;
   main.querySelector("button")!.addEventListener("click", () => location.reload());
   root.append(main);
 }

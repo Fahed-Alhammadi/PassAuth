@@ -47,14 +47,14 @@ export function Shell() {
         <Wordmark />
         <nav className="nav" aria-label="Items">
           <NavLink to={filterPath("all")} end>
-            <Icon name="vault" /> All items <span className="count">{counts.all}</span>
+            <Icon name="vault" /> <span className="label">All items</span> <span className="count">{counts.all}</span>
           </NavLink>
           <NavLink to={filterPath("favorites")}>
-            <Icon name="star" /> Favorites <span className="count">{counts.favorites}</span>
+            <Icon name="star" /> <span className="label">Favorites</span> <span className="count">{counts.favorites}</span>
           </NavLink>
           {KINDS.map(([k, label, icon]) => (
             <NavLink key={k} to={filterPath(k)}>
-              <Icon name={icon} /> {label} <span className="count">{counts[k]}</span>
+              <Icon name={icon} /> <span className="label">{label}</span> <span className="count">{counts[k]}</span>
             </NavLink>
           ))}
         </nav>
@@ -63,7 +63,7 @@ export function Shell() {
             <div className="nav-title">Vaults</div>
             {vaults.map((v) => (
               <NavLink key={v.id} to={filterPath(`vault:${v.id}`)}>
-                <Icon name={v.kind === "sealed" ? "share" : "lock"} /> {v.name}
+                <Icon name={v.kind === "sealed" ? "share" : "lock"} /> <span className="label">{v.name}</span>
               </NavLink>
             ))}
           </nav>
@@ -73,7 +73,7 @@ export function Shell() {
             <div className="nav-title">Folders</div>
             {folders.map((f) => (
               <NavLink key={f} to={filterPath(`folder:${f}`)}>
-                <Icon name="folder" /> {f}
+                <Icon name="folder" /> <span className="label">{f}</span>
               </NavLink>
             ))}
           </nav>

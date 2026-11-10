@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useId, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
-import { CopyButton, ErrorText, Icon, Modal, PasswordInput, StrengthMeter, copySecret, toast } from "../components/ui";
+import { KitActions } from "../components/KitActions";
+import { ActionRow, ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, copySecret, toast, type IconName } from "../components/ui";
 import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
-import { downloadEmergencyKit, downloadFile, printEmergencyKit } from "../lib/kit";
+import { downloadFile } from "../lib/kit";
 import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { server } from "../lib/server";
 import type { Role } from "../lib/types";
@@ -109,6 +110,8 @@ function ago(ts: number) {
   return new Date(ts * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
 }
 
+const KIND_ICON: Record<string, IconName> = { web: "globe", extension: "puzzle", cli: "terminal", desktop: "desktop", mobile: "phone" };
+
 function kindLabel(kind: string) {
   const known: Record<string, string> = { web: "Web vault", extension: "Browser extension", cli: "Command line", desktop: "Desktop app", mobile: "Mobile app" };
   return known[kind] ?? kind.charAt(0).toUpperCase() + kind.slice(1);
@@ -181,15 +184,21 @@ export function SettingsPage() {
 /** Ask for the master password before a sensitive action. */
 function ConfirmPassword({
   title,
+  subtitle,
+  icon = "lock",
   children,
   action,
+  busyAction = "Working…",
   danger,
   onConfirm,
   onClose,
 }: {
   title: string;
+  subtitle?: ReactNode;
+  icon?: IconName;
   children?: ReactNode;
   action: string;
+  busyAction?: string;
   danger?: boolean;
   onConfirm: (password: string) => Promise<void>;
   onClose: () => void;
@@ -215,90 +224,45 @@ function ConfirmPassword({
   }
 
   return (
-    <Modal title={title} onClose={close}>
-      <form className="stack" onSubmit={submit}>
+    <Modal title={title} subtitle={subtitle} icon={icon} tone={danger ? "danger" : undefined} onClose={close}>
+      <form onSubmit={submit}>
         {children}
         <div className="field">
-          <label htmlFor="confirm-password">
-            Master password
-          </label>
+          <label htmlFor="confirm-password">Master password</label>
           <PasswordInput id="confirm-password" value={password} onChange={setPassword} autoFocus />
+          <span className="field-hint">Confirms that it's you making this change.</span>
         </div>
         <ErrorText error={error} />
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy}>
-            Cancel
+        <SheetActions
+          quiet={
+            <button type="button" className="btn btn-text" onClick={close} disabled={busy}>
+              Cancel
+            </button>
+          }
+        >
+          <button type="submit" className={`btn btn-block ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy}>
+            {busy ? busyAction : action}
           </button>
-          <button type="submit" className={`btn ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy}>
-            {busy ? "Working…" : action}
-          </button>
-        </div>
+        </SheetActions>
       </form>
     </Modal>
   );
 }
 
-/** Plain yes/no confirmation for destructive actions that don't need reauth. */
-function ConfirmDialog({
-  title,
-  children,
-  action,
-  confirmText,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  children: ReactNode;
-  action: string;
-  /** When set, the user must type this (e.g. the vault name) before the action is enabled. */
-  confirmText?: string;
-  onConfirm: () => Promise<void>;
-  onClose: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [typed, setTyped] = useState("");
-  const typedId = useId();
-  const ready = !confirmText || typed.trim() === confirmText.trim();
-  const close = useCallback(() => {
-    if (!busy) onClose();
-  }, [busy, onClose]);
-
-  async function confirm() {
-    setBusy(true);
-    setError(null);
-    try {
-      await onConfirm();
-    } catch (e) {
-      setError(friendly(e));
-      setBusy(false);
-    }
-  }
-
+/** A setting on one row: what it is at the leading edge, its control at the trailing edge. */
+function Setting({ title, children, control, as: Tag = "div" }: { title: ReactNode; children?: ReactNode; control: ReactNode; as?: "div" | "label" }) {
   return (
-    <Modal title={title} onClose={close}>
-      <div className="stack">
-        {children}
-        {confirmText && (
-          <div className="field">
-            <label htmlFor={typedId}>Type {confirmText} to confirm</label>
-            <input id={typedId} className="input" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
-          </div>
-        )}
-        <ErrorText error={error} />
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          {/* Cancel gets the initial focus: a stray Enter must never confirm a destructive action. */}
-          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy} data-autofocus={confirmText ? undefined : ""}>
-            Cancel
-          </button>
-          <button type="button" className="btn btn-danger-solid" onClick={confirm} disabled={busy || !ready}>
-            {busy ? "Working…" : action}
-          </button>
-        </div>
-      </div>
-    </Modal>
+    <Tag className="setting">
+      <span className="setting-text">
+        <span className="setting-title">{title}</span>
+        {children && <span className="setting-desc">{children}</span>}
+      </span>
+      {control}
+    </Tag>
   );
 }
+
+const OnOff = ({ on }: { on: boolean }) => (on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>);
 
 // ---------------------------------------------------------------- account
 
@@ -351,14 +315,32 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
         <ErrorText error={error} />
         <div className="field">
           <span>Email</span>
-          <div className="row">
-            <span>{account.email}</span>
+          <div className="row row-wrap">
+            <span className="wrap-anywhere">{account.email}</span>
             {account.email_verified ? <span className="badge badge-ok">Verified</span> : <span className="badge badge-warn">Not verified</span>}
           </div>
           {!account.email_verified && (
-            <span className="small muted">Others can't share vaults with you until you verify your email. Check your inbox for the verification link.</span>
+            <span className="field-hint">Others can't share vaults with you until you verify your email. Check your inbox for the verification link.</span>
           )}
         </div>
+      </section>
+
+      <section className="card" aria-labelledby="appearance-title">
+        <h2 id="appearance-title">Appearance</h2>
+        <Setting
+          as="label"
+          title="Theme"
+          control={
+            <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+              <option value="system">Same as system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          }
+        />
+        <Setting as="label" title="Show website icons" control={<input type="checkbox" role="switch" className="switch" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />}>
+          Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to {clientName()}.
+        </Setting>
       </section>
 
       {desktop?.vaultTimeout && <VaultTimeoutCard hook={desktop.vaultTimeout} />}
@@ -371,7 +353,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           check that it matches exactly. A match means the vault is encrypted for you and nobody else.
         </p>
         {fp ? (
-          <div className="row">
+          <div className="secret-box">
             <div className="fingerprint grow">{fp}</div>
             <CopyButton value={fp} label="Copy fingerprint" />
           </div>
@@ -380,44 +362,33 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
         )}
       </section>
 
-      <section className="card danger-zone" aria-labelledby="danger-title">
-        <h2 id="danger-title">Delete account</h2>
-        <p className="card-text">
-          This permanently deletes your account, every vault you own and every item in them. People you shared those vaults with lose access too.
-          You can't undo this.
-        </p>
-        <div>
-          <button type="button" className="btn btn-danger" onClick={() => setDeleting(true)}>
-            <Icon name="trash" />
-            Delete account
-          </button>
-        </div>
-      </section>
-
-      <section className="card" aria-labelledby="appearance-title">
-        <h2 id="appearance-title">Appearance</h2>
-        <label className="field">
-          <span>Theme</span>
-          <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
-            <option value="system">Same as system</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />
-          <span>
-            Show website icons
-            <span className="small muted block">Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to {clientName()}.</span>
-          </span>
-        </label>
-      </section>
-
       {desktop && <AboutDesktop desktop={desktop} />}
 
+      <section className="card" aria-labelledby="danger-title">
+        <div className="card-head">
+          <h2 id="danger-title">Delete account</h2>
+          <button type="button" className="btn btn-danger" onClick={() => setDeleting(true)}>
+            Delete account…
+          </button>
+        </div>
+        <p className="card-text">
+          Permanently deletes your account, every vault you own and every item in them. People you shared those vaults with lose access too. You can't
+          undo this.
+        </p>
+      </section>
+
       {deleting && (
-        <ConfirmPassword title="Delete your account" action="Delete account" danger onConfirm={deleteAccount} onClose={() => setDeleting(false)}>
-          <p className="card-text">Enter your master password to permanently delete {account.email} and all vaults you own.</p>
+        <ConfirmPassword
+          title="Delete your account?"
+          subtitle={account.email}
+          icon="trash"
+          action="Delete account"
+          busyAction="Deleting…"
+          danger
+          onConfirm={deleteAccount}
+          onClose={() => setDeleting(false)}
+        >
+          <p className="card-text">This permanently deletes the account, every vault you own and every item in them. You can't undo this.</p>
         </ConfirmPassword>
       )}
     </>
@@ -434,48 +405,54 @@ function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
   return (
     <section className="card" aria-labelledby="timeout-title">
       <h2 id="timeout-title">Vault timeout</h2>
-      <label className="field">
-        <span>Vault timeout</span>
-        <select
-          className="select"
-          value={String(settings.vaultTimeout)}
-          onChange={(e) => {
-            const picked = hook.options.find(([v]) => String(v) === e.target.value);
-            if (picked) hook.set({ vaultTimeout: picked[0] });
-          }}
-        >
-          {hook.options.map(([v, label]) => (
-            <option key={String(v)} value={String(v)} disabled={hook.disabledReason(v) !== null}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <Setting
+        as="label"
+        title="Lock the vault"
+        control={
+          <select
+            className="select"
+            value={String(settings.vaultTimeout)}
+            onChange={(e) => {
+              const picked = hook.options.find(([v]) => String(v) === e.target.value);
+              if (picked) hook.set({ vaultTimeout: picked[0] });
+            }}
+          >
+            {hook.options.map(([v, label]) => (
+              <option key={String(v)} value={String(v)} disabled={hook.disabledReason(v) !== null}>
+                {label}
+              </option>
+            ))}
+          </select>
+        }
+      >
+        {!neverActive && hook.help[current]}
+      </Setting>
       {unavailable.map(([label, reason]) => (
         <p key={label} className="small muted">
           {label}: {reason}
         </p>
       ))}
       {neverActive && (
-        <div className="alert alert-error small">
+        <div className="alert alert-error small" role="note">
           With "Never", your vault key is stored in this computer's keychain without the master password protecting it. Anyone who can use this computer account can
           open your vault.
         </div>
       )}
-      {!neverActive && hook.help[current] && <p className="small muted">{hook.help[current]}</p>}
-      <label className="field">
-        <span>Timeout action</span>
-        <select className="select" value={settings.timeoutAction} onChange={(e) => hook.set({ timeoutAction: e.target.value as TimeoutSettings["timeoutAction"] })}>
-          <option value="lock">Lock</option>
-          <option value="logout">Sign out</option>
-        </select>
-      </label>
-      <p className="small muted">
+      <Setting
+        as="label"
+        title="When the time is up"
+        control={
+          <select className="select" value={settings.timeoutAction} onChange={(e) => hook.set({ timeoutAction: e.target.value as TimeoutSettings["timeoutAction"] })}>
+            <option value="lock">Lock</option>
+            <option value="logout">Sign out</option>
+          </select>
+        }
+      >
         {settings.timeoutAction === "lock"
           ? "Locking keeps your encrypted vault here; unlock with your master password."
           : "Signing out removes the vault from this app; sign in again (with two-step login) to use it."}
         {lockShortcut && ` Lock at any time with ${lockShortcut}; that always needs the master password again.`}
-      </p>
+      </Setting>
     </section>
   );
 }
@@ -486,38 +463,38 @@ function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
   return (
     <section className="card" aria-labelledby="app-title">
       <h2 id="app-title">This app</h2>
-      <label className="check">
-        <input type="checkbox" checked={s.startAtLogin} onChange={(e) => void hook.set({ startAtLogin: e.target.checked })} />
-        <span>
-          Start PassAuth when you sign in to this computer
-          <span className="small muted block">It starts in the {hook.platform === "macos" ? "menu bar" : "tray"} without opening the window.</span>
-        </span>
-      </label>
+      <Setting
+        as="label"
+        title="Start PassAuth when you sign in to this computer"
+        control={<input type="checkbox" role="switch" className="switch" checked={s.startAtLogin} onChange={(e) => void hook.set({ startAtLogin: e.target.checked })} />}
+      >
+        It starts in the {hook.platform === "macos" ? "menu bar" : "tray"} without opening the window.
+      </Setting>
       {hook.platform === "macos" && (
-        <label className="check">
-          <input type="checkbox" checked={s.keepDock} onChange={(e) => void hook.set({ keepDock: e.target.checked })} />
-          <span>
-            Keep the Dock icon while the window is closed
-            <span className="small muted block">
-              Closing the window leaves PassAuth running in the menu bar. When this is off, the Dock icon goes away until you open the window again.
-            </span>
-          </span>
-        </label>
+        <Setting
+          as="label"
+          title="Keep the Dock icon while the window is closed"
+          control={<input type="checkbox" role="switch" className="switch" checked={s.keepDock} onChange={(e) => void hook.set({ keepDock: e.target.checked })} />}
+        >
+          Closing the window leaves PassAuth running in the menu bar. When this is off, the Dock icon goes away until you open the window again.
+        </Setting>
       )}
-      <label className="field">
-        <span>Background sync</span>
-        <select className="select" value={String(s.backgroundSyncMinutes)} onChange={(e) => void hook.set({ backgroundSyncMinutes: Number(e.target.value) })}>
-          {hook.syncOptions.map(([m, label]) => (
-            <option key={m} value={String(m)}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <p className="small muted">
+      <Setting
+        as="label"
+        title="Background sync"
+        control={
+          <select className="select" value={String(s.backgroundSyncMinutes)} onChange={(e) => void hook.set({ backgroundSyncMinutes: Number(e.target.value) })}>
+            {hook.syncOptions.map(([m, label]) => (
+              <option key={m} value={String(m)}>
+                {label}
+              </option>
+            ))}
+          </select>
+        }
+      >
         Changes reach this app as they happen while it's connected. On this schedule, and after the computer wakes, it also checks the server and reconnects,
         so the vault stays current if the connection dropped. Runs only while the vault is unlocked.
-      </p>
+      </Setting>
     </section>
   );
 }
@@ -541,41 +518,37 @@ function AboutDesktop({ desktop }: { desktop: DesktopHooks }) {
   return (
     <section className="card" aria-labelledby="about-title">
       <h2 id="about-title">About</h2>
-      <dl className="fields">
-        <div>
-          <div className="grow">
-            <dt>App</dt>
-            <dd>PassAuth for desktop {desktop.version}</dd>
-            {check.failed && <dd className="small muted">Couldn't check for updates</dd>}
-            {check.version === null && <dd className="small muted">Up to date · checked just now</dd>}
-            {check.version && (
-              <dd className="small muted">
-                {check.version} available ·{" "}
-                <button type="button" className="link" onClick={() => desktop.installUpdate()}>
-                  Install and restart
-                </button>
-              </dd>
-            )}
-          </div>
+      <Setting
+        title={`PassAuth for desktop ${desktop.version}`}
+        control={
           <button type="button" className="btn" disabled={check.busy} onClick={checkNow}>
             {check.busy ? "Checking…" : "Check for updates"}
           </button>
-        </div>
-        <div>
-          <div className="grow">
-            <dt>Server</dt>
-            <dd>
-              <span className="mono">{server.host()}</span>
-              {config?.version && <span className="muted"> · PassAuth server {config.version}</span>}
-            </dd>
-          </div>
+        }
+      >
+        {check.failed && "Couldn't check for updates. Try again later."}
+        {check.version === null && "Up to date. Checked just now."}
+        {check.version && (
+          <>
+            {check.version} is available.{" "}
+            <button type="button" className="link" onClick={() => desktop.installUpdate()}>
+              Install and restart
+            </button>
+          </>
+        )}
+      </Setting>
+      <Setting
+        title={server.host()}
+        control={
           <button type="button" className="btn" onClick={() => desktop.changeServer()}>
             Change server…
           </button>
-        </div>
-      </dl>
+        }
+      >
+        {config?.version ? `Your server, running PassAuth server ${config.version}` : "Your server"}
+      </Setting>
       <p className="small muted">
-        © Fahed Alhammadi ·{" "}
+        © Fahed Alhammadi.{" "}
         <button type="button" className="link" onClick={() => desktop.openUrl(LICENSE_URL)}>
           MIT License
         </button>
@@ -634,7 +607,10 @@ function SecurityTab() {
         <h2 id="pw-title">Change master password</h2>
         <p className="card-text">
           Your master password encrypts your vault and is never sent to the server. If you forget it, nobody can recover your data.
-          {skOn && " Changing it also creates a new Secret Key."}
+          {skOn &&
+            (savedKey
+              ? " Your Secret Key stays the same."
+              : ` Changing it also creates a new Secret Key, shown once, because ${clientName()} doesn't have the current one saved.`)}
         </p>
         <form className="stack" onSubmit={changePassword}>
           <div className="field">
@@ -649,7 +625,7 @@ function SecurityTab() {
             </label>
             <PasswordInput id="pw-new" value={next} onChange={setNext} autoComplete="new-password" />
             <StrengthMeter password={next} />
-            <span className="small muted">At least {MIN_PASSWORD} characters. A few unrelated words are easy to remember and hard to guess.</span>
+            <span className="field-hint">At least {MIN_PASSWORD} characters. A few unrelated words are easy to remember and hard to guess.</span>
           </div>
           <div className="field">
             <label htmlFor="pw-confirm">
@@ -658,64 +634,61 @@ function SecurityTab() {
             <PasswordInput id="pw-confirm" value={confirm} onChange={setConfirm} autoComplete="new-password" />
           </div>
           <ErrorText error={error} />
-          <p className="small muted">Changing your master password signs out all your other devices.</p>
-          <div>
+          <div className="card-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
               {busy ? "Changing password…" : "Change master password"}
             </button>
+            <span className="small muted">Your other devices are signed out.</span>
           </div>
         </form>
       </section>
 
       <section className="card" aria-labelledby="sk-title">
         <div className="card-head">
-          <h2 id="sk-title">Secret Key</h2>
-          {skOn ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
+          <div className="card-title">
+            <h2 id="sk-title">Secret Key</h2>
+            <OnOff on={skOn} />
+          </div>
+          <button type="button" className={skOn ? "btn btn-danger" : "btn"} onClick={() => setToggling(true)}>
+            {skOn ? "Turn off…" : "Turn on…"}
+          </button>
         </div>
         <p className="card-text">
           A Secret Key is a long random code that's combined with your master password when you sign in on a new device. Even if someone learns
           your master password, they can't open your vault without it.
         </p>
-        {skOn ? (
-          <p className="small muted">
-            {savedKey
+        <p className="small muted">
+          {!skOn
+            ? "When you turn it on, you get a Secret Key to save in an Emergency Kit."
+            : savedKey
               ? `${clientName(true)} remembers your Secret Key. Keep your Emergency Kit somewhere safe: you need it to sign in on any other device.`
               : `${clientName(true)} doesn't have your Secret Key saved. Use the Emergency Kit you saved when you turned it on.`}
-          </p>
-        ) : (
-          <p className="small muted">When you turn it on, you'll get a Secret Key to save in an Emergency Kit.</p>
-        )}
-        <div className="row" style={{ flexWrap: "wrap" }}>
-          <button type="button" className={skOn ? "btn" : "btn btn-primary"} onClick={() => setToggling(true)}>
-            <Icon name="key" />
-            {skOn ? "Turn off Secret Key" : "Turn on Secret Key"}
-          </button>
-          {(!skOn || savedKey) && (
-            <>
-              <button type="button" className="btn" onClick={() => downloadEmergencyKit({ email, secretKey: skOn ? savedKey : null })}>
-                <Icon name="download" />
-                Download Emergency Kit
-              </button>
-              <button type="button" className="btn btn-ghost" onClick={() => printEmergencyKit({ email, secretKey: skOn ? savedKey : null })}>
-                {isDesktop() ? "Save kit" : "Print kit"}
-              </button>
-            </>
-          )}
-        </div>
+        </p>
       </section>
+
+      {(!skOn || savedKey) && (
+        <section className="card" aria-labelledby="kit-title">
+          <h2 id="kit-title">Emergency Kit</h2>
+          <p className="card-text">What you need to sign in on a new device, on one page. Keep it where only you can reach it.</p>
+          <KitActions email={email} secretKey={skOn ? savedKey : null} />
+        </section>
+      )}
 
       {toggling && (
         <ConfirmPassword
-          title={skOn ? "Turn off Secret Key" : "Turn on Secret Key"}
+          title={skOn ? "Turn off your Secret Key?" : "Turn on a Secret Key?"}
+          subtitle={email}
+          icon="key"
           action={skOn ? "Turn off Secret Key" : "Turn on Secret Key"}
+          danger={skOn}
           onConfirm={toggleSecretKey}
           onClose={() => setToggling(false)}
         >
           <p className="card-text">
             {skOn
               ? "After this, your master password alone unlocks your vault on a new device. Your current Secret Key and Emergency Kit stop working."
-              : "PassAuth will create a Secret Key and show it once. You'll need it, together with your master password, to sign in on other devices."}{" "}
-            All your other devices will be signed out.
+              : "PassAuth creates a Secret Key and shows it once. You need it, together with your master password, to sign in on other devices."}{" "}
+            Your other devices are signed out.
           </p>
         </ConfirmPassword>
       )}
@@ -727,43 +700,30 @@ function SecurityTab() {
 
 function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; email: string; onClose: () => void }) {
   const [saved, setSaved] = useState(false);
+  // It's shown only once: Escape or a click outside must not throw it away.
   const close = useCallback(() => {
     if (saved) onClose();
   }, [saved, onClose]);
 
-  const kit = { email, secretKey };
-
   return (
-    <Modal title="Save your new Secret Key" onClose={close}>
-      <p className="card-text">
-        This is the only time PassAuth shows your Secret Key. Any older Secret Key no longer works. Save it now: without it, you can't sign in on a
-        new device.
-      </p>
-      <div className="secret-key" aria-label="Secret Key">
-        {secretKey}
+    <Modal title="Save your new Secret Key" subtitle="Shown only once. Any older Secret Key no longer works." icon="key" closable={false} onClose={close}>
+      <p className="card-text">Without it, you can't sign in on a new device.</p>
+      <div className="secret-box">
+        <div className="secret-key grow" aria-label="Secret Key">
+          {secretKey}
+        </div>
+        <CopyButton value={secretKey} label="Copy Secret Key" />
       </div>
-      <div className="row" style={{ flexWrap: "wrap" }}>
-        <button type="button" className="btn btn-accent" onClick={() => downloadEmergencyKit(kit)} data-autofocus="">
-          <Icon name="download" />
-          Download Emergency Kit
-        </button>
-        <button type="button" className="btn" onClick={() => printEmergencyKit(kit)}>
-          {isDesktop() ? "Save kit" : "Print"}
-        </button>
-        <button type="button" className="btn" onClick={() => copySecret(secretKey, "Secret Key copied")}>
-          <Icon name="copy" />
-          Copy
-        </button>
-      </div>
+      <KitActions email={email} secretKey={secretKey} />
       <label className="check">
         <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
-        <span>I saved my Secret Key</span>
+        <span>I saved my Secret Key somewhere safe</span>
       </label>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn btn-primary" disabled={!saved} onClick={onClose}>
+      <SheetActions>
+        <button type="button" className="btn btn-primary btn-block" disabled={!saved} onClick={onClose}>
           Done
         </button>
-      </div>
+      </SheetActions>
     </Modal>
   );
 }
@@ -815,7 +775,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
 
   return (
     <>
-      <p className="card-text">
+      <p className="card-text settings-intro">
         Two-step login asks for a code after your master password when you sign in on a new device, so a stolen password isn't enough.
       </p>
 
@@ -824,30 +784,36 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
       <PasskeysCard account={account} onAdd={() => setAddingKey(true)} onRemove={setRemovingKey} />
 
       <section className="card" aria-labelledby="rc-title">
-        <h2 id="rc-title">Recovery codes</h2>
+        <div className="card-head">
+          <div className="card-title">
+            <h2 id="rc-title">Recovery codes</h2>
+            {anyOn && <span className="badge">{account.recovery_codes_left} left</span>}
+          </div>
+          {anyOn && (
+            <button type="button" className="btn" onClick={() => setRegenerating(true)}>
+              Generate new codes…
+            </button>
+          )}
+        </div>
         {anyOn ? (
           <>
-            <p className="card-text">
-              Use a recovery code to sign in if you lose access to your other methods. You have {account.recovery_codes_left} unused{" "}
-              {account.recovery_codes_left === 1 ? "code" : "codes"} left.
-            </p>
+            <p className="card-text">Use a recovery code to sign in if you lose access to your other methods. Each code works once.</p>
             {account.recovery_codes_left <= 3 && (
-              <div className="alert alert-info">You're running low on recovery codes. Generate new ones and store them somewhere safe.</div>
+              <div className="alert alert-warn" role="note">
+                You're running low on recovery codes. Generate new ones and store them somewhere safe.
+              </div>
             )}
-            <div>
-              <button type="button" className="btn" onClick={() => setRegenerating(true)}>
-                Generate new recovery codes
-              </button>
-            </div>
           </>
         ) : (
-          <p className="card-text">You'll get recovery codes when you turn on your first two-step method.</p>
+          <p className="card-text">You get recovery codes when you turn on your first two-step method.</p>
         )}
       </section>
 
       {disabling && (
         <ConfirmPassword
-          title={disabling === "totp" ? "Turn off authenticator app" : "Turn off email codes"}
+          title={disabling === "totp" ? "Turn off the authenticator app?" : "Turn off email codes?"}
+          subtitle={account.email}
+          icon={disabling === "totp" ? "phone" : "mail"}
           action="Turn off"
           danger
           onConfirm={disable}
@@ -862,7 +828,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
       )}
 
       {regenerating && (
-        <ConfirmPassword title="Generate new recovery codes" action="Generate new codes" onConfirm={regenerate} onClose={() => setRegenerating(false)}>
+        <ConfirmPassword title="Generate new recovery codes?" subtitle={account.email} icon="note" action="Generate new codes" onConfirm={regenerate} onClose={() => setRegenerating(false)}>
           <p className="card-text">Your current recovery codes stop working as soon as the new ones are created.</p>
         </ConfirmPassword>
       )}
@@ -878,7 +844,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
       )}
 
       {removingKey && (
-        <ConfirmPassword title={`Remove "${removingKey.name}"`} action="Remove" danger onConfirm={removeKey} onClose={() => setRemovingKey(null)}>
+        <ConfirmPassword title="Remove this security key?" subtitle={removingKey.name} icon="key" action="Remove security key" danger onConfirm={removeKey} onClose={() => setRemovingKey(null)}>
           <p className="card-text">
             {lastKey
               ? "This is your only two-step method. Removing it also deletes your recovery codes, and signing in will need only your master password."
@@ -903,45 +869,36 @@ function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAd
   return (
     <section className="card" aria-labelledby="passkeys-title">
       <div className="card-head">
-        <h2 id="passkeys-title">Security keys and passkeys</h2>
-        {on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
+        <div className="card-title">
+          <h2 id="passkeys-title">Security keys and passkeys</h2>
+          <OnOff on={on} />
+        </div>
+        <button type="button" className="btn" onClick={onAdd} disabled={!canAdd}>
+          <Icon name="plus" /> Add a key…
+        </button>
       </div>
       <p className="card-text">
-        Confirm your sign-in by touching a hardware security key or with a passkey on your device (Touch ID, Windows Hello, your phone). Nothing to type.
+        Confirm your sign-in by touching a hardware security key or with a passkey on your device (fingerprint, face or PIN). Nothing to type.
       </p>
-      <div className="alert alert-warn">
-        The phone apps, browser extension and desktop app can't use a security key for two-step login yet. If you sign in there, keep an authenticator app
-        or email codes turned on as well. Recovery codes work everywhere.
-      </div>
 
       {on && (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Added</th>
-                <th scope="col">Last used</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {account.passkeys.map((k) => (
-                <tr key={k.id}>
-                  <td>{k.name}</td>
-                  <td>{formatDate(k.created_at)}</td>
-                  <td title={k.last_used_at ? formatDate(k.last_used_at) : undefined}>{k.last_used_at ? ago(k.last_used_at) : "Never"}</td>
-                  <td className="actions">
-                    <button type="button" className="btn btn-danger" onClick={() => onRemove(k)}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="fields" role="list" aria-label="Your security keys">
+          {account.passkeys.map((k) => (
+            <div key={k.id} role="listitem">
+              <span className="tile" aria-hidden="true">
+                <Icon name="key" />
+              </span>
+              <span className="grow">
+                <span className="row-title">{k.name}</span>
+                <span className="row-sub" title={k.last_used_at ? formatDate(k.last_used_at) : undefined}>
+                  Added {formatDate(k.created_at)}. {k.last_used_at ? `Last used ${ago(k.last_used_at).toLowerCase()}.` : "Not used yet."}
+                </span>
+              </span>
+              <button type="button" className="btn btn-text btn-danger btn-sm" aria-label={`Remove ${k.name}`} onClick={() => onRemove(k)}>
+                Remove
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -952,10 +909,9 @@ function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAd
       ) : !supported ? (
         <p className="small muted">This browser can't use security keys here. Open the web vault over https (or localhost) in a current browser.</p>
       ) : null}
-      <div>
-        <button type="button" className="btn btn-primary" onClick={onAdd} disabled={!canAdd}>
-          Add a security key or passkey
-        </button>
+      <div className="alert alert-warn small" role="note">
+        The phone apps, browser extension and desktop app can't use a security key for two-step login yet. If you sign in there, keep an authenticator app
+        or email codes turned on as well. Recovery codes work everywhere.
       </div>
     </section>
   );
@@ -1000,9 +956,9 @@ function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | 
   }
 
   return (
-    <Modal title="Add a security key or passkey" onClose={close}>
-      <form className="stack" onSubmit={submit}>
-        <p className="card-text">After you confirm, your browser asks you to touch your security key or to use the passkey on this device.</p>
+    <Modal title="Add a security key or passkey" subtitle={server.host()} icon="key" onClose={close}>
+      <form onSubmit={submit}>
+        <p className="card-text">After you continue, your browser asks you to touch your security key or to use the passkey on this device.</p>
         <div className="field">
           <label htmlFor="passkey-name">Name</label>
           <input
@@ -1010,26 +966,35 @@ function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | 
             className="input"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Blue key, Work laptop"
+            placeholder="Blue key, work laptop…"
             maxLength={60}
             autoFocus
             disabled={busy}
           />
+          <span className="field-hint">Helps you tell your keys apart later.</span>
         </div>
         <div className="field">
           <label htmlFor="passkey-password">Master password</label>
           <PasswordInput id="passkey-password" value={password} onChange={setPassword} />
+          <span className="field-hint">Confirms that it's you adding the key.</span>
         </div>
-        {step === "waiting" && <div className="alert alert-info">Waiting for your security key or passkey…</div>}
+        {step === "waiting" && (
+          <div className="alert alert-info" role="status">
+            Waiting for your security key or passkey…
+          </div>
+        )}
         <ErrorText error={error} />
-        <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="button" className="btn btn-ghost" onClick={close} disabled={busy}>
-            Cancel
-          </button>
-          <button type="submit" className="btn btn-primary" disabled={busy}>
+        <SheetActions
+          quiet={
+            <button type="button" className="btn btn-text" onClick={close} disabled={busy}>
+              Cancel
+            </button>
+          }
+        >
+          <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
             {step === "form" ? "Continue" : step === "confirming" ? "Confirming…" : step === "waiting" ? "Waiting for key…" : "Saving…"}
           </button>
-        </div>
+        </SheetActions>
       </form>
     </Modal>
   );
@@ -1098,56 +1063,57 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
   return (
     <section className="card" aria-labelledby="totp-title">
       <div className="card-head">
-        <h2 id="totp-title">Authenticator app</h2>
-        {on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
-      </div>
-      <p className="card-text">Get a new 6-digit code every 30 seconds from an authenticator app, such as Aegis, Google Authenticator or Microsoft Authenticator.</p>
-
-      {on ? (
-        <div>
-          <button type="button" className="btn btn-danger" onClick={onDisable}>
-            Turn off authenticator app
-          </button>
+        <div className="card-title">
+          <h2 id="totp-title">Authenticator app</h2>
+          <OnOff on={on} />
         </div>
-      ) : setup ? (
+        {on ? (
+          <button type="button" className="btn btn-danger" onClick={onDisable}>
+            Turn off…
+          </button>
+        ) : (
+          !setup && (
+            <button type="button" className="btn" onClick={start} disabled={busy}>
+              {busy ? "Starting setup…" : "Set up…"}
+            </button>
+          )
+        )}
+      </div>
+      <p className="card-text">Get a new 6-digit code every 30 seconds from an authenticator app on your phone.</p>
+
+      {!on && setup && (
         <form className="stack" onSubmit={enable}>
           <div className="totp-setup">
             <div className="qr">
               <img src={setup.qr} alt="QR code to add PassAuth to your authenticator app" width={200} height={200} />
             </div>
-            <div className="stack-s">
-              <p className="card-text">1. Scan the QR code with your authenticator app.</p>
-              <p className="small muted">Can't scan it? Enter this setup key in the app instead:</p>
-              <div className="row">
-                <code className="mono" style={{ wordBreak: "break-all" }}>
-                  {prettySecret}
-                </code>
-                <CopyButton value={setup.secret} label="Copy setup key" />
-              </div>
-              <p className="card-text">2. Enter the code the app shows.</p>
-              <CodeField id="totp-code" value={code} onChange={setCode} />
-            </div>
+            <ol className="steps">
+              <li>
+                <span className="row-title">Scan the QR code with your authenticator app</span>
+                <span className="row-sub">Can't scan it? Enter this setup key in the app instead:</span>
+                <span className="secret-box">
+                  <code className="mono wrap-anywhere">{prettySecret}</code>
+                  <CopyButton value={setup.secret} label="Copy setup key" />
+                </span>
+              </li>
+              <li>
+                <span className="row-title">Enter the code the app shows</span>
+                <CodeField id="totp-code" value={code} onChange={setCode} />
+              </li>
+            </ol>
           </div>
           <ErrorText error={error} />
-          <div className="row">
+          <div className="card-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
               {busy ? "Checking code…" : "Turn on authenticator app"}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setSetup(null)} disabled={busy}>
+            <button type="button" className="btn btn-text" onClick={() => setSetup(null)} disabled={busy}>
               Cancel
             </button>
           </div>
         </form>
-      ) : (
-        <>
-          <ErrorText error={error} />
-          <div>
-            <button type="button" className="btn btn-primary" onClick={start} disabled={busy}>
-              {busy ? "Starting setup…" : "Set up authenticator app"}
-            </button>
-          </div>
-        </>
       )}
+      {!on && !setup && <ErrorText error={error} />}
     </section>
   );
 }
@@ -1205,53 +1171,47 @@ function EmailCard({
   return (
     <section className="card" aria-labelledby="email2fa-title">
       <div className="card-head">
-        <h2 id="email2fa-title">Email codes</h2>
-        {on ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
+        <div className="card-title">
+          <h2 id="email2fa-title">Email codes</h2>
+          <OnOff on={on} />
+        </div>
+        {on ? (
+          <button type="button" className="btn btn-danger" onClick={onDisable}>
+            Turn off…
+          </button>
+        ) : (
+          !sent &&
+          available && (
+            <button type="button" className="btn" onClick={send} disabled={busy}>
+              {busy ? "Sending…" : "Send setup code"}
+            </button>
+          )
+        )}
       </div>
       <p className="card-text">Get a one-time code by email at {email} when you sign in.</p>
 
-      {on ? (
-        <div>
-          <button type="button" className="btn btn-danger" onClick={onDisable}>
-            Turn off email codes
-          </button>
-        </div>
-      ) : !available ? (
-        <>
-          <p className="small muted">This server isn't set up to send email, so email codes aren't available. Ask your PassAuth administrator to configure email.</p>
-          <div>
-            <button type="button" className="btn" disabled>
-              Send setup code
-            </button>
-          </div>
-        </>
-      ) : sent ? (
+      {!on && !available && (
+        <p className="small muted">This server isn't set up to send email, so email codes aren't available. Ask your PassAuth administrator to configure email.</p>
+      )}
+      {!on && available && sent && (
         <form className="stack" onSubmit={enable}>
           <p className="card-text">We sent a code to {email}. Enter it below.</p>
           <CodeField id="email-code" value={code} onChange={setCode} />
           <ErrorText error={error} />
-          <div className="row" style={{ flexWrap: "wrap" }}>
+          <div className="card-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
               {busy ? "Checking code…" : "Turn on email codes"}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={send} disabled={busy}>
+            <button type="button" className="btn btn-text" onClick={send} disabled={busy}>
               Send a new code
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setSent(false)} disabled={busy}>
+            <button type="button" className="btn btn-text" onClick={() => setSent(false)} disabled={busy}>
               Cancel
             </button>
           </div>
         </form>
-      ) : (
-        <>
-          <ErrorText error={error} />
-          <div>
-            <button type="button" className="btn btn-primary" onClick={send} disabled={busy}>
-              {busy ? "Sending…" : "Send setup code"}
-            </button>
-          </div>
-        </>
       )}
+      {!on && available && !sent && <ErrorText error={error} />}
     </section>
   );
 }
@@ -1259,43 +1219,49 @@ function EmailCard({
 function RecoveryCodesModal({ codes, onClose }: { codes: string[]; onClose: () => void }) {
   const text = codes.join("\n");
   const [saved, setSaved] = useState(false);
+  const [done, setDone] = useState<{ download?: boolean; copy?: boolean }>({});
   // They're shown only once: Escape or a click outside must not throw them away.
   const close = useCallback(() => {
     if (saved) onClose();
   }, [saved, onClose]);
   return (
-    <Modal title="Save your recovery codes" onClose={close}>
-      <p className="card-text">
-        If you lose your phone or can't get email, a recovery code lets you sign in. Each code works once. This is the only time PassAuth shows them.
-      </p>
+    <Modal title="Save your recovery codes" subtitle="Shown only once. Each code works once." icon="note" closable={false} onClose={close}>
+      <p className="card-text">If you lose your phone or can't get email, a recovery code lets you sign in.</p>
       <div className="codes recovery-codes" aria-label="Recovery codes">
         {codes.map((c) => (
           <span key={c}>{c}</span>
         ))}
       </div>
-      <div className="row" style={{ flexWrap: "wrap" }}>
-        <button type="button" className="btn" onClick={() => copySecret(text, "Recovery codes copied")}>
-          <Icon name="copy" />
-          Copy all
-        </button>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${server.origin()}\n\nEach code works once.\n\n${text}\n`)}
-        >
-          <Icon name="download" />
-          Download
-        </button>
+      <div className="choices">
+        <ActionRow
+          icon="download"
+          title="Download recovery codes"
+          sub={`A text file with all ${codes.length} codes`}
+          done={done.download ? "Downloaded. Keep the file somewhere safe." : undefined}
+          onClick={() => {
+            download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${server.origin()}\n\nEach code works once.\n\n${text}\n`);
+            setDone((d) => ({ ...d, download: true }));
+          }}
+        />
+        <ActionRow
+          icon="copy"
+          title="Copy all codes"
+          sub="To paste into a note you keep safe"
+          done={done.copy ? "Copied" : undefined}
+          onClick={async () => {
+            if (await copySecret(text, "Recovery codes copied")) setDone((d) => ({ ...d, copy: true }));
+          }}
+        />
       </div>
       <label className="check">
         <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
-        <span>I saved my recovery codes</span>
+        <span>I saved my recovery codes somewhere safe</span>
       </label>
-      <div className="row" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn btn-primary" disabled={!saved} onClick={onClose}>
+      <SheetActions>
+        <button type="button" className="btn btn-primary btn-block" disabled={!saved} onClick={onClose}>
           Done
         </button>
-      </div>
+      </SheetActions>
     </Modal>
   );
 }
@@ -1338,8 +1304,7 @@ function VaultsTab() {
             <span>Vault name</span>
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
           </label>
-          <button type="submit" className="btn btn-primary" disabled={busy}>
-            <Icon name="plus" />
+          <button type="submit" className="btn btn-primary" disabled={busy || !name.trim()}>
             {busy ? "Creating…" : "Create vault"}
           </button>
         </form>
@@ -1368,36 +1333,41 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
   return (
     <section className="card" aria-labelledby={`vault-${vault.id}`}>
       <div className="card-head">
-        <div className="row">
-          <Icon name="vault" />
-          <h2 id={`vault-${vault.id}`}>{vault.name}</h2>
-          <span className={`badge${vault.role === "owner" ? " badge-ok" : ""}`}>{ROLE_LABEL[vault.role]}</span>
+        <div className="card-title">
+          <span className="tile" aria-hidden="true">
+            <Icon name={vault.kind === "sealed" ? "share" : "vault"} />
+          </span>
+          <div className="grow">
+            <h2 id={`vault-${vault.id}`} className="wrap-anywhere">
+              {vault.name}
+            </h2>
+            <p className="row-sub">
+              {count} {count === 1 ? "item" : "items"}
+              {vault.kind === "sealed" && ", shared with you"}
+            </p>
+          </div>
+          <span className="badge">{ROLE_LABEL[vault.role]}</span>
         </div>
-        <div className="row">
-          {canManage && (
-            <button type="button" className="btn" aria-expanded={open} onClick={() => setOpen(!open)}>
-              <Icon name="share" />
-              {open ? "Close" : "Manage and share"}
+        <div className="card-actions">
+          {vault.role !== "owner" && (
+            <button type="button" className="btn btn-text btn-danger" onClick={() => setLeaving(true)}>
+              Leave vault…
             </button>
           )}
-          {vault.role !== "owner" && (
-            <button type="button" className="btn btn-danger" onClick={() => setLeaving(true)}>
-              Leave vault
+          {canManage && (
+            <button type="button" className="btn" aria-expanded={open} onClick={() => setOpen(!open)}>
+              {open ? "Done" : "Manage and share"}
             </button>
           )}
         </div>
       </div>
-      <p className="small muted">
-        {count} {count === 1 ? "item" : "items"}
-        {vault.kind === "sealed" ? ". Shared with you." : "."}
-      </p>
 
       {open && canManage && <VaultManager vault={vault} count={count} />}
 
       {leaving && (
-        <ConfirmDialog title={`Leave "${vault.name}"`} action="Leave vault" onConfirm={leave} onClose={() => setLeaving(false)}>
+        <ConfirmDialog title="Leave this vault?" subtitle={vault.name} icon="share" action="Leave vault" busyAction="Leaving…" onConfirm={leave} onClose={() => setLeaving(false)}>
           <p className="card-text">
-            You'll lose access to the {count} {count === 1 ? "item" : "items"} in this vault. To get access again, someone who manages the vault has to
+            You lose access to the {count} {count === 1 ? "item" : "items"} in this vault. To get access again, someone who manages the vault has to
             share it with you again.
           </p>
         </ConfirmDialog>
@@ -1498,7 +1468,7 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
         </label>
         <button type="submit" className="btn" disabled={renaming || name.trim() === vault.name}>
-          {renaming ? "Saving…" : "Rename vault"}
+          {renaming ? "Saving…" : "Rename"}
         </button>
       </form>
       <ErrorText error={renameError} />
@@ -1508,44 +1478,30 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         <ErrorText error={membersError} />
         {members === null && !membersError && <p className="muted small">Loading members…</p>}
         {members && (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th scope="col">Person</th>
-                  <th scope="col">Access</th>
-                  <th scope="col">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {members.map((m) => (
-                  <tr key={m.user_id}>
-                    <td>
-                      <div>
-                        {m.name || m.email}
-                        {m.user_id === userId && <span className="muted"> (you)</span>}
-                      </div>
-                      {m.name && <div className="small muted">{m.email}</div>}
-                      <div className="fingerprint-s" title="Public key fingerprint">
-                        {safeFingerprint(m.public_key)}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="badge">{ROLE_LABEL[m.role] ?? m.role}</span>
-                    </td>
-                    <td className="actions">
-                      {m.role !== "owner" && m.user_id !== userId && (
-                        <button type="button" className="btn btn-danger" onClick={() => setRemoving(m)}>
-                          Remove
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="fields" role="list" aria-label="Members">
+            {members.map((m) => (
+              <div key={m.user_id} role="listitem">
+                <span className="avatar" aria-hidden="true">
+                  {((m.name || m.email).trim()[0] ?? "?").toUpperCase()}
+                </span>
+                <span className="grow">
+                  <span className="row-title">
+                    {m.name || m.email}
+                    {m.user_id === userId && <span className="muted"> (you)</span>}
+                  </span>
+                  {m.name && <span className="row-sub">{m.email}</span>}
+                  <span className="fingerprint-s" title="Public key fingerprint">
+                    {safeFingerprint(m.public_key)}
+                  </span>
+                </span>
+                <span className="badge">{ROLE_LABEL[m.role] ?? m.role}</span>
+                {m.role !== "owner" && m.user_id !== userId && (
+                  <button type="button" className="btn btn-text btn-danger btn-sm" aria-label={`Remove ${m.name || m.email}`} onClick={() => setRemoving(m)}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1553,32 +1509,47 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
       <AddMember vault={vault} members={members ?? []} onAdded={loadMembers} />
 
       {vault.role === "owner" && (
-        <div className="stack-s">
-          <h3>Delete vault</h3>
-          <p className="card-text">Deletes the vault and every item in it, for you and everyone it's shared with.</p>
-          <div>
+        <Setting
+          title="Delete this vault"
+          control={
             <button type="button" className="btn btn-danger" onClick={() => setDeleting(true)}>
-              <Icon name="trash" />
               Delete vault…
             </button>
-          </div>
-        </div>
+          }
+        >
+          Deletes the vault and every item in it, for you and everyone it's shared with.
+        </Setting>
       )}
 
       {removing && (
-        <ConfirmDialog title={`Remove ${removing.name || removing.email}`} action="Remove" onConfirm={remove} onClose={() => setRemoving(null)}>
+        <ConfirmDialog
+          title={`Remove ${removing.name || removing.email}?`}
+          subtitle={`From ${vault.name}`}
+          icon="person"
+          action="Remove from vault"
+          busyAction="Removing…"
+          onConfirm={remove}
+          onClose={() => setRemoving(null)}
+        >
           <p className="card-text">
-            They lose access to "{vault.name}" right away. PassAuth then replaces the vault key and re-encrypts every item, so they can't read any
-            future changes. Anything they already copied or saw stays with them, so change important passwords if needed.
+            They lose access right away. PassAuth then replaces the vault key and re-encrypts every item, so they can't read any future changes.
+            Anything they already copied or saw stays with them, so change important passwords if needed.
           </p>
         </ConfirmDialog>
       )}
 
       {deleting && (
-        <ConfirmDialog title={`Delete "${vault.name}"`} action="Delete vault" confirmText={vault.name} onConfirm={destroy} onClose={() => setDeleting(false)}>
-          <p className="card-text">
-            This permanently deletes the vault and its {count} {count === 1 ? "item" : "items"} for everyone who has access. You can't undo this.
-          </p>
+        <ConfirmDialog
+          title="Delete this vault?"
+          subtitle={`${vault.name}, ${count} ${count === 1 ? "item" : "items"}`}
+          icon="trash"
+          action="Delete vault"
+          busyAction="Deleting…"
+          confirmText={vault.name}
+          onConfirm={destroy}
+          onClose={() => setDeleting(false)}
+        >
+          <p className="card-text">This permanently deletes the vault and its items for everyone who has access. You can't undo this.</p>
         </ConfirmDialog>
       )}
     </div>
@@ -1639,7 +1610,7 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
       <h3>Share this vault</h3>
       <form className="inline-form" onSubmit={find}>
         <label className="field">
-          <span>Email address</span>
+          <span>Email address of the person</span>
           <input
             className="input"
             type="email"
@@ -1659,20 +1630,25 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
 
       {found && (
         <div className="person">
-          <div>
-            <strong>{found.name || found.email}</strong>
-            {found.name && <div className="small muted">{found.email}</div>}
+          <div className="sheet-context">
+            <span className="avatar" aria-hidden="true">
+              {((found.name || found.email).trim()[0] ?? "?").toUpperCase()}
+            </span>
+            <div className="grow">
+              <div className="row-title">{found.name || found.email}</div>
+              {found.name && <div className="row-sub">{found.email}</div>}
+            </div>
           </div>
-          <div className="stack-s">
-            <span className="small">Their key fingerprint</span>
+          <div className="field">
+            <span>Their key fingerprint</span>
             <div className="fingerprint">{safeFingerprint(found.public_key)}</div>
-            <p className="small muted">
+            <span className="field-hint">
               Ask {found.name || "them"} to open Settings, then Account, and read you their fingerprint. Share only if it matches exactly. If it doesn't,
               don't share and tell your PassAuth administrator.
-            </p>
+            </span>
           </div>
           {existing && (
-            <div className="alert alert-info">
+            <div className="alert alert-info small" role="note">
               They already have {ROLE_LABEL[existing.role].toLowerCase()} access. Sharing again changes their access to what you choose below.
             </div>
           )}
@@ -1686,11 +1662,11 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
               ))}
             </select>
           </label>
-          <div className="row">
+          <div className="card-actions">
             <button type="button" className="btn btn-primary" onClick={share} disabled={busy || existing?.role === "owner"}>
               {busy ? "Sharing…" : "Share vault"}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setFound(null)} disabled={busy}>
+            <button type="button" className="btn btn-text" onClick={() => setFound(null)} disabled={busy}>
               Cancel
             </button>
           </div>
@@ -1726,7 +1702,7 @@ function SessionsTab() {
     setError(null);
     try {
       for (const id of ids) await api(`/account/sessions/${id}`, { method: "DELETE" });
-      toast(ids.length === 1 ? "Session revoked" : `${ids.length} sessions revoked`);
+      toast(ids.length === 1 ? "Device signed out" : `${ids.length} devices signed out`);
       await load();
     } catch (e) {
       setError(friendly(e));
@@ -1753,56 +1729,38 @@ function SessionsTab() {
               )
             }
           >
-            {busy === "all" ? "Revoking…" : "Revoke all other sessions"}
+            {busy === "all" ? "Signing out…" : "Sign out all other devices"}
           </button>
         )}
       </div>
-      <p className="card-text">Revoking a session signs that device out. It will need your master password to sign in again.</p>
+      <p className="card-text">Signing a device out ends its session. It needs your master password to sign in again.</p>
       <ErrorText error={error} />
-      {!data && !error && <p className="muted small">Loading sessions…</p>}
+      {!data && !error && <p className="muted small">Loading devices…</p>}
       {data && (
-        <div className="table-wrap">
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Device</th>
-                <th scope="col">Type</th>
-                <th scope="col">Signed in</th>
-                <th scope="col">Last used</th>
-                <th scope="col">
-                  <span className="sr-only">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.sessions.map((s) => {
-                const isCurrent = s.id === data.current;
-                return (
-                  <tr key={s.id}>
-                    <td>
-                      {s.device_name || "Unknown device"}
-                      {isCurrent && (
-                        <>
-                          {" "}
-                          <span className="badge badge-ok">This device</span>
-                        </>
-                      )}
-                    </td>
-                    <td>{kindLabel(s.device_kind)}</td>
-                    <td>{formatDate(s.created_at)}</td>
-                    <td title={formatDate(s.last_used)}>{isCurrent ? "Now" : ago(s.last_used)}</td>
-                    <td className="actions">
-                      {!isCurrent && (
-                        <button type="button" className="btn btn-danger" disabled={busy !== null} onClick={() => revoke([s.id], s.id)}>
-                          {busy === s.id ? "Revoking…" : "Revoke"}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="fields" role="list" aria-label="Signed-in devices">
+          {data.sessions.map((s) => {
+            const isCurrent = s.id === data.current;
+            return (
+              <div key={s.id} role="listitem">
+                <span className="tile" aria-hidden="true">
+                  <Icon name={KIND_ICON[s.device_kind] ?? "desktop"} />
+                </span>
+                <span className="grow">
+                  <span className="row-title">{s.device_name || "Unknown device"}</span>
+                  <span className="row-sub" title={`Last used ${formatDate(s.last_used)}`}>
+                    {kindLabel(s.device_kind)}. Signed in {formatDate(s.created_at)}. {isCurrent ? "In use now." : `Last used ${ago(s.last_used).toLowerCase()}.`}
+                  </span>
+                </span>
+                {isCurrent ? (
+                  <span className="badge badge-ok">This device</span>
+                ) : (
+                  <button type="button" className="btn btn-text btn-danger btn-sm" disabled={busy !== null} aria-label={`Sign out ${s.device_name || "this device"}`} onClick={() => revoke([s.id], s.id)}>
+                    {busy === s.id ? "Signing out…" : "Sign out"}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
       {data && others.length === 0 && <p className="small muted">You're not signed in anywhere else.</p>}

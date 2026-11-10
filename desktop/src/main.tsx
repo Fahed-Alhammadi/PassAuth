@@ -48,6 +48,6 @@ try {
   );
 } catch (e) {
   console.error(e);
-  root.innerHTML = `<main class="auth"><div class="auth-card"><div class="auth-panel stack" role="alert">
-    <h1>PassAuth couldn't start</h1><p>The encryption module didn't load. Reinstall the app, then try again.</p></div></div></main>`;
+  root.innerHTML = `<main class="auth"><div class="auth-card"><div class="auth-head"><h1>PassAuth couldn't start</h1></div>
+    <div class="auth-panel stack" role="alert"><p>The encryption module didn't load. Reinstall the app, then try again.</p></div></div></main>`;
 }
