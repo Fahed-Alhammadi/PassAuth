@@ -1,0 +1,123 @@
+# CodeQL code scanning (results: Security → Code scanning).
+# - Push to main, pull request, and weekly (new queries find old code).
+# - Rust, JavaScript/TypeScript, Python and the workflows are scanned without a build.
+# - Kotlin (Android) and Swift (iOS app + AutoFill, macOS AutoFill extension) are scanned while
+#   they build, the same way as android.yml / ios.yml / desktop.yml build them (unsigned).
+# Settings (ignored paths): .github/codeql/codeql-config.yml.
+# GitHub's "default setup" for code scanning must stay off, or the uploads are refused.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  analyze:
+    name: ${{ matrix.language }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { language: actions, build-mode: none, os: ubuntu-latest }
+          - { language: javascript-typescript, build-mode: none, os: ubuntu-latest }
+          - { language: python, build-mode: none, os: ubuntu-latest }
+          - { language: rust, build-mode: none, os: ubuntu-latest }
+          - { language: java-kotlin, build-mode: manual, os: ubuntu-latest }
+          - { language: swift, build-mode: manual, os: macos-latest }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Android toolchain (as android.yml)
+      - if: matrix.language == 'java-kotlin'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - if: matrix.language == 'java-kotlin'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools
+      - if: matrix.language == 'java-kotlin'
+        name: Install NDK
+        run: sdkmanager --install "ndk;29.0.14206865" >/dev/null && echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - if: matrix.language == 'java-kotlin'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,x86_64-linux-android
+      - if: matrix.language == 'java-kotlin'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        with:
+          tool: cargo-ndk
+          fallback: cargo-install
+
+      # Apple toolchain (as ios.yml / desktop.yml)
+      - if: matrix.language == 'swift'
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: latest-stable
+      - if: matrix.language == 'swift'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin,x86_64-apple-darwin
+      - if: matrix.language == 'swift'
+        name: Install XcodeGen
+        run: brew install xcodegen
+
+      # The Rust cores are built before CodeQL starts, so only the app code is traced.
+      - if: matrix.language == 'java-kotlin'
+        name: Build the core for Android
+        run: PROFILE=debug scripts/build-android-core.sh
+      - if: matrix.language == 'swift'
+        name: Build the cores for iOS and macOS
+        run: |
+          scripts/build-ios-core.sh
+          scripts/build-macos-core.sh
+          (cd ios && xcodegen generate)
+          (cd desktop/macos && xcodegen generate)
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Compiled from scratch (no Gradle build cache, no Kotlin daemon) so CodeQL sees every file.
+      - if: matrix.language == 'java-kotlin'
+        name: Build the Android app
+        run: |
+          cd android
+          ./gradlew --no-daemon --no-build-cache -Pkotlin.compiler.execution.strategy=in-process :app:assembleDebug
+
+      - if: matrix.language == 'swift'
+        name: Build the iOS app and the macOS AutoFill extension
+        run: |
+          xcodebuild -project ios/PassAuth.xcodeproj -scheme PassAuth -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build -quiet
+          xcodebuild -project desktop/macos/PassAuthAutoFill.xcodeproj -scheme PassAuthAutoFill -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO build -quiet
+
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}
