@@ -74,7 +74,7 @@ cp .env.example .env          # then set PUID/PGID and the admin password
 docker compose up -d
 ```
 
-Put it behind HTTPS (the apps require it), open your domain and create your account. The admin page is at `/admin` (email, sign-ups and server settings are set there). The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: HTTPS with a reverse proxy, email, updates, backups and all settings.
+Put it behind HTTPS (the apps require it), open your domain and create your account. The admin page is at `/admin`: users, invitations, sign-ups, email and server settings, plus two-step login for the admin page itself. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: HTTPS with a reverse proxy, email, updates, backups and all settings.
 
 To update: `docker compose pull && docker compose up -d`. Database changes apply on start. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
@@ -85,6 +85,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.
 - **Server:** runs as your PUID:PGID user on a read-only filesystem with no Linux capabilities (it starts as root only to prepare its data folder).
+- **Admin page:** user name and password, optional two-step login with an authenticator app and recovery codes, and optionally reachable only from your own networks (`PASSAUTH_ADMIN_ALLOWED_NETWORKS`).
 
 The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
