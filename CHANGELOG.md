@@ -6,6 +6,17 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.8.0 (2026-11-14)
+
+- Server: short docker-compose.yml + .env, admin sign-in with user name and password, settings on the admin page (d7feb17)
+- Bump vite from 8.3.5 to 8.3.6 in /web (f897e0c)
+- Bump zip from 9.2.2 to 9.4.2 (1ad2298)
+- Bump uuid from 1.29.0 to 1.29.1 (5c92062)
+- Bump node from `bc0a2af` to `add5c17` (f1c18b0)
+- Bump rust from `ed2c95c` to `f2c004e` (98b4a79)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.7.0...server-0.8.0)
+
 ## 0.7.0 (2026-11-10)
 
 - Web vault and desktop: redesigned dialogs, sign-in and settings; changing the master password keeps this device signed in (f4526f7)
