@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.9.0 (2026-11-14)
+
+- Server: two-step login and allowed networks for the admin page (2c7ddc8)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.8.0...server-0.9.0)
+
 ## 0.8.0 (2026-11-14)
 
 - Server: short docker-compose.yml + .env, admin sign-in with user name and password, settings on the admin page (d7feb17)
