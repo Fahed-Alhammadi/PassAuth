@@ -9,7 +9,9 @@ use rand_core06::OsRng;
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use crate::config::{Config, SignupPolicy};
+use crate::config::{
+    ADMIN_PASSWORD_EXAMPLE, ADMIN_PASSWORD_MIN_CHARS, Config, SignupPolicy, SmtpConfig,
+};
 use crate::db::{self, Db, now};
 use crate::icons::IconService;
 use crate::mail::Mailer;
@@ -39,11 +41,74 @@ pub struct App {
     pub icons: IconService,
     /// Effective sign-up policy (env defaults, overridden from the admin page).
     pub signups: std::sync::RwLock<SignupPolicy>,
-    /// Bounds concurrent Argon2 checks of the admin token (each takes ~19 MiB).
+    /// New accounts must confirm their email before the first sign-in
+    /// (`SIGNUPS_VERIFY`, overridden from the admin page).
+    pub signups_verify: std::sync::atomic::AtomicBool,
+    /// Log level shown on the admin page: one of `logging::LEVELS` or `custom`.
+    pub log_level: std::sync::RwLock<String>,
+    /// How the admin page signs in.
+    pub admin: AdminLogin,
+    /// Admin page sessions by SHA-256 of their token: (idle expiry, absolute expiry).
+    pub admin_sessions: DashMap<String, (i64, i64)>,
+    /// Bounds concurrent Argon2 checks of admin sign-ins (each takes ~19 MiB).
     pub admin_verify: tokio::sync::Semaphore,
-    /// SHA-256 of the last admin token that passed the Argon2 check, with its
-    /// expiry, so an open admin page doesn't re-run Argon2 on every request.
+    /// SHA-256 of the last `ADMIN_TOKEN` sent directly as a bearer token that passed
+    /// the Argon2 check, with its expiry (scripts that skip `/admin/login`).
     pub admin_verified: std::sync::Mutex<Option<(String, i64)>>,
+}
+
+/// How the admin page signs in.
+pub enum AdminLogin {
+    /// No admin credentials, or a password the server refuses (`weak` = true).
+    Off { weak: bool },
+    /// `PASSAUTH_ADMIN_USERNAME` + `PASSAUTH_ADMIN_PASSWORD` (kept as an Argon2 hash).
+    Password { username: String, hash: String },
+    /// Old `ADMIN_TOKEN` (Argon2 PHC string or plain text).
+    Token(String),
+}
+
+impl AdminLogin {
+    fn from_config(config: &Config) -> Result<Self> {
+        let Some(password) = &config.admin_password else {
+            return Ok(match &config.admin_token {
+                Some(token) => Self::Token(token.clone()),
+                None => Self::Off { weak: false },
+            });
+        };
+        if password == ADMIN_PASSWORD_EXAMPLE || password.chars().count() < ADMIN_PASSWORD_MIN_CHARS
+        {
+            tracing::warn!(
+                "the admin page is off: PASSAUTH_ADMIN_PASSWORD is still the example value or shorter than {ADMIN_PASSWORD_MIN_CHARS} characters; set a long password in .env and run `docker compose up -d`"
+            );
+            return Ok(Self::Off { weak: true });
+        }
+        if config.admin_username.is_empty() {
+            anyhow::bail!("PASSAUTH_ADMIN_USERNAME is empty");
+        }
+        if config.admin_token.is_some() {
+            tracing::info!(
+                "ADMIN_TOKEN is ignored because PASSAUTH_ADMIN_PASSWORD is set; you can remove it from .env"
+            );
+        }
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = argon2::Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("hashing the admin password: {e}"))?
+            .to_string();
+        Ok(Self::Password {
+            username: config.admin_username.clone(),
+            hash,
+        })
+    }
+
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Self::Off { .. } => "off",
+            Self::Password { .. } => "password",
+            Self::Token(_) => "token",
+        }
+    }
 }
 
 pub struct PendingRegistration {
@@ -104,6 +169,37 @@ impl App {
                 .map(str::to_owned)
                 .collect();
         }
+        let flag = |v: Option<String>, default: bool| v.map_or(default, |v| v == "1");
+        let signups_verify = flag(
+            db::setting(&db, "signups_verify").await?,
+            config.signups_verify,
+        );
+        let icons_on = flag(db::setting(&db, "icon_service").await?, config.icon_service);
+        let log_level = match db::setting(&db, "log_level").await? {
+            Some(level) if crate::logging::set_level(&level).is_ok() => level,
+            _ => crate::logging::env_level(),
+        };
+        let smtp: Option<SmtpConfig> = match db::setting(&db, "smtp").await?.as_deref() {
+            Some("off") => None,
+            Some(json) => match serde_json::from_str(json) {
+                Ok(smtp) => Some(smtp),
+                Err(e) => {
+                    tracing::warn!(error = %e, "saved email settings are unreadable; using SMTP_* from .env");
+                    config.smtp.clone()
+                }
+            },
+            None => config.smtp.clone(),
+        };
+        let mailer = match Mailer::new(&config.domain, smtp.as_ref()) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "email settings are invalid, email is off until they are fixed on the admin page");
+                Mailer::new(&config.domain, None)?
+            }
+        };
+        let icons = IconService::new(&config);
+        icons.set_enabled(icons_on);
+        let admin = AdminLogin::from_config(&config)?;
         let webauthn = match crate::passkeys::build(&config.domain) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -115,8 +211,12 @@ impl App {
             webauthn,
             passkey_registrations: Expiring::default(),
             signups: std::sync::RwLock::new(signups),
-            mailer: Arc::new(Mailer::new(&config)?),
-            icons: IconService::new(&config),
+            signups_verify: std::sync::atomic::AtomicBool::new(signups_verify),
+            log_level: std::sync::RwLock::new(log_level),
+            admin,
+            admin_sessions: DashMap::new(),
+            mailer: Arc::new(mailer),
+            icons,
             config,
             db,
             opaque,
@@ -130,6 +230,11 @@ impl App {
             admin_verify: tokio::sync::Semaphore::new(2),
             admin_verified: std::sync::Mutex::new(None),
         }))
+    }
+
+    pub fn signups_verify(&self) -> bool {
+        self.signups_verify
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Tell every connected client of these users to re-sync to their new revision.
@@ -165,6 +270,9 @@ impl App {
         self.reauth.sweep();
         self.passkey_registrations.sweep();
         self.limiter.sweep();
+        let t = now();
+        self.admin_sessions
+            .retain(|_, (idle, absolute)| *idle > t && *absolute > t);
         self.notify.retain(|_, tx| tx.receiver_count() > 0);
     }
 }

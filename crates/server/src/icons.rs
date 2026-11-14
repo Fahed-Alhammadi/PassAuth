@@ -14,7 +14,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -67,7 +67,7 @@ async fn icon(
     headers: HeaderMap,
 ) -> Response {
     let icons = &state.icons;
-    if !icons.enabled {
+    if !icons.enabled() {
         return reply(StatusCode::NOT_FOUND, "no-store", None);
     }
     let Some(host) = normalize_host(&host) else {
@@ -146,7 +146,7 @@ enum Lookup {
 }
 
 pub struct IconService {
-    enabled: bool,
+    enabled: AtomicBool,
     disk: Option<PathBuf>,
     mem: DashMap<String, (i64, Option<Icon>)>,
     inflight: DashMap<String, Arc<OnceCell<Lookup>>>,
@@ -160,7 +160,6 @@ impl IconService {
         let disk = config
             .icon_cache_dir
             .as_deref()
-            .filter(|_| config.icon_service)
             .and_then(|dir| match std::fs::create_dir_all(dir) {
                 Ok(()) => Some(PathBuf::from(dir)),
                 Err(e) => {
@@ -179,7 +178,7 @@ impl IconService {
         .with_no_client_auth();
         tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         Self {
-            enabled: config.icon_service,
+            enabled: AtomicBool::new(config.icon_service),
             disk,
             mem: DashMap::new(),
             inflight: DashMap::new(),
@@ -187,6 +186,15 @@ impl IconService {
             tls: tokio_rustls::TlsConnector::from(Arc::new(tls)),
             last_disk_sweep: AtomicI64::new(0),
         }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Turn the icon service on or off (admin page), without a restart.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
     }
 
     async fn cached(&self, host: &str) -> Option<Lookup> {

@@ -17,8 +17,30 @@ interface Overview {
     signups_domains: string[] | string | null;
     signups_verify: boolean;
     smtp_enabled: boolean;
-    admin_token_hashed: boolean;
+    admin_login: "password" | "token";
   };
+}
+
+type LoginMode = { mode: "password" | "token" | "off"; weak_password: boolean };
+
+type SmtpSecurity = "starttls" | "force_tls" | "off";
+
+interface Smtp {
+  host: string;
+  port: number;
+  security: SmtpSecurity;
+  username: string;
+  password_set: boolean;
+  from: string;
+  from_name: string;
+}
+
+interface Settings {
+  log_level: string;
+  log_levels: string[];
+  icons: boolean;
+  signups_verify: boolean;
+  smtp: Smtp | null;
 }
 
 interface User {
@@ -79,7 +101,7 @@ async function adminFetch<T = any>(token: string, path: string, opts: { method?:
     res = await fetch(`/api/admin${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${token}`,
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -97,7 +119,7 @@ async function adminFetch<T = any>(token: string, path: string, opts: { method?:
   if (!res.ok) {
     const msg =
       res.status === 401
-        ? "That admin token is not valid."
+        ? "Your admin session has ended."
         : res.status === 429
           ? "Too many attempts from this address. Wait a minute, then try again."
           : json?.message
@@ -108,7 +130,11 @@ async function adminFetch<T = any>(token: string, path: string, opts: { method?:
   return json as T;
 }
 
-const TURNED_OFF = "The admin panel is turned off. Set ADMIN_TOKEN on the server to enable it.";
+const TURNED_OFF =
+  "The admin panel is turned off. To turn it on, set PASSAUTH_ADMIN_USERNAME and PASSAUTH_ADMIN_PASSWORD in the server's .env file, then run docker compose up -d.";
+const WEAK_PASSWORD =
+  "The admin panel is turned off because PASSAUTH_ADMIN_PASSWORD in the server's .env file is still the example or shorter than 12 characters. Set a longer password, then run docker compose up -d.";
+const SESSION_ENDED = "Your admin session has ended. Sign in again to continue.";
 
 function formatDate(t: number) {
   return new Date(t * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
@@ -147,6 +173,8 @@ export function AdminPage() {
   }, []);
 
   const signOut = useCallback((message: string | null = null) => {
+    const old = loadToken();
+    if (old) adminFetch(old, "/logout", { body: {} }).catch(() => {});
     saveToken(null);
     setToken("");
     setFatal(message);
@@ -168,7 +196,7 @@ export function AdminPage() {
       {token ? (
         <Dashboard token={token} onAuthLost={signOut} />
       ) : (
-        <TokenForm
+        <SignInForm
           initialError={fatal}
           onSignedIn={(t) => {
             saveToken(t);
@@ -181,29 +209,50 @@ export function AdminPage() {
   );
 }
 
-// ------------------------------------------------------------- token form
+// ----------------------------------------------------------- sign-in form
 
-function TokenForm({ initialError, onSignedIn }: { initialError: string | null; onSignedIn: (token: string) => void }) {
-  const [value, setValue] = useState("");
+function SignInForm({ initialError, onSignedIn }: { initialError: string | null; onSignedIn: (token: string) => void }) {
+  const [mode, setMode] = useState<LoginMode | null>(null);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(initialError);
   const [busy, setBusy] = useState(false);
 
+  const loadMode = useCallback(async () => {
+    try {
+      setMode(await adminFetch<LoginMode>("", "/login"));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadMode();
+  }, [loadMode]);
+
   async function submit(e: FormEvent) {
     e.preventDefault();
-    const t = value.trim();
-    if (!t) return setError("Enter the admin token from your server configuration.");
+    if (!mode) return;
+    const byPassword = mode.mode === "password";
+    if (byPassword && (!username.trim() || !password)) return setError("Enter the admin user name and password from the server's .env file.");
+    if (!byPassword && !password.trim()) return setError("Enter the admin token from the server's .env file.");
     setBusy(true);
     setError(null);
     try {
-      await adminFetch(t, "/overview");
-      onSignedIn(t);
+      const res = await adminFetch<{ token: string }>("", "/login", {
+        body: byPassword ? { username: username.trim(), password } : { token: password.trim() },
+      });
+      onSignedIn(res.token);
     } catch (err) {
-      setError(err instanceof AdminError && err.status === 404 ? TURNED_OFF : (err as Error).message);
+      if (err instanceof AdminError && err.status === 401) setError(byPassword ? "That user name or password is not right." : "That admin token is not valid.");
+      else if (err instanceof AdminError && err.status === 404) setError(TURNED_OFF);
+      else setError((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
 
+  const off = mode?.mode === "off";
   return (
     <main className="auth">
       <div className="auth-card">
@@ -211,19 +260,69 @@ function TokenForm({ initialError, onSignedIn }: { initialError: string | null; 
           <h1>Server administration</h1>
           <p className="muted">Manage users, invitations and email for this PassAuth server.</p>
         </div>
-        <form className="auth-panel stack" onSubmit={submit}>
-          <div className="field">
-            <label htmlFor="admin-token">Admin token</label>
-            <PasswordInput id="admin-token" value={value} onChange={setValue} autoComplete="off" autoFocus />
-            <span className="field-hint">The token you set in ADMIN_TOKEN, not a user password. It is kept only in this tab and forgotten when you close it.</span>
+        {!mode ? (
+          <div className="auth-panel stack">
+            {error ? (
+              <>
+                <ErrorText error={error} />
+                <SheetActions>
+                  <button type="button" className="btn btn-block" onClick={() => loadMode()}>
+                    Try again
+                  </button>
+                </SheetActions>
+              </>
+            ) : (
+              <p className="muted" role="status">
+                Loading…
+              </p>
+            )}
           </div>
-          <ErrorText error={error} />
-          <SheetActions>
-            <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
-              {busy ? "Checking token…" : "Open admin panel"}
-            </button>
-          </SheetActions>
-        </form>
+        ) : off ? (
+          <div className="auth-panel stack">
+            <div className="alert alert-info" role="note">
+              {mode.weak_password ? WEAK_PASSWORD : TURNED_OFF}
+            </div>
+          </div>
+        ) : (
+          <form className="auth-panel stack" onSubmit={submit}>
+            {mode.mode === "password" ? (
+              <>
+                <div className="field">
+                  <label htmlFor="admin-user">User name</label>
+                  <input
+                    id="admin-user"
+                    className="input"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    autoFocus
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="admin-password">Password</label>
+                  <PasswordInput id="admin-password" value={password} onChange={setPassword} autoComplete="current-password" />
+                  <span className="field-hint">
+                    PASSAUTH_ADMIN_USERNAME and PASSAUTH_ADMIN_PASSWORD from the server's .env file, not a vault account. You stay signed in only in this tab.
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div className="field">
+                <label htmlFor="admin-token">Admin token</label>
+                <PasswordInput id="admin-token" value={password} onChange={setPassword} autoComplete="off" autoFocus />
+                <span className="field-hint">The token you set in ADMIN_TOKEN, not a user password. You stay signed in only in this tab.</span>
+              </div>
+            )}
+            <ErrorText error={error} />
+            <SheetActions>
+              <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
+                {busy ? "Signing in…" : "Sign in"}
+              </button>
+            </SheetActions>
+          </form>
+        )}
       </div>
     </main>
   );
@@ -235,6 +334,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
   const [overview, setOverview] = useState<Overview | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
   const [invites, setInvites] = useState<Invite[] | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   /** Run an admin call; a 401 or 404 here means the token or panel is gone. */
@@ -243,7 +343,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
       try {
         return await adminFetch<T>(token, path, opts);
       } catch (e) {
-        if (e instanceof AdminError && e.status === 401) onAuthLost("That admin token is no longer valid. Enter the current token to continue.");
+        if (e instanceof AdminError && e.status === 401) onAuthLost(SESSION_ENDED);
         throw e;
       }
     },
@@ -252,14 +352,16 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
 
   const load = useCallback(async () => {
     try {
-      const [o, u, i] = await Promise.all([
+      const [o, u, i, st] = await Promise.all([
         call<Overview>("/overview"),
         call<{ users: User[] }>("/users"),
         call<{ invites: Invite[] }>("/invites"),
+        call<Settings>("/settings"),
       ]);
       setOverview(o);
       setUsers(u.users);
       setInvites(i.invites);
+      setSettings(st);
       setLoadError(null);
     } catch (e) {
       if (e instanceof AdminError && e.status === 404) return onAuthLost(TURNED_OFF);
@@ -271,7 +373,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
     load();
   }, [load]);
 
-  if (!overview || !users || !invites) {
+  if (!overview || !users || !invites || !settings) {
     return (
       <main className="admin-main">
         {loadError ? (
@@ -298,7 +400,8 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
       <SignupsCard config={overview.config} call={call} reload={load} />
       <UsersCard users={users} call={call} reload={load} />
       <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />
-      <SmtpCard smtp={overview.config.smtp_enabled} call={call} />
+      <SettingsCard settings={settings} call={call} reload={load} />
+      <EmailCard smtp={settings.smtp} call={call} reload={load} />
     </main>
   );
 }
@@ -313,10 +416,10 @@ function OverviewCard({ o }: { o: Overview }) {
         <h1 id="ov-title">Overview</h1>
         <span className="small muted">PassAuth server version {o.version}</span>
       </div>
-      {!c.admin_token_hashed && (
+      {c.admin_login === "token" && (
         <div className="alert alert-info" role="note">
-          ADMIN_TOKEN is stored as plain text in your server configuration. Run <code className="mono">passauth-server hash-admin-token</code>, set ADMIN_TOKEN to
-          the hash it prints and restart the server. You keep signing in here with the same token.
+          You sign in with ADMIN_TOKEN. To sign in with a user name and password instead, set PASSAUTH_ADMIN_USERNAME and PASSAUTH_ADMIN_PASSWORD in the
+          server's .env file and run <code className="mono">docker compose up -d</code>. ADMIN_TOKEN can then be removed.
         </div>
       )}
       <div className="stat-grid">
@@ -357,8 +460,8 @@ function OverviewCard({ o }: { o: Overview }) {
             <dd>{c.smtp_enabled ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}</dd>
           </div>
           <div>
-            <dt>Admin token</dt>
-            <dd>{c.admin_token_hashed ? <span className="badge badge-ok">Hashed</span> : <span className="badge badge-warn">Plain text</span>}</dd>
+            <dt>Admin sign-in</dt>
+            <dd>{c.admin_login === "password" ? "User name and password" : "Admin token"}</dd>
           </div>
         </dl>
       </div>
@@ -739,24 +842,32 @@ function InvitesCard({ invites, smtp, domain, call, reload }: { invites: Invite[
   );
 }
 
-// ------------------------------------------------------------------- smtp
+// --------------------------------------------------------------- settings
 
-function SmtpCard({ smtp, call }: { smtp: boolean; call: Call }) {
-  const [to, setTo] = useState("");
+const LEVEL_LABELS: Record<string, string> = {
+  error: "Errors only",
+  warn: "Warnings and errors",
+  info: "Normal",
+  debug: "Detailed (for troubleshooting)",
+  trace: "Everything (very large)",
+};
+
+function SettingsCard({ settings, call, reload }: { settings: Settings; call: Call; reload: () => Promise<void> }) {
+  const [level, setLevel] = useState(settings.log_level);
+  const [icons, setIcons] = useState(settings.icons);
+  const [verify, setVerify] = useState(settings.signups_verify);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sent, setSent] = useState<string | null>(null);
+  const changed = level !== settings.log_level || icons !== settings.icons || verify !== settings.signups_verify;
 
-  async function send(e: FormEvent) {
+  async function save(e: FormEvent) {
     e.preventDefault();
-    const addr = to.trim();
-    if (!addr.includes("@")) return setError("Enter a full email address, such as name@example.com.");
     setBusy(true);
     setError(null);
-    setSent(null);
     try {
-      await call("/smtp/test", { body: { to: addr } });
-      setSent(`Test email sent to ${addr}. If it does not arrive within a few minutes, check the spam folder and the server logs.`);
+      await call("/settings", { method: "PUT", body: { log_level: level, icons, signups_verify: verify } });
+      await reload();
+      toast("Server settings saved");
     } catch (err) {
       if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
     } finally {
@@ -765,31 +876,224 @@ function SmtpCard({ smtp, call }: { smtp: boolean; call: Call }) {
   }
 
   return (
+    <section className="card" aria-labelledby="settings-title">
+      <h2 id="settings-title">Server settings</h2>
+      <form className="stack" onSubmit={save}>
+        <label className="check">
+          <input type="checkbox" checked={verify} onChange={(e) => setVerify(e.target.checked)} />
+          <span>
+            New accounts must confirm their email address
+            <span className="field-hint block">Needs email delivery (below). Without email, new accounts are confirmed automatically.</span>
+          </span>
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={icons} onChange={(e) => setIcons(e.target.checked)} />
+          <span>
+            Show website icons
+            <span className="field-hint block">
+              The server fetches each website's icon for the apps. It learns which websites' icons are asked for, never anything in a vault. When off, apps
+              show the first letter instead.
+            </span>
+          </span>
+        </label>
+        <label className="field">
+          <span>Server log</span>
+          <select className="select" value={level} onChange={(e) => setLevel(e.target.value)}>
+            {level === "custom" && <option value="custom">Custom (LOG_LEVEL in .env)</option>}
+            {settings.log_levels.map((l) => (
+              <option key={l} value={l}>
+                {LEVEL_LABELS[l] ?? l}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">How much the server writes to its log (docker compose logs). Vault contents and passwords are never logged.</span>
+        </label>
+        <ErrorText error={error} />
+        <div className="card-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy || !changed}>
+            {busy ? "Saving…" : "Save server settings"}
+          </button>
+          <span className="small muted">Takes effect immediately and replaces SIGNUPS_VERIFY, ICON_SERVICE and LOG_LEVEL from the server's .env file.</span>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------- email
+
+const DEFAULT_PORTS: Record<SmtpSecurity, number> = { starttls: 587, force_tls: 465, off: 25 };
+
+function EmailCard({ smtp, call, reload }: { smtp: Smtp | null; call: Call; reload: () => Promise<void> }) {
+  const [host, setHost] = useState(smtp?.host ?? "");
+  const [security, setSecurity] = useState<SmtpSecurity>(smtp?.security ?? "starttls");
+  const [port, setPort] = useState(smtp && smtp.port !== DEFAULT_PORTS[smtp.security] ? String(smtp.port) : "");
+  const [username, setUsername] = useState(smtp?.username ?? "");
+  const [password, setPassword] = useState("");
+  const [from, setFrom] = useState(smtp?.from ?? "");
+  const [fromName, setFromName] = useState(smtp?.from_name ?? "PassAuth");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+
+  const [to, setTo] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [sent, setSent] = useState<string | null>(null);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!host.trim()) return setError("Enter your mail provider's SMTP server, such as smtp.example.com.");
+    if (!from.includes("@")) return setError("Enter the address emails are sent from, such as passauth@example.com.");
+    const portNum = port.trim() ? Number(port) : undefined;
+    if (portNum !== undefined && !(Number.isInteger(portNum) && portNum > 0 && portNum < 65536)) return setError("The port must be a number from 1 to 65535.");
+    setBusy(true);
+    setError(null);
+    try {
+      await call("/settings/smtp", {
+        method: "PUT",
+        body: {
+          host: host.trim(),
+          security,
+          port: portNum,
+          username: username.trim(),
+          // Left empty: keep the saved password.
+          ...(password || !smtp?.password_set ? { password } : {}),
+          from: from.trim(),
+          from_name: fromName.trim(),
+        },
+      });
+      setPassword("");
+      await reload();
+      toast("Email settings saved");
+    } catch (err) {
+      if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function send(e: FormEvent) {
+    e.preventDefault();
+    const addr = to.trim();
+    if (!addr.includes("@")) return setTestError("Enter a full email address, such as name@example.com.");
+    setTesting(true);
+    setTestError(null);
+    setSent(null);
+    try {
+      await call("/smtp/test", { body: { to: addr } });
+      setSent(`Test email sent to ${addr}. If it does not arrive within a few minutes, check the spam folder and the server logs.`);
+    } catch (err) {
+      if (!(err instanceof AdminError && err.status === 401)) setTestError((err as Error).message);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
     <section className="card" aria-labelledby="smtp-title">
       <h2 id="smtp-title">Email delivery</h2>
-      {smtp ? (
-        <>
+      <p className="card-text">
+        {smtp
+          ? "The server sends verification codes, invitations and security alerts through this mail server."
+          : "Email is off. Enter your mail provider's SMTP details to send verification codes, invitations and security alerts."}
+      </p>
+      <form className="stack" onSubmit={save}>
+        <label className="field">
+          <span>SMTP server</span>
+          <input className="input" value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.com" autoCapitalize="none" spellCheck={false} />
+        </label>
+        <label className="field">
+          <span>Encryption</span>
+          <select className="select" value={security} onChange={(e) => setSecurity(e.target.value as SmtpSecurity)}>
+            <option value="starttls">STARTTLS (usually port 587)</option>
+            <option value="force_tls">TLS (usually port 465)</option>
+            <option value="off">None (unencrypted, only inside your own network)</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>Port (optional)</span>
+          <input className="input" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value)} placeholder={String(DEFAULT_PORTS[security])} />
+        </label>
+        <label className="field">
+          <span>User name (optional)</span>
+          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck={false} />
+        </label>
+        <div className="field">
+          <label htmlFor="smtp-password">Password{smtp?.password_set ? "" : " (optional)"}</label>
+          <PasswordInput
+            id="smtp-password"
+            value={password}
+            onChange={setPassword}
+            autoComplete="new-password"
+            placeholder={smtp?.password_set ? "Saved. Leave empty to keep it." : undefined}
+          />
+        </div>
+        <label className="field">
+          <span>Send from</span>
+          <input className="input" type="email" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="passauth@example.com" autoCapitalize="none" spellCheck={false} />
+        </label>
+        <label className="field">
+          <span>Sender name</span>
+          <input className="input" value={fromName} onChange={(e) => setFromName(e.target.value)} placeholder="PassAuth" />
+        </label>
+        <ErrorText error={error} />
+        <div className="card-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? "Saving…" : "Save email settings"}
+          </button>
+          {smtp && (
+            <button type="button" className="btn" onClick={() => setConfirmOff(true)}>
+              Turn off email
+            </button>
+          )}
+          <span className="small muted">Takes effect immediately and replaces the SMTP settings from the server's .env file.</span>
+        </div>
+      </form>
+      {smtp && (
+        <div className="stack">
+          <h3>Test email</h3>
           <p className="card-text">Send a test message to confirm the server can deliver verification codes and invitations.</p>
           <form className="inline-form" onSubmit={send}>
             <label className="field">
               <span>Send test email to</span>
               <input className="input" type="email" value={to} onChange={(e) => setTo(e.target.value)} autoComplete="email" placeholder="you@example.com" />
             </label>
-            <button type="submit" className="btn" disabled={busy}>
-              {busy ? "Sending test email…" : "Send test email"}
+            <button type="submit" className="btn" disabled={testing}>
+              {testing ? "Sending test email…" : "Send test email"}
             </button>
           </form>
-          <ErrorText error={error} />
+          <ErrorText error={testError} />
           {sent && (
             <div className="alert alert-ok" role="status">
               {sent}
             </div>
           )}
-        </>
-      ) : (
-        <p className="card-text">
-          Email is off. Set the SMTP settings in the server configuration and restart the server to send verification codes, invitations and test emails.
-        </p>
+        </div>
+      )}
+      {confirmOff && (
+        <ConfirmDialog
+          title="Turn off email?"
+          icon="mail"
+          action="Turn off email"
+          busyAction="Turning off…"
+          onClose={() => setConfirmOff(false)}
+          onConfirm={async () => {
+            await call("/settings/smtp", { method: "DELETE" });
+            setConfirmOff(false);
+            setHost("");
+            setUsername("");
+            setFrom("");
+            setPort("");
+            await reload();
+            toast("Email is off");
+          }}
+        >
+          <p className="card-text">
+            The saved mail server details are removed. New accounts are then confirmed without an email, invitations aren't emailed and email codes for two-step
+            login stop working.
+          </p>
+        </ConfirmDialog>
       )}
     </section>
   );

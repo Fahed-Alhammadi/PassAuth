@@ -5,8 +5,10 @@ mod config;
 mod db;
 mod error;
 mod icons;
+mod logging;
 mod mail;
 mod passkeys;
+mod privileges;
 mod state;
 mod twofactor;
 mod vault;
@@ -33,13 +35,29 @@ use tower_http::trace::TraceLayer;
 use crate::config::Config;
 use crate::state::{App, AppState};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Synchronous on purpose: switching from root to PUID:PGID happens before the
+/// async runtime starts any thread.
+fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        None | Some("serve") => serve().await,
-        Some("hash-admin-token") => hash_admin_token(),
-        Some("healthcheck") => healthcheck().await,
+        None | Some("serve") => {
+            privileges::drop_root(true)?;
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(serve())
+        }
+        Some("hash-admin-token") => {
+            privileges::drop_root(false)?;
+            hash_admin_token()
+        }
+        Some("healthcheck") => {
+            privileges::drop_root(false)?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(healthcheck())
+        }
         Some("--version" | "version") => {
             println!("passauth-server {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -52,11 +70,12 @@ async fn main() -> Result<()> {
 
 async fn serve() -> Result<()> {
     let config = Config::from_env()?;
-    init_tracing(config.log_json);
-    if config
-        .admin_token
-        .as_deref()
-        .is_some_and(|t| !t.starts_with("$argon2"))
+    logging::init(config.log_json);
+    if config.admin_password.is_none()
+        && config
+            .admin_token
+            .as_deref()
+            .is_some_and(|t| !t.starts_with("$argon2"))
     {
         tracing::warn!(
             "ADMIN_TOKEN is plain text; generate a hash with `passauth-server hash-admin-token`"
@@ -67,13 +86,13 @@ async fn serve() -> Result<()> {
             "IP_HEADER is believed only from loopback and private-network proxies; set TRUSTED_PROXIES if your proxy connects from elsewhere"
         );
     }
-    if config.smtp.is_none() {
-        tracing::warn!(
-            "SMTP is not configured: email verification, invites and email 2FA are disabled"
-        );
-    }
     let bind = config.bind;
     let state = App::new(config).await?;
+    if !state.mailer.enabled() {
+        tracing::warn!(
+            "email is not set up (admin page → Email delivery): email verification, invites and email 2FA are disabled"
+        );
+    }
 
     let sweeper = state.clone();
     tokio::spawn(async move {
@@ -285,17 +304,6 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
         "signups_allowed": state.signups.read().expect("signup policy lock").allowed,
         "email_enabled": state.mailer.enabled(),
     }))
-}
-
-fn init_tracing(json: bool) {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("LOG_LEVEL")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,tower_http=warn,sqlx=warn"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    if json {
-        builder.json().init()
-    } else {
-        builder.init()
-    }
 }
 
 fn hash_admin_token() -> Result<()> {

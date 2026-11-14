@@ -504,6 +504,258 @@ async fn admin_requires_token() {
     assert_eq!(v["config"]["database"], expected);
 }
 
+async fn password_admin_app(password: &str) -> Router {
+    let config = Config {
+        admin_token: Some("old-token".into()),
+        admin_username: "boss".into(),
+        admin_password: Some(password.into()),
+        ..test_config().await
+    };
+    crate::router(App::new(config).await.unwrap())
+}
+
+#[tokio::test]
+async fn admin_signs_in_with_user_name_and_password() {
+    let app = password_admin_app("a long admin password").await;
+    let (s, v) = call(&app, Method::GET, "/api/admin/login", None, json!(null)).await;
+    assert_eq!((s, &v["mode"]), (StatusCode::OK, &json!("password")));
+    for (user, pw) in [
+        ("boss", "wrong password!"),
+        ("admin", "a long admin password"),
+    ] {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            "/api/admin/login",
+            None,
+            json!({ "username": user, "password": pw }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED, "{user}/{pw}");
+    }
+    // The password itself and the ignored ADMIN_TOKEN are not bearer tokens.
+    for bearer in ["a long admin password", "old-token"] {
+        let (s, _) = call(
+            &app,
+            Method::GET,
+            "/api/admin/overview",
+            Some(bearer),
+            json!(null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "username": " boss ", "password": "a long admin password" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let token = v["token"].as_str().unwrap().to_owned();
+    let (s, v) = call(
+        &app,
+        Method::GET,
+        "/api/admin/overview",
+        Some(&token),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["config"]["admin_login"], "password");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/logout",
+        Some(&token),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        "/api/admin/overview",
+        Some(&token),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn admin_page_stays_off_with_the_example_or_a_short_password() {
+    for pw in [crate::config::ADMIN_PASSWORD_EXAMPLE, "short pw"] {
+        let app = password_admin_app(pw).await;
+        let (_, v) = call(&app, Method::GET, "/api/admin/login", None, json!(null)).await;
+        assert_eq!(v, json!({ "mode": "off", "weak_password": true }));
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            "/api/admin/login",
+            None,
+            json!({ "username": "boss", "password": pw }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let (s, _) = call(
+            &app,
+            Method::GET,
+            "/api/admin/overview",
+            Some("old-token"),
+            json!(null),
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn admin_token_still_signs_in() {
+    let app = app().await;
+    let (_, v) = call(&app, Method::GET, "/api/admin/login", None, json!(null)).await;
+    assert_eq!(v["mode"], "token");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "token": "nope" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "token": "test-admin" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        "/api/admin/users",
+        v["token"].as_str(),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_settings_apply_at_once_and_are_saved() {
+    let dir = std::env::temp_dir().join(format!("passauth-test-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = test_config().await;
+    if std::env::var("PASSAUTH_TEST_DATABASE_URL").is_err() {
+        config.database_url = format!("sqlite://{}/passauth.db?mode=rwc", dir.display());
+    }
+    let admin = Some("test-admin");
+    let app = crate::router(App::new(config.clone()).await.unwrap());
+
+    let (s, v) = call(&app, Method::GET, "/api/admin/settings", admin, json!(null)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        (&v["icons"], &v["smtp"], &v["signups_verify"]),
+        (&json!(true), &json!(null), &json!(false))
+    );
+
+    let (s, v) = call(
+        &app,
+        Method::PUT,
+        "/api/admin/settings",
+        admin,
+        json!({ "log_level": "debug", "icons": false, "signups_verify": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["log_level"], "debug");
+    let resp = get_raw(&app, "/api/icons/github.com").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "icons are off at once"
+    );
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/api/admin/settings",
+        admin,
+        json!({ "log_level": "loud", "icons": false, "signups_verify": true }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let smtp = json!({
+        "host": "smtp.example.com", "security": "starttls", "username": "mailer",
+        "password": "secret", "from": "not an address", "from_name": ""
+    });
+    let (s, _) = call(
+        &app,
+        Method::PUT,
+        "/api/admin/settings/smtp",
+        admin,
+        smtp.clone(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let mut good = smtp.clone();
+    good["from"] = json!("passauth@example.com");
+    let (s, v) = call(
+        &app,
+        Method::PUT,
+        "/api/admin/settings/smtp",
+        admin,
+        good.clone(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["smtp"]["port"], 587);
+    assert_eq!(v["smtp"]["password_set"], true);
+    assert_eq!(v["smtp"]["from_name"], "PassAuth");
+    assert!(
+        v["smtp"].get("password").is_none(),
+        "the password is never sent back"
+    );
+    let (_, v) = call(&app, Method::GET, "/api/config", None, json!(null)).await;
+    assert_eq!(v["email_enabled"], true);
+    // Saving without a password keeps the saved one.
+    good.as_object_mut().unwrap().remove("password");
+    good["port"] = json!(2525);
+    let (_, v) = call(&app, Method::PUT, "/api/admin/settings/smtp", admin, good).await;
+    assert_eq!(
+        (&v["smtp"]["port"], &v["smtp"]["password_set"]),
+        (&json!(2525), &json!(true))
+    );
+
+    // A restart keeps everything saved on the admin page (file database only).
+    if std::env::var("PASSAUTH_TEST_DATABASE_URL").is_err() {
+        drop(app);
+        let app = crate::router(App::new(config.clone()).await.unwrap());
+        let (_, v) = call(&app, Method::GET, "/api/admin/settings", admin, json!(null)).await;
+        assert_eq!(v["log_level"], "debug");
+        assert_eq!(v["icons"], false);
+        assert_eq!(v["signups_verify"], true);
+        assert_eq!(v["smtp"]["port"], 2525);
+        let (s, v) = call(
+            &app,
+            Method::DELETE,
+            "/api/admin/settings/smtp",
+            admin,
+            json!(null),
+        )
+        .await;
+        assert_eq!((s, &v["smtp"]), (StatusCode::OK, &json!(null)));
+        let (_, v) = call(&app, Method::GET, "/api/config", None, json!(null)).await;
+        assert_eq!(v["email_enabled"], false);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 async fn get_raw(app: &Router, path: &str) -> axum::response::Response {
     app.clone()
         .oneshot(Request::get(path).body(Body::empty()).unwrap())

@@ -70,12 +70,11 @@ You need a machine with Docker and Docker Compose, and a domain with HTTPS to us
 ```bash
 git clone https://github.com/Fahed-Alhammadi/PassAuth.git passauth
 cd passauth
-cp .env.example .env          # then set DOMAIN in .env
-mkdir -p data && sudo chown 1000:1000 data   # owned by your PUID:PGID
+cp .env.example .env          # then set PUID/PGID and the admin password
 docker compose up -d
 ```
 
-Put it behind HTTPS (the apps require it), open your domain and create your account. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: the admin token, email, HTTPS with a reverse proxy, updates, backups and all settings.
+Put it behind HTTPS (the apps require it), open your domain and create your account. The admin page is at `/admin` (email, sign-ups and server settings are set there). The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: HTTPS with a reverse proxy, email, updates, backups and all settings.
 
 To update: `docker compose pull && docker compose up -d`. Database changes apply on start. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
@@ -85,7 +84,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.
-- **Server:** runs as a non-root user on a read-only filesystem with no extra Linux capabilities.
+- **Server:** runs as your PUID:PGID user on a read-only filesystem with no Linux capabilities (it starts as root only to prepare its data folder).
 
 The full design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). To report a vulnerability, see [SECURITY.md](SECURITY.md).
 

@@ -2,8 +2,10 @@
 #
 # PassAuth server image.
 # - Cross-compiles natively for amd64/arm64 (no QEMU emulation for Rust).
-# - Runtime is distroless (no shell, no package manager) and never runs as root:
-#   default uid/gid 1000, overridable at run time (compose `user: ${PUID}:${PGID}`).
+# - Runtime is distroless (no shell, no package manager). The server starts as root only
+#   to create /data and give it to PUID:PGID (default 1000:1000, set in .env), then switches
+#   to that user with no capabilities left (crates/server/src/privileges.rs). Started as
+#   another user (old compose files with `user:`), it runs as that user directly.
 
 # Base images are pinned by digest (Dependabot keeps them current).
 
@@ -72,7 +74,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p passauth-server --target "$target"; \
     cp "target/$target/release/passauth-server" /passauth-server
 
-# Directories owned by the default runtime user (distroless has no chown/mkdir).
+# /data owned by the default PUID:PGID, so the startup ownership fix has nothing to do.
 RUN mkdir -p /rootfs/data /rootfs/tmp && chmod 1777 /rootfs/tmp
 
 # ------------------------------------------------------------------ runtime
@@ -93,7 +95,6 @@ ENV BIND=0.0.0.0:8080 \
     DATABASE_URL=sqlite:///data/passauth.db?mode=rwc \
     WEB_VAULT_DIR=/web-vault
 
-USER 1000:1000
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

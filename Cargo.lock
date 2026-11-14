@@ -2421,6 +2421,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "lettre",
+ "libc",
  "passauth-core",
  "rand_core 0.6.4",
  "rustls",

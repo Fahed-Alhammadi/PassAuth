@@ -130,11 +130,11 @@
     <div class="wrap split">
       <div>
         <h2>Run your own server</h2>
-        <p class="lead">PassAuth is one small container with the web vault built in. It stores data in SQLite, or PostgreSQL if you prefer, and never runs as root.</p>
+        <p class="lead">PassAuth is one small container with the web vault built in. It stores data in SQLite, or PostgreSQL if you prefer, and runs as your own user.</p>
         <ol class="steps">
           <li><b>Get the files</b> on a machine with Docker.</li>
-          <li><b>Set your domain</b> in <code>.env</code>.</li>
-          <li><b>Create the data folder</b> and start PassAuth.</li>
+          <li><b>Set your user and admin password</b> in <code>.env</code>.</li>
+          <li><b>Start PassAuth</b> with Docker Compose.</li>
           <li><b>Put it behind <a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md#https">HTTPS</a></b>, which the apps require, then create your account.</li>
         </ol>
         <p class="more"><a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/SELF_HOSTING.md">Read the full self-hosting guide</a></p>
@@ -143,12 +143,11 @@
 git clone https://github.com/Fahed-Alhammadi/PassAuth.git
 cd PassAuth
 
-<span class="c"># 2. set DOMAIN (admin token and email: see the guide)</span>
+<span class="c"># 2. set PUID/PGID and the admin password</span>
 cp .env.example .env
 nano .env
 
-<span class="c"># 3. create the data folder (your PUID:PGID) and start</span>
-mkdir -p data && sudo chown 1000:1000 data
+<span class="c"># 3. start (email and sign-ups: your-domain/admin)</span>
 docker compose up -d</code></pre>
     </div>
   </section>

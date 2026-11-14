@@ -1,6 +1,7 @@
-//! Admin API, enabled only when `ADMIN_TOKEN` is set. The token should be an
-//! Argon2 PHC hash (`passauth-server hash-admin-token`). There are
-//! deliberately no settings here that execute programs or touch the filesystem.
+//! Admin API, on when `PASSAUTH_ADMIN_USERNAME` + `PASSAUTH_ADMIN_PASSWORD` (or the
+//! older `ADMIN_TOKEN`) are set. The admin page signs in at `/admin/login` and gets a
+//! session token. There are deliberately no settings here that execute programs or
+//! touch the filesystem.
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::extract::{FromRequestParts, Path, State};
@@ -11,14 +12,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::{bearer, client_ip};
-use crate::config::SignupPolicy;
+use crate::config::{SignupPolicy, SmtpConfig, SmtpSecurity};
 use crate::db::{self, now};
 use crate::error::{ApiError, ApiResult};
 use crate::mail::Email;
-use crate::state::{AppState, ct_eq, hash_token, normalize_email};
+use crate::state::{AdminLogin, AppState, ct_eq, hash_token, normalize_email, random_token};
+
+/// An admin session ends after this long without a request…
+const SESSION_IDLE_SECS: i64 = 3600;
+/// …and at the latest this long after signing in.
+const SESSION_MAX_SECS: i64 = 12 * 3600;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/login", get(login_mode).post(login))
+        .route("/logout", post(logout))
         .route("/overview", get(overview))
         .route("/users", get(list_users))
         .route("/users/{id}", delete(delete_user))
@@ -30,6 +38,8 @@ pub fn routes() -> Router<AppState> {
         .route("/invites/{email}", delete(delete_invite))
         .route("/smtp/test", post(smtp_test))
         .route("/settings/signups", put(set_signups))
+        .route("/settings", get(get_settings).put(set_settings))
+        .route("/settings/smtp", put(set_smtp).delete(smtp_off))
 }
 
 pub struct Admin;
@@ -38,44 +48,140 @@ impl FromRequestParts<AppState> for Admin {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
-        let configured = state
-            .config
-            .admin_token
-            .as_deref()
-            .ok_or(ApiError::NotFound)?;
+        if matches!(state.admin, AdminLogin::Off { .. }) {
+            return Err(ApiError::NotFound);
+        }
         let given = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;
         let digest = hash_token(&given);
+        let t = now();
+        if let Some(mut session) = state.admin_sessions.get_mut(&digest) {
+            let (idle, absolute) = *session;
+            if idle > t && absolute > t {
+                session.0 = (t + SESSION_IDLE_SECS).min(absolute);
+                return Ok(Admin);
+            }
+        }
+        // Scripts may still send ADMIN_TOKEN itself as the bearer token.
+        let AdminLogin::Token(configured) = &state.admin else {
+            return Err(ApiError::Unauthorized);
+        };
         // A token that passed the Argon2 check recently is accepted by its
-        // SHA-256, so the admin page doesn't run Argon2 on every request.
+        // SHA-256, so the admin API doesn't run Argon2 on every request.
         let cached = state
             .admin_verified
             .lock()
             .expect("admin cache lock")
             .as_ref()
-            .is_some_and(|(h, exp)| *exp > now() && ct_eq(h, &digest));
+            .is_some_and(|(h, exp)| *exp > t && ct_eq(h, &digest));
         if cached {
             return Ok(Admin);
         }
-        let ip = client_ip(state, &parts.headers);
-        if !state.limiter.check(&format!("admin:{ip}"), 30, 60) {
-            return Err(ApiError::TooManyRequests);
-        }
-        // At most two Argon2 checks at once (each allocates ~19 MiB), off the async threads.
-        let _permit = state
-            .admin_verify
-            .acquire()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let (configured, token) = (configured.to_owned(), given);
-        let ok = tokio::task::spawn_blocking(move || verify_token(&configured, &token))
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if !ok {
+        if !check_secret(state, parts, configured.clone(), given, None).await? {
             return Err(ApiError::Unauthorized);
         }
         *state.admin_verified.lock().expect("admin cache lock") = Some((digest, now() + 600));
         Ok(Admin)
     }
+}
+
+/// Rate-limited Argon2 check of an admin secret, off the async threads. With
+/// `username`, `configured` is the password hash and both must match.
+async fn check_secret(
+    state: &AppState,
+    parts: &Parts,
+    configured: String,
+    given: String,
+    username: Option<(String, String)>,
+) -> ApiResult<bool> {
+    let ip = client_ip(state, &parts.headers);
+    if !state.limiter.check(&format!("admin:{ip}"), 10, 60) {
+        return Err(ApiError::TooManyRequests);
+    }
+    // At most two Argon2 checks at once (each allocates ~19 MiB).
+    let _permit = state
+        .admin_verify
+        .acquire()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let ok = tokio::task::spawn_blocking(move || {
+        // Always run Argon2, so a wrong user name takes as long as a wrong password.
+        let secret_ok = verify_token(&configured, &given);
+        let user_ok = username.is_none_or(|(want, got)| ct_eq(&want, &got));
+        secret_ok && user_ok
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+    if !ok {
+        tracing::warn!(%ip, "admin sign-in failed");
+    }
+    Ok(ok)
+}
+
+/// How the admin page signs in: `password`, `token` or `off` (`weak` = the
+/// password in .env is refused).
+async fn login_mode(State(state): State<AppState>) -> Json<Value> {
+    let weak = matches!(state.admin, AdminLogin::Off { weak: true });
+    Json(json!({ "mode": state.admin.mode(), "weak_password": weak }))
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    token: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    parts: Parts,
+    Json(b): Json<LoginBody>,
+) -> ApiResult<Json<Value>> {
+    let ok = match &state.admin {
+        AdminLogin::Off { .. } => return Err(ApiError::NotFound),
+        AdminLogin::Password { username, hash } => {
+            check_secret(
+                &state,
+                &parts,
+                hash.clone(),
+                b.password,
+                Some((username.clone(), b.username.trim().to_owned())),
+            )
+            .await?
+        }
+        AdminLogin::Token(configured) => {
+            check_secret(
+                &state,
+                &parts,
+                configured.clone(),
+                b.token.trim().to_owned(),
+                None,
+            )
+            .await?
+        }
+    };
+    if !ok {
+        return Err(ApiError::Unauthorized);
+    }
+    let token = random_token();
+    let t = now();
+    state.admin_sessions.insert(
+        hash_token(&token),
+        (t + SESSION_IDLE_SECS, t + SESSION_MAX_SECS),
+    );
+    tracing::info!(ip = %client_ip(&state, &parts.headers), "admin signed in");
+    Ok(Json(
+        json!({ "token": token, "expires_in": SESSION_IDLE_SECS }),
+    ))
+}
+
+async fn logout(State(state): State<AppState>, parts: Parts) -> Json<Value> {
+    if let Some(token) = bearer(&parts.headers) {
+        state.admin_sessions.remove(&hash_token(&token));
+    }
+    Json(json!({ "ok": true }))
 }
 
 pub fn verify_token(configured: &str, given: &str) -> bool {
@@ -104,6 +210,7 @@ async fn overview(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Val
         .await?;
     let c = &state.config;
     let signups = state.signups.read().expect("signup policy lock").clone();
+    let token_hashed = matches!(&state.admin, AdminLogin::Token(t) if t.starts_with("$argon2"));
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "users": users, "vaults": vaults, "items": items,
@@ -112,9 +219,10 @@ async fn overview(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Val
             "database": if c.database_url.starts_with("postgres") { "postgresql" } else { "sqlite" },
             "signups_allowed": signups.allowed,
             "signups_domains": signups.domains,
-            "signups_verify": c.signups_verify,
+            "signups_verify": state.signups_verify(),
             "smtp_enabled": state.mailer.enabled(),
-            "admin_token_hashed": c.admin_token.as_deref().is_some_and(|t| t.starts_with("$argon2")),
+            "admin_login": state.admin.mode(),
+            "admin_token_hashed": token_hashed,
         }
     })))
 }
@@ -386,4 +494,132 @@ async fn set_signups(
     *state.signups.write().expect("signup policy lock") = policy.clone();
     tracing::info!(allowed = policy.allowed, domains = ?policy.domains, "sign-up policy changed by admin");
     Ok(Json(policy))
+}
+
+// ---------------------------------------------------------------- settings
+
+/// Settings changed on the admin page. They are saved in the database, apply at
+/// once and replace the matching `.env` values (which only set the starting values).
+async fn get_settings(State(state): State<AppState>, _: Admin) -> Json<Value> {
+    let smtp = state.mailer.config().map(|c| {
+        json!({
+            "host": c.host,
+            "port": c.port,
+            "security": c.security,
+            "username": c.username.unwrap_or_default(),
+            "password_set": c.password.is_some(),
+            "from": c.from,
+            "from_name": c.from_name,
+        })
+    });
+    Json(json!({
+        "log_level": state.log_level.read().expect("log level lock").clone(),
+        "log_levels": crate::logging::LEVELS,
+        "icons": state.icons.enabled(),
+        "signups_verify": state.signups_verify(),
+        "smtp": smtp,
+    }))
+}
+
+#[derive(Deserialize)]
+struct GeneralSettings {
+    log_level: String,
+    icons: bool,
+    signups_verify: bool,
+}
+
+async fn set_settings(
+    State(state): State<AppState>,
+    _: Admin,
+    Json(b): Json<GeneralSettings>,
+) -> ApiResult<Json<Value>> {
+    let level_changed = *state.log_level.read().expect("log level lock") != b.log_level;
+    if level_changed {
+        crate::logging::set_level(&b.log_level).map_err(|e| ApiError::bad(e.to_string()))?;
+        db::set_setting(&state.db, "log_level", &b.log_level).await?;
+        *state.log_level.write().expect("log level lock") = b.log_level.clone();
+    }
+    let bit = |on: bool| if on { "1" } else { "0" };
+    db::set_setting(&state.db, "icon_service", bit(b.icons)).await?;
+    state.icons.set_enabled(b.icons);
+    db::set_setting(&state.db, "signups_verify", bit(b.signups_verify)).await?;
+    state
+        .signups_verify
+        .store(b.signups_verify, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!(
+        log_level = %b.log_level,
+        icons = b.icons,
+        signups_verify = b.signups_verify,
+        "server settings changed by admin"
+    );
+    Ok(get_settings(State(state), Admin).await)
+}
+
+#[derive(Deserialize)]
+struct SmtpBody {
+    host: String,
+    port: Option<u16>,
+    security: SmtpSecurity,
+    #[serde(default)]
+    username: String,
+    /// `None` keeps the saved password; `""` removes it.
+    password: Option<String>,
+    from: String,
+    #[serde(default)]
+    from_name: String,
+}
+
+async fn set_smtp(
+    State(state): State<AppState>,
+    _: Admin,
+    Json(b): Json<SmtpBody>,
+) -> ApiResult<Json<Value>> {
+    let host = b.host.trim().to_owned();
+    if host.is_empty()
+        || host.len() > 253
+        || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(ApiError::bad(
+            "enter the SMTP server's host name, such as smtp.example.com",
+        ));
+    }
+    let password = match b.password {
+        Some(p) => Some(p).filter(|p| !p.is_empty()),
+        None => state.mailer.config().and_then(|c| c.password),
+    };
+    let username = Some(b.username.trim().to_owned()).filter(|u| !u.is_empty());
+    let from_name = b.from_name.trim();
+    let smtp = SmtpConfig {
+        host,
+        port: b.port.unwrap_or(match b.security {
+            SmtpSecurity::Starttls => 587,
+            SmtpSecurity::ForceTls => 465,
+            SmtpSecurity::Off => 25,
+        }),
+        security: b.security,
+        username,
+        password,
+        from: b.from.trim().to_owned(),
+        from_name: if from_name.is_empty() {
+            "PassAuth".into()
+        } else {
+            from_name.to_owned()
+        },
+    };
+    state
+        .mailer
+        .configure(Some(&smtp))
+        .map_err(|e| ApiError::bad(format!("{e:#}")))?;
+    let json = serde_json::to_string(&smtp).map_err(|e| anyhow::anyhow!(e))?;
+    db::set_setting(&state.db, "smtp", &json).await?;
+    tracing::info!(host = %smtp.host, port = smtp.port, "email settings changed by admin");
+    Ok(get_settings(State(state), Admin).await)
+}
+
+/// Turn email off (also when SMTP_* is set in .env).
+async fn smtp_off(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Value>> {
+    state.mailer.configure(None)?;
+    db::set_setting(&state.db, "smtp", "off").await?;
+    tracing::info!("email turned off by admin");
+    Ok(get_settings(State(state), Admin).await)
 }

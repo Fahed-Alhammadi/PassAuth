@@ -2,7 +2,7 @@
 # - Push to main / pull request: builds the image (not pushed) when something that goes into it changes.
 # - Push a tag like server-1.2.3 (scripts/release.sh server 1.2.3) to publish the server +
 #   web vault image: ghcr.io/fahed-alhammadi/passauth:1.2.3 and :latest.
-#   Every release moves :latest, so `docker compose pull` with PASSAUTH_VERSION=latest
+#   Every release moves :latest, so `docker compose pull` with the image on :latest
 #   always gets the newest version. Pre-release tags (server-1.2.3-rc.1) don't move :latest.
 #   No GitHub release: the changes are in CHANGELOG.md (written by scripts/release.sh). GitHub
 #   releases are used only by the desktop app (desktop.yml, tags vX.Y.Z).
@@ -17,6 +17,8 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
+      - "docker-compose.yml"
+      - ".env.example"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -28,6 +30,8 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
+      - "docker-compose.yml"
+      - ".env.example"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -61,6 +65,23 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Check docker-compose.yml with .env.example
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          rm .env
+      - name: Load the amd64 image for the smoke test
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: passauth:ci
+          cache-from: type=gha
+      - name: Smoke test (runs as PUID, admin sign-in over HTTP, old compose still works)
+        run: |
+          shellcheck scripts/docker-smoke.sh
+          scripts/docker-smoke.sh passauth:ci
 
   server-image:
     if: github.event_name == 'push' && github.ref_type == 'tag'

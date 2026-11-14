@@ -5,14 +5,15 @@ use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Context, Result, bail};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SmtpSecurity {
     Starttls,
     ForceTls,
     Off,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SmtpConfig {
     pub host: String,
     pub port: u16,
@@ -32,8 +33,14 @@ pub struct Config {
     pub signups_allowed: bool,
     pub signups_domains: Vec<String>,
     pub signups_verify: bool,
-    /// Argon2 PHC string (preferred) or plain token. `None` disables /api/admin.
+    /// Old admin sign-in: Argon2 PHC string (preferred) or plain token. Used only
+    /// when `PASSAUTH_ADMIN_PASSWORD` is not set.
     pub admin_token: Option<String>,
+    /// `PASSAUTH_ADMIN_USERNAME` (default `admin`).
+    pub admin_username: String,
+    /// `PASSAUTH_ADMIN_PASSWORD`, plain text; hashed in memory at startup.
+    /// `None` (and no `admin_token`) turns the admin page off.
+    pub admin_password: Option<String>,
     pub smtp: Option<SmtpConfig>,
     pub web_vault_dir: Option<String>,
     /// Header holding the client IP when behind a reverse proxy.
@@ -86,6 +93,37 @@ pub(crate) fn sqlite_dir(url: &str) -> Option<String> {
     })
 }
 
+/// Database used when `DATABASE_URL` is not set.
+pub const DEFAULT_DATABASE_URL: &str = "sqlite:///data/passauth.db?mode=rwc";
+
+/// The admin password `.env.example` ships with; the admin page stays off until it is changed.
+pub const ADMIN_PASSWORD_EXAMPLE: &str = "change-me-to-a-long-password";
+pub const ADMIN_PASSWORD_MIN_CHARS: usize = 12;
+
+/// Folders PassAuth itself writes (the SQLite database folder and the icon
+/// cache), for the startup ownership fix. Only absolute paths below `/`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn data_dirs() -> Result<Vec<String>> {
+    let db = var("DATABASE_URL")?.unwrap_or_else(|| DEFAULT_DATABASE_URL.into());
+    Ok(data_dirs_for(&db, var("ICON_CACHE_DIR")?))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn data_dirs_for(database_url: &str, icon_cache_dir: Option<String>) -> Vec<String> {
+    let safe = |d: &String| {
+        let path = std::path::Path::new(d);
+        path.is_absolute() && path.components().count() > 1
+    };
+    let db_dir = sqlite_dir(database_url).filter(safe);
+    let icons = match icon_cache_dir {
+        Some(dir) => Some(dir).filter(safe),
+        None => db_dir.as_ref().map(|d| format!("{d}/icons")),
+    };
+    let mut dirs: Vec<String> = db_dir.into_iter().chain(icons).collect();
+    dirs.dedup();
+    dirs
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let smtp = match var("SMTP_HOST")? {
@@ -125,8 +163,7 @@ impl Config {
             Some("off") => false,
             Some(v) => bail!("ICON_SERVICE: expected internal or off, got {v:?}"),
         };
-        let database_url =
-            var("DATABASE_URL")?.unwrap_or_else(|| "sqlite:///data/passauth.db?mode=rwc".into());
+        let database_url = var("DATABASE_URL")?.unwrap_or_else(|| DEFAULT_DATABASE_URL.into());
         let icon_cache_dir = match var("ICON_CACHE_DIR")? {
             Some(dir) => Some(dir),
             None => sqlite_dir(&database_url).map(|d| format!("{d}/icons")),
@@ -152,6 +189,10 @@ impl Config {
                 .unwrap_or_default(),
             signups_verify: flag("SIGNUPS_VERIFY", smtp.is_some())?,
             admin_token: var("ADMIN_TOKEN")?,
+            admin_username: var("PASSAUTH_ADMIN_USERNAME")?
+                .map(|u| u.trim().to_owned())
+                .unwrap_or_else(|| "admin".into()),
+            admin_password: var("PASSAUTH_ADMIN_PASSWORD")?,
             web_vault_dir: if flag("WEB_VAULT_ENABLED", true)? {
                 Some(var("WEB_VAULT_DIR")?.unwrap_or_else(|| "/web-vault".into()))
             } else {
@@ -193,6 +234,8 @@ impl Config {
             signups_domains: vec![],
             signups_verify: false,
             admin_token: Some("test-admin".into()),
+            admin_username: "admin".into(),
+            admin_password: None,
             smtp: None,
             web_vault_dir: None,
             ip_header: None,
@@ -294,5 +337,21 @@ mod tests {
                 .unwrap()
                 .contains("172.31.255.1".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn data_dirs_follow_the_database_and_skip_unsafe_paths() {
+        assert_eq!(
+            data_dirs_for(DEFAULT_DATABASE_URL, None),
+            ["/data", "/data/icons"]
+        );
+        // Never the root folder or a relative path (that would be the working directory).
+        assert!(data_dirs_for("sqlite:///passauth.db", None).is_empty());
+        assert!(data_dirs_for("sqlite:passauth.db", Some("cache".into())).is_empty());
+        assert_eq!(
+            data_dirs_for("postgres://db/passauth", Some("/cache/icons".into())),
+            ["/cache/icons"]
+        );
+        assert!(data_dirs_for("postgres://db/passauth", None).is_empty());
     }
 }

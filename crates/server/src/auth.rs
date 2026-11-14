@@ -639,7 +639,7 @@ async fn login_finish(
     if disabled != 0 {
         return Err(ApiError::Forbidden("this account is disabled".into()));
     }
-    if verified == 0 && state.config.signups_verify {
+    if verified == 0 && state.signups_verify() {
         return Err(ApiError::Forbidden("email_not_verified".into()));
     }
 

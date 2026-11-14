@@ -2,6 +2,7 @@
 //! (subject only) and dropped, and features that need it are disabled.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -9,13 +10,18 @@ use lettre::message::{Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
-use crate::config::{Config, SmtpConfig, SmtpSecurity};
+use crate::config::{SmtpConfig, SmtpSecurity};
 
 pub struct Mailer {
-    transport: Option<(AsyncSmtpTransport<Tokio1Executor>, Mailbox)>,
-    /// SMTP host and port, for [`Mailer::check_connection`].
-    target: Option<(String, u16)>,
+    /// Current SMTP setup; replaced from the admin page without a restart.
+    smtp: std::sync::RwLock<Option<Arc<Smtp>>>,
     domain: String,
+}
+
+struct Smtp {
+    config: SmtpConfig,
+    transport: AsyncSmtpTransport<Tokio1Executor>,
+    from: Mailbox,
 }
 
 pub struct Email {
@@ -29,33 +35,59 @@ pub struct Email {
 }
 
 impl Mailer {
-    pub fn new(config: &Config) -> Result<Self> {
-        let transport = config.smtp.as_ref().map(build).transpose()?;
-        Ok(Self {
-            transport,
-            target: config.smtp.as_ref().map(|s| (s.host.clone(), s.port)),
-            domain: config.domain.clone(),
-        })
+    pub fn new(domain: &str, smtp: Option<&SmtpConfig>) -> Result<Self> {
+        let mailer = Self {
+            smtp: std::sync::RwLock::new(None),
+            domain: domain.to_owned(),
+        };
+        mailer.configure(smtp)?;
+        Ok(mailer)
+    }
+
+    /// Use `smtp` from now on (`None` turns email off). On error the old setup stays.
+    pub fn configure(&self, smtp: Option<&SmtpConfig>) -> Result<()> {
+        let next = smtp
+            .map(|c| {
+                build(c).map(|(transport, from)| {
+                    Arc::new(Smtp {
+                        config: c.clone(),
+                        transport,
+                        from,
+                    })
+                })
+            })
+            .transpose()?;
+        *self.smtp.write().expect("smtp lock") = next;
+        Ok(())
+    }
+
+    fn current(&self) -> Option<Arc<Smtp>> {
+        self.smtp.read().expect("smtp lock").clone()
+    }
+
+    /// The SMTP setup in use, if any.
+    pub fn config(&self) -> Option<SmtpConfig> {
+        self.current().map(|s| s.config.clone())
     }
 
     pub fn enabled(&self) -> bool {
-        self.transport.is_some()
+        self.smtp.read().expect("smtp lock").is_some()
     }
 
     pub async fn send(&self, to: &str, email: Email) -> Result<()> {
-        let Some((transport, from)) = &self.transport else {
+        let Some(smtp) = self.current() else {
             tracing::info!(subject = %email.subject, "SMTP not configured; email not sent");
             return Ok(());
         };
         let msg = Message::builder()
-            .from(from.clone())
+            .from(smtp.from.clone())
             .to(to.parse().context("invalid recipient address")?)
             .subject(&email.subject)
             .multipart(MultiPart::alternative_plain_html(
                 render_text(&email, &self.domain),
                 render_html(&email, &self.domain),
             ))?;
-        transport.send(msg).await.context("sending email")?;
+        smtp.transport.send(msg).await.context("sending email")?;
         Ok(())
     }
 
@@ -63,8 +95,9 @@ impl Mailer {
     /// test. The SMTP client reports only the last address's error, which inside Docker is
     /// often an IPv6 "network unreachable" that hides why the IPv4 address failed.
     pub async fn check_connection(&self) -> Option<String> {
-        let (host, port) = self.target.as_ref()?;
-        let addrs = match tokio::net::lookup_host((host.as_str(), *port)).await {
+        let smtp = self.current()?;
+        let (host, port) = (&smtp.config.host, smtp.config.port);
+        let addrs = match tokio::net::lookup_host((host.as_str(), port)).await {
             Ok(a) => a.collect::<Vec<_>>(),
             Err(e) => return Some(format!("{host} could not be resolved: {e}.")),
         };
@@ -78,11 +111,11 @@ impl Mailer {
                 r.map_err(|_| None).and_then(|r| r.map(drop).map_err(Some)),
             ));
         }
-        Some(describe(host, *port, &results))
+        Some(describe(host, port, &results))
     }
 
     /// Send in the background; failures are logged, never surfaced to the requester.
-    pub fn send_later(self: &std::sync::Arc<Self>, to: String, email: Email) {
+    pub fn send_later(self: &Arc<Self>, to: String, email: Email) {
         let mailer = self.clone();
         tokio::spawn(async move {
             if let Err(e) = mailer.send(&to, email).await {
@@ -104,7 +137,12 @@ fn build(smtp: &SmtpConfig) -> Result<(AsyncSmtpTransport<Tokio1Executor>, Mailb
     }
     let from = Mailbox::new(
         Some(smtp.from_name.clone()),
-        smtp.from.parse().context("SMTP_FROM")?,
+        smtp.from.parse().with_context(|| {
+            format!(
+                "sender address {:?} is not a valid email address",
+                smtp.from
+            )
+        })?,
     );
     Ok((builder.build(), from))
 }

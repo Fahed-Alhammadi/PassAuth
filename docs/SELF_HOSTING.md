@@ -4,7 +4,7 @@ This guide sets up a PassAuth server with Docker Compose: the server, the web va
 
 - [Install](#install)
 - [HTTPS](#https)
-- [Update](#update)
+- [Update](#update) (and [moving to the short files](#move-to-the-short-files))
 - [Back up](#back-up)
 - [Configuration reference](#configuration-reference)
 
@@ -24,77 +24,64 @@ cp .env.example .env
 
 ### 2. Edit `.env`
 
-Open `.env` in a text editor and set at least:
+`.env` holds only what you have to decide:
+
+```env
+PUID=1000
+PGID=1000
+PASSAUTH_ADMIN_USERNAME=admin
+PASSAUTH_ADMIN_PASSWORD=change-me-to-a-long-password
+```
 
 | Setting | What to put |
 |---|---|
-| `DOMAIN` | The address people will open, without a trailing slash, e.g. `https://vault.example.com` (or `http://localhost:8080` to try it on this computer). Used in email links, and as the WebAuthn origin for security keys in two-step login, so behind a reverse proxy it must be the public `https://` address people actually use. |
-| `PASSAUTH_VERSION` | `latest` to always run the newest release, or a version such as `0.3.2` to stay on it. |
-| `PUID` / `PGID` | The user and group the container runs as (default `1000`). The container never runs as root. |
-| `PASSAUTH_PORT` | Port on this machine (default `8080`). |
+| `PUID` / `PGID` | The user and group PassAuth runs as and that owns `./data`. Use your own: the output of `id -u` and `id -g`. |
+| `PASSAUTH_ADMIN_USERNAME` | The user name for the admin page. |
+| `PASSAUTH_ADMIN_PASSWORD` | The password for the admin page, at least 12 characters, for example from `openssl rand -base64 24`. Until you change the example value the admin page stays off. If it contains `$`, put the whole value in single quotes. |
 
-### 3. Create the data folder
+Below them, `.env.example` lists the optional settings, commented out. Remove the `#` from the ones you need:
 
-Everything PassAuth stores (the database and cached website icons) goes into `./data`, which must belong to the `PUID:PGID` user:
+- `DOMAIN`: the address people open, without a trailing slash, e.g. `https://vault.example.com`. Needed for links in emails and for security keys in two-step login, so behind a reverse proxy it must be the public `https://` address. Without it the server assumes `http://localhost:8080`.
+- `DATABASE_URL`, `IP_HEADER`, `TRUSTED_PROXIES`: see [HTTPS](#https) and the [configuration reference](#configuration-reference).
 
-```bash
-mkdir -p data
-sudo chown 1000:1000 data        # use your PUID:PGID if you changed them
-```
+`.env` holds a password: make it readable only by you with `chmod 600 .env`.
 
-On macOS you can instead set `PUID` and `PGID` in `.env` to the output of `id -u` and `id -g`, and skip `chown`.
+### 3. Check `docker-compose.yml`
 
-### 4. Create an admin token
+You normally change nothing. The lines you might edit have a comment:
 
-The admin page (`/admin`) is where you manage users, send invitations and close sign-ups. It stays off until you set an admin token. Only a **hash** of the token goes into `.env`; you type the token itself on the admin page.
+- `ports`: `"8080:8080"` publishes PassAuth on port 8080. Behind a reverse proxy on the same machine, use `"127.0.0.1:8080:8080"` (see [HTTPS](#https)).
+- `volumes`: `./data` is where PassAuth keeps its database and website icons.
 
-1. Make up a strong token of at least 16 characters, and keep it somewhere safe:
-   ```bash
-   openssl rand -base64 32
-   ```
-2. Hash it. Run this and paste the token when asked:
-   ```bash
-   docker compose run --rm passauth hash-admin-token
-   ```
-   It prints a line starting with `$argon2id$`.
-3. Add it to `.env`, writing **every `$` as `$$`** (otherwise Docker Compose reads `$` as the start of a variable):
-   ```
-   ADMIN_TOKEN=$$argon2id$$v=19$$m=19456,t=2,p=1$$...
-   ```
+PassAuth starts as root only to create `./data` and give it to `PUID:PGID`, then switches to that user with no Linux capabilities left. `cap_add: [CHOWN, SETUID, SETGID]` is what it needs for that one step; the rest of the file keeps the container locked down (read-only, no new privileges).
 
-Steps 2 and 3 in one command, printing the line already escaped for `.env`:
-
-```bash
-printf '%s\n' 'YOUR-TOKEN' | docker compose run --rm -T passauth hash-admin-token 2>/dev/null | sed 's/\$/$$/g'
-```
-
-To turn the admin page off again, remove `ADMIN_TOKEN` from `.env` and run `docker compose up -d`.
-
-If someone loses every two-step method (phone, email access and recovery codes), use **Reset two-step login** next to their account on the admin page. It turns off all their two-step methods so they can sign in with their master password (and Secret Key) and set them up again, and emails them about it. Only do this once you're sure the request really comes from them.
-
-### 5. Email (optional, recommended)
-
-With email set up, PassAuth sends sign-up verification, new-device alerts, two-step codes by email and invitations. Fill in the `SMTP_*` settings in `.env`:
-
-```
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_SECURITY=starttls        # starttls, force_tls or off
-SMTP_USERNAME=passauth@example.com
-SMTP_PASSWORD=your-smtp-password
-SMTP_FROM=passauth@example.com
-```
-
-Check it from the admin page with **Send test email**.
-
-### 6. Start PassAuth
+### 4. Start PassAuth
 
 ```bash
 docker compose up -d
 docker compose logs -f passauth      # "PassAuth server listening" means it's ready
 ```
 
-Open your `DOMAIN` (or `http://localhost:8080`) and create your account. Then open `/admin`, sign in with your admin token, and turn off **Allow new accounts to sign up** if only people you invite should join.
+Open your `DOMAIN` (or `http://localhost:8080`) and create your account.
+
+### 5. Admin page
+
+Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign in with `PASSAUTH_ADMIN_USERNAME` and `PASSAUTH_ADMIN_PASSWORD`. This sign-in is only for the admin page: it is not a vault account and can't open anyone's vault. There you can:
+
+- manage users and send invitations,
+- open or close sign-ups, or limit them to email domains,
+- set up email delivery and send a test email,
+- choose whether new accounts must confirm their email, whether the server fetches website icons, and how much it logs.
+
+These settings are saved in the database and take effect at once, without a restart.
+
+To change the admin password, edit `.env` and run `docker compose up -d`; anyone signed in to the admin page is signed out. To turn the admin page off, remove both admin lines from `.env` and run `docker compose up -d`.
+
+If someone loses every two-step method (phone, email access and recovery codes), use **Reset two-step login** next to their account on the admin page. It turns off all their two-step methods so they can sign in with their master password (and Secret Key) and set them up again, and emails them about it. Only do this once you're sure the request really comes from them.
+
+### 6. Email (optional, recommended)
+
+With email set up, PassAuth sends sign-up verification, new-device alerts, two-step codes by email and invitations. On the admin page, open **Email delivery** and enter your mail provider's SMTP server, encryption, port, user name, password and the address to send from. Save, then check it with **Send test email**.
 
 ## HTTPS
 
@@ -113,7 +100,7 @@ Tell PassAuth which header carries each visitor's real address, so rate limits w
 
 PassAuth believes that header only from proxies on the same machine or a private network (loopback, `10.x`, `172.16–31.x`, `192.168.x`, IPv6 ULA). If your proxy connects from another address, list it in `TRUSTED_PROXIES`.
 
-When the proxy runs on the same host, publish PassAuth on loopback only so nobody can reach it around the proxy (Docker's published ports bypass host firewalls): set `PASSAUTH_PORT=127.0.0.1:8080` in `.env`.
+When the proxy runs on the same host, publish PassAuth on loopback only so nobody can reach it around the proxy (Docker's published ports bypass host firewalls): in `docker-compose.yml`, change the port line to `"127.0.0.1:8080:8080"`.
 
 ## Update
 
@@ -122,7 +109,20 @@ docker compose pull
 docker compose up -d
 ```
 
-With `PASSAUTH_VERSION=latest` this always brings you to the newest release. Database changes are applied automatically when the new version starts.
+The image line ends in `:latest`, so this always brings you to the newest release. To stay on one version, write it instead, e.g. `ghcr.io/fahed-alhammadi/passauth:0.7.0`. Database changes are applied automatically when the new version starts.
+
+### Move to the short files
+
+Servers installed before version 0.8 have a longer `docker-compose.yml` with `${...}` variables and an `.env` with an `ADMIN_TOKEN` hash. They keep working as they are: `docker compose pull && docker compose up -d` runs the new version, and the admin page still asks for your admin token.
+
+To switch to the short files (nothing is lost; your data in `./data` stays as it is):
+
+1. Back up `./data` (see [Back up](#back-up)).
+2. Replace `docker-compose.yml` with the [new one](../docker-compose.yml). If your old `.env` had `PASSAUTH_PORT=127.0.0.1:8080`, use `"127.0.0.1:8080:8080"` on the port line. If you pinned `PASSAUTH_VERSION`, write that version in the `image:` line.
+3. Rewrite `.env` in the [new shape](../.env.example): keep your `PUID`, `PGID` and any of `DOMAIN`, `DATABASE_URL`, `IP_HEADER`, `TRUSTED_PROXIES` you set. Set `PASSAUTH_ADMIN_USERNAME` and `PASSAUTH_ADMIN_PASSWORD`, or keep your `ADMIN_TOKEN` line for now (it is ignored once an admin password is set).
+4. Run `docker compose up -d`.
+
+Your `SIGNUPS_*`, `SMTP_*`, `ICON_SERVICE` and `LOG_LEVEL` values are still read as starting values while they are in `.env`. Once you have saved the same settings on the admin page, you can delete those lines.
 
 ## Back up
 
@@ -136,21 +136,26 @@ Or stop the container (`docker compose stop`), copy the `data` folder, and start
 
 ## Configuration reference
 
-All settings live in `.env`. Any secret can be read from a file instead by adding `_FILE` to its name, e.g. `SMTP_PASSWORD_FILE=/run/secrets/smtp`.
+`.env` settings. Any secret can be read from a file instead by adding `_FILE` to its name, e.g. `PASSAUTH_ADMIN_PASSWORD_FILE=/run/secrets/admin`.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `DOMAIN` | (required) | Public address of the server, e.g. `https://vault.example.com`. Also the origin security keys / passkeys are bound to: if it isn't the exact address people open in their browser, two-step login with a security key can't be set up (the server logs a warning and the setting is greyed out in the web vault). |
-| `PASSAUTH_VERSION` | `latest` | Image version to run. |
-| `PASSAUTH_PORT` | `8080` | Port on the host. |
-| `PUID` / `PGID` | `1000` | User and group the container runs as. |
+| `PUID` / `PGID` | `1000` | User and group PassAuth runs as; `./data` is given to them at start. |
+| `PASSAUTH_ADMIN_USERNAME` | `admin` | User name for the admin page. |
+| `PASSAUTH_ADMIN_PASSWORD` | off | Password for the admin page (at least 12 characters, not the example). Without it the admin page is off. |
+| `DOMAIN` | `http://localhost:8080` | Public address of the server, e.g. `https://vault.example.com`. Also the origin security keys / passkeys are bound to: if it isn't the exact address people open in their browser, two-step login with a security key can't be set up (the server logs a warning and the setting is greyed out in the web vault). |
 | `DATABASE_URL` | SQLite in `/data` | `postgres://user:pass@host:5432/db` to use PostgreSQL. |
-| `ADMIN_TOKEN` | off | Hash of the admin token (see step 4). |
-| `SIGNUPS_ALLOWED` | `true` | Starting value for open sign-ups; the admin page can change it. |
-| `SIGNUPS_DOMAINS_WHITELIST` | any | Only these email domains may sign up, e.g. `example.com,example.org`. |
-| `SIGNUPS_VERIFY` | on when email is set up | Require email verification before the first sign-in. |
 | `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |
 | `TRUSTED_PROXIES` | loopback + private networks | Proxies whose `IP_HEADER` is believed, as IPs or CIDRs, e.g. `10.0.0.5,fd00::/8`. |
-| `ICON_SERVICE` | `internal` | `off` stops the server fetching website icons. |
-| `LOG_LEVEL` / `LOG_FORMAT` | `info` / text | Logging detail; `json` for structured logs. |
-| `SMTP_*` | off | Email delivery (see step 5). |
+| `LOG_FORMAT` | text | `json` for structured logs. |
+
+Set on the admin page (saved in the database, no restart). The `.env` names still work and only set the starting value:
+
+| Admin page | Old `.env` setting |
+|---|---|
+| Sign-ups: open, closed or limited to email domains | `SIGNUPS_ALLOWED`, `SIGNUPS_DOMAINS_WHITELIST` |
+| New accounts must confirm their email address | `SIGNUPS_VERIFY` (default: on when email is set up) |
+| Show website icons | `ICON_SERVICE` (`internal` or `off`), `ICON_CACHE_DIR` |
+| Server log | `LOG_LEVEL` |
+| Email delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME` |
+| Admin sign-in | `ADMIN_TOKEN` (an Argon2 hash from `passauth-server hash-admin-token`; used only when `PASSAUTH_ADMIN_PASSWORD` is not set) |
