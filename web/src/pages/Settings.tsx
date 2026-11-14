@@ -3,9 +3,9 @@ import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../l
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { KitActions } from "../components/KitActions";
-import { ActionRow, ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, copySecret, toast, type IconName } from "../components/ui";
+import { CodeField, RecoveryCodesModal } from "../components/TwoStep";
+import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast, type IconName } from "../components/ui";
 import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
-import { downloadFile } from "../lib/kit";
 import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { server } from "../lib/server";
 import type { Role } from "../lib/types";
@@ -89,7 +89,6 @@ const MIN_PASSWORD = 10;
 
 /** Turn server and crypto errors into a sentence that says how to fix it. */
 const friendly = friendlyError;
-const download = (filename: string, text: string) => downloadFile(filename, text);
 
 function formatDate(ts: number) {
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
@@ -1000,25 +999,6 @@ function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | 
   );
 }
 
-function CodeField({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
-  return (
-    <div className="field">
-      <label htmlFor={id}>
-        Verification code
-      </label>
-      <input
-        id={id}
-        className="input mono code-input"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        inputMode="numeric"
-        autoComplete="one-time-code"
-        maxLength={10}
-        spellCheck={false}
-      />
-    </div>
-  );
-}
 
 function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes: string[] | null) => Promise<void>; onDisable: () => void }) {
   const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
@@ -1216,55 +1196,6 @@ function EmailCard({
   );
 }
 
-function RecoveryCodesModal({ codes, onClose }: { codes: string[]; onClose: () => void }) {
-  const text = codes.join("\n");
-  const [saved, setSaved] = useState(false);
-  const [done, setDone] = useState<{ download?: boolean; copy?: boolean }>({});
-  // They're shown only once: Escape or a click outside must not throw them away.
-  const close = useCallback(() => {
-    if (saved) onClose();
-  }, [saved, onClose]);
-  return (
-    <Modal title="Save your recovery codes" subtitle="Shown only once. Each code works once." icon="note" closable={false} onClose={close}>
-      <p className="card-text">If you lose your phone or can't get email, a recovery code lets you sign in.</p>
-      <div className="codes recovery-codes" aria-label="Recovery codes">
-        {codes.map((c) => (
-          <span key={c}>{c}</span>
-        ))}
-      </div>
-      <div className="choices">
-        <ActionRow
-          icon="download"
-          title="Download recovery codes"
-          sub={`A text file with all ${codes.length} codes`}
-          done={done.download ? "Downloaded. Keep the file somewhere safe." : undefined}
-          onClick={() => {
-            download("PassAuth recovery codes.txt", `PassAuth recovery codes\n${server.origin()}\n\nEach code works once.\n\n${text}\n`);
-            setDone((d) => ({ ...d, download: true }));
-          }}
-        />
-        <ActionRow
-          icon="copy"
-          title="Copy all codes"
-          sub="To paste into a note you keep safe"
-          done={done.copy ? "Copied" : undefined}
-          onClick={async () => {
-            if (await copySecret(text, "Recovery codes copied")) setDone((d) => ({ ...d, copy: true }));
-          }}
-        />
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
-        <span>I saved my recovery codes somewhere safe</span>
-      </label>
-      <SheetActions>
-        <button type="button" className="btn btn-primary btn-block" disabled={!saved} onClick={onClose}>
-          Done
-        </button>
-      </SheetActions>
-    </Modal>
-  );
-}
 
 // -------------------------------------------------------- vaults & sharing
 

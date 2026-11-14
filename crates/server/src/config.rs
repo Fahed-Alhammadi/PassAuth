@@ -41,6 +41,9 @@ pub struct Config {
     /// `PASSAUTH_ADMIN_PASSWORD`, plain text; hashed in memory at startup.
     /// `None` (and no `admin_token`) turns the admin page off.
     pub admin_password: Option<String>,
+    /// `PASSAUTH_ADMIN_ALLOWED_NETWORKS`: the admin API answers only visitors from
+    /// these networks (IPs or CIDRs). `None` = from anywhere.
+    pub admin_networks: Option<Vec<IpNet>>,
     pub smtp: Option<SmtpConfig>,
     pub web_vault_dir: Option<String>,
     /// Header holding the client IP when behind a reverse proxy.
@@ -91,6 +94,19 @@ pub(crate) fn sqlite_dir(url: &str) -> Option<String> {
     } else {
         dir.into()
     })
+}
+
+/// A comma-separated list of IPs or CIDRs from `name`.
+fn networks(name: &str) -> Result<Option<Vec<IpNet>>> {
+    var(name)?
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| IpNet::parse(p).with_context(|| format!("{name}: {p:?}")))
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()
 }
 
 /// Database used when `DATABASE_URL` is not set.
@@ -199,15 +215,8 @@ impl Config {
                 None
             },
             ip_header: var("IP_HEADER")?,
-            trusted_proxies: var("TRUSTED_PROXIES")?
-                .map(|v| {
-                    v.split(',')
-                        .map(str::trim)
-                        .filter(|p| !p.is_empty())
-                        .map(|p| IpNet::parse(p).with_context(|| format!("TRUSTED_PROXIES: {p:?}")))
-                        .collect::<Result<Vec<_>>>()
-                })
-                .transpose()?,
+            trusted_proxies: networks("TRUSTED_PROXIES")?,
+            admin_networks: networks("PASSAUTH_ADMIN_ALLOWED_NETWORKS")?,
             log_json: var("LOG_FORMAT")?.as_deref() == Some("json"),
             icon_service,
             icon_cache_dir,
@@ -236,6 +245,7 @@ impl Config {
             admin_token: Some("test-admin".into()),
             admin_username: "admin".into(),
             admin_password: None,
+            admin_networks: None,
             smtp: None,
             web_vault_dir: None,
             ip_header: None,

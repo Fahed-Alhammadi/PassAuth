@@ -75,6 +75,14 @@ Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign i
 
 These settings are saved in the database and take effect at once, without a restart.
 
+**Protect the admin page.** Two extra locks, both recommended:
+
+- **Two-step login:** in **Admin security**, choose **Set up two-step login**, scan the QR code with an authenticator app and enter the code it shows. Save the recovery codes you get. From then on, signing in needs the password and a 6-digit code (or a recovery code). If you lose your phone and your recovery codes, turn it off from the server's terminal:
+  ```bash
+  docker compose exec passauth passauth-server reset-admin-2fa
+  ```
+- **Allowed networks:** set `PASSAUTH_ADMIN_ALLOWED_NETWORKS` in `.env` to the networks the admin page may be opened from, e.g. `192.168.1.0/24` for your home network or your VPN's range (several separated by commas), then run `docker compose up -d`. Visitors from anywhere else get "not allowed". Behind a reverse proxy, also set `IP_HEADER` (see [HTTPS](#https)), or every visitor looks like the proxy.
+
 To change the admin password, edit `.env` and run `docker compose up -d`; anyone signed in to the admin page is signed out. To turn the admin page off, remove both admin lines from `.env` and run `docker compose up -d`.
 
 If someone loses every two-step method (phone, email access and recovery codes), use **Reset two-step login** next to their account on the admin page. It turns off all their two-step methods so they can sign in with their master password (and Secret Key) and set them up again, and emails them about it. Only do this once you're sure the request really comes from them.
@@ -143,6 +151,7 @@ Or stop the container (`docker compose stop`), copy the `data` folder, and start
 | `PUID` / `PGID` | `1000` | User and group PassAuth runs as; `./data` is given to them at start. |
 | `PASSAUTH_ADMIN_USERNAME` | `admin` | User name for the admin page. |
 | `PASSAUTH_ADMIN_PASSWORD` | off | Password for the admin page (at least 12 characters, not the example). Without it the admin page is off. |
+| `PASSAUTH_ADMIN_ALLOWED_NETWORKS` | anywhere | Networks the admin page may be opened from, as IPs or CIDRs, e.g. `192.168.1.0/24,10.8.0.0/24`. |
 | `DOMAIN` | `http://localhost:8080` | Public address of the server, e.g. `https://vault.example.com`. Also the origin security keys / passkeys are bound to: if it isn't the exact address people open in their browser, two-step login with a security key can't be set up (the server logs a warning and the setting is greyed out in the web vault). |
 | `DATABASE_URL` | SQLite in `/data` | `postgres://user:pass@host:5432/db` to use PostgreSQL. |
 | `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |

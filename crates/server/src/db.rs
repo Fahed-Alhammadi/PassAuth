@@ -262,6 +262,26 @@ pub async fn set_setting(db: &Db, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a setting; true when it existed.
+pub async fn delete_setting(db: &Db, name: &str) -> Result<bool> {
+    let done = sqlx::query("DELETE FROM server_settings WHERE name = $1")
+        .bind(name)
+        .execute(db)
+        .await?;
+    Ok(done.rows_affected() > 0)
+}
+
+/// Replace a setting only if it still holds `old` (two requests can't both use one code).
+pub async fn swap_setting(db: &Db, name: &str, old: &str, new: &str) -> Result<bool> {
+    let done = sqlx::query("UPDATE server_settings SET value = $1 WHERE name = $2 AND value = $3")
+        .bind(new)
+        .bind(name)
+        .bind(old)
+        .execute(db)
+        .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 /// Whether the database is PostgreSQL (else SQLite).
 pub fn is_postgres(url: &str) -> bool {
     url.starts_with("postgres")

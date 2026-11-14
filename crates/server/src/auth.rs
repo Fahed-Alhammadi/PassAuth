@@ -112,6 +112,11 @@ pub const PEER_IP_HEADER: &str = "x-passauth-peer-ip";
 /// its left were written by the client and can be anything. IPv6 addresses
 /// are bucketed by /64, since one host usually controls a whole /64.
 pub fn client_ip(state: &AppState, headers: &HeaderMap) -> String {
+    client_addr(state, headers).map_or_else(|| "direct".into(), rate_key)
+}
+
+/// The visitor's address: `IP_HEADER` when the peer is a trusted proxy, else the TCP peer.
+pub fn client_addr(state: &AppState, headers: &HeaderMap) -> Option<IpAddr> {
     let peer: Option<IpAddr> = headers
         .get(PEER_IP_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -135,7 +140,7 @@ pub fn client_ip(state: &AppState, headers: &HeaderMap) -> String {
                 .or(hops.first())
                 .copied()
         });
-    forwarded.or(peer).map_or_else(|| "direct".into(), rate_key)
+    forwarded.or(peer)
 }
 
 /// An address from a forwarding header: `1.2.3.4`, `1.2.3.4:567`, `[::1]:80` or `::1`.

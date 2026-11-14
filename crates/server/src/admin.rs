@@ -5,12 +5,14 @@
 
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::extract::{FromRequestParts, Path, State};
+use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::admin_security;
 use crate::auth::{bearer, client_ip};
 use crate::config::{SignupPolicy, SmtpConfig, SmtpSecurity};
 use crate::db::{self, now};
@@ -26,6 +28,7 @@ const SESSION_MAX_SECS: i64 = 12 * 3600;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/login", get(login_mode).post(login))
+        .route("/login/2fa", post(login_two_factor))
         .route("/logout", post(logout))
         .route("/overview", get(overview))
         .route("/users", get(list_users))
@@ -40,6 +43,7 @@ pub fn routes() -> Router<AppState> {
         .route("/settings/signups", put(set_signups))
         .route("/settings", get(get_settings).put(set_settings))
         .route("/settings/smtp", put(set_smtp).delete(smtp_off))
+        .merge(crate::admin_security::routes())
 }
 
 pub struct Admin;
@@ -48,6 +52,7 @@ impl FromRequestParts<AppState> for Admin {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
+        admin_security::check_network(state, &parts.headers)?;
         if matches!(state.admin, AdminLogin::Off { .. }) {
             return Err(ApiError::NotFound);
         }
@@ -61,10 +66,14 @@ impl FromRequestParts<AppState> for Admin {
                 return Ok(Admin);
             }
         }
-        // Scripts may still send ADMIN_TOKEN itself as the bearer token.
+        // Scripts may still send ADMIN_TOKEN itself as the bearer token, unless
+        // two-step login is on (that needs a session from /admin/login).
         let AdminLogin::Token(configured) = &state.admin else {
             return Err(ApiError::Unauthorized);
         };
+        if admin_security::enabled(&state.db).await? {
+            return Err(ApiError::Unauthorized);
+        }
         // A token that passed the Argon2 check recently is accepted by its
         // SHA-256, so the admin API doesn't run Argon2 on every request.
         let cached = state
@@ -119,9 +128,12 @@ async fn check_secret(
 
 /// How the admin page signs in: `password`, `token` or `off` (`weak` = the
 /// password in .env is refused).
-async fn login_mode(State(state): State<AppState>) -> Json<Value> {
+async fn login_mode(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    admin_security::check_network(&state, &headers)?;
     let weak = matches!(state.admin, AdminLogin::Off { weak: true });
-    Json(json!({ "mode": state.admin.mode(), "weak_password": weak }))
+    Ok(Json(
+        json!({ "mode": state.admin.mode(), "weak_password": weak }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -139,6 +151,7 @@ async fn login(
     parts: Parts,
     Json(b): Json<LoginBody>,
 ) -> ApiResult<Json<Value>> {
+    admin_security::check_network(&state, &parts.headers)?;
     let ok = match &state.admin {
         AdminLogin::Off { .. } => return Err(ApiError::NotFound),
         AdminLogin::Password { username, hash } => {
@@ -165,16 +178,66 @@ async fn login(
     if !ok {
         return Err(ApiError::Unauthorized);
     }
+    if admin_security::enabled(&state.db).await? {
+        let pending = state.admin_pending.insert(0, TWO_FACTOR_TTL);
+        return Ok(Json(json!({ "two_factor": true, "pending": pending })));
+    }
+    Ok(Json(start_session(&state, &parts.headers)))
+}
+
+/// Seconds to enter the code after the password, and wrong codes allowed meanwhile.
+const TWO_FACTOR_TTL: i64 = 5 * 60;
+const TWO_FACTOR_ATTEMPTS: u32 = 5;
+
+#[derive(Deserialize)]
+struct TwoFactorBody {
+    pending: String,
+    code: String,
+}
+
+/// Second sign-in step: an authenticator or recovery code for the `pending` token
+/// that `/admin/login` returned.
+async fn login_two_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(b): Json<TwoFactorBody>,
+) -> ApiResult<Json<Value>> {
+    admin_security::check_network(&state, &headers)?;
+    let ip = client_ip(&state, &headers);
+    if !state.limiter.check(&format!("admin:{ip}"), 10, 60) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let Some((expires, attempts)) = state.admin_pending.take(&b.pending) else {
+        return Err(ApiError::bad(
+            "this sign-in has expired. Go back and enter your password again",
+        ));
+    };
+    if admin_security::check_code(&state.db, &b.code).await? {
+        return Ok(Json(start_session(&state, &headers)));
+    }
+    tracing::warn!(%ip, "admin sign-in: wrong two-step code");
+    if attempts + 1 >= TWO_FACTOR_ATTEMPTS {
+        return Err(ApiError::bad(
+            "too many wrong codes. Go back and enter your password again",
+        ));
+    }
+    state
+        .admin_pending
+        .put_back(b.pending, attempts + 1, expires);
+    Err(ApiError::bad(
+        "that code isn't right. Enter the newest code from your authenticator app, or a recovery code",
+    ))
+}
+
+fn start_session(state: &AppState, headers: &HeaderMap) -> Value {
     let token = random_token();
     let t = now();
     state.admin_sessions.insert(
         hash_token(&token),
         (t + SESSION_IDLE_SECS, t + SESSION_MAX_SECS),
     );
-    tracing::info!(ip = %client_ip(&state, &parts.headers), "admin signed in");
-    Ok(Json(
-        json!({ "token": token, "expires_in": SESSION_IDLE_SECS }),
-    ))
+    tracing::info!(ip = %client_ip(state, headers), "admin signed in");
+    json!({ "token": token, "expires_in": SESSION_IDLE_SECS })
 }
 
 async fn logout(State(state): State<AppState>, parts: Parts) -> Json<Value> {
@@ -222,6 +285,8 @@ async fn overview(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Val
             "signups_verify": state.signups_verify(),
             "smtp_enabled": state.mailer.enabled(),
             "admin_login": state.admin.mode(),
+            "admin_2fa": admin_security::enabled(&state.db).await?,
+            "admin_networks": c.admin_networks.is_some(),
             "admin_token_hashed": token_hashed,
         }
     })))

@@ -1,5 +1,6 @@
 mod account;
 mod admin;
+mod admin_security;
 mod auth;
 mod config;
 mod db;
@@ -47,6 +48,13 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(serve())
         }
+        Some("reset-admin-2fa") => {
+            privileges::drop_root(false)?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(reset_admin_2fa())
+        }
         Some("hash-admin-token") => {
             privileges::drop_root(false)?;
             hash_admin_token()
@@ -63,7 +71,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(other) => anyhow::bail!(
-            "unknown command {other:?} (expected serve, hash-admin-token, healthcheck)"
+            "unknown command {other:?} (expected serve, reset-admin-2fa, hash-admin-token, healthcheck)"
         ),
     }
 }
@@ -304,6 +312,22 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
         "signups_allowed": state.signups.read().expect("signup policy lock").allowed,
         "email_enabled": state.mailer.enabled(),
     }))
+}
+
+/// `docker compose exec passauth passauth-server reset-admin-2fa`: turn off two-step
+/// login for the admin page when its authenticator and recovery codes are lost. Works
+/// on a running server (the setting is read on every sign-in).
+async fn reset_admin_2fa() -> Result<()> {
+    let config = Config::from_env()?;
+    let db = db::connect(&config.database_url).await?;
+    if db::delete_setting(&db, admin_security::SETTING).await? {
+        println!(
+            "Two-step login for the admin page is off. Sign in at /admin with the user name and password, then set it up again."
+        );
+    } else {
+        println!("Two-step login for the admin page was not on.");
+    }
+    Ok(())
 }
 
 fn hash_admin_token() -> Result<()> {

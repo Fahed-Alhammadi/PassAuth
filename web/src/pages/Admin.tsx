@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
+import QRCode from "qrcode";
 import { Wordmark } from "../components/Logo";
-import { ConfirmDialog, ErrorText, Icon, Modal, PasswordInput, SheetActions, toast } from "../components/ui";
+import { CodeField, RecoveryCodesModal } from "../components/TwoStep";
+import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, toast } from "../components/ui";
 import "../styles/tools.css";
 
 const TOKEN_KEY = "pa.admin";
@@ -18,7 +20,14 @@ interface Overview {
     signups_verify: boolean;
     smtp_enabled: boolean;
     admin_login: "password" | "token";
+    admin_2fa: boolean;
+    admin_networks: boolean;
   };
+}
+
+interface TwoStep {
+  enabled: boolean;
+  recovery_codes_left: number;
 }
 
 type LoginMode = { mode: "password" | "token" | "off"; weak_password: boolean };
@@ -217,6 +226,8 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(initialError);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
+  const [code, setCode] = useState("");
 
   const loadMode = useCallback(async () => {
     try {
@@ -239,10 +250,13 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
     setBusy(true);
     setError(null);
     try {
-      const res = await adminFetch<{ token: string }>("", "/login", {
+      const res = await adminFetch<{ token?: string; two_factor?: boolean; pending?: string }>("", "/login", {
         body: byPassword ? { username: username.trim(), password } : { token: password.trim() },
       });
-      onSignedIn(res.token);
+      if (res.two_factor && res.pending) {
+        setPending(res.pending);
+        setCode("");
+      } else if (res.token) onSignedIn(res.token);
     } catch (err) {
       if (err instanceof AdminError && err.status === 401) setError(byPassword ? "That user name or password is not right." : "That admin token is not valid.");
       else if (err instanceof AdminError && err.status === 404) setError(TURNED_OFF);
@@ -250,6 +264,30 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function submitCode(e: FormEvent) {
+    e.preventDefault();
+    if (!pending) return;
+    if (!code.trim()) return setError("Enter the code from your authenticator app, or a recovery code.");
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await adminFetch<{ token: string }>("", "/login/2fa", { body: { pending, code: code.trim() } });
+      onSignedIn(res.token);
+    } catch (err) {
+      setError((err as Error).message);
+      setCode("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function back() {
+    setPending(null);
+    setCode("");
+    setPassword("");
+    setError(null);
   }
 
   const off = mode?.mode === "off";
@@ -283,6 +321,20 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
               {mode.weak_password ? WEAK_PASSWORD : TURNED_OFF}
             </div>
           </div>
+        ) : pending ? (
+          <form className="auth-panel stack" onSubmit={submitCode}>
+            <p className="card-text">Enter the 6-digit code from your authenticator app. If you don't have your phone, enter one of your recovery codes.</p>
+            <CodeField id="admin-code" label="Code" value={code} onChange={setCode} autoFocus />
+            <ErrorText error={error} />
+            <SheetActions>
+              <button type="submit" className="btn btn-accent btn-block" disabled={busy}>
+                {busy ? "Checking code…" : "Sign in"}
+              </button>
+              <button type="button" className="btn btn-text btn-block" onClick={back} disabled={busy}>
+                Back
+              </button>
+            </SheetActions>
+          </form>
         ) : (
           <form className="auth-panel stack" onSubmit={submit}>
             {mode.mode === "password" ? (
@@ -303,9 +355,6 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
                 <div className="field">
                   <label htmlFor="admin-password">Password</label>
                   <PasswordInput id="admin-password" value={password} onChange={setPassword} autoComplete="current-password" />
-                  <span className="field-hint">
-                    PASSAUTH_ADMIN_USERNAME and PASSAUTH_ADMIN_PASSWORD from the server's .env file, not a vault account. You stay signed in only in this tab.
-                  </span>
                 </div>
               </>
             ) : (
@@ -335,6 +384,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
   const [users, setUsers] = useState<User[] | null>(null);
   const [invites, setInvites] = useState<Invite[] | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [twoStep, setTwoStep] = useState<TwoStep | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   /** Run an admin call; a 401 or 404 here means the token or panel is gone. */
@@ -352,12 +402,14 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
 
   const load = useCallback(async () => {
     try {
-      const [o, u, i, st] = await Promise.all([
+      const [o, u, i, st, ts] = await Promise.all([
         call<Overview>("/overview"),
         call<{ users: User[] }>("/users"),
         call<{ invites: Invite[] }>("/invites"),
         call<Settings>("/settings"),
+        call<TwoStep>("/2fa"),
       ]);
+      setTwoStep(ts);
       setOverview(o);
       setUsers(u.users);
       setInvites(i.invites);
@@ -373,7 +425,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
     load();
   }, [load]);
 
-  if (!overview || !users || !invites || !settings) {
+  if (!overview || !users || !invites || !settings || !twoStep) {
     return (
       <main className="admin-main">
         {loadError ? (
@@ -402,6 +454,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
       <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />
       <SettingsCard settings={settings} call={call} reload={load} />
       <EmailCard smtp={settings.smtp} call={call} reload={load} />
+      <AdminSecurityCard twoStep={twoStep} networks={overview.config.admin_networks} call={call} reload={load} />
     </main>
   );
 }
@@ -461,7 +514,10 @@ function OverviewCard({ o }: { o: Overview }) {
           </div>
           <div>
             <dt>Admin sign-in</dt>
-            <dd>{c.admin_login === "password" ? "User name and password" : "Admin token"}</dd>
+            <dd>
+              {c.admin_login === "password" ? "User name and password" : "Admin token"}
+              {c.admin_2fa ? " + code" : ""}
+            </dd>
           </div>
         </dl>
       </div>
@@ -1096,5 +1152,185 @@ function EmailCard({ smtp, call, reload }: { smtp: Smtp | null; call: Call; relo
         </ConfirmDialog>
       )}
     </section>
+  );
+}
+
+// --------------------------------------------------------- admin security
+
+function AdminSecurityCard({ twoStep, networks, call, reload }: { twoStep: TwoStep; networks: boolean; call: Call; reload: () => Promise<void> }) {
+  const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [asking, setAsking] = useState<"disable" | "codes" | null>(null);
+
+  async function start() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await call<{ secret: string; uri: string }>("/2fa/setup", { body: {} });
+      setSetup({ secret: r.secret, qr: await QRCode.toDataURL(r.uri, { margin: 1, width: 200 }) });
+      setCode("");
+    } catch (err) {
+      if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function enable(e: FormEvent) {
+    e.preventDefault();
+    if (!code.trim()) return setError("Enter the 6-digit code from your authenticator app.");
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await call<{ recovery_codes: string[] }>("/2fa/enable", { body: { code: code.replace(/\s/g, "") } });
+      setSetup(null);
+      setCodes(r.recovery_codes);
+      toast("Two-step login is on for the admin page");
+    } catch (err) {
+      if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const prettySecret = setup?.secret.replace(/(.{4})/g, "$1 ").trim();
+
+  return (
+    <section className="card" aria-labelledby="admin-security-title">
+      <div className="card-head">
+        <div className="card-title">
+          <h2 id="admin-security-title">Admin security</h2>
+          {twoStep.enabled ? <span className="badge badge-ok">Two-step login on</span> : <span className="badge">Two-step login off</span>}
+        </div>
+        {twoStep.enabled ? (
+          <div className="card-actions">
+            <button type="button" className="btn" onClick={() => setAsking("codes")}>
+              New recovery codes…
+            </button>
+            <button type="button" className="btn btn-danger" onClick={() => setAsking("disable")}>
+              Turn off…
+            </button>
+          </div>
+        ) : (
+          !setup && (
+            <button type="button" className="btn" onClick={start} disabled={busy}>
+              {busy ? "Starting setup…" : "Set up two-step login…"}
+            </button>
+          )
+        )}
+      </div>
+      <p className="card-text">
+        {twoStep.enabled
+          ? `Signing in to the admin page needs the password and a code from your authenticator app. ${twoStep.recovery_codes_left} recovery ${twoStep.recovery_codes_left === 1 ? "code" : "codes"} left.`
+          : "Ask for a code from an authenticator app on your phone, in addition to the admin password."}
+      </p>
+      {twoStep.enabled && twoStep.recovery_codes_left <= 3 && (
+        <div className="alert alert-warn" role="note">
+          You're running low on recovery codes. Create new ones and keep them somewhere safe.
+        </div>
+      )}
+      {!twoStep.enabled && setup && (
+        <form className="stack" onSubmit={enable}>
+          <div className="totp-setup">
+            <div className="qr">
+              <img src={setup.qr} alt="QR code to add the PassAuth admin page to your authenticator app" width={200} height={200} />
+            </div>
+            <ol className="steps">
+              <li>
+                <span className="row-title">Scan the QR code with your authenticator app</span>
+                <span className="row-sub">Can't scan it? Enter this setup key in the app instead:</span>
+                <span className="secret-box">
+                  <code className="mono wrap-anywhere">{prettySecret}</code>
+                  <CopyButton value={setup.secret} label="Copy setup key" />
+                </span>
+              </li>
+              <li>
+                <span className="row-title">Enter the code the app shows</span>
+                <CodeField id="admin-totp-code" value={code} onChange={setCode} />
+              </li>
+            </ol>
+          </div>
+          <ErrorText error={error} />
+          <div className="card-actions">
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              {busy ? "Checking code…" : "Turn on two-step login"}
+            </button>
+            <button type="button" className="btn btn-text" onClick={() => setSetup(null)} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {!setup && <ErrorText error={error} />}
+      <p className="small muted">
+        If you lose your phone and your recovery codes, run <code className="mono">docker compose exec passauth passauth-server reset-admin-2fa</code> on the
+        server to turn two-step login off.
+      </p>
+      <p className="small muted">
+        {networks
+          ? "The admin page only opens from the networks in PASSAUTH_ADMIN_ALLOWED_NETWORKS."
+          : "The admin page opens from any network. To allow only your own networks, set PASSAUTH_ADMIN_ALLOWED_NETWORKS in the server's .env file."}
+      </p>
+      {asking && (
+        <AskCode
+          kind={asking}
+          call={call}
+          onClose={() => setAsking(null)}
+          onDone={async (newCodes) => {
+            setAsking(null);
+            if (newCodes) setCodes(newCodes);
+            else toast("Two-step login is off for the admin page");
+            await reload();
+          }}
+        />
+      )}
+      {codes && (
+        <RecoveryCodesModal
+          codes={codes}
+          title="PassAuth admin recovery codes"
+          intro="If you lose your phone, a recovery code lets you sign in to the admin page."
+          onClose={async () => {
+            setCodes(null);
+            await reload();
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+/** Ask for a current code before turning two-step login off or replacing the recovery codes. */
+function AskCode({ kind, call, onClose, onDone }: { kind: "disable" | "codes"; call: Call; onClose: () => void; onDone: (codes: string[] | null) => Promise<void> }) {
+  const [code, setCode] = useState("");
+  const off = kind === "disable";
+  return (
+    <ConfirmDialog
+      title={off ? "Turn off two-step login?" : "Create new recovery codes?"}
+      icon={off ? "shield" : "note"}
+      danger={off}
+      action={off ? "Turn off" : "Create new codes"}
+      busyAction={off ? "Turning off…" : "Creating…"}
+      onClose={onClose}
+      onConfirm={async () => {
+        if (!code.trim()) throw new Error("Enter a code from your authenticator app, or a recovery code.");
+        if (off) {
+          await call("/2fa/disable", { body: { code: code.trim() } });
+          await onDone(null);
+        } else {
+          const r = await call<{ recovery_codes: string[] }>("/2fa/recovery-codes", { body: { code: code.trim() } });
+          await onDone(r.recovery_codes);
+        }
+      }}
+    >
+      <p className="card-text">
+        {off
+          ? "Signing in to the admin page will need only the user name and password."
+          : "Your current recovery codes stop working as soon as the new ones are created."}
+      </p>
+      <CodeField id="admin-confirm-code" label="Code from your authenticator app, or a recovery code" value={code} onChange={setCode} autoFocus />
+    </ConfirmDialog>
   );
 }

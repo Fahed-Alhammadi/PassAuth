@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::config::Config;
-use crate::state::App;
+use crate::state::{App, AppState};
 
 fn fast_kdf() -> KdfParams {
     KdfParams {
@@ -610,6 +610,218 @@ async fn admin_page_stays_off_with_the_example_or_a_short_password() {
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND);
     }
+}
+
+/// Admin session token from `/admin/login`, entering `code` when two-step login is on.
+/// Clears the rate limits first (10 admin sign-ins a minute).
+async fn admin_session(app: &Router, state: &AppState, code: Option<&str>) -> (StatusCode, Value) {
+    state.limiter.clear();
+    let (s, v) = call(
+        app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "token": "test-admin" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    match (v["two_factor"].as_bool(), code) {
+        (Some(true), Some(code)) => {
+            call(
+                app,
+                Method::POST,
+                "/api/admin/login/2fa",
+                None,
+                json!({ "pending": v["pending"], "code": code }),
+            )
+            .await
+        }
+        _ => (s, v),
+    }
+}
+
+#[tokio::test]
+async fn admin_two_step_login() {
+    let state = App::new(test_config().await).await.unwrap();
+    let app = crate::router(state.clone());
+    let (_, v) = admin_session(&app, &state, None).await;
+    let session = v["token"].as_str().unwrap().to_owned();
+    let admin = Some(session.as_str());
+
+    let (_, v) = call(&app, Method::GET, "/api/admin/2fa", admin, json!(null)).await;
+    assert_eq!(v, json!({ "enabled": false, "recovery_codes_left": 0 }));
+    let (s, v) = call(&app, Method::POST, "/api/admin/2fa/setup", admin, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(
+        v["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/PassAuth%20admin:localhost?")
+    );
+    let totp = Totp::parse(v["secret"].as_str().unwrap()).unwrap();
+    let t = crate::db::now() as u64;
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/2fa/enable",
+        admin,
+        json!({ "code": "000000x" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/admin/2fa/enable",
+        admin,
+        json!({ "code": totp.generate(t) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let recovery: Vec<String> = serde_json::from_value(v["recovery_codes"].clone()).unwrap();
+    assert_eq!(recovery.len(), 10);
+
+    // ADMIN_TOKEN as a bearer token no longer gets around the code; the open session stays.
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        "/api/admin/users",
+        Some("test-admin"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, v) = call(&app, Method::GET, "/api/admin/overview", admin, json!(null)).await;
+    assert_eq!(
+        (s, &v["config"]["admin_2fa"]),
+        (StatusCode::OK, &json!(true))
+    );
+
+    // The code used to turn it on can't be used again; the next one works once.
+    let (s, _) = admin_session(&app, &state, Some(&totp.generate(t))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let next = totp.generate(t + 30);
+    let (s, v) = admin_session(&app, &state, Some(&next)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["token"].is_string());
+    let (s, _) = admin_session(&app, &state, Some(&next)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "replayed code");
+
+    // A recovery code works once, with or without the dash.
+    let (s, _) = admin_session(
+        &app,
+        &state,
+        Some(&recovery[0].replace('-', "").to_lowercase()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = admin_session(&app, &state, Some(&recovery[0])).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (_, v) = call(&app, Method::GET, "/api/admin/2fa", admin, json!(null)).await;
+    assert_eq!(v["recovery_codes_left"], 9);
+
+    // Five wrong codes end the pending sign-in.
+    state.limiter.clear();
+    let (_, v) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "token": "test-admin" }),
+    )
+    .await;
+    for _ in 0..5 {
+        let (s, _) = call(
+            &app,
+            Method::POST,
+            "/api/admin/login/2fa",
+            None,
+            json!({ "pending": v["pending"], "code": "123456" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+    }
+    let (s, e) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login/2fa",
+        None,
+        json!({ "pending": v["pending"], "code": recovery[1] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(e["message"].as_str().unwrap().contains("expired"), "{e}");
+
+    // New recovery codes replace the old ones; turning it off needs a code.
+    state.limiter.clear();
+    let (s, v) = call(
+        &app,
+        Method::POST,
+        "/api/admin/2fa/recovery-codes",
+        admin,
+        json!({ "code": recovery[2] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fresh: Vec<String> = serde_json::from_value(v["recovery_codes"].clone()).unwrap();
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/2fa/disable",
+        admin,
+        json!({ "code": recovery[3] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "old recovery codes are gone");
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/2fa/disable",
+        admin,
+        json!({ "code": fresh[0] }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v) = admin_session(&app, &state, None).await;
+    assert!(v["token"].is_string(), "password alone signs in again");
+}
+
+#[tokio::test]
+async fn admin_page_only_from_allowed_networks() {
+    let config = Config {
+        admin_networks: Some(vec![crate::config::IpNet::parse("10.0.0.0/8").unwrap()]),
+        ..test_config().await
+    };
+    let app = crate::router(App::new(config).await.unwrap());
+    let (s, v) = call(&app, Method::GET, "/api/admin/login", None, json!(null)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(
+        v["message"]
+            .as_str()
+            .unwrap()
+            .contains("PASSAUTH_ADMIN_ALLOWED_NETWORKS")
+    );
+    let (s, _) = call(
+        &app,
+        Method::POST,
+        "/api/admin/login",
+        None,
+        json!({ "token": "test-admin" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = call(
+        &app,
+        Method::GET,
+        "/api/admin/users",
+        Some("test-admin"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    // The rest of the server is not affected.
+    let (s, _) = call(&app, Method::GET, "/api/config", None, json!(null)).await;
+    assert_eq!(s, StatusCode::OK);
 }
 
 #[tokio::test]

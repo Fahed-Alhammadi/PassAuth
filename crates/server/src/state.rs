@@ -50,6 +50,10 @@ pub struct App {
     pub admin: AdminLogin,
     /// Admin page sessions by SHA-256 of their token: (idle expiry, absolute expiry).
     pub admin_sessions: DashMap<String, (i64, i64)>,
+    /// Admin sign-ins waiting for their two-step code (value = wrong codes so far).
+    pub admin_pending: Expiring<u32>,
+    /// Admin two-step setup in progress: (secret, expiry).
+    pub admin_2fa_setup: std::sync::Mutex<Option<(String, i64)>>,
     /// Bounds concurrent Argon2 checks of admin sign-ins (each takes ~19 MiB).
     pub admin_verify: tokio::sync::Semaphore,
     /// SHA-256 of the last `ADMIN_TOKEN` sent directly as a bearer token that passed
@@ -215,6 +219,8 @@ impl App {
             log_level: std::sync::RwLock::new(log_level),
             admin,
             admin_sessions: DashMap::new(),
+            admin_pending: Expiring::default(),
+            admin_2fa_setup: std::sync::Mutex::new(None),
             mailer: Arc::new(mailer),
             icons,
             config,
@@ -269,6 +275,7 @@ impl App {
         self.two_factor.sweep();
         self.reauth.sweep();
         self.passkey_registrations.sweep();
+        self.admin_pending.sweep();
         self.limiter.sweep();
         let t = now();
         self.admin_sessions
@@ -326,6 +333,11 @@ impl RateLimiter {
     fn sweep(&self) {
         let t = now();
         self.0.retain(|_, (start, _)| t - *start < 3600);
+    }
+
+    #[cfg(test)]
+    pub fn clear(&self) {
+        self.0.clear();
     }
 }
 

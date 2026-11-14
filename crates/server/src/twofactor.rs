@@ -206,19 +206,24 @@ async fn verify_recovery(db: &Db, user_id: &str, code: &str) -> ApiResult<bool> 
 }
 
 /// Generate 10 fresh recovery codes, replacing any existing set.
-pub async fn regenerate_recovery_codes(db: &Db, user_id: &str) -> ApiResult<Vec<String>> {
+/// Ten new recovery codes (`ABCDE-FGHIJ`) and the hashes to store for them.
+pub fn new_recovery_codes() -> (Vec<String>, Vec<String>) {
     let codes: Vec<String> = (0..10)
         .map(|_| {
             let raw = data_encoding_base32(&random_bytes::<6>().expect("rng"));
             format!("{}-{}", &raw[..5], &raw[5..10])
         })
         .collect();
-    let data = RecoveryData {
-        hashes: codes
-            .iter()
-            .map(|c| hash_token(&c.replace('-', "")))
-            .collect(),
-    };
+    let hashes = codes
+        .iter()
+        .map(|c| hash_token(&c.replace('-', "")))
+        .collect();
+    (codes, hashes)
+}
+
+pub async fn regenerate_recovery_codes(db: &Db, user_id: &str) -> ApiResult<Vec<String>> {
+    let (codes, hashes) = new_recovery_codes();
+    let data = RecoveryData { hashes };
     upsert(
         db,
         user_id,
