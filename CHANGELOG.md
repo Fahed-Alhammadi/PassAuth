@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.11.0 (2026-11-16)
+
+- Web vault, desktop: emergency access with a key per contact, a sealed contact list and new keys on removal (1a2e06d)
+- Core, server: emergency contacts get a key to the personal vaults only, and removing one replaces those keys (8545515)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.10.0...server-0.11.0)
+
 ## 0.10.0 (2026-11-16)
 
 - Web vault, desktop: Send, attachments, emergency access, sign-in approval, password health, invitations, activity log and item history (1fcef6b)
