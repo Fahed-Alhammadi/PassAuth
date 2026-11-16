@@ -14,8 +14,19 @@ import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHoo
 import { MIN_MASTER_PASSWORD, clampTimeout, minPasswordLength, minutesLabel, newKeysMeetKdf, timeoutOptions } from "../lib/policies";
 import { server } from "../lib/server";
 import { UNEXPECTED_RESPONSE, readRecoveryCodes, type Role } from "../lib/types";
-import { NOT_YET_SIGNED, cleanText, consentText, firstTimeText, replacedText, unsignedInvitationText, type SignedMemberRow } from "../lib/signing";
-import { KeyChangedError, emailText, needsSigning, type Consent } from "../lib/signed-sharing";
+import {
+  ASK_OWNER_TO_SIGN,
+  NOT_YET_SIGNED,
+  cleanText,
+  consentText,
+  firstTimeText,
+  ownVaultReplacedText,
+  replacedSignedText,
+  replacedText,
+  unsignedInvitationText,
+  type SignedMemberRow,
+} from "../lib/signing";
+import { KeyChangedError, consentAcceptable, consentDeclinable, emailText, needsSigning, type Consent, type SignerView } from "../lib/signed-sharing";
 import { formatBytes } from "../lib/sizes";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
@@ -1444,6 +1455,17 @@ function KeyIdField({ epoch }: { epoch: Consent["epoch"] }) {
   );
 }
 
+/** Who signed a replaced key, as shown: their pinned email, else only "someone listed by your server as …". */
+const replacedBy = (signer: SignerView) =>
+  signer.pin === "new" ? `someone listed by your server as ${emailText(signer.email) || cleanText(signer.label) || "an unknown account"}` : signer.label;
+
+/** The warning a vault needing consent shows. */
+function consentWarning(c: Consent, name: string): string {
+  if (c.own) return ownVaultReplacedText(name);
+  if (c.replaced) return c.signer ? replacedSignedText(name, replacedBy(c.signer)) : replacedText(name);
+  return consentText(name);
+}
+
 /** A sealed vault the server lists that the account never accepted: shown like an invitation (signed sharing). */
 function ConsentRow({ vault: c }: { vault: ConsentVault }) {
   const [asking, setAsking] = useState<"accept" | "decline" | null>(null);
@@ -1454,11 +1476,11 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
   const signer = c.consent.signer;
   const name = c.name ?? "Shared vault";
   const replaced = c.consent.replaced;
-  // Signed, or (unsigned) a key replaced by an app from before, or while the account's trust memory is missing.
-  const acceptable = !!signer || replaced || c.consent.unsignedAllowed;
-  // While the trust memory is missing, a server could list real vaults here: they're never offered for decline
-  // (Accept, or leave it for later), so nobody is pushed into leaving a vault they use.
-  const declinable = !replaced && !c.consent.unsignedAllowed;
+  // Signed, or (unsigned) a replaced key, or while the account's trust memory is missing: by the key id shown.
+  const acceptable = consentAcceptable(c.consent);
+  // Only a signed one that names its signer is offered for decline (rule 1): a server could make a real vault look
+  // like an unsigned one waiting here, and declining writes a tombstone.
+  const declinable = consentDeclinable(c.consent);
   return (
     <div className="person" role="group" aria-labelledby={titleId}>
       <div className="sheet-context">
@@ -1474,7 +1496,7 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
         <span className="badge">{role}</span>
       </div>
       <div className="alert alert-warn small" role="note">
-        {replaced ? replacedText(name) : consentText(name)}
+        {consentWarning(c.consent, name)}
       </div>
       {signer ? (
         <SignerTrust signer={signer} />
@@ -1490,7 +1512,7 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
         </>
       ) : (
         <div className="alert alert-warn small" role="note">
-          This vault isn't signed, so it can't be accepted. Decline it, then ask the person who shared it to update PassAuth and share it again.
+          This vault isn't signed, so it stays locked on this device. {ASK_OWNER_TO_SIGN}
         </div>
       )}
       {c.consent.unsignedAllowed && !replaced && (
@@ -1532,6 +1554,11 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
             setShown(null);
           }}
         >
+          {(shown.own || shown.replaced) && (
+            <div className="alert alert-warn small" role="note">
+              {consentWarning(shown, name)}
+            </div>
+          )}
           <p className="card-text">
             The vault and its items appear in all your apps. {ROLE_SENTENCE[c.role as Role] ?? ""} Accept only if you expected it.
           </p>

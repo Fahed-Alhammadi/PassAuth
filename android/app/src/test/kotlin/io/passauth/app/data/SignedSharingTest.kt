@@ -83,6 +83,11 @@ class SignedSharingTest {
             puts++
         }
 
+        /** What `GET /vaults/{id}/members` says ([SharingApi.stillMember]). */
+        var member: Boolean? = null
+
+        override suspend fun stillMember(vaultId: String): Boolean? = member
+
         override suspend fun rosters(vaultId: String, after: Long): Pair<List<String>, Boolean> {
             if (offline) throw UserException(UNREACHABLE)
             asked += after
@@ -139,7 +144,9 @@ class SignedSharingTest {
         }
     }
 
-    private fun session(f: Fixture, now: Long = 1000): SharingSession = SharingSession(f.account, api, memory) { now }.also { opened += it }
+    /** [earlier]: the vaults this phone showed as usable before the unlock (the grandfathering candidates). */
+    private fun session(f: Fixture, now: Long = 1000, earlier: Set<String> = setOf(vaultId)): SharingSession =
+        SharingSession(f.account, api, memory, { now }, earlier).also { opened += it }
 
     private fun user(f: Fixture, pinsSeq: Long = api.pinsSeq, identity: JsonElement = Json.parseToJsonElement(f.record)): JsonObject = buildJsonObject {
         put("id", f.id)
@@ -365,7 +372,7 @@ class SignedSharingTest {
     fun aPlantedUnsignedVaultCantBeAccepted() = runBlocking {
         val s = session(bob)
         s.refresh(user(bob, 0, JsonNull), online = true)
-        s.grandfather(emptyList(), emptySet(), online = true)
+        s.grandfather(emptyList(), online = true)
         val c = (check(s, bob, legacyVault()) as VaultCheck.Consent).vault
         assertFalse(c.acceptable)
         try {
@@ -381,7 +388,7 @@ class SignedSharingTest {
     fun theFirstSignedSyncGrandfathersTheSharesFromBefore() = runBlocking {
         val s = session(bob)
         s.refresh(user(bob, 0, JsonNull), online = true)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
         assertEquals("Not yet signed", SignedSharing.label(VaultTrust.NotYetSigned))
         // A roster this phone trusted, then an unsigned share (or no roster at all): refused.
@@ -394,7 +401,7 @@ class SignedSharingTest {
     fun anExistingIdentityWithoutKeyPinsGrandfathersNothing() = runBlocking {
         val s = session(bob)
         s.refresh(user(bob, 0), online = true)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(s.memoryMissing)
         // An empty list is written (once): nothing grandfathered.
         assertFalse(SignedSharing.needsGrandfathering(s.pins))
@@ -410,7 +417,7 @@ class SignedSharingTest {
     fun anUnsignedKeyReplacementNeedsConsent() = runBlocking {
         val s = session(bob)
         s.refresh(user(bob, 0, JsonNull), online = true)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
         val other = alice.account.newVaultKey(vaultId)
         try {
@@ -663,10 +670,11 @@ class SignedSharingTest {
         api.rosters[vaultId] = mutableListOf(r)
         val t = s.checkInvitation(invitation(rosterText = r, email = "boss@‮evil.example\nX"), opener, online = true) as InvitationTrust.Signed
         assertEquals("alice@example.com", t.signer.email)
-        assertEquals("boss@evil.example x", t.signer.listedEmail)
+        // Round 4: the core's normalized form drops invisible and control characters (no line break left to fold).
+        assertEquals("boss@evil.examplex", t.signer.listedEmail)
         assertTrue(t.signer.verified)
         val line = SignedSharing.signerLine(t.signer, false)
-        assertEquals("Signed by alice@example.com (listed by your server as boss@evil.example x)", line)
+        assertEquals("Signed by alice@example.com (listed by your server as boss@evil.examplex)", line)
         assertFalse(line.contains("Verified"))
         // Invitations read from the server are cleaned too.
         val read = Invitations.read(
@@ -1021,17 +1029,29 @@ class SignedSharingTest {
         assertEquals("alice@example.com", InvitationText.sharerName(inv.copy(invitedBy = InvitedBy(alice.id, "ALICE@example.com", "Alice"))))
     }
 
-    /** Grandfathering rule 1: a fresh phone (no earlier offline copy) grandfathers nothing, even when this unlock made the identity. */
+    /**
+     * Grandfathering rule 1: a fresh phone (no earlier offline copy) grandfathers nothing, even when
+     * this unlock made the identity; its unsigned shared vaults then wait for consent, accepted by the
+     * key id shown (final review L: a genuine share is never stuck), and never declined.
+     */
     @Test
     fun aFreshPhoneGrandfathersNothing() = runBlocking {
-        val s = session(bob)
+        val s = session(bob, earlier = emptySet())
         s.refresh(user(bob, 0, JsonNull), online = true)
         assertEquals(1, api.identities.size)
-        s.grandfather(listOf(vaultId), emptySet(), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertFalse(SignedSharing.needsGrandfathering(s.pins))
+        assertTrue(SignedSharing.grandfathered(s.pins).isEmpty())
+        s.beginChecks()
         val c = (check(s, bob, legacyVault()) as VaultCheck.Consent).vault
-        assertFalse(c.unsignedAllowed)
-        assertFalse(c.acceptable)
+        assertTrue(c.unsignedAllowed && c.acceptable)
+        assertFalse(c.declinable)
+        assertEquals(key.keyId(vaultId), c.keyId)
+        assertEquals(SigningMemory.MISSING_DEVICE, s.missingWhy())
+        s.acceptConsent(c)
+        assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
+        // Accepted: no longer waiting.
+        assertTrue(memory.m.missing.orEmpty().isEmpty())
     }
 
     /** Grandfathering rule 2: a failed identity upload writes nothing; the next sync tries again. */
@@ -1041,19 +1061,19 @@ class SignedSharingTest {
         api.putIdentityError = java.io.IOException("offline")
         s.refresh(user(bob, 0, JsonNull), online = true)
         assertNull(s.fingerprint)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(SignedSharing.needsGrandfathering(s.pins))
         s.savePins()
         assertEquals(0, api.puts)
         // A server error (5xx): the same, and tried again.
         api.putIdentityError = ApiException(503, "unavailable", "unavailable")
         s.refresh(user(bob, 0, JsonNull), online = true)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(SignedSharing.needsGrandfathering(s.pins))
         api.putIdentityError = null
         s.refresh(user(bob, 0, JsonNull), online = true)
         assertNotNull(s.fingerprint)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
     }
 
@@ -1064,18 +1084,18 @@ class SignedSharingTest {
         api.loseIdentityAnswer = true
         s.refresh(user(bob, 0, JsonNull), online = true)
         assertNull(s.fingerprint)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(SignedSharing.needsGrandfathering(s.pins))
         // The next sync lists the record that landed: opened, and made here.
         val landed = Json.parseToJsonElement(api.identities.single())
         s.refresh(user(bob, 0, landed), online = true)
         assertNotNull(s.fingerprint)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
         // On another phone (no memory of it) the same record is not made here: nothing grandfathered.
         val other = SharingSession(bob.account, FakeSharingApi(), Memory()).also { opened += it }
         other.refresh(user(bob, 0, landed), online = true)
-        other.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        other.grandfather(listOf(vaultId), online = true)
         assertTrue((check(other, bob, legacyVault()) as VaultCheck.Consent).vault.let { !it.acceptable || it.unsignedAllowed })
     }
 
@@ -1087,10 +1107,10 @@ class SignedSharingTest {
         val s = session(bob)
         s.refresh(user(bob, 0, JsonNull), online = true)
         assertNotNull(s.fingerprint)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(SignedSharing.needsGrandfathering(s.pins))
         // The next sync: known, not made here → an empty list.
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertFalse(SignedSharing.needsGrandfathering(s.pins))
         assertTrue(check(s, bob, legacyVault()) is VaultCheck.Consent)
     }
@@ -1102,7 +1122,7 @@ class SignedSharingTest {
         val s = session(bob)
         s.refresh(user(bob, 3), online = true)
         assertTrue(s.pinsUnreachable)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertFalse(s.memoryMissing)
         assertTrue(SignedSharing.needsGrandfathering(s.pins))
         assertEquals(VaultCheck.Refused(SignedSharing.UNCHECKED), check(s, bob, legacyVault()))
@@ -1142,8 +1162,9 @@ class SignedSharingTest {
         val r2 = roster(0, alice.row("owner"), bob.row("write"), previous = r1)
         api.rosters[vaultId] = mutableListOf(r1, r2)
         s.beginChecks()
-        assertTrue(check(s, bob, bobsVault(rosterText = r2)) is VaultCheck.Consent)
-        s.declineConsent(vaultId)
+        val c = (check(s, bob, bobsVault(rosterText = r2)) as VaultCheck.Consent).vault
+        assertTrue(c.declinable)
+        s.declineConsent(c)
         assertEquals(2L, SignedSharing.number(pinsPart(s, "left"), "roster_version"))
     }
 
@@ -1209,8 +1230,14 @@ class SignedSharingTest {
         // Still listed: nothing.
         s.tombstoneRemoved(setOf(vaultId), setOf(vaultId), online = true)
         assertNull(pinsPart(s, "left"))
+        // Rule 3: one sync that omits it isn't enough (the server answers its members: still there) ...
         s.tombstoneRemoved(emptySet(), setOf(vaultId), online = true)
+        assertNull(pinsPart(s, "left"))
+        assertEquals(mapOf(vaultId to 1), memory.m.absent)
+        // ... the second verified sync in a row that doesn't list it is.
+        s.tombstoneRemoved(emptySet(), emptySet(), online = true)
         assertEquals(1L, SignedSharing.number(pinsPart(s, "left"), "roster_version"))
+        assertTrue(memory.m.absent.isEmpty())
         assertEquals(VaultCheck.Refused(SignedSharing.refusedReason("left")), check(s, bob, v))
     }
 
@@ -1259,12 +1286,12 @@ class SignedSharingTest {
     fun consentsCantBeDeclinedWhileTheTrustMemoryIsMissing() = runBlocking {
         val s = session(bob)
         s.refresh(user(bob, 0), online = true)
-        s.grandfather(listOf(vaultId), setOf(vaultId), online = true)
+        s.grandfather(listOf(vaultId), online = true)
         assertTrue(s.memoryMissing)
         s.beginChecks()
-        assertTrue(check(s, bob, legacyVault()) is VaultCheck.Consent)
+        val c = (check(s, bob, legacyVault()) as VaultCheck.Consent).vault
         try {
-            s.declineConsent(vaultId)
+            s.declineConsent(c)
             fail("declined while the trust memory is missing")
         } catch (e: UserException) {
             assertEquals(SignedSharing.NO_DECLINE_NOW, e.message)
@@ -1314,4 +1341,351 @@ class SignedSharingTest {
         assertEquals(setOf("https://vault.example.com|u1"), moved.signing.keys)
     }
 
+
+    // ------------------------------------------------- round 4 (core API + cross-client rules)
+
+    private fun pinEmail(s: SharingSession, userId: String) = SignedSharing.text(SignedSharing.pinOf(s.pins, userId), "email")
+
+    /** Round 4 I1: accepting uses `pins_accept`: the roster's version and hash are remembered with the key. */
+    @Test
+    fun acceptingRemembersTheRosterHashThroughPinsAccept() = runBlocking {
+        val r = roster(0, alice.row("owner"), bob.row("write"))
+        api.rosters[vaultId] = mutableListOf(r)
+        val s = accepted(bobsVault(rosterText = r))
+        val e = pinsPart(s, "epochs")!!
+        assertEquals(io.passauth.core.rosterHash(r), SignedSharing.text(e, "roster_hash"))
+        assertEquals(1L, SignedSharing.number(e, "roster_version_max"))
+        // An invitation the same.
+        val t = session(bob)
+        t.refresh(user(bob, api.pinsSeq), online = true)
+        memory.m = memory.m.copy(rosters = emptyMap())
+        val v2 = "00000000-0000-4000-8000-0000000000f2"
+        assertNull(SignedSharing.epochOf(t.pins, v2))
+    }
+
+    /** Round 4 (puppet chain): a chain re-signed from version 1 without the roster the account last trusted is refused (`chain_hashes`). */
+    @Test
+    fun aChainWithoutTheRosterTheAccountTrustedIsForked() = runBlocking {
+        val r1 = roster(0, alice.row("owner"), bob.row("write"))
+        api.rosters[vaultId] = mutableListOf(r1)
+        val s = accepted(bobsVault(rosterText = r1))
+        // This phone forgets the roster (a device with no memory of it); the key pins remember version 1 and its hash.
+        memory.m = memory.m.copy(rosters = emptyMap())
+        val p1 = roster(0, carol.row("owner"), bob.row("write"), by = carol)
+        val p2 = roster(0, carol.row("owner"), bob.row("read"), previous = p1, by = carol)
+        api.rosters[vaultId] = mutableListOf(p1, p2)
+        val forked = SignedSharing.refusedReason("roster_forked")
+        assertEquals(VaultCheck.Refused(forked), check(s, bob, bobsVault(role = "read", rosterText = p2, by = carol)))
+        assertEquals(InvitationTrust.Refused(forked), s.checkInvitation(invitation(role = "read", rosterText = p2, by = carol), opener, online = true))
+        assertTrue(memory.m.rosters.isEmpty())
+        // The real chain (r1, then a version 2 by alice) is taken.
+        val r2 = roster(0, alice.row("owner"), bob.row("read"), previous = r1)
+        api.rosters[vaultId] = mutableListOf(r1, r2)
+        assertTrue(check(s, bob, bobsVault(role = "read", rosterText = r2)) is VaultCheck.Ok)
+    }
+
+    /** Round 4: an own vault served as shared with a new key (signed) is a consent that says so, naming the signer only as listed by the server. */
+    @Test
+    fun anOwnVaultWithANewSignedKeyIsAConsentThatSaysSo() = runBlocking {
+        val s = session(bob)
+        s.refresh(user(bob, 0), online = true)
+        val own = SyncVault(vaultId, role = "owner", wrappedKey = key.wrapFor(bob.account, vaultId), keyKind = "account", keyEpoch = 0)
+        assertEquals(VaultCheck.Ok(VaultTrust.Own), check(s, bob, own))
+        val other = alice.account.newVaultKey(vaultId)
+        try {
+            val r = roster(1, alice.row("owner"), bob.row("write"), k = other.key)
+            api.rosters[vaultId] = mutableListOf(r)
+            s.beginChecks()
+            val c = (check(s, bob, bobsVault(epoch = 1, rosterText = r, k = other.key)) as VaultCheck.Consent).vault
+            assertTrue(c.own && c.replaced && c.acceptable)
+            assertFalse(c.declinable)
+            val text = SignedSharing.consentText(c)
+            assertTrue(text, text.startsWith("Team was your own vault. Your server now says someone else gave you a new key for it."))
+            assertTrue(text, text.contains("replaced and signed by someone listed by your server as alice@example.com for the first time"))
+            try {
+                s.declineConsent(c)
+                fail("declined a replaced key")
+            } catch (e: UserException) {
+                assertEquals(SignedSharing.CANT_DECLINE, e.message)
+            }
+        } finally {
+            other.destroy()
+        }
+        // Unsigned replaced key: its own wording and the key id shown.
+        val unsigned = ConsentVault(vaultId, "Team", "write", false, null, false, replaced = true, keyId = "k")
+        assertTrue(SignedSharing.consentText(unsigned).startsWith("The key of Team was replaced by an app that doesn't sign yet."))
+        assertTrue(unsigned.acceptable && !unsigned.declinable)
+    }
+
+    /** Rule 1: an unsigned vault held for consent never offers Decline; one that can't be accepted asks for the owner's signature. */
+    @Test
+    fun unsignedConsentsAreNeverDeclined() = runBlocking {
+        val s = session(bob)
+        s.refresh(user(bob, 0, JsonNull), online = true)
+        s.grandfather(emptyList(), online = true)
+        s.beginChecks()
+        val c = (check(s, bob, legacyVault()) as VaultCheck.Consent).vault
+        assertFalse(c.declinable || c.acceptable)
+        assertEquals("It isn't signed, so PassAuth keeps it locked. Ask the vault's owner to sign this vault.", SignedSharing.unsignedConsentNote(c, null))
+        try {
+            s.declineConsent(c)
+            fail("declined an unsigned vault")
+        } catch (e: UserException) {
+            assertEquals(SignedSharing.CANT_DECLINE, e.message)
+        }
+        assertNull(pinsPart(s, "left"))
+    }
+
+    /** Rule 3: the server saying the vault is gone (403/404 for its members) confirms a removal at once; a made-up invitation carrying a vault in use doesn't tombstone it. */
+    @Test
+    fun removalsAreConfirmedAndFakeInvitationsDontTombstone() = runBlocking {
+        val r = roster(0, alice.row("owner"), bob.row("write"))
+        api.rosters[vaultId] = mutableListOf(r)
+        val s = accepted(bobsVault(rosterText = r))
+        // Declining an invitation for the vault in use: no tombstone (usable, or accepted and still listed).
+        s.declineInvitation(vaultId, 5, usable = setOf(vaultId), rows = setOf(vaultId))
+        s.declineInvitation(vaultId, 5, usable = emptySet(), rows = setOf(vaultId))
+        assertNull(pinsPart(s, "left"))
+        // Gone on the server: tombstoned after one sync.
+        api.member = false
+        s.tombstoneRemoved(emptySet(), setOf(vaultId), online = true)
+        assertEquals(1L, SignedSharing.number(pinsPart(s, "left"), "roster_version"))
+        // A declined invitation of a vault not in use: tombstoned at its checked version.
+        val t = SharingSession(alice.account, FakeSharingApi(), Memory()).also { opened += it }
+        t.refresh(user(alice, 0), online = true)
+        t.declineInvitation(vaultId, 5, usable = emptySet(), rows = setOf(vaultId))
+        assertEquals(5L, SignedSharing.number(pinsPart(t, "left"), "roster_version"))
+    }
+
+    /** Rule 4 + one email form: accepting binds the email shown, and pins exactly that, normalized. */
+    @Test
+    fun acceptingBindsAndPinsTheEmailShown() = runBlocking {
+        val s = session(bob)
+        s.refresh(user(bob, 0), online = true)
+        val r = roster(0, alice.row("owner"), bob.row("write"))
+        api.rosters[vaultId] = mutableListOf(r)
+        s.beginChecks()
+        val a = (check(s, bob, bobsVault(rosterText = r, email = " Alice@EXAMPLE.com. ")) as VaultCheck.Consent).vault
+        assertEquals("alice@example.com", a.signer!!.email)
+        // The server lists another email for the same signer while the sheet shows the first.
+        s.beginChecks()
+        val b = (check(s, bob, bobsVault(rosterText = r, email = "mallory@example.com")) as VaultCheck.Consent).vault
+        assertTrue(a.token != b.token)
+        try {
+            s.acceptConsent(a)
+            fail("accepted under an email no longer shown")
+        } catch (e: UserException) {
+            assertEquals(SignedSharing.CHANGED_JUST_NOW, e.message)
+        }
+        assertNull(SignedSharing.pinOf(s.pins, alice.id))
+        s.beginChecks()
+        val c = (check(s, bob, bobsVault(rosterText = r, email = " Alice@EXAMPLE.com. ")) as VaultCheck.Consent).vault
+        s.acceptConsent(c)
+        assertEquals("alice@example.com", pinEmail(s, alice.id))
+    }
+
+    /** Rule 4: an upgraded pin (legacy → signing identity, same X25519 key) keeps the pinned email and its verified mark. */
+    @Test
+    fun anUpgradedPinKeepsItsEmailAndVerifiedMark() = runBlocking {
+        val s = session(bob)
+        s.refresh(user(bob, 0), online = true)
+        api.pins = bob.account.sealKeyPins(io.passauth.core.pinSet(null, carol.account.legacyIdentityJson(), "carol@example.com", true, 1), 1u)
+        api.pinsSeq = 1
+        s.refresh(user(bob, 1), online = true)
+        val r = roster(0, carol.row("owner"), bob.row("write"), by = carol)
+        api.rosters[vaultId] = mutableListOf(r)
+        s.beginChecks()
+        val c = (check(s, bob, bobsVault(rosterText = r, by = carol, email = "carol@new.example")) as VaultCheck.Consent).vault
+        assertEquals(PinState.Upgraded, c.signer!!.pin)
+        assertEquals("carol@example.com", c.signer!!.email)
+        assertEquals("carol@new.example", c.signer!!.listedEmail)
+        s.acceptConsent(c)
+        val pin = SignedSharing.pinOf(s.pins, carol.id)!!
+        assertEquals("carol@example.com", SignedSharing.text(pin, "email"))
+        assertTrue(SignedSharing.flag(pin, "verified"))
+        assertEquals(carol.hash, SignedSharing.text(pin, "identity"))
+        // A key replacement's review the same.
+        val api2 = FakeSharingApi()
+        val a = SharingSession(alice.account, api2, Memory()).also { opened += it }
+        a.refresh(user(alice, 0), online = true)
+        api2.pins = alice.account.sealKeyPins(io.passauth.core.pinSet(null, carol.account.legacyIdentityJson(), "carol@example.com", true, 1), 1u)
+        api2.pinsSeq = 1
+        a.refresh(user(alice, 1), online = true)
+        val rows = listOf(alice.row("owner"), carol.row("write", email = "carol@new.example"))
+        val review = (a.planRotation(vaultId, "Team", null, rows, null) as RotationPlan.NeedsReview).review
+        assertEquals(PinState.Upgraded, review.members.first { it.userId == carol.id }.pin)
+        val ready = a.planRotation(vaultId, "Team", null, rows, ReviewApproval(review.digest, emptySet(), review.emailsToPin())) as RotationPlan.Ready
+        assertEquals(Triple(rows[1].toString(), "carol@example.com", true), ready.newPins.single())
+    }
+
+    /** Rule 5: this phone's last-known pins are merged into a newer server copy (another device wrote it without them) and written back. */
+    @Test
+    fun aNewerServerCopyGetsThisPhonesPinsMergedIn() = runBlocking {
+        val first = session(bob)
+        first.refresh(user(bob, 0), online = true)
+        first.leave(vaultId, 3)
+        first.savePins()
+        assertEquals(1L, api.pinsSeq)
+        // Another device wrote version 2 without the tombstone.
+        val theirs = io.passauth.core.pinsSetOwnIdentity(io.passauth.core.pinSet(null, carol.public, "carol@example.com", false, 5), bob.hash)
+        api.pins = bob.account.sealKeyPins(theirs, 2u)
+        api.pinsSeq = 2
+        val s = session(bob)
+        s.refresh(user(bob, 2), online = true)
+        assertEquals(3L, SignedSharing.number(pinsPart(s, "left"), "roster_version"))
+        assertEquals(listOf(carol.id), SignedSharing.people(s.pins).map { it.userId })
+        s.savePins()
+        assertEquals(3L, api.pinsSeq)
+        val stored = bob.account.openKeyPins(api.pins!!, 3u)
+        assertNotNull(SignedSharing.obj(stored)!!["left"]!!.jsonObject[vaultId])
+        // Nothing new to add: nothing written.
+        val again = session(bob)
+        again.refresh(user(bob, 3), online = true)
+        again.savePins()
+        assertEquals(3L, api.pinsSeq)
+    }
+
+    /** Round 4: a key replacement the server refuses for its hourly limit (429) says so plainly. */
+    @Test
+    fun aRateLimitedKeyReplacementSaysSo() {
+        assertEquals(
+            "This vault's key was replaced too often in the last hour. Try again later. (Too many attempts. Try again in 2 minutes.)",
+            SignedSharing.keyReplacementLimited(ApiException(429, "rate_limited", "Too many requests", retryAfter = 120)),
+        )
+        assertEquals(SignedSharing.TOO_MANY_KEY_REPLACEMENTS, SignedSharing.keyReplacementLimited(ApiException(429, "rate_limited", "Too many requests")))
+        assertNull(SignedSharing.keyReplacementLimited(ApiException(409, "vault_key_changed", "changed")))
+    }
+
+    /** Rule 6: a generated identity hash counts as made here only if no own identity was known when the unlock began. */
+    @Test
+    fun aGeneratedHashDoesntMakeEveryLaterUnlockTheCreator() = runBlocking {
+        memory.m = SigningMemory(ownIdentity = bob.hash, generated = listOf(bob.hash))
+        val s = session(bob)
+        s.refresh(user(bob, 0), online = true)
+        s.grandfather(listOf(vaultId), online = true)
+        assertFalse(SignedSharing.needsGrandfathering(s.pins))
+        assertTrue(SignedSharing.grandfathered(s.pins).isEmpty())
+    }
+
+    /** Rule 6: the grandfathering candidates are recorded once, when the identity is first made; cleared once the pins hold the identity and the list. */
+    @Test
+    fun grandfatheringCandidatesAreRecordedOnce() = runBlocking {
+        api.loseIdentityAnswer = true
+        val a = session(bob, earlier = setOf(vaultId))
+        a.refresh(user(bob, 0, JsonNull), online = true)
+        assertEquals(setOf(vaultId), memory.m.candidates)
+        val landed = Json.parseToJsonElement(api.identities.single())
+        api.loseIdentityAnswer = false
+        // The next unlock: the vault was held meanwhile, so it isn't among its usable ones; the candidates still count.
+        val b = session(bob, earlier = emptySet())
+        b.refresh(user(bob, 0, landed), online = true)
+        b.grandfather(listOf(vaultId), online = true)
+        assertEquals(setOf(vaultId), SignedSharing.grandfathered(b.pins))
+        b.savePins()
+        assertTrue(memory.m.generated.isEmpty())
+        assertNull(memory.m.candidates)
+    }
+
+    /** Rule 7: unreadable trust memory never runs with no pins: shared vaults refused, own vaults checked against the server's pins, nothing replaced. */
+    @Test
+    fun unreadableTrustMemoryRefusesSharedVaultsAndKeepsOwnChecks() = runBlocking {
+        memory.m = SigningMemory(pinsSeq = 3, pinsSealed = alice.account.sealKeyPins(io.passauth.core.pinSet(null, carol.public, "carol@example.com", false, 5), 3u))
+        api.pins = bob.account.sealKeyPins(io.passauth.core.pinsSetEpoch(null, vaultId, key.epochPinJson(vaultId, 1u), null), 2u)
+        api.pinsSeq = 2
+        val s = session(bob)
+        s.refresh(user(bob, 2), online = true)
+        assertTrue(s.memoryUnreadable)
+        assertEquals(SignedSharing.PINS_ROLLED_BACK, s.pinsProblem)
+        assertEquals(VaultCheck.Refused(SignedSharing.MEMORY_UNREADABLE), check(s, bob, legacyVault()))
+        val own = SyncVault(vaultId, role = "owner", wrappedKey = key.wrapFor(bob.account, vaultId), keyKind = "account", keyEpoch = 0)
+        assertEquals(VaultCheck.Refused(SignedSharing.refusedReason("older")), check(s, bob, own))
+        assertTrue(check(s, bob, own.copy(keyEpoch = 1)) is VaultCheck.Ok)
+        try {
+            s.planRotation(vaultId, "Team", null, listOf(bob.row("owner")), null)
+            fail("replaced a key without trust memory")
+        } catch (e: UserException) {
+            assertEquals(SignedSharing.MEMORY_UNREADABLE, e.message)
+        }
+        try {
+            s.savePins()
+            fail("wrote pins without trust memory")
+        } catch (e: UserException) {
+            assertEquals(SignedSharing.MEMORY_UNREADABLE, e.message)
+        }
+        // Offline the same: shared vaults refused.
+        val off = session(bob)
+        off.refresh(user(bob, 2), online = false)
+        assertTrue(off.memoryUnreadable)
+        assertEquals(VaultCheck.Refused(SignedSharing.MEMORY_UNREADABLE), check(off, bob, legacyVault(), online = false))
+    }
+
+    /** Final review M: a cache-first unlock (offline first) doesn't make the trust memory "missing" once the server has the pins. */
+    @Test
+    fun aCacheFirstUnlockIsntTrustMemoryMissing() = runBlocking {
+        val theirs = io.passauth.core.pinsGrandfather(io.passauth.core.pinsSetOwnIdentity(null, bob.hash), emptyList(), false)
+        api.pins = bob.account.sealKeyPins(theirs, 1u)
+        api.pinsSeq = 1
+        val s = session(bob, earlier = emptySet())
+        s.refresh(user(bob, 1), online = false)
+        s.grandfather(listOf(vaultId), online = false)
+        s.refresh(user(bob, 1), online = true)
+        s.grandfather(listOf(vaultId), online = true)
+        assertFalse(s.memoryMissing)
+        s.beginChecks()
+        assertFalse((check(s, bob, legacyVault()) as VaultCheck.Consent).vault.unsignedAllowed)
+        // The server really has none: missing, also after an offline start.
+        val other = SharingSession(bob.account, FakeSharingApi(), Memory()).also { opened += it }
+        other.refresh(user(bob, 0), online = false)
+        other.refresh(user(bob, 0), online = true)
+        other.grandfather(listOf(vaultId), online = true)
+        assertTrue(other.memoryMissing)
+    }
+
+    /** Rule 2 (iOS M1): before this phone finished the account's first signed sync an unsigned vault is held neutrally; the identity upload is retried every sync. */
+    @Test
+    fun unsignedVaultsAreHeldUntilTheFirstSignedSyncAndTheUploadIsRetried() = runBlocking {
+        val s = session(bob)
+        api.putIdentityError = ApiException(429, "rate_limited", "Too many requests")
+        s.refresh(user(bob, 0, JsonNull), online = true)
+        s.grandfather(listOf(vaultId), online = true)
+        s.beginChecks()
+        assertEquals(VaultCheck.Held(SignedSharing.STILL_CHECKING), check(s, bob, legacyVault()))
+        assertFalse(s.firstSignedSyncDone)
+        // The next sync (same unlock) tries the upload again.
+        api.putIdentityError = null
+        s.refresh(user(bob, 0, JsonNull), online = true)
+        assertEquals(1, api.identities.size)
+        s.grandfather(listOf(vaultId), online = true)
+        assertTrue(s.firstSignedSyncDone)
+        assertEquals(VaultCheck.Ok(VaultTrust.NotYetSigned), check(s, bob, legacyVault()))
+        // 404 (the server doesn't sign): not retried.
+        val c = SharingSession(carol.account, api, Memory()).also { opened += it }
+        val carolUser = buildJsonObject { put("id", carol.id); put("identity", JsonNull); put("key_pins_seq", 0) }
+        api.putIdentityError = ApiException(404, "not_found", "Not found")
+        c.refresh(carolUser, online = true)
+        api.putIdentityError = null
+        c.refresh(carolUser, online = true)
+        assertEquals(1, api.identities.size)
+    }
+
+    /** Final review Info: a changed identity no row of a later sync shows any more is dropped. */
+    @Test
+    fun staleIdentityChangesAreDropped() = runBlocking {
+        val s = session(bob)
+        s.refresh(user(bob, 0), online = true)
+        api.pins = bob.account.sealKeyPins(io.passauth.core.pinSet(null, alice.public, "alice@example.com", true, 1), 1u)
+        api.pinsSeq = 1
+        s.refresh(user(bob, 1), online = true)
+        val r = roster(0, carol.row("owner"), bob.row("write"), by = carol)
+        api.rosters[vaultId] = mutableListOf(r)
+        repeat(2) {
+            s.beginChecks()
+            check(s, bob, bobsVault(rosterText = r, by = carol, email = "alice@example.com"))
+            s.endChecks()
+            assertEquals(1, s.changed.size)
+        }
+        s.beginChecks()
+        s.endChecks()
+        assertTrue(s.changed.isEmpty())
+    }
 }

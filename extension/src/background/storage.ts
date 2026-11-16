@@ -418,13 +418,16 @@ const trustKey = (server: string, userId: string) => `trust:${server}|${userId}`
  * same IndexedDB store as the offline copies, under its own key: the server's address plus the account id the core
  * authenticated (never the server's `user.id`), so another account can never be handed this one's memory. Kept when
  * the account signs out, removed with the account. Writes go through `update` (read, merge, write in one queued step:
- * signed-sharing.ts `mergeMemory`, never a blind overwrite). A read that fails answers undefined: the checks then start
- * as on a new device (the account's key pins and epoch pins still come from the server); writes that fail are logged.
- * In `update`, a read that fails rejects and nothing is written.
+ * signed-sharing.ts `mergeMemory`, never a blind overwrite). `read` rejects when the read fails: the checks never run
+ * as on a new device then (cross-client rule 7: shared vaults are refused and nothing is written); `get` answers
+ * undefined instead (for callers that only look). Writes that fail are logged. In `update`, a read that fails rejects
+ * and nothing is written.
  */
+const readTrust = (server: string, userId: string): Promise<unknown> => inOrder(() => tx<unknown>("readonly", (s) => s.get(trustKey(server, userId))));
 export const trustMemory = {
+  read: readTrust,
   get: (server: string, userId: string): Promise<unknown> =>
-    inOrder(() => tx<unknown>("readonly", (s) => s.get(trustKey(server, userId)))).catch((e) => {
+    readTrust(server, userId).catch((e) => {
       log.warn("Reading what this browser trusted for signed sharing failed:", e);
       return undefined;
     }),

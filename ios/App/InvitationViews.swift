@@ -102,10 +102,10 @@ private struct InvitationSection: View {
             }
             .padding(.vertical, 2)
             .accessibilityElement(children: .combine)
-            if let consent = inv.consent {
+            if inv.consent != nil {
                 // Signed sharing: not an invitation, a vault the server lists for the account that
                 // it never accepted.
-                Text(consentText(consent, inv.name))
+                Text(consentText(inv))
                     .font(.subheadline).foregroundStyle(Color.paInk).fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("invitation.consent.\(inv.vaultId)")
             }
@@ -127,7 +127,7 @@ private struct InvitationSection: View {
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("invitation.accept.\(inv.vaultId)")
             }
-            if inv.consent != .replaced && !inv.declineHidden {
+            if inv.canDecline {
                 Button("Decline…", role: .destructive) { answer(.decline(inv)) }
                     .accessibilityIdentifier("invitation.decline.\(inv.vaultId)")
             }
@@ -163,6 +163,8 @@ private struct InvitationSheet: View {
     @Environment(\.dismiss) private var dismiss
     let answer: InvitationAnswer
     @State private var busy = false
+    /// The decision went through: the entry leaving the list is its result, not a change.
+    @State private var finished = false
     @State private var error: String?
 
     private var accepting: Bool {
@@ -182,8 +184,8 @@ private struct InvitationSheet: View {
                         .promptPlainRow()
                 }
                 Section {
-                    if let consent = inv.consent {
-                        Text(consentText(consent, inv.name))
+                    if inv.consent != nil {
+                        Text(consentText(inv))
                             .foregroundStyle(Color.paInk).fixedSize(horizontal: false, vertical: true)
                     }
                     Text(accepting ? InvitationText.acceptBody(inv) : InvitationText.declineBody)
@@ -220,7 +222,7 @@ private struct InvitationSheet: View {
         // The entry changed after it was shown (another key, signer or member list, or gone):
         // this sheet's decision no longer applies, so it closes; the list shows the new state.
         .onChange(of: current) { _, now in
-            guard !busy else { return }
+            guard !busy, !finished else { return }
             if now.map({ Invitation.sameDecision(answer.invitation, $0) }) != true {
                 model.notify(InvitationText.changed)
                 dismiss()
@@ -243,9 +245,11 @@ private struct InvitationSheet: View {
             do {
                 if accept {
                     try await model.repo.acceptInvitation(inv)
+                    finished = true
                     model.notify(InvitationText.joined(inv.name ?? "the vault"))
                 } else {
                     try await model.repo.declineInvitation(inv.vaultId)
+                    finished = true
                     model.notify(InvitationText.declined)
                 }
                 dismiss()
@@ -257,13 +261,17 @@ private struct InvitationSheet: View {
     }
 }
 
-/// What the app says about a vault the server added (signed sharing's consent).
-func consentText(_ c: Invitation.Consent, _ name: String?) -> String {
-    switch c {
-    case .added: SharingText.consent(name)
-    case .rejoin: SharingText.rejoin(name)
-    case .replaced: SharingText.replaced(name)
+/// What the app says about a vault the server added (signed sharing's consent): a replaced key
+/// names who signed it (pinned email first, else as the server lists them; the fingerprint is
+/// shown below), and a vault that was the account's own says so first.
+func consentText(_ inv: Invitation) -> String {
+    let signer: SignerInfo? = if case .signed(let s)? = inv.trust { s } else { nil }
+    let text: String = switch inv.consent {
+    case .added?, nil: SharingText.consent(inv.name)
+    case .rejoin?: SharingText.rejoin(inv.name)
+    case .replaced?: SharingText.replaced(inv.name, signer: signer)
     }
+    return inv.own ? SharingText.ownVault(inv.name) + " " + text : text
 }
 
 // MARK: Notices in the vault list

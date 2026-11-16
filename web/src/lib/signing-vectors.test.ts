@@ -176,8 +176,25 @@ describe("signed sharing vectors", () => {
       paused: false,
     }).pins;
     expect(rosterMax).toEqual(v.keyPinsRosterMax);
-    const sets: Record<string, core.KeyPins | null> = { none: null, withEpoch, raised, left, grandfathered, withheld, unsigned, rosterMax };
+    // An account row marks the pin `own` (a personal vault must never silently become one someone else sealed).
+    const own = core.pinsObserve(null, {
+      vault_id: v.vault.id,
+      key_kind: "account",
+      key: ep(vaultKey, 1),
+      roster_version: null,
+      roster_hash: null,
+      signed_share: false,
+      paused: false,
+    }).pins;
+    expect(own).toEqual(v.keyPinsOwn);
+    const sets: Record<string, core.KeyPins | null> = { none: null, withEpoch, raised, left, grandfathered, withheld, unsigned, rosterMax, own };
     for (const c of v.admissions) expect(core.pinsAdmit(sets[c.pins], c.observation), JSON.stringify(c)).toEqual(c.expected);
+    // Some admissions carry `chain_hashes` (round 4): a chain that forks the pinned roster is refused.
+    expect(v.admissions.some((c) => c.observation.chain_hashes)).toBe(true);
+    // Accepting (consents, invitations): pins like pinsSetEpoch plus the roster hash and `own`, or throws what admission refuses.
+    for (const c of v.accepts) expect(outcome(() => core.pinsAccept(sets[c.pins], c.observation)), JSON.stringify(c)).toEqual(want(c));
+    // Merges are monotone: retired keys never come back, tombstones absorb the pins they beat, re-joins are explicit.
+    for (const c of v.merges) expect(core.mergePins(c.base, c.ours), c.name).toEqual(c.expected);
     let step = grandfathered;
     for (const c of v.observations) {
       const observed = core.pinsObserve(step, c.observation);

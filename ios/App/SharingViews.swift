@@ -294,6 +294,12 @@ struct InvitationTrustView: View {
             Label(SharingText.notYetSigned, systemImage: "seal")
                 .font(.subheadline).foregroundStyle(Color.paMuted)
                 .accessibilityIdentifier("invitation.notYetSigned")
+            // Accepting pins exactly this key.
+            if let key = invitation.shownKeyId, !key.isEmpty {
+                Text(SharingText.consentKeyId(key)).font(.footnote.monospaced()).foregroundStyle(Color.paMuted)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("invitation.keyId")
+            }
         case .unsigned?:
             WarningNote(text: invitation.consent != nil ? SharingText.consentUnsigned : SharingText.unsignedInvitation(who), identifier: "invitation.unsigned")
         case .refused?:

@@ -48,8 +48,14 @@ public enum SharingIdentity {
         return .object(o)
     }
 
-    /// The email as pins keep it and the core compares it (one line, no control characters).
-    static func pinEmail(_ raw: String) -> String { ShownText.clean(raw, limit: 254) }
+    /// The email as pins keep it and the core compares it: one line without control characters,
+    /// in the core's `normalize_email` form (invisible characters removed, NFKC, lower case, the
+    /// domain in IDNA ASCII, non-ASCII escaped where IDNA refuses it). Every email that is pinned,
+    /// compared or sent to the core goes through here, so pins hold one form only.
+    static func pinEmail(_ raw: String) -> String {
+        let clean = ShownText.clean(raw, limit: 320)
+        return clean.isEmpty ? "" : normalizeEmail(email: clean)
+    }
 
     /// The identity fingerprint of an identity hash (base64url): the first 15 bytes in base32
     /// (RFC 4648), groups of four: what `verify_identity` reports, for pins (which keep only the
@@ -152,18 +158,21 @@ public struct SignerInfo: Equatable, Sendable {
     let identity: String
     /// The identity hash (computed by the core): accepting checks the signer is still this one.
     let identityHash: String
+    /// Whether their pin is marked verified (an upgraded pin keeps it).
+    let pinnedVerified: Bool
 
     public init(userId: String, email: String, name: String, fingerprint: String, deleted: Bool, pin: PinState, identity: String,
-                pinnedEmail: String? = nil, identityHash: String = "") {
+                pinnedEmail: String? = nil, identityHash: String = "", pinnedVerified: Bool = false) {
         self.userId = userId
-        self.listedEmail = email
-        self.pinnedEmail = pinnedEmail
+        self.listedEmail = SharingIdentity.pinEmail(email)
+        self.pinnedEmail = pinnedEmail.map(SharingIdentity.pinEmail)
         self.name = name
         self.fingerprint = fingerprint
         self.deleted = deleted
         self.pin = pin
         self.identity = identity
         self.identityHash = identityHash
+        self.pinnedVerified = pinnedVerified
     }
 
     /// Whether they are in the account's key pins (their email there is the one shown first).
@@ -197,6 +206,28 @@ public struct SignerInfo: Equatable, Sendable {
 
     /// Whether this signer still needs pinning once everything else passed.
     var needsPin: Bool { pin == .new || pin == .upgraded }
+
+    /// The email their pin is written with once everything passed: exactly the one shown (an
+    /// upgraded pin keeps the email it was pinned with, someone new the one the server lists),
+    /// in the one form pins keep (`SharingIdentity.pinEmail`).
+    var pinEmailToWrite: String {
+        if pin == .upgraded, let p = pinnedEmail, !p.isEmpty { return p }
+        return listedEmail
+    }
+
+    /// Whether that pin is marked verified: an upgraded pin keeps its mark (the same person, now
+    /// with a cross-signed signing key); someone new isn't.
+    var pinVerifiedToWrite: Bool { pin == .upgraded && pinnedVerified }
+
+    /// Who signed, as headings and consent texts say it: the pinned email, "you", else only as
+    /// the server lists them ("someone listed by your server as …").
+    public var heading: String {
+        if pin == .me { return "you" }
+        if isPinned, !email.isEmpty { return email }
+        let listed = SharingText.shownEmail(listedEmail)
+        let shown = listed.isEmpty ? ShownText.clean(name, limit: 64) : listed
+        return shown.isEmpty ? "someone your server lists" : "someone listed by your server as \(shown)"
+    }
 }
 
 /// What the checks found out about a vault the app uses.
@@ -227,6 +258,11 @@ public enum Refusal: Error, Equatable, Sendable {
     /// The account's key pins refuse it (`pins_admit`): `missing_epoch`, `left`, `older`,
     /// `conflict`, `downgraded`.
     case admission(String)
+    /// An unsigned shared vault seen before this device finished the account's first signed
+    /// sync (the server hasn't shown it signs yet, the signing identity's state is unknown, or
+    /// the grandfathered list isn't written yet): held, neither accepted nor declinable, and
+    /// checked again at the next sync (cross-client rule 2).
+    case checking
 }
 
 /// A shared vault the checks refused: never used for fill, save or display.
@@ -263,8 +299,9 @@ public enum InvitationTrust: Equatable, Sendable {
 }
 
 /// What accepting an invitation, or consenting to a vault the server added, writes once the user
-/// says yes: the vault's key epoch pin (with the trusted roster version), the signer's pin and
-/// the roster to remember.
+/// says yes (`pins_accept` with the same observation the checks admitted): the vault's key epoch
+/// pin with the trusted roster's version and hash (and the hashes of the chain fetched for it),
+/// the signer's pin and the roster to remember.
 public struct Acceptance: Equatable, Sendable {
     /// `VaultKey.epochPinJson` of the key the checks opened.
     let epochPin: String
@@ -274,13 +311,37 @@ public struct Acceptance: Equatable, Sendable {
     var rosterHash: String?
     /// The signer to pin when not pinned yet (nil: none, or this account).
     let signer: SignerInfo?
+    /// The row's key kind (`sealed` for invitations and consent).
+    var kind = "sealed"
+    /// Its share verified.
+    var signedShare = false
+    /// `{"<version>": rosterHash}` of the chain the checks fetched (nil: none fetched).
+    var chainHashes: [String: String]?
 
-    init(epochPin: String, rosterVersion: UInt64?, roster: String?, rosterHash: String? = nil, signer: SignerInfo?) {
+    init(epochPin: String, rosterVersion: UInt64?, roster: String?, rosterHash: String? = nil, signer: SignerInfo?, kind: String = "sealed",
+         signedShare: Bool = false, chainHashes: [String: String]? = nil) {
         self.epochPin = epochPin
         self.rosterVersion = rosterVersion
         self.roster = roster
         self.rosterHash = rosterHash
         self.signer = signer
+        self.kind = kind
+        self.signedShare = signedShare
+        self.chainHashes = chainHashes
+    }
+
+    /// The observation `pins_accept` gets for `vaultId` (the one the checks admitted).
+    func observation(vaultId: String, paused: Bool) -> String {
+        SignedSharing.observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
+                                  chainHashes: chainHashes, signedShare: signedShare, paused: paused)
+    }
+
+    /// The key id of the key accepting pins (from the epoch pin), as an unsigned vault's consent
+    /// shows it: its first 16 characters in groups of four.
+    public var shownKeyId: String {
+        let id = (try? JSON.parse(epochPin))?.str("key_id") ?? ""
+        let head = Array(id.prefix(16))
+        return stride(from: 0, to: head.count, by: 4).map { String(head[$0..<min($0 + 4, head.count)]) }.joined(separator: "-")
     }
 }
 
@@ -311,6 +372,26 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
     /// (another process's list stays); empty: none any more.
     public var missing: [String]?
     public var missingDevice: Bool = false
+    /// The server showed it signs (its config lists the feature, an identity or key pins request
+    /// answered, or it sent anything signed): from then on the checks are sticky and decisions
+    /// (pins, tombstones, leaving) may be written. Never written before (cross-client rule 2).
+    public var proven = false
+    /// Vaults this device showed as usable (an `ok` verdict, or any vault while the checks were
+    /// off), in the foreground only: what "this device's earlier copy" means for grandfathering
+    /// (cross-client rule 6). Not counted by `isEmpty` (it doesn't turn the checks on). nil: never
+    /// recorded (an app from before).
+    public var seen: [String]?
+    /// The vault ids grandfathering may pass, recorded once when this device generated the
+    /// signing identity (from `seen` as it was before that unlock), so rows that arrived later
+    /// can't be grandfathered by a later unlock.
+    public var candidates: [String]?
+    /// The account's key pins remember the own identity and the grandfathered list: the pending
+    /// identity and the candidates are dropped for good (a later unlock never counts as the one
+    /// that created the identity).
+    public var settled = false
+    /// Tombstones of vaults declined on the server whose key pins write failed (vault id → trusted
+    /// roster version), written at the next sync. nil: not changed by this writer.
+    public var tombstones: [String: UInt64]?
     /// The Keychain couldn't be read just now (not stored): nothing is known about this device's
     /// memory, so the checks treat it as having some (shared vaults refused, nothing grandfathered)
     /// and nothing is written over it.
@@ -321,6 +402,7 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case userId = "user_id", server, pinsSeq = "pins_seq", sealedPins = "sealed_pins", uploaded, rosters, signed
         case pendingIdentity = "pending_identity", pendingRecord = "pending_record", missing, missingDevice = "missing_device"
+        case proven, seen, candidates, settled, tombstones
     }
 
     public init(from decoder: Decoder) throws {
@@ -336,6 +418,11 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
         pendingRecord = try? c.decodeIfPresent(String.self, forKey: .pendingRecord)
         missing = try? c.decodeIfPresent([String].self, forKey: .missing)
         missingDevice = (try? c.decodeIfPresent(Bool.self, forKey: .missingDevice)) ?? false
+        proven = (try? c.decodeIfPresent(Bool.self, forKey: .proven)) ?? false
+        seen = try? c.decodeIfPresent([String].self, forKey: .seen)
+        candidates = try? c.decodeIfPresent([String].self, forKey: .candidates)
+        settled = (try? c.decodeIfPresent(Bool.self, forKey: .settled)) ?? false
+        tombstones = try? c.decodeIfPresent([String: UInt64].self, forKey: .tombstones)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -351,6 +438,11 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
         try c.encodeIfPresent(pendingRecord, forKey: .pendingRecord)
         try c.encodeIfPresent(missing, forKey: .missing)
         if missingDevice { try c.encode(missingDevice, forKey: .missingDevice) }
+        if proven { try c.encode(proven, forKey: .proven) }
+        try c.encodeIfPresent(seen, forKey: .seen)
+        try c.encodeIfPresent(candidates, forKey: .candidates)
+        if settled { try c.encode(settled, forKey: .settled) }
+        if let t = tombstones, !t.isEmpty { try c.encode(t, forKey: .tombstones) }
     }
 
     /// An unreadable record (the Keychain refused the read).
@@ -363,8 +455,11 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
     /// Whether this device has seen signed sharing on the account: then the checks run even when
     /// the server stops listing the feature (a downgrade can't switch them off).
     public var isEmpty: Bool {
-        !unreadable && pinsSeq == 0 && sealedPins == nil && rosters.isEmpty && signed.isEmpty && pendingIdentity == nil
+        !unreadable && !proven && pinsSeq == 0 && sealedPins == nil && rosters.isEmpty && signed.isEmpty && pendingIdentity == nil
     }
+
+    /// At most this many vault ids in `seen` (the oldest drop first).
+    static let maxSeen = 2000
 
     /// The server's version this device's pins build on.
     var serverBase: Int64 { uploaded ? pinsSeq : max(0, pinsSeq - 1) }
@@ -415,6 +510,20 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
         if let m = ours.missing {
             out.missing = m
             out.missingDevice = ours.missingDevice
+        }
+        out.proven = out.proven || ours.proven
+        if let s = ours.seen {
+            var all = out.seen ?? []
+            for v in s where !all.contains(v) { all.append(v) }
+            out.seen = Array(all.suffix(Self.maxSeen))
+        }
+        if out.candidates == nil { out.candidates = ours.candidates }
+        if let t = ours.tombstones { out.tombstones = t }
+        out.settled = out.settled || ours.settled
+        if out.settled {
+            out.pendingIdentity = nil
+            out.pendingRecord = nil
+            out.candidates = nil
         }
         out.unreadable = false
         return out
@@ -516,11 +625,16 @@ public final class KeychainSharingMemory: SharingMemory, @unchecked Sendable {
         return true
     }
 
+    /// Removes the account's record, under the same lock as writes (an AutoFill extension's
+    /// write can't land after it); without the lock in time it is deleted anyway (an account
+    /// being removed must not keep its memory).
     public func clear(_ account: String) {
         guard !account.isEmpty else { return }
         guardLock.lock()
         pending[account] = nil
         guardLock.unlock()
+        let lock = FileLock.acquireSync(FileLock.url("signed-sharing", directory: lockDirectory), timeout: lockTimeout)
+        defer { lock?.release() }
         keychain.delete(Self.key(account))
     }
 }
@@ -674,6 +788,11 @@ struct SharingInputs: @unchecked Sendable {
     var keep = true
     /// The server withholds a newer list of known keys: this device's changes stay on it.
     var holdPins = false
+    /// This device finished the account's first signed sync (the server showed it signs, the
+    /// signing identity's state is known, the grandfathered list is written): only then is an
+    /// unsigned shared vault the account never accepted shown for consent; before, it is held
+    /// neutrally (`Refusal.checking`; cross-client rule 2).
+    var firstSyncDone = false
     /// What the vault list says about the account's keys (paused, rollback, …), before the
     /// consent states (`missing`) are added.
     var notice: String?
@@ -699,10 +818,17 @@ enum SignedSharing {
         /// row adds (its epoch pin, a new signer).
         case ok(VaultTrust, roster: String?, pins: String?)
         /// A sealed vault this account never accepted (or left, re-shared since: `rejoin`): not
-        /// opened beyond its name; shown like an invitation. `signed`: its share verified (it can
-        /// be accepted); `signer` as checked.
-        case consent(Acceptance, rejoin: Bool, replaced: Bool, signer: SignerInfo?)
+        /// opened beyond its name; shown like an invitation. `signer`: its share verified (as
+        /// checked); `own`: the account held it with its own key wrap before.
+        case consent(Acceptance, rejoin: Bool, replaced: Bool, own: Bool, signer: SignerInfo?)
         case refused(Refusal)
+    }
+
+    /// A trusted roster and, when newer rosters were fetched and verified for it, the chain's
+    /// roster hashes (`chain_hashes`: the remembered roster and every newer one).
+    struct Trusted {
+        var roster: String?
+        var chainHashes: [String: String]?
     }
 
     /// The status `roster_head` reports (`unsigned`, `same`, `fetch` with `after`), or nil when
@@ -715,18 +841,30 @@ enum SignedSharing {
     /// The trusted roster of a vault after the server's `latest`: the remembered one when the
     /// same, else the verified chain from it. `.failure(.offline)` when newer rosters are needed
     /// but weren't fetched.
-    static func trustedRoster(_ vaultId: String, remembered: String?, latest: String?, newer: [String]?, tooLarge: Bool) -> Result<String?, Refusal> {
+    static func trustedRoster(_ vaultId: String, remembered: String?, latest: String?, newer: [String]?, tooLarge: Bool) -> Result<Trusted, Refusal> {
         guard let h = head(vaultId, remembered: remembered, latest: latest) else { return .failure(.unverified) }
         switch h.status {
-        case "unsigned": return .success(nil)
-        case "same": return .success(remembered)
+        case "unsigned": return .success(Trusted())
+        case "same": return .success(Trusted(roster: remembered))
         case "fetch":
             if tooLarge { return .failure(.tooLarge) }
             guard let newer, let latest else { return .failure(.offline) }
-            guard let chain = try? verifyRosterChain(vaultId: vaultId, trusted: remembered, newer: newer, latest: latest) else { return .failure(.unverified) }
-            return .success(chain)
+            guard let chain = try? verifyRosterChain(vaultId: vaultId, trusted: remembered, newer: newer, latest: latest),
+                  let hashes = chainHashes(remembered: remembered, newer: newer) else { return .failure(.unverified) }
+            return .success(Trusted(roster: chain, chainHashes: hashes))
         default: return .failure(.unverified)
         }
+    }
+
+    /// `chain_hashes` of a verified chain: `rosterHash` of the roster it started from (if any)
+    /// and of every newer one, by version (plain decimal). nil when a hash can't be had.
+    static func chainHashes(remembered: String?, newer: [String]) -> [String: String]? {
+        var out: [String: String] = [:]
+        for roster in (remembered.map { [$0] } ?? []) + newer {
+            guard let version = rosterVersion(roster), let hash = try? rosterHash(rosterJson: roster) else { return nil }
+            out[String(version)] = hash
+        }
+        return out
     }
 
     /// One vault row (`docs/ARCHITECTURE.md` "What the apps do", step 1), its key opened with the
@@ -744,8 +882,11 @@ enum SignedSharing {
         if me.paused && kind != VaultInfo.accountKeyKind { return .refused(.paused) }
         // (b) The member roster.
         let trusted: String?
+        let chain: [String: String]?
         switch trustedRoster(v.id, remembered: remembered, latest: v.memberRoster, newer: newer, tooLarge: tooLarge) {
-        case .success(let r): trusted = r
+        case .success(let r):
+            trusted = r.roster
+            chain = r.chainHashes
         case .failure(let r): return .refused(r)
         }
         if let roster = trusted {
@@ -785,13 +926,14 @@ enum SignedSharing {
         let hash = trusted.flatMap { try? rosterHash(rosterJson: $0) }
         guard trusted == nil || hash != nil,
               let observed = observe(pins, vaultId: v.id, kind: kind, epochPin: epochPin, rosterVersion: version, rosterHash: hash,
-                                     signedShare: signedShare, paused: me.paused),
+                                     chainHashes: chain, signedShare: signedShare, paused: me.paused),
               let verdict = observed.admission else { return .refused(.unverified) }
         switch verdict.str("status") {
         case "ok":
             var p = observed.pins
             if let s = signer, s.needsPin {
-                guard let next = try? pinSet(pinsJson: p, identityJson: s.identity, email: s.listedEmail, verified: false, now: now) else {
+                guard let next = try? pinSet(pinsJson: p, identityJson: s.identity, email: s.pinEmailToWrite, verified: s.pinVerifiedToWrite,
+                                             now: now) else {
                     return .refused(.unverified)
                 }
                 p = next
@@ -803,41 +945,45 @@ enum SignedSharing {
             }
             return .ok(trust, roster: trusted, pins: p)
         case "consent":
-            let replaced = verdict["replaced"]?.bool ?? false
-            return .consent(Acceptance(epochPin: epochPin, rosterVersion: replaced ? nil : version, roster: trusted, rosterHash: hash,
-                                       signer: signer?.needsPin == true ? signer : nil),
-                            rejoin: verdict["rejoin"]?.bool ?? false, replaced: replaced, signer: signer)
+            // Accepting runs `pins_accept` on this same observation.
+            return .consent(Acceptance(epochPin: epochPin, rosterVersion: version, roster: trusted, rosterHash: hash,
+                                       signer: signer?.needsPin == true ? signer : nil, kind: kind, signedShare: signedShare, chainHashes: chain),
+                            rejoin: verdict["rejoin"]?.bool ?? false, replaced: verdict["replaced"]?.bool ?? false,
+                            own: verdict["own"]?.bool ?? false, signer: signer)
         default:
             let reason = verdict.str("reason")
             return .refused(reason == "paused" ? .paused : .admission(reason.isEmpty ? "unverified" : reason))
         }
     }
 
-    /// The observation of a row for `pins_admit` / `pins_observe`.
+    /// The observation of a row for `pins_admit` / `pins_observe` / `pins_accept`: `signed_share`
+    /// and `paused` always (required since round 4), `chain_hashes` whenever a chain was fetched.
     static func observation(vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String? = nil,
-                            signedShare: Bool, paused: Bool) -> String {
+                            chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool) -> String {
         var o: [String: JSON] = ["vault_id": .string(vaultId), "key_kind": .string(kind), "signed_share": .bool(signedShare),
                                  "paused": .bool(paused)]
         o["key"] = epochPin.flatMap { try? JSON.parse($0) } ?? .null
         o["roster_version"] = rosterVersion.map { .int(Int64($0)) } ?? .null
         if let rosterHash { o["roster_hash"] = .string(rosterHash) }
+        if let chainHashes { o["chain_hashes"] = .object(chainHashes.mapValues { .string($0) }) }
         return JSON.object(o).text
     }
 
     /// `pins_observe` for a row: the verdict and the key pins with what it says to pin.
     static func observe(_ pins: String?, vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String?,
-                        signedShare: Bool, paused: Bool) -> (admission: JSON?, pins: String?)? {
+                        chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool) -> (admission: JSON?, pins: String?)? {
         let o = observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
-                            signedShare: signedShare, paused: paused)
+                            chainHashes: chainHashes, signedShare: signedShare, paused: paused)
         guard let text = try? pinsObserve(pinsJson: pins, observationJson: o), let j = try? JSON.parse(text) else { return nil }
         let changed = j["changed"]?.bool ?? false
         return (j["admission"], changed ? j["pins"].map(\.text) : pins)
     }
 
     /// `pins_admit` for a row.
-    static func admit(_ pins: String?, vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, signedShare: Bool,
-                      paused: Bool) -> JSON? {
-        let o = observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, signedShare: signedShare, paused: paused)
+    static func admit(_ pins: String?, vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String? = nil,
+                      chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool) -> JSON? {
+        let o = observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
+                            chainHashes: chainHashes, signedShare: signedShare, paused: paused)
         guard let text = try? pinsAdmit(pinsJson: pins, observationJson: o) else { return nil }
         return try? JSON.parse(text)
     }
@@ -855,7 +1001,7 @@ enum SignedSharing {
         let pinned = KeyPinsReader.pin(pins, userId)
         func signer(_ pin: PinState) -> SignerInfo {
             SignerInfo(userId: userId, email: share.email, name: share.name, fingerprint: fingerprint, deleted: share.signerDeleted, pin: pin,
-                       identity: share.signer, pinnedEmail: pinned?.email, identityHash: info.str("hash"))
+                       identity: share.signer, pinnedEmail: pinned?.email, identityHash: info.str("hash"), pinnedVerified: pinned?.verified ?? false)
         }
         if userId == me.userId {
             guard let mine = me.signingHash, mine == info.str("hash") else { return .failure(.unverified) }
@@ -893,7 +1039,7 @@ enum SignedSharing {
                                 signerJson: share.signer, signature: share.signature)) != nil,
               inv.memberRoster != nil,
               case .success(let trusted) = trustedRoster(inv.vaultId, remembered: remembered, latest: inv.memberRoster, newer: newer, tooLarge: tooLarge),
-              let roster = trusted,
+              let roster = trusted.roster,
               rosterEpoch(roster) == rowEpoch,
               (try? key.matchesRoster(vaultId: inv.vaultId, rosterJson: roster)) == true else { return (.refused, nil) }
         let signerRole = (try? rosterSignerRole(rosterJson: roster, signerJson: share.signer)) ?? nil
@@ -903,11 +1049,12 @@ enum SignedSharing {
         let version = rosterVersion(roster)
         guard let hash = try? rosterHash(rosterJson: roster) else { return (.refused, nil) }
         let o = observation(vaultId: inv.vaultId, kind: "sealed", epochPin: epochPin, rosterVersion: version,
-                            rosterHash: hash, signedShare: true, paused: me.paused)
+                            rosterHash: hash, chainHashes: trusted.chainHashes, signedShare: true, paused: me.paused)
         guard let text = try? pinsAdmit(pinsJson: pins, observationJson: o), let verdict = try? JSON.parse(text),
               verdict.str("status") != "refused" else { return (.refused, nil) }
         return (.signed(signer), Acceptance(epochPin: epochPin, rosterVersion: version, roster: roster, rosterHash: hash,
-                                            signer: signer.needsPin ? signer : nil))
+                                            signer: signer.needsPin ? signer : nil, kind: "sealed", signedShare: true,
+                                            chainHashes: trusted.chainHashes))
     }
 
     /// A roster's key epoch (read only after the core verified the roster).
@@ -1117,6 +1264,7 @@ public enum SharingText {
         case .offline: offline
         case .tooLarge: tooLarge
         case .paused: pausedRefusal
+        case .checking: checking
         case .keyChanged(let s): keyChanged(s) + " Until then this shared vault isn't used."
         case .admission(let reason):
             switch reason {
@@ -1138,6 +1286,9 @@ public enum SharingText {
         guard !list.isEmpty else { return nil }
         if list.allSatisfy({ $0.reason == .offline }) {
             return list.count == 1 ? "A shared vault isn't shown until PassAuth reaches your server." : "\(list.count) shared vaults aren't shown until PassAuth reaches your server."
+        }
+        if list.allSatisfy({ $0.reason == .checking }) {
+            return list.count == 1 ? "A shared vault isn't shown until PassAuth finishes checking it." : "\(list.count) shared vaults aren't shown until PassAuth finishes checking them."
         }
         return list.count == 1 ? "PassAuth couldn't verify a shared vault, so it isn't shown." : "PassAuth couldn't verify \(list.count) shared vaults, so they aren't shown."
     }
@@ -1161,11 +1312,37 @@ public enum SharingText {
         "You left " + (name.map { "\u{201C}\($0)\u{201D}" } ?? "this vault") + " before, and it was shared with you again. Accept only if you expected it."
     }
 
-    public static func replaced(_ name: String?) -> String {
-        "The key of " + (name.map { "\u{201C}\($0)\u{201D}" } ?? "this vault") + " was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key."
+    /// A vault already accepted, never seen signed, whose key changed: unsigned ("by an app that
+    /// doesn't sign yet"), or signed for the first time by `signer` (pinned email first, else only
+    /// as the server lists them; their fingerprint is shown with it).
+    public static func replaced(_ name: String?, signer: SignerInfo? = nil) -> String {
+        let vault = name.map { "\u{201C}\($0)\u{201D}" } ?? "this vault"
+        guard let signer else {
+            return "The key of \(vault) was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key."
+        }
+        return "The key of \(vault) was replaced and signed by \(signer.heading) for the first time. Compare their fingerprint before you accept."
     }
 
-    public static let consentUnsigned = "This vault isn't signed, so it can't be accepted on this server. Decline it, then ask its owner to share it again."
+    /// Before the consent text of a vault the account held with its own key wrap.
+    public static func ownVault(_ name: String?) -> String {
+        (name.map { "\u{201C}\($0)\u{201D}" } ?? "This vault") + " was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change."
+    }
+
+    /// Under an unsigned vault the server added that may not be accepted here: no Decline either
+    /// (declining writes a tombstone, and a server could make a real vault look like this).
+    public static let consentUnsigned = "This vault isn't signed, so PassAuth can't accept it. Ask the vault's owner to sign this vault."
+    /// Under an unsigned vault that may be accepted (trust memory missing, a new device, an
+    /// unsigned key replacement): the key accepting pins.
+    public static func consentKeyId(_ keyId: String) -> String { "Key ID: \(keyId)" }
+    /// An unsigned shared vault seen before the account's first signed sync finished.
+    public static let checking = "PassAuth is still checking this shared vault. It is used once PassAuth has checked it with your server."
+    /// Decline isn't offered for this entry (unsigned, or a replaced key: keep it locked).
+    public static let cantDecline = "This vault can't be declined here. It stays locked until you accept it or its owner signs it."
+    /// The server allows a limited number of key replacements per vault and hour (429 `rate_limited`).
+    public static func keyReplacementLimited(_ retryAfter: Int?) -> String {
+        "This vault's key was replaced too often in the last hour, so your server didn't take another replacement. "
+            + (retryAfter.map { "Try again in \(waitText($0))." } ?? "Try again later.")
+    }
 
     // Key replacement
 

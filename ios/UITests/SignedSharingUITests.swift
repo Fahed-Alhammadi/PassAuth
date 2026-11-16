@@ -8,6 +8,9 @@ import XCTest
 /// - Eli shares "Family" with the app's account, signed (share signature + roster v1): the app
 ///   shows "Signed by eli@…", accepts it, and lists the vault as signed.
 /// - Eli shares "Planted" without a signature: the app offers Decline only.
+/// - Eli shares "Elsewhere" without a signature and the account accepts it from another device: the
+///   app holds it locked with "Ask the vault's owner to sign this vault.", without Accept or Decline
+///   (an unsigned vault the server lists is never declinable: cross-client rule 1).
 /// - The app's account shares its own vault with Gus (accepts) and Fay (declines, so the server
 ///   asks for a new key): the app replaces the key from Emergency access after confirming that Fay
 ///   is gone; Gus's device checks the new share, the new roster and the items.
@@ -104,6 +107,9 @@ final class SignedSharingUITests: UITestBase {
                                   current: [(try eliId.publicIdentityJson(), "owner")])
         let planted = try await srv.newVault(eliS, name: "Planted")
         try await srv.shareUnsigned(eliS, vault: planted.id, key: planted.key, to: dana, role: "read")
+        let elsewhere = try await srv.newVault(eliS, name: "Elsewhere")
+        try await srv.shareUnsigned(eliS, vault: elsewhere.id, key: elsewhere.key, to: dana, role: "read")
+        try await srv.call("POST", "/vaults/\(elsewhere.id)/invitation/accept", session: danaS)
 
         // Invitations: the signed one names its signer; the unsigned one can only be declined.
         goTo("Vault")
@@ -118,6 +124,14 @@ final class SignedSharingUITests: UITestBase {
         XCTAssertTrue(app.buttons["invitation.decline.\(planted.id)"].exists)
         XCTAssertFalse(app.buttons["invitation.accept.\(planted.id)"].exists, "an unsigned invitation can't be accepted")
         shot("signed-02-invitation-unsigned")
+        // The unsigned membership accepted elsewhere: held, neither accepted nor declined here.
+        let held = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Ask the vault's owner to sign this vault.")).firstMatch
+        scrollTo(held)
+        wait(held, 30)
+        XCTAssertTrue(app.descendants(matching: .any)["invitation.consent.\(elsewhere.id)"].exists)
+        XCTAssertFalse(app.buttons["invitation.decline.\(elsewhere.id)"].exists, "no Decline for an unsigned vault the server lists")
+        XCTAssertFalse(app.buttons["invitation.accept.\(elsewhere.id)"].exists)
+        shot("signed-02-consent-unsigned-held")
         // The list is in the server's order: scroll to Family's Accept.
         let acceptFamily = app.buttons["invitation.accept.\(family.id)"]
         if !acceptFamily.exists {

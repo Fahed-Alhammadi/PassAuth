@@ -241,6 +241,13 @@ export interface DeviceMemory {
   missing?: string[];
   /** Why `missing` was written: "pins" (the key pins were missing) or "device" (no earlier copy on this device). */
   missingWhy?: "pins" | "device";
+  /**
+   * The vaults this device had shown as usable before the account's signing identity was first generated here (null:
+   * none, a new device), recorded once at that moment (rule 6): the only ones grandfathered when that identity turns
+   * out to be made here, even if the first signed sync slips to a later unlock. Undefined when nothing was recorded;
+   * cleared with `generated` once the key pins hold the own identity and the grandfathered list.
+   */
+  earlier?: string[] | null;
 }
 
 /** The device-local store (local storage in the apps; a map in tests). Failures read as nothing remembered. */
@@ -290,6 +297,8 @@ function memoryState(store: KeyValueStore, scope: string): DeviceMemory | null {
     }
   }
   out.generated = strings(raw.generated).slice(-GENERATED_MAX);
+  // Anything but a list reads as "no earlier copy" (nothing grandfathered: the safe side).
+  if ("earlier" in raw) out.earlier = Array.isArray(raw.earlier) ? strings(raw.earlier) : null;
   if (Array.isArray(raw.missing)) {
     out.missing = strings(raw.missing);
     out.missingWhy = raw.missingWhy === "device" ? "device" : "pins";
@@ -320,6 +329,10 @@ export interface MemoryPatch {
   generated?: string;
   /** The vaults waiting without trust memory: written once (`why`), later only narrowed to `ids`. */
   missing?: { ids: string[]; why: "pins" | "device" };
+  /** The vaults shown here before the identity was generated (null: none): written once, never replaced. */
+  earlier?: string[] | null;
+  /** The first signed sync is finished (own identity and grandfathered list in the pins): forget `generated` and `earlier`. */
+  clearPending?: boolean;
 }
 
 /**
@@ -339,6 +352,11 @@ export function updateMemory(store: KeyValueStore, scope: string, patch: MemoryP
     m.vaults[id] = { ...(roster ? { roster } : {}), ...(have.signed || v.signed ? { signed: true } : {}) };
   }
   if (patch.generated && !m.generated.includes(patch.generated)) m.generated = [...m.generated, patch.generated].slice(-GENERATED_MAX);
+  if (patch.earlier !== undefined && m.earlier === undefined) m.earlier = patch.earlier === null ? null : [...new Set(patch.earlier.filter(filled))].slice(0, SEEN_MAX);
+  if (patch.clearPending) {
+    m.generated = [];
+    delete m.earlier;
+  }
   if (patch.missing) {
     const ids = [...new Set(patch.missing.ids.filter(filled))];
     if (m.missing === undefined) {
@@ -348,6 +366,7 @@ export function updateMemory(store: KeyValueStore, scope: string, patch: MemoryP
   }
   const out: Record<string, unknown> = { on: m.on, own: m.own, vaults: m.vaults };
   if (m.generated.length) out.generated = m.generated;
+  if (m.earlier !== undefined) out.earlier = m.earlier;
   if (m.missing !== undefined) {
     out.missing = m.missing;
     out.missingWhy = m.missingWhy;
@@ -442,6 +461,21 @@ export const FIRST_SIGNED = "First time this vault is signed: compare these fing
 export const AUTOMATIC_NEEDS_REVIEW =
   "This vault's list of members isn't signed yet, so PassAuth didn't replace its key automatically. Open the vault in Settings, Vaults & sharing, and replace its key there.";
 
+/**
+ * An unsigned shared vault before this device finished the account's first signed sync (the server hasn't shown it
+ * signs, the identity state isn't known yet, or the grandfathered list isn't written): neither used nor offered for
+ * consent yet (rule 2).
+ */
+export const STILL_CHECKING = "PassAuth is still checking this shared vault. It's used once the check is finished.";
+/** An unsigned vault needing consent that can't be accepted unsigned: held, never offered for decline (rule 1). */
+export const ASK_OWNER_TO_SIGN = "Ask the vault's owner to sign this vault.";
+/** This device's trust memory is stored but can't be read: shared vaults aren't used and nothing about them is changed (rule 7). */
+export const MEMORY_UNREADABLE =
+  "PassAuth couldn't read what this device remembers about your shared vaults, so they aren't used here and nothing about them is changed. Your own vaults still work.";
+/** 429 `rate_limited` on a key replacement (30 per vault and hour). */
+export const KEY_REPLACEMENTS_LIMIT =
+  "This vault's key was replaced many times in the last hour, so your server asks to wait. Nothing was changed. Try again later.";
+
 /** Why a vault was refused (`pinsAdmit` reasons), in words. */
 export function refusedText(reason: string): string {
   if (reason === "paused") return SHARING_PAUSED;
@@ -467,6 +501,17 @@ export const unsignedInvitationText = (who: string) => `This invitation isn't si
 /** A vault accepted before whose key an app that doesn't sign replaced. */
 export const replacedText = (vault: string) =>
   `The key of "${cleanText(vault) || "a shared vault"}" was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key.`;
+
+/**
+ * A vault accepted before, never seen signed, whose new key is signed for the first time (`consent.replaced` with a
+ * signer): `who` is the signer's pinned email, else "someone listed by your server as <email>".
+ */
+export const replacedSignedText = (vault: string, who: string) =>
+  `The key of "${cleanText(vault) || "a shared vault"}" was replaced and signed by ${cleanText(who) || "someone on this server"} for the first time. Compare their fingerprint before you accept.`;
+
+/** `consent.own`: the account held this vault with its own key wrap. */
+export const ownVaultReplacedText = (vault: string) =>
+  `"${cleanText(vault) || "This vault"}" was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change.`;
 
 /** A vault the server put in the account without an invitation it accepted. */
 export const consentText = (vault: string) => `Your server added "${cleanText(vault) || "a shared vault"}" to your account. Accept only if you expected it.`;

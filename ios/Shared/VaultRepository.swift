@@ -257,8 +257,14 @@ final class Session {
     var openedSigning: SigningIdentity?
     var signingRecord: JSON?
     var signingPaused = false
+    /// The identity upload was answered (created, 404 or 409): not sent again by this unlock.
     var identityTried = false
     var identityCreated = false
+    /// The last sync's checks may keep what they decide (the server has shown it signs).
+    var sharingProven = false
+    /// The key pins of the last checks this unlock (read-only fallback while this device's memory
+    /// can't be read).
+    var lastPins: String?
     /// The vault ids of the account's offline copy on this device when this unlock started
     /// (grandfathering rule 1; nil: none), read once (`earlierCopyRead`) before this session
     /// stores a copy of its own.
@@ -343,7 +349,8 @@ public final class VaultRepository {
     /// Invitations' roster chains fetched for their checks, by vault, with the latest roster they end at.
     @ObservationIgnored var invitationChains: [String: (latest: String, chain: [String])] = [:]
     /// Signed sharing: tombstones of vaults declined on the server whose key pins write failed,
-    /// by account (vault id → trusted roster version), written at the next sync.
+    /// by account (vault id → trusted roster version), also kept in the device memory when it can
+    /// be written (`SharingMemoryRecord.tombstones`); written at the next sync.
     @ObservationIgnored var pendingTombstones: [String: [String: UInt64]] = [:]
     /// Signed sharing: the emails a version-1 member review showed, kept with its digest, by
     /// vault: people seen for the first time are pinned with these, not a later members answer's.
@@ -1091,15 +1098,8 @@ public final class VaultRepository {
         let account = session.account
         var fresh = given
         if !session.earlierCopyRead {
-            // Grandfathering rule 1: what this device had before this session stores its own copy.
-            if mode == .none {
-                session.earlierCopyRead = true
-                if let listed = given.user?["id"]?.string, !listed.isEmpty, listed != session.meId {} else {
-                    session.earlierCopy = Set(given.vaults.map(\.id))
-                }
-            } else {
-                _ = await earlierCopy(id, session)
-            }
+            // Grandfathering rule 1: what this device showed before this session shows anything.
+            _ = await earlierCopy(id, session, given: mode == .none ? given : nil)
         }
         let sharing = try await sharingInputs(id, session, &fresh, network: mode != .none)
         let snapshot = fresh
@@ -1130,6 +1130,8 @@ public final class VaultRepository {
         vault = v
         refreshIdentities()
         if let out = opened.sharing { await finishSharing(id, session, out, network: mode != .none) }
+        // What this device showed as usable: the "earlier copy" of later unlocks (rule 6).
+        recordSeen(id, session, v.vaults.map(\.id))
         // A vault came or went, or a key was replaced (here or on another device): personal vaults
         // may need new emergency-access wraps. The first sync after unlocking runs it from `afterOpen`.
         if let before, before != Self.keyShape(v.vaults) { vaultKeysChanged() }
@@ -1421,20 +1423,29 @@ public final class VaultRepository {
                 case .refused(let reason):
                     out.refused.append(RefusedVault(id: v.id, name: n.isEmpty ? nil : n, reason: reason))
                     continue
-                case .consent(let acceptance, let rejoin, let replaced, let signer):
+                case .consent(let acceptance, let rejoin, let replaced, let own, let signer):
+                    if signer == nil && !s.firstSyncDone {
+                        // Before this device finished the account's first signed sync an unsigned
+                        // vault is neither consent nor declinable: held, checked again next sync.
+                        out.refused.append(RefusedVault(id: v.id, name: n.isEmpty ? nil : n, reason: .checking))
+                        continue
+                    }
                     // Never opened beyond its name: shown like an invitation (the app only).
                     let shownName = ShownText.clean(n, limit: 64)
                     var inv = Invitation(vaultId: v.id, role: v.role, name: shownName.isEmpty ? "Shared vault" : shownName,
                                          invitedBy: signer.map { SyncInvitation.Sharer(id: $0.userId, email: $0.email, name: $0.name) },
                                          trust: signer.map { .signed($0) } ?? .unsigned)
                     inv.consent = replaced ? .replaced : rejoin ? .rejoin : .added
-                    // Unsigned: accepted only when its key was replaced by an app from before, or
-                    // while the account's trust memory is missing or this device had no earlier
-                    // copy of it (then labelled "Not yet signed"). Then Decline isn't offered: a
-                    // server can't push the user into leaving vaults they really are in.
+                    inv.own = own
+                    // Unsigned: accepted (by the key id shown) only when its key was replaced by an
+                    // app from before, or while the account's trust memory is missing or this
+                    // device had no earlier copy of it (then labelled "Not yet signed"); otherwise
+                    // held with "Ask the vault's owner to sign this vault." Unsigned ones never
+                    // offer Decline (cross-client rule 1): a server can't push the user into
+                    // leaving vaults they really are in.
                     let waiting = o.memory.missing?.contains(v.id) ?? false
                     inv.acceptance = signer != nil || replaced || waiting ? acceptance : nil
-                    inv.declineHidden = waiting
+                    inv.declineHidden = waiting || signer == nil
                     consent.append(inv)
                     continue
                 case .ok(let t, let roster, let pins):
@@ -1818,6 +1829,9 @@ public final class VaultRepository {
         } catch let e as ApiError where e.status == 409 && e.hasCode("vault_key_changed") {
             try? await syncLocked()
             throw UserError("Someone else replaced this vault's key just now. If the vault still asks for a new key, replace it again.")
+        } catch let e as ApiError where e.isRateLimited {
+            // At most 30 key replacements per vault and hour (signed sharing's retired key ids).
+            throw UserError(SharingText.keyReplacementLimited(e.retryAfter))
         }
     }
 

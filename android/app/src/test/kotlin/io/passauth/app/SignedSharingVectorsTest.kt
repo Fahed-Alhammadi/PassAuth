@@ -12,6 +12,7 @@ import io.passauth.core.mergePins
 import io.passauth.core.normalizeEmail
 import io.passauth.core.pinCheck
 import io.passauth.core.pinSet
+import io.passauth.core.pinsAccept
 import io.passauth.core.pinsAdmit
 import io.passauth.core.pinsCheckOwnIdentity
 import io.passauth.core.pinsEpochCheck
@@ -158,7 +159,7 @@ class SignedSharingVectorsTest {
 
     @Test
     fun vectorsAreThere() {
-        for (name in listOf("accounts", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles", "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "legacyWraps", "openings", "observations", "emails")) {
+        for (name in listOf("accounts", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles", "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "legacyWraps", "openings", "observations", "emails", "accepts", "merges")) {
             assertTrue("no $name vectors", (v[name] as? JsonArray)?.isNotEmpty() == true)
         }
     }
@@ -335,12 +336,35 @@ class SignedSharingVectorsTest {
         val observation = """{"vault_id":"$vaultId","key_kind":"sealed","key":${vaultKey.epochPinJson(vaultId, 1u)},"roster_version":3,"roster_hash":"${v3.s("hash")}","signed_share":true,"paused":false}"""
         val rosterMax = json(pinsObserve(withEpoch, observation)).jsonObject["pins"].toString()
         check(failures, "roster max", v["keyPinsRosterMax"], json(rosterMax))
+        // The account's own vault: pinned from an `account` row, marked `own` (round 4).
+        val ownObservation = """{"vault_id":"$vaultId","key_kind":"account","key":${vaultKey.epochPinJson(vaultId, 1u)},"roster_version":null,"signed_share":false,"paused":false}"""
+        val ownPins = json(pinsObserve(null, ownObservation)).jsonObject["pins"].toString()
+        check(failures, "own vault pins", v["keyPinsOwn"], json(ownPins))
         val sets = mapOf(
             "none" to null, "withEpoch" to withEpoch, "raised" to raised, "left" to left, "grandfathered" to grandfathered,
-            "withheld" to withheld, "unsigned" to unsigned, "rosterMax" to rosterMax,
+            "withheld" to withheld, "unsigned" to unsigned, "rosterMax" to rosterMax, "own" to ownPins,
         )
+        // Admissions, including `chain_hashes` (a chain re-signed from version 1 without the roster the pins remember: roster_forked).
         for (c in cases("admissions")) {
             check(failures, "admission ${c.s("pins")} ${c["observation"]}", c["expected"], json(pinsAdmit(sets.getValue(c.s("pins")), c["observation"].toString())))
+            // pins_observe gives the same verdict.
+            check(failures, "observed admission ${c.s("pins")} ${c["observation"]}", c["expected"], json(pinsObserve(sets.getValue(c.s("pins")), c["observation"].toString())).jsonObject["admission"])
+        }
+        check(failures, "admissions with chain hashes", true, cases("admissions").count { "chain_hashes" in it["observation"]!!.jsonObject } >= 3)
+        // Accepting a consent or invitation (`pins_accept`): the pins it writes, or the refusal it throws.
+        for (c in cases("accepts")) {
+            val what = "accept ${c.s("pins")} ${c["observation"]}"
+            val got: Any? = try {
+                json(pinsAccept(sets.getValue(c.s("pins")), c["observation"].toString()))
+            } catch (e: CoreException) {
+                "error:" + code(e)
+            }
+            val want: Any? = c["expected"] ?: ("error:" + expectedCode(c.s("error")))
+            check(failures, what, want, got)
+        }
+        // Merging key pins (round 4: retired keys never come back, tombstones beat stale pins).
+        for (c in cases("merges")) {
+            check(failures, "merge ${c.s("name")}", c["expected"], json(mergePins(c["base"].toString(), c["ours"].toString())))
         }
         // Observations chained over a sync's rows, from the grandfathered pins.
         var step: String = grandfathered

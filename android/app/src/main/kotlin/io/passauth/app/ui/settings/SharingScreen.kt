@@ -146,6 +146,17 @@ fun SharingScreen(ctx: UiCtx) {
                     }
                 }
             }
+            if (status.checking.isNotEmpty()) {
+                CardSection("Still being checked") {
+                    status.checking.forEachIndexed { n, r ->
+                        if (n > 0) HorizontalDivider(color = PassAuthTheme.colors.line)
+                        Column(Modifier.padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(r.name, style = MaterialTheme.typography.bodyLarge)
+                            Muted(r.reason)
+                        }
+                    }
+                }
+            }
             val shared = vault?.vaults.orEmpty().filter { !it.personal }
             if (shared.isNotEmpty()) {
                 CardSection("Shared with you") {

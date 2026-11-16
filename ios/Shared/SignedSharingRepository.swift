@@ -106,14 +106,17 @@ extension VaultRepository {
     // MARK: Before decrypting a copy
 
     /// What the checks of `snapshot` need (step 0): "me", the key pins (the server's newer ones
-    /// fetched; rollback and withheld lists noticed), the signing identity (made and uploaded here
-    /// when the account has none, the app only) checked against the own identity the pins
-    /// remember, the vaults grandfathered at the account's first signed sync (docs/ARCHITECTURE.md
-    /// "Grandfathering" rules 1–4), and the member rosters newer than the remembered ones (vaults
-    /// and, the app only, invitations; within the caps). `network: false` (a copy from the
-    /// device): nothing is asked of the server; a vault whose newer roster would be needed is
-    /// refused as offline until the next sync. nil when signed sharing is off for the account.
-    /// Throws for a copy of another account (`user.id` isn't this account's).
+    /// fetched, this device's last-known pins merged into them; rollback and withheld lists
+    /// noticed), the signing identity (made and uploaded here when the account has none, the app
+    /// only; tried again at every sync until the server answers) checked against the own identity
+    /// the pins remember, the vaults grandfathered at the account's first signed sync
+    /// (docs/ARCHITECTURE.md "Grandfathering" rules 1–4, cross-client rules 2 and 6), and the
+    /// member rosters newer than the remembered ones (vaults and, the app only, invitations;
+    /// within the caps). `network: false` (a copy from the device): nothing is asked of the
+    /// server; a vault whose newer roster would be needed is refused as offline until the next
+    /// sync. nil when signed sharing is off for the account. Throws for a copy of another account
+    /// (`user.id` isn't this account's), and for a copy from the server while this device's
+    /// memory can't be read and the server's key pins can't be had (treated as offline).
     func sharingInputs(_ id: String, _ session: Session, _ snapshot: inout SyncSnapshot, network: Bool) async throws -> SharingInputs? {
         var memory = loadMemory(id, session)
         guard signedSharingOn(id, snapshot, memory: memory) else { return nil }
@@ -124,18 +127,7 @@ extension VaultRepository {
         let featureListed = features?.contains(signedSharingFeature) == true
         let now = Int64(Date().timeIntervalSince1970)
         if memory.unreadable {
-            // Nothing known about this device's memory: the listed identity opened (for the
-            // account's own vaults), nothing made, fetched, grandfathered or written; every shared
-            // vault refused until the memory can be read.
-            var pins: String?
-            var changed = false
-            _ = await prepareSigning(id, session, &snapshot, pins: &pins, changed: &changed, memory: &memory, network: false, mayCreate: false)
-            var inputs = SharingInputs(me: sharingSelf(session), pins: nil, pinsChanged: false, memory: memory, fetched: [:], tooLarge: [], now: now)
-            inputs.unavailable = "memory_unreadable"
-            inputs.keep = false
-            inputs.notice = SharingText.memoryUnreadable
-            sharingNotice = SharingText.memoryUnreadable
-            return inputs
+            return try await unreadableInputs(id, session, &snapshot, memory: memory, network: network, now: now)
         }
         let remembered = !memory.isEmpty
         let earlier = await earlierCopy(id, session)
@@ -144,42 +136,55 @@ extension VaultRepository {
         var changed = prepared.changed
         let hadPins = pins != nil
         let ident = await prepareSigning(id, session, &snapshot, pins: &pins, changed: &changed, memory: &memory, network: network,
-                                         mayCreate: prepared.unavailable == nil)
+                                         mayCreate: prepared.unavailable == nil, ownBefore: prepared.deviceOwn, earlier: earlier)
         // Kept only once the server has shown it signs (rule 4): its config lists the feature (and
         // an identity upload wasn't answered 404), its answers carry signing, or this device
         // already has memory of it.
         let keep = remembered || Self.showsSigning(snapshot) || ident.created || prepared.fetched || (featureListed && !ident.unsupported)
+        if keep && prepared.unavailable == nil { memory.proven = true }
+        let sealedIds = snapshot.vaults.filter { !$0.keyKind.isEmpty && $0.keyKind != VaultInfo.accountKeyKind }.map(\.id)
         // The account's first signed sync (rules 1–3): only when the identity state is known, and
-        // only the vault rows this device had in its own offline copy from an earlier session (none
-        // on a fresh install or a re-added account). The other shared vaults wait for consent and
-        // may be accepted by the key shown, as when the account's trust memory is missing (an
-        // identity exists but the server has no key pins and this device remembers none).
-        if network, keep, featureListed, prepared.unavailable == nil, ident.known, !session.signingPaused,
-           KeyPinsReader.field(pins, "grandfathered") == nil {
-            let sealedIds = snapshot.vaults.filter { !$0.keyKind.isEmpty && $0.keyKind != VaultInfo.accountKeyKind }.map(\.id)
-            if !ident.created && !hadPins && memory.pinsSeq == 0 {
-                memory.missing = sealedIds
-                memory.missingDevice = false
-            } else if ident.created {
-                let unseen = sealedIds.filter { !(earlier?.contains($0) ?? false) }
-                if !unseen.isEmpty {
-                    memory.missing = unseen
+        // only the vault rows this device showed as usable before it generated the identity (the
+        // candidates recorded then; none on a fresh install or a re-added account). The other
+        // shared vaults wait for consent and may be accepted by the key shown, as when the
+        // account's trust memory is missing (an identity exists but the server has no key pins
+        // and this device remembers none).
+        if network, keep, featureListed, prepared.unavailable == nil, ident.known, !session.signingPaused {
+            if KeyPinsReader.field(pins, "grandfathered") == nil {
+                let candidates = Set(memory.candidates ?? [])
+                if !ident.created && !hadPins && memory.pinsSeq == 0 {
+                    memory.missing = sealedIds
+                    memory.missingDevice = false
+                } else if ident.created {
+                    memory.missing = sealedIds.filter { !candidates.contains($0) }
                     memory.missingDevice = true
                 }
-            }
-            let ids = snapshot.vaults.map(\.id).filter { earlier?.contains($0) ?? false }
-            if let next = try? pinsGrandfather(pinsJson: pins, vaultIds: ids, createdIdentity: ident.created) {
-                pins = next
-                changed = true
+                let ids = ident.created ? snapshot.vaults.map(\.id).filter { candidates.contains($0) } : []
+                if let next = try? pinsGrandfather(pinsJson: pins, vaultIds: ids, createdIdentity: ident.created) {
+                    pins = next
+                    changed = true
+                }
+            } else if ident.created, memory.missing == nil {
+                // Made here, but another device wrote the grandfathered list first (it didn't
+                // make the identity, so it grandfathered nothing): this device's shared vaults
+                // from before may be accepted by the key shown, without Decline (review M1 c).
+                memory.missing = sealedIds
+                memory.missingDevice = true
             }
         }
-        // Tombstones whose write failed before (a decline the server already took): written now.
-        if network, keep, prepared.unavailable == nil, let waiting = pendingTombstones[id], !waiting.isEmpty {
-            for (vault, version) in waiting {
+        let firstSyncDone = keep && prepared.unavailable == nil && ident.known && !session.signingPaused
+            && KeyPinsReader.field(pins, "grandfathered") != nil
+        // Tombstones whose write failed before (a decline the server already took): written now,
+        // except for a vault this account uses now (a decline never tombstones a usable vault).
+        let waiting = (memory.tombstones ?? [:]).merging(pendingTombstones[id] ?? [:]) { max($0, $1) }
+        if network, keep, prepared.unavailable == nil, !waiting.isEmpty {
+            let usable = Set(vault?.vaults.map(\.id) ?? [])
+            for (vault, version) in waiting where !usable.contains(vault) {
                 guard let next = try? pinsLeave(pinsJson: pins, vaultId: vault, rosterVersion: version, now: now) else { continue }
                 pins = next
                 changed = true
             }
+            memory.tombstones = [:]
             pendingTombstones[id] = nil
         }
         let notice: String? = if session.signingPaused {
@@ -198,17 +203,34 @@ extension VaultRepository {
         } else if sharingNotice == SharingText.paused {
             sharingNotice = nil
         }
+        let (fetched, tooLarge) = prepared.unavailable == nil ? await fetchChains(id, snapshot, memory: memory, network: network) : ([:], [])
+        var inputs = SharingInputs(me: sharingSelf(session), pins: pins, pinsChanged: changed, memory: memory, fetched: fetched, tooLarge: tooLarge,
+                                   now: now)
+        inputs.unavailable = prepared.unavailable
+        // Without the key pins to check against, nothing is kept; a list the server withholds
+        // isn't written over (this device's changes wait on it).
+        inputs.keep = keep && prepared.unavailable == nil
+        inputs.holdPins = prepared.withheld
+        inputs.notice = notice
+        inputs.firstSyncDone = firstSyncDone
+        session.sharingProven = inputs.keep
+        if let pins { session.lastPins = pins }
+        return inputs
+    }
+
+    /// The member rosters newer than the remembered ones, for the vaults and (the app only) the
+    /// invitations whose head is `fetch` (within the caps; with the server only).
+    private func fetchChains(_ id: String, _ snapshot: SyncSnapshot, memory: SharingMemoryRecord, network: Bool) async
+        -> (fetched: [String: [String]], tooLarge: Set<String>) {
         var fetched: [String: [String]] = [:]
         var tooLarge = Set<String>()
-        if prepared.unavailable == nil {
-            for v in snapshot.vaults {
-                guard let h = SignedSharing.head(v.id, remembered: memory.rosters[v.id], latest: v.memberRoster), h.status == "fetch", network else { continue }
-                do {
-                    fetched[v.id] = try await fetchRosters(id, vault: v.id, after: h.after)
-                } catch is RosterLimit {
-                    tooLarge.insert(v.id)
-                } catch {}
-            }
+        for v in snapshot.vaults {
+            guard let h = SignedSharing.head(v.id, remembered: memory.rosters[v.id], latest: v.memberRoster), h.status == "fetch", network else { continue }
+            do {
+                fetched[v.id] = try await fetchRosters(id, vault: v.id, after: h.after)
+            } catch is RosterLimit {
+                tooLarge.insert(v.id)
+            } catch {}
         }
         if isApp {
             for inv in snapshot.invitations where ShareRecord.present(inv.share) {
@@ -228,14 +250,37 @@ extension VaultRepository {
                 }
             }
         }
-        var inputs = SharingInputs(me: sharingSelf(session), pins: pins, pinsChanged: changed, memory: memory, fetched: fetched, tooLarge: tooLarge,
-                                   now: now)
-        inputs.unavailable = prepared.unavailable
-        // Without the key pins to check against, nothing is kept; a list the server withholds
-        // isn't written over (this device's changes wait on it).
-        inputs.keep = keep && prepared.unavailable == nil
-        inputs.holdPins = prepared.withheld
-        inputs.notice = notice
+        return (fetched, tooLarge)
+    }
+
+    /// This device's memory can't be read just now (review L3): nothing is made, grandfathered or
+    /// written, every shared vault is refused, and the account's own vaults are still checked
+    /// against key pins, never against none: the pins this unlock already had, else (a copy from
+    /// the server) the server's, opened read-only. A copy from the server whose key pins can't be
+    /// had is treated as offline (throws; the copy shown stays).
+    private func unreadableInputs(_ id: String, _ session: Session, _ snapshot: inout SyncSnapshot, memory: SharingMemoryRecord, network: Bool,
+                                  now: Int64) async throws -> SharingInputs {
+        var memory = memory
+        var pins = session.lastPins
+        let serverSeq = snapshot.user?["key_pins_seq"]?.number ?? 0
+        if network, serverSeq > 0 {
+            let account = session.account
+            if let j = try? await api.call(id, "/account/key-pins"), let seq = j["seq"]?.number, seq >= 0, let sealed = j["key_pins"]?.string,
+               let opened = try? await core({ try account.openKeyPins(sealed: sealed, seq: UInt64(seq)) }) {
+                pins = pins.flatMap { try? mergePins(baseJson: opened, oursJson: $0) } ?? opened
+            }
+        }
+        // The account has key pins (the copy says so) but none can be had: not used (as offline).
+        if pins == nil, serverSeq > 0 { throw UserError(SharingText.memoryUnreadable) }
+        var changed = false
+        var scratch = pins
+        _ = await prepareSigning(id, session, &snapshot, pins: &scratch, changed: &changed, memory: &memory, network: false, mayCreate: false,
+                                 ownBefore: nil, earlier: nil)
+        var inputs = SharingInputs(me: sharingSelf(session), pins: pins, pinsChanged: false, memory: memory, fetched: [:], tooLarge: [], now: now)
+        inputs.unavailable = "memory_unreadable"
+        inputs.keep = false
+        inputs.notice = SharingText.memoryUnreadable
+        sharingNotice = SharingText.memoryUnreadable
         return inputs
     }
 
@@ -246,16 +291,42 @@ extension VaultRepository {
         return SharingSelf(identity: identity, userId: session.meId, signingHash: signing?.identityHash(), paused: session.signingPaused)
     }
 
-    /// The vault ids in the account's offline copy on this device when this unlock started (rule
-    /// 1): read once per unlock, before this session stores a copy of its own; nil without one (a
-    /// fresh install, a re-added account) or when it is another account's.
-    func earlierCopy(_ id: String, _ session: Session) async -> Set<String>? {
+    /// The vaults this device showed as usable before this unlock (rule 1, cross-client rule 6):
+    /// the device memory's `seen` list as it was when this unlock started (read once per unlock).
+    /// An app from before kept no such list: then the vault ids of the account's offline copy on
+    /// this device (written by that app, which didn't check). nil without either (a fresh
+    /// install, a re-added account) or when the copy is another account's.
+    func earlierCopy(_ id: String, _ session: Session, given: SyncSnapshot? = nil) async -> Set<String>? {
         if session.earlierCopyRead { return session.earlierCopy }
         session.earlierCopyRead = true
-        guard let copy = await readSnapshot(id) else { return nil }
+        let memory = sharingMemory.load(id)
+        if memory.unreadable { return nil }
+        let server = store.get().file.accounts[id]?.server ?? ""
+        let mine = memory.owned(by: session.meId, server: server)
+        if let seen = mine.seen, mine.userId == memory.userId || memory.userId.isEmpty {
+            session.earlierCopy = Set(seen)
+            return session.earlierCopy
+        }
+        let copy: SyncSnapshot?
+        if let given { copy = given } else { copy = await readSnapshot(id) }
+        guard let copy else { return nil }
         if let listed = copy.user?["id"]?.string, !listed.isEmpty, listed != session.meId { return nil }
         session.earlierCopy = Set(copy.vaults.map(\.id))
         return session.earlierCopy
+    }
+
+    /// Remember the vaults this device just showed as usable (the foreground only; cross-client
+    /// rule 6). Written only when the list grows; never turns the checks on.
+    func recordSeen(_ id: String, _ session: Session, _ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let memory = loadMemory(id, session)
+        guard !memory.unreadable else { return }
+        let have = Set(memory.seen ?? [])
+        guard memory.seen == nil || !Set(ids).isSubset(of: have) else { return }
+        var update = SharingMemoryRecord().owned(by: session.meId, server: memory.server)
+        update.userId = memory.userId
+        update.seen = ids
+        saveMemory(id, session, update)
     }
 
     /// The signing identity as far as one sync tells.
@@ -279,8 +350,15 @@ extension VaultRepository {
     /// device memory before uploading) and uploads it (`PUT /account/identity`); only `created:
     /// true` counts as made now. On 409 `identity_exists` the copy is fetched again and the stored
     /// one opened, with the state unknown for this sync (nothing grandfathered).
+    ///
+    /// `ownBefore`: the own identity this device's pins remembered before this sync (an identity
+    /// generated here counts as made here only when there was none); `earlier`: the vaults this
+    /// device showed as usable before this unlock (recorded as the grandfathering candidates when
+    /// an identity is generated). The upload is tried again at every sync until the server
+    /// answers it (`created`, 404 or 409).
     func prepareSigning(_ id: String, _ session: Session, _ snapshot: inout SyncSnapshot, pins: inout String?, changed: inout Bool,
-                        memory: inout SharingMemoryRecord, network: Bool, mayCreate: Bool) async -> IdentityState {
+                        memory: inout SharingMemoryRecord, network: Bool, mayCreate: Bool, ownBefore: String?,
+                        earlier: Set<String>?) async -> IdentityState {
         let account = session.account
         var paused = false
         var hash: String?
@@ -296,7 +374,10 @@ extension VaultRepository {
             if let s = session.openedSigning {
                 hash = s.identityHash()
                 state.known = true
-                state.created = session.identityCreated || (memory.pendingIdentity != nil && memory.pendingIdentity == hash)
+                // Generated here (kept before uploading; the answer may have been lost) counts
+                // only while no own identity was known here before (review L2).
+                state.created = session.identityCreated
+                    || (memory.pendingIdentity != nil && memory.pendingIdentity == hash && !memory.settled && ownBefore == nil)
             } else {
                 paused = true
             }
@@ -311,10 +392,11 @@ extension VaultRepository {
                 paused = true
             } else if network, isApp, mayCreate, !session.identityTried,
                       store.get().file.accounts[id]?.features?.contains(signedSharingFeature) == true {
-                session.identityTried = true
-                if let made = await madeIdentity(id, session, memory: &memory) {
+                if let made = await madeIdentity(id, session, memory: &memory, earlier: earlier) {
                     do {
                         let answer = try await api.call(id, "/account/identity", body: made.record, method: "PUT")
+                        // Answered: not sent again by this unlock.
+                        session.identityTried = true
                         if answer["created"]?.bool == true {
                             session.openedSigning = made.identity
                             session.signingRecord = made.record
@@ -331,17 +413,20 @@ extension VaultRepository {
                     } catch let e as ApiError where e.status == 409 && e.hasCode("identity_exists") {
                         // Another device made one meanwhile: open the stored one. Grandfathering
                         // waits for the next sync (rule 3).
+                        session.identityTried = true
                         if let fresh = try? await fetchSnapshot(id), case .object? = fresh.user?["identity"] {
                             snapshot = fresh
                             var other = memory
                             _ = await prepareSigning(id, session, &snapshot, pins: &pins, changed: &changed, memory: &other, network: false,
-                                                     mayCreate: false)
+                                                     mayCreate: false, ownBefore: ownBefore, earlier: nil)
                             return IdentityState()
                         }
                     } catch let e as ApiError where e.status == 404 {
+                        session.identityTried = true
                         state.unsupported = true
                     } catch {
-                        // Tried again at the next unlock.
+                        // Not answered (offline, 5xx, a refused request): tried again at the next
+                        // sync, with the same identity (review M1 b).
                     }
                 }
             }
@@ -367,7 +452,10 @@ extension VaultRepository {
     /// The signing identity to upload: the one this device made before (its record kept in the
     /// device memory, so an upload tried again sends the same one), else a new one, kept there
     /// first. nil when it can't be kept (then it isn't uploaded).
-    private func madeIdentity(_ id: String, _ session: Session, memory: inout SharingMemoryRecord) async -> (identity: SigningIdentity, record: JSON)? {
+    /// The candidates for grandfathering are recorded with it, once (`earlier`, the vaults this
+    /// device showed as usable before this unlock; review L2).
+    private func madeIdentity(_ id: String, _ session: Session, memory: inout SharingMemoryRecord,
+                              earlier: Set<String>?) async -> (identity: SigningIdentity, record: JSON)? {
         let account = session.account
         if let text = memory.pendingRecord, let record = try? JSON.parse(text),
            let s = try? await core({ try account.openSigningIdentity(recordJson: text) }), s.identityHash() == memory.pendingIdentity {
@@ -376,6 +464,8 @@ extension VaultRepository {
         guard let made = try? await core({ try account.newSigningIdentity() }), let record = try? JSON.parse(made.recordJson) else { return nil }
         memory.pendingIdentity = made.identity.identityHash()
         memory.pendingRecord = made.recordJson
+        if memory.candidates == nil { memory.candidates = (earlier ?? []).sorted() }
+        memory.proven = true
         guard saveMemory(id, session, memory) else { return nil }
         return (made.identity, record)
     }
@@ -396,6 +486,8 @@ extension VaultRepository {
         var unavailable: String?
         /// `GET /account/key-pins` answered (the server signs).
         var fetched = false
+        /// The own identity this device's pins remembered before this sync (nil: none).
+        var deviceOwn: String?
     }
 
     /// The key pins to check with. With the server: a newer list (`user.key_pins_seq` above what
@@ -417,6 +509,7 @@ extension VaultRepository {
                 memory.uploaded = true
             }
         }
+        out.deviceOwn = KeyPinsReader.field(out.pins, "own_identity")?.string
         let serverSeq = snapshot.user?["key_pins_seq"]?.number ?? 0
         // The server's newer list can't be had: keep the device's, or (none) wait for it.
         func missingNewer() -> PreparedPins {
@@ -445,20 +538,28 @@ extension VaultRepository {
             // None (or unreadable) while the server's own `/sync` says there is a newer version.
             return seq > 0 || serverSeq > 0 ? missingNewer() : out
         }
-        if !memory.uploaded, let ours = out.pins, let merged = try? mergePins(baseJson: opened, oursJson: ours) {
-            // This device's changes on top of the server's newer list: written next (`finishSharing`).
-            memory.pinsSeq = seq
-            memory.sealedPins = sealed
-            memory.uploaded = true
-            out.pins = merged
-            out.changed = true
-            return out
-        }
+        let ours = out.pins
         memory.pinsSeq = seq
         memory.sealedPins = sealed
         memory.uploaded = true
         out.pins = opened
+        // This device's last-known pins merged into every newer server copy (cross-client rule
+        // 5), not only with unsent changes: retired keys, tombstones and rosters it knows are never
+        // dropped because another device wrote first. Written back (`finishSharing`) when the
+        // merge adds anything.
+        if let ours, let merged = try? mergePins(baseJson: opened, oursJson: ours), !Self.samePins(merged, opened) {
+            out.pins = merged
+            out.changed = true
+        }
         return out
+    }
+
+    /// Whether two key pins (JSON) say the same, apart from their version.
+    nonisolated static func samePins(_ a: String, _ b: String) -> Bool {
+        guard case .object(var x)? = try? JSON.parse(a), case .object(var y)? = try? JSON.parse(b) else { return a == b }
+        x["version"] = nil
+        y["version"] = nil
+        return JSON.object(x) == JSON.object(y)
     }
 
     /// `GET /vaults/{id}/rosters?after=N`, page after page: every roster version after `after`,
@@ -505,8 +606,17 @@ extension VaultRepository {
                 // Offline: kept on the device and written at the next sync.
                 sealOnDevice(session, p, memory: &memory)
             }
+            // The key pins on the server remember the own identity and the grandfathered list: the
+            // pending identity and the grandfathering candidates are done with (review L2).
+            if memory.uploaded, KeyPinsReader.field(pins, "own_identity") != nil, KeyPinsReader.field(pins, "grandfathered") != nil {
+                memory.settled = true
+                memory.pendingIdentity = nil
+                memory.pendingRecord = nil
+                memory.candidates = nil
+            }
             saveMemory(id, session, memory)
         }
+        if let pins { session.lastPins = pins }
         guard activeId == id else { return }
         knownPeople = KeyPinsReader.people(pins)
         guard out.notice == nil else { return }
@@ -567,9 +677,13 @@ extension VaultRepository {
     /// not written (offline, conflict twice) they stay on the device for the next sync. The
     /// caller holds the repository's lock. Throws when this device's memory can't be read now
     /// (nothing is written over it) or the change couldn't be kept anywhere.
+    ///
+    /// Nothing is written before the server has shown it signs (cross-client rule 2): a decision
+    /// written on a server that doesn't sign would keep the checks on for good.
     func updatePins(_ id: String, _ session: Session, _ change: (String?) throws -> String?) async throws {
         var (pins, memory) = devicePins(id, session)
         if memory.unreadable { throw UserError(SharingText.memoryUnreadable) }
+        guard memory.proven || session.sharingProven else { throw UserError(SharingText.checking) }
         guard let next = try change(pins) else { return }
         pins = await writePins(id, session, next, memory: &memory)
         if !memory.uploaded, let p = pins { sealOnDevice(session, p, memory: &memory) }
@@ -626,20 +740,28 @@ extension VaultRepository {
     }
 
     /// Accepting a verified invitation, or a vault the server added (step 3, consent): pin its
-    /// signer (still the identity checked), pin the vault's key epoch with its roster version
-    /// (clears a tombstone), then remember its verified roster. The caller holds the lock.
+    /// signer (still the identity checked) with exactly the email the user was shown, then
+    /// `pins_accept` with the observation the checks admitted (the key, the roster's version and
+    /// hash, the chain fetched for it; clears a tombstone, marks the re-join), then remember its
+    /// verified roster. The caller holds the lock.
     func accept(_ id: String, _ session: Session, vaultId: String, _ a: Acceptance) async throws {
         let now = Int64(Date().timeIntervalSince1970)
+        let observation = a.observation(vaultId: vaultId, paused: session.signingPaused)
         try await updatePins(id, session) { pins in
             var p = pins
             if let s = a.signer {
-                switch try pinCheck(pinsJson: p, identityJson: s.identity, email: s.listedEmail) {
+                switch try pinCheck(pinsJson: p, identityJson: s.identity, email: s.pinEmailToWrite) {
                 case "changed", "email_conflict": throw UserError(SharingText.keyChanged(s))
                 case "match": break
-                default: p = try pinSet(pinsJson: p, identityJson: s.identity, email: s.listedEmail, verified: false, now: now)
+                default: p = try pinSet(pinsJson: p, identityJson: s.identity, email: s.pinEmailToWrite, verified: s.pinVerifiedToWrite, now: now)
                 }
             }
-            return try pinsSetEpoch(pinsJson: p, vaultId: vaultId, currentJson: a.epochPin, rosterVersion: a.rosterVersion)
+            do {
+                return try pinsAccept(pinsJson: p, observationJson: observation)
+            } catch let e as CoreError {
+                if case .IdentityMismatch = e { throw UserError(SharingText.paused) }
+                throw UserError(SharingText.refused)
+            }
         }
         var memory = loadMemory(id, session)
         if let roster = a.roster { memory.rosters[vaultId] = roster }
@@ -709,6 +831,8 @@ extension VaultRepository {
         }
         let onlyMe = members.map(\.userId) == [me]
         let (pins, memory) = devicePins(id, session)
+        // Never reviewed without the account's key pins (review L3).
+        if memory.unreadable { throw UserError(SharingText.memoryUnreadable) }
         if personalOnly {
             let personal = onlyMe && info.keyKind == VaultInfo.accountKeyKind && info.role == .owner
                 && (trusted.map { SignedSharing.rosterMembers($0) == [me] } ?? true)

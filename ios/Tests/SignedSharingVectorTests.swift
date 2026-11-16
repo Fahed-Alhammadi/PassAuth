@@ -103,10 +103,11 @@ final class SignedSharingVectorTests: XCTestCase {
 
     func testSectionsAreThere() {
         for name in ["accounts", "openings", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles",
-                     "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "observations", "emails", "legacyWraps"] {
+                     "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "accepts", "merges", "observations", "emails",
+                     "legacyWraps"] {
             XCTAssertFalse(list(name).isEmpty, "no \(name) vectors")
         }
-        for name in ["keyPins", "keyPinsWithEpoch", "keyPinsRaised", "keyPinsLeft", "keyPinsGrandfathered", "keyPinsWithheld", "keyPinsUnsigned", "keyPinsRosterMax", "mergedEpochs", "ownIdentity", "keyIds",
+        for name in ["keyPins", "keyPinsWithEpoch", "keyPinsRaised", "keyPinsLeft", "keyPinsGrandfathered", "keyPinsWithheld", "keyPinsUnsigned", "keyPinsRosterMax", "keyPinsOwn", "mergedEpochs", "ownIdentity", "keyIds",
                      "forgedUpgrade"] {
             XCTAssertNotNil(v[name], name)
         }
@@ -334,14 +335,39 @@ final class SignedSharingVectorTests: XCTestCase {
                                                            rosterVersion: 3, rosterHash: try rosterHash(rosterJson: v3), signedShare: true, paused: false))
         let rosterMax = try XCTUnwrap(observed.pins)
         XCTAssertEqual(object(rosterMax), v["keyPinsRosterMax"] as? NSDictionary)
+        // An account row marks the pin `own` (round 4).
+        let ownObserved = try XCTUnwrap(SignedSharing.observe(nil, vaultId: vaultId, kind: "account", epochPin: try key.epochPinJson(vaultId: vaultId, keyEpoch: 1),
+                                                              rosterVersion: nil, rosterHash: nil, signedShare: false, paused: false))
+        let ownPins = try XCTUnwrap(ownObserved.pins)
+        XCTAssertEqual(object(ownPins), v["keyPinsOwn"] as? NSDictionary)
         XCTAssertNotNil(KeyPinsReader.field(grandfathered, "grandfathered"))
         XCTAssertNil(KeyPinsReader.field(pins, "grandfathered"))
         XCTAssertTrue(KeyPinsReader.signedSince(withEpoch, vaultId))
         let sets: [String: String?] = ["none": nil, "withEpoch": withEpoch, "raised": raised, "left": left, "grandfathered": grandfathered,
-                                       "withheld": withheld, "unsigned": unsigned, "rosterMax": rosterMax]
+                                       "withheld": withheld, "unsigned": unsigned, "rosterMax": rosterMax, "own": ownPins]
         for c in list("admissions") {
             let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""], "\(c)")
             XCTAssertEqual(object(try pinsAdmit(pinsJson: p, observationJson: try text(c["observation"]))), c["expected"] as? NSDictionary, "admission \(c)")
+            // The app's own observation (as the checks build it, `chain_hashes` included) gives the same verdict.
+            if let o = c["observation"] as? Object, o["signed_share"] != nil, o["paused"] != nil {
+                let built = SignedSharing.observation(vaultId: o["vault_id"] as? String ?? "", kind: o["key_kind"] as? String ?? "",
+                                                      epochPin: o["key"].flatMap { $0 is NSNull ? nil : try? text($0) },
+                                                      rosterVersion: optNumber(o["roster_version"]), rosterHash: o["roster_hash"] as? String,
+                                                      chainHashes: o["chain_hashes"] as? [String: String],
+                                                      signedShare: o["signed_share"] as? Bool ?? false, paused: o["paused"] as? Bool ?? false)
+                outcome(c, "app admission \(c)", { try pinsAdmit(pinsJson: p, observationJson: built) },
+                        same: { self.object($0) == ($1 as? NSDictionary) })
+            }
+        }
+        XCTAssertGreaterThan(list("admissions").filter { ($0["observation"] as? Object)?["chain_hashes"] != nil }.count, 0)
+        for c in list("accepts") {
+            let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""], "\(c)")
+            outcome(c, "accept \(c)", { try pinsAccept(pinsJson: p, observationJson: try self.text(c["observation"])) },
+                    same: { self.object($0) == ($1 as? NSDictionary) })
+        }
+        for c in list("merges") {
+            XCTAssertEqual(object(try mergePins(baseJson: try text(c["base"]), oursJson: try text(c["ours"]))), c["expected"] as? NSDictionary,
+                           "merge \(c["name"] ?? "")")
         }
         var step: String? = grandfathered
         for c in list("observations") {

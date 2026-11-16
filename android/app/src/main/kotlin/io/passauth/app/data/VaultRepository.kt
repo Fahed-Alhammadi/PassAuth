@@ -262,9 +262,11 @@ private class Session(val accountId: String, val account: Account) {
     var sharing: SharingSession? = null
 
     /**
-     * This phone's own offline copy of the account from before this unlock (read when the session
-     * opened): its vault ids, and those of its shared (sealed) rows. Only these may be grandfathered,
-     * and an accepted shared vault they had that a verified sync no longer lists gets a tombstone.
+     * From before this unlock (read when the session opened): [earlierVaults], the vaults this phone
+     * last showed as usable ([SigningMemory.usable]: checked "ok", or shown while the server didn't
+     * sign; never rows a locked background refresh wrote into the copy), the only ones that may be
+     * grandfathered (rule 6); [earlierShared], the shared (sealed) rows of the offline copy, whose
+     * removal a verified sync may confirm.
      */
     var earlierVaults: Set<String> = emptySet()
     var earlierShared: Set<String> = emptySet()
@@ -926,9 +928,10 @@ class VaultRepository(
     private suspend fun openSession(id: String, session: Session) {
         // The copy this phone kept from an earlier session (none on a fresh install or a re-added account).
         runCatching { readSnapshot(id) }.getOrNull()?.let { earlier ->
-            session.earlierVaults = earlier.vaults.map { it.id }.toSet()
             session.earlierShared = earlier.vaults.filter { it.keyKind == "sealed" }.map { it.id }.toSet()
         }
+        val server = store.get().accounts[id]?.server.orEmpty()
+        session.earlierVaults = store.get().signingMemory(server, session.accountId).usable.orEmpty()
         sessions.remove(id)?.close()
         sessions[id] = session
         sessionIds.value = sessions.keys.toSet()
@@ -1280,7 +1283,7 @@ class VaultRepository(
         if (sessions[id] !== session) return
         // Signed sharing: every vault and invitation checked before anything of it is used.
         val shownBefore = copy?.takeIf { it.first == id }?.second?.vaults?.filter { it.keyKind == "sealed" }?.map { it.id }?.toSet()
-        val checks = verifySharing(id, session, snap, online = !offline && mode != CopyStore.None, sharedBefore = shownBefore ?: session.earlierShared)
+        val checks = verifySharing(id, session, snap, online = !offline && mode != CopyStore.None, sharedBefore = shownBefore ?: session.earlierShared, fromServer = !offline && mode == CopyStore.Synced)
         if (sessions[id] !== session) return
         // An identity uploaded at this sync goes into the copy kept, so an offline unlock later opens it (instead of pausing).
         @Suppress("NAME_SHADOWING")
@@ -1313,7 +1316,22 @@ class VaultRepository(
         invitationNames = opened.invitationNames
         copy = id to snap
         _vault.value = opened.data.copy(offline = offline)
+        rememberUsable(id, session, opened.data.vaults.map { it.id }.toSet(), checks)
         if (!offline) vaultKeysMaybeChanged(id, opened.data.vaults)
+    }
+
+    /**
+     * The vaults just shown as usable, kept per account ([SigningMemory.usable]) as the next unlock's
+     * "earlier copy" (rule 6): every vault shown while the server doesn't sign, else the ones checked
+     * "ok" — only once this phone finished the account's first signed sync (a vault held meanwhile
+     * mustn't drop out of the list).
+     */
+    private suspend fun rememberUsable(id: String, session: Session, shown: Set<String>, checks: SharingChecks?) {
+        if (checks != null && session.sharing?.firstSignedSyncDone != true) return
+        val server = store.get().accounts[id]?.server.orEmpty()
+        val me = session.sharing?.me ?: session.accountId
+        if (store.get().signingMemory(server, me).usable == shown) return
+        store.update { st -> st.updatingSigning(server, me) { it.copy(usable = shown) } }
     }
 
     /**
@@ -1532,6 +1550,13 @@ class VaultRepository(
                 } ?: throw ApiException(200, "malformed", EmergencyClient.UNEXPECTED)
                 return list to ((o["more"] as? JsonPrimitive)?.content == "true")
             }
+
+            override suspend fun stillMember(vaultId: String): Boolean? = try {
+                api.call(id, "/vaults/${enc(vaultId)}/members")
+                true
+            } catch (e: ApiException) {
+                if (e.status == 403 || e.status == 404) false else null
+            }
         }
         // Memory is keyed by the server and the account id the core authenticated (never the server's word).
         var made: SharingSession? = null
@@ -1541,7 +1566,7 @@ class VaultRepository(
                 store.update { it.updatingSigning(server, made!!.me, transform) }
             }
         }
-        made = SharingSession(session.account, api, memoryStore)
+        made = SharingSession(session.account, api, memoryStore, earlier = session.earlierVaults)
         session.sharing = made
         return made
     }
@@ -1566,7 +1591,7 @@ class VaultRepository(
      * and every invitation checked, new pins written. Null when the account's server doesn't sign
      * shares (nothing is checked, as before).
      */
-    private suspend fun verifySharing(id: String, session: Session, snap: SyncSnapshot, online: Boolean, sharedBefore: Set<String>): SharingChecks? {
+    private suspend fun verifySharing(id: String, session: Session, snap: SyncSnapshot, online: Boolean, sharedBefore: Set<String>, fromServer: Boolean): SharingChecks? {
         if (!signedSharingOn(id, session, online, snap)) {
             if (id == activeId()) _sharing.value = SharingStatus()
             return null
@@ -1583,7 +1608,7 @@ class VaultRepository(
                 // Identity or pins not reachable now: checked with what this phone has.
             }
             // Only the unsigned shared vaults present now that this phone's copy from an earlier session had (signed ones are checked on their own).
-            sh.grandfather(snap.vaults.filter { it.keyKind == "sealed" && (it.share == null || it.share is kotlinx.serialization.json.JsonNull) }.map { it.id }, session.earlierVaults, online)
+            sh.grandfather(snap.vaults.filter { it.keyKind == "sealed" && (it.share == null || it.share is kotlinx.serialization.json.JsonNull) }.map { it.id }, online)
             sh.beginChecks()
             val vaults = mutableMapOf<String, VaultCheck>()
             val names = mutableMapOf<String, String>()
@@ -1596,7 +1621,7 @@ class VaultRepository(
                     online = online,
                 )
                 vaults[v.id] = check
-                if (check is VaultCheck.Refused) names[v.id] = rowName(session.account, v, sh.legacyAllowed(v.id))
+                if (check is VaultCheck.Refused || check is VaultCheck.Held) names[v.id] = rowName(session.account, v, sh.legacyAllowed(v.id))
             }
             val invitations = mutableMapOf<String, InvitationTrust>()
             for (inv in snap.invitations) {
@@ -1606,10 +1631,12 @@ class VaultRepository(
                     online,
                 )
             }
-            // Accepted shared vaults this verified sync no longer lists: tombstoned (the server can't bring the old copy back).
-            sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, online)
+            sh.endChecks()
+            // Accepted shared vaults a sync from the server no longer lists: tombstoned once that is confirmed
+            // (the server says it's gone, or two such syncs in a row), so the server can't bring the old copy back.
+            sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, fromServer)
             if (online) savePinsQuietly(sh)
-            if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names)
+            if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names, sh.missingWhy())
             SharingChecks(vaults, invitations, { vid -> sh.legacyAllowed(vid) }, sh.uploadedRecord)
         }
     }
@@ -1624,11 +1651,13 @@ class VaultRepository(
         }
     }
 
-    private fun publishSharing(sh: SharingSession, vaults: Map<String, VaultCheck>? = null, names: Map<String, String> = emptyMap()) {
+    private fun publishSharing(sh: SharingSession, vaults: Map<String, VaultCheck>? = null, names: Map<String, String> = emptyMap(), missingWhy: String? = _sharing.value.missingWhy) {
         val before = _sharing.value
         val refused = vaults?.mapNotNull { (vid, c) -> (c as? VaultCheck.Refused)?.let { RefusedVault(vid, names[vid] ?: Invitations.UNNAMED, it.reason) } } ?: before.refused
+        val checking = vaults?.mapNotNull { (vid, c) -> (c as? VaultCheck.Held)?.let { RefusedVault(vid, names[vid] ?: Invitations.UNNAMED, it.reason) } } ?: before.checking
         val consent = vaults?.mapNotNull { (_, c) -> (c as? VaultCheck.Consent)?.vault } ?: before.consent
-        _sharing.value = SharingStatus(true, sh.fingerprint, sh.paused, sh.pinsProblem, refused, sh.changed, SignedSharing.people(sh.pins), consent, sh.memoryMissing)
+        val problem = sh.pinsProblem ?: SignedSharing.MEMORY_UNREADABLE.takeIf { sh.memoryUnreadable }
+        _sharing.value = SharingStatus(true, sh.fingerprint, sh.paused, problem, refused, sh.changed, SignedSharing.people(sh.pins), consent, sh.memoryMissing, missingWhy, checking)
     }
 
     /** Signed sharing of the active, unlocked account; a [UserException] otherwise. */
@@ -1678,10 +1707,12 @@ class VaultRepository(
      * Decline a shared vault held for consent: a tombstone in the key pins (it never comes back unless
      * shared again with a newer signed member list), and the account leaves it on the server.
      */
-    suspend fun declineConsent(vaultId: String) {
+    suspend fun declineConsent(shown: ConsentVault) {
+        val vaultId = shown.vaultId
         val (id, me) = mutex.withLock {
             val sh = activeSharing()
-            sh.declineConsent(vaultId)
+            // Exactly the vault the sheet showed, and only a signed one naming its signer (rule 1).
+            sh.declineConsent(shown)
             sh.savePins()
             activeId() to sh.me
         }
@@ -2067,8 +2098,10 @@ class VaultRepository(
         val id = mutex.withLock {
             val (id, session) = unlockedAccount()
             session.sharing?.let { sh ->
-                // The tombstone at the roster version the check verified (a later share needs a newer one).
-                sh.leave(vaultId, (shown.trust as? InvitationTrust.Signed)?.rosterVersion)
+                // The tombstone at the roster version the check verified (a later share needs a newer one),
+                // never for a vault id this account uses now (a made-up invitation carrying it).
+                val rows = copy?.takeIf { it.first == id }?.second?.vaults.orEmpty().map { it.id }.toSet()
+                sh.declineInvitation(vaultId, (shown.trust as? InvitationTrust.Signed)?.rosterVersion, vaultHeaders.keys, rows)
                 savePinsQuietly(sh)
             }
             id
@@ -2607,6 +2640,8 @@ class VaultRepository(
                         syncAfterWrite()
                         throw UserException(SignedSharing.CHANGED_JUST_NOW)
                     }
+                    // 30 key replacements per vault and hour (round 4): said plainly, tried again later.
+                    e.isRateLimited -> throw UserException(SignedSharing.keyReplacementLimited(e)!!)
                     else -> throw e
                 }
             }

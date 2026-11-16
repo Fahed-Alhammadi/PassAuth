@@ -38,7 +38,12 @@ function Notice({ tone, children, onDismiss }: { tone: "warn" | "info"; children
 
 const openTab = (url: string) => void chrome.tabs.create({ url });
 
-/** A shared vault the server added without the account ever accepting it: who signed it, and Accept (after a confirmation) or the web vault. */
+/**
+ * A shared vault the server added without the account ever accepting it (or whose key was replaced on a vault never
+ * seen signed): who signed it with their fingerprint, or the key id of an unsigned one, and Accept (after a
+ * confirmation). Only a signed vault can be declined (in the web vault); an unsigned one that can't be accepted stays
+ * locked with "Ask the vault's owner to sign this vault." (no Decline: a server could make a real vault look like it).
+ */
 function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["waiting"][number]; vaultsUrl?: string; refresh: () => void; notify: (t: string) => void }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -67,6 +72,11 @@ function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["wai
         </>
       )}
       {w.note ? `${w.note} ` : ""}
+      {!s && w.keyId && (
+        <>
+          Key id <span className="mono">{w.keyId}</span>.{" "}
+        </>
+      )}
       {w.acceptable && !confirming && (
         <button type="button" className="link" disabled={busy} onClick={() => setConfirming(true)}>
           Accept…
@@ -74,18 +84,24 @@ function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["wai
       )}
       {w.acceptable && confirming && (
         <>
-          {w.replaced ? "Accept only if someone in this vault just replaced its key." : s ? "Accept only if you expected this vault from them." : "Accept only if you expected this vault."}{" "}
+          {w.replaced
+            ? s
+              ? "Accept only if you compared this fingerprint with them and someone in this vault just replaced its key."
+              : "Accept only if someone in this vault just replaced its key."
+            : s
+              ? "Accept only if you expected this vault from them."
+              : "Accept only if you expected this vault, with this key id."}{" "}
           <button type="button" className="link" disabled={busy} onClick={() => void accept()}>
             I expected it: accept
           </button>{" "}
           <button type="button" className="link" disabled={busy} onClick={() => setConfirming(false)}>
-            Cancel
+            Not now
           </button>
         </>
       )}{" "}
-      {vaultsUrl && !w.replaced && (
+      {vaultsUrl && s && !w.replaced && (
         <button type="button" className="link" onClick={() => openTab(vaultsUrl)}>
-          {w.acceptable ? "Decline in the web vault" : "Open in the web vault"}
+          Decline in the web vault
         </button>
       )}
     </span>

@@ -101,15 +101,22 @@ final class SignedSharingTests: XCTestCase {
         let w = try world()
         // Review H2: a signed share Bob's account never accepted (a planted one looks the same).
         let first = try check(w, try bobRow(w), pins: nil, newer: [w.roster])
-        guard case .consent(let a, let rejoin, _, let signer) = first else { return XCTFail("\(first)") }
+        guard case .consent(let a, let rejoin, _, let own, let signer) = first else { return XCTFail("\(first)") }
         XCTAssertFalse(rejoin)
+        XCTAssertFalse(own)
         XCTAssertEqual(signer?.pin, .new)
         XCTAssertEqual(a.roster, w.roster)
         XCTAssertEqual(a.rosterVersion, 1)
         XCTAssertEqual(a.signer?.userId, w.aliceId)
-        // Accepting = the signer pinned, the epoch pinned with the roster version.
+        // The chain fetched for it is part of what accepting records (`chain_hashes`).
+        XCTAssertEqual(a.chainHashes, ["1": try rosterHash(rosterJson: w.roster)])
+        XCTAssertTrue(a.signedShare)
+        // Accepting = the signer pinned, then `pins_accept` with the observation admitted.
         var pins = try pinSet(pinsJson: nil, identityJson: try XCTUnwrap(a.signer).identity, email: "alice@example.com", verified: false, now: 1)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: w.vaultId, currentJson: a.epochPin, rosterVersion: a.rosterVersion)
+        pins = try pinsAccept(pinsJson: pins, observationJson: a.observation(vaultId: w.vaultId, paused: false))
+        let accepted = try JSON.parse(pins)
+        XCTAssertEqual(accepted["epochs"]?[w.vaultId]?["roster_hash"]?.string, try rosterHash(rosterJson: w.roster))
+        XCTAssertEqual(accepted["epochs"]?[w.vaultId]?["signed_since"]?.number, 1)
         let after = try check(w, try bobRow(w), pins: pins, remembered: w.roster)
         guard case .ok(.signed(let s), let roster, let p) = after else { return XCTFail("\(after)") }
         XCTAssertEqual(s.pin, .unverified)
@@ -237,7 +244,7 @@ final class SignedSharingTests: XCTestCase {
         guard case .ok(.notYetSigned, nil, let p) = try check(w, old, pins: grandfathered) else { return XCTFail() }
         XCTAssertNotNil(p)
         // Not grandfathered: a consent that can't be accepted (no signer).
-        guard case .consent(_, false, false, nil) = try check(w, old, pins: try pinsGrandfather(pinsJson: nil, vaultIds: [], createdIdentity: true)) else { return XCTFail() }
+        guard case .consent(_, false, false, false, nil) = try check(w, old, pins: try pinsGrandfather(pinsJson: nil, vaultIds: [], createdIdentity: true)) else { return XCTFail() }
         // Seen signed before (on this device, or by the account) and now not: refused.
         XCTAssertEqual(try check(w, old, pins: grandfathered, seenSigned: true), .refused(.admission("downgraded")))
         XCTAssertEqual(try check(w, old, pins: try accepted(w)), .refused(.admission("downgraded")))
@@ -595,7 +602,12 @@ final class SignedSharingTests: XCTestCase {
         XCTAssertEqual(SharingText.trustSavedAs(s), "PassAuth saves the new key for bob@example.com.")
         XCTAssertEqual(s.otherListedEmail, "bob@new.example")
         let unpinned = SignerInfo(userId: "u2", email: "Carol@Example.com", name: "", fingerprint: "F", deleted: false, pin: .changed, identity: "{}")
-        XCTAssertEqual(unpinned.trustEmail, "Carol@Example.com")
+        // Pins keep one form only: the core's `normalize_email` (round 4).
+        XCTAssertEqual(unpinned.trustEmail, "carol@example.com")
+        let invisible = SignerInfo(userId: "u3", email: "Al\u{200B}ice@B\u{00FC}cher.example.", name: "", fingerprint: "F", deleted: false, pin: .new,
+                                   identity: "{}")
+        XCTAssertEqual(invisible.listedEmail, normalizeEmail(email: "alice@b\u{00FC}cher.example"))
+        XCTAssertEqual(invisible.pinEmailToWrite, "alice@xn--bcher-kva.example")
         XCTAssertEqual(SharingText.trustSavedAs(unpinned), "PassAuth saves the new key for carol@example.com.")
     }
 
@@ -676,5 +688,193 @@ final class SignedSharingTests: XCTestCase {
         other.missing = []
         XCTAssertEqual(r.merging(other).missing, [])
         XCTAssertEqual(r.merging(other).pendingIdentity, "H")
+    }
+
+    // MARK: Round 4 (core API and the cross-client rules)
+
+    /// A vault the account saw signed up to roster version 1 (its hash pinned), served by a
+    /// server on a device with no remembered roster as a chain re-signed from version 1 by an
+    /// account it made up ("puppet signer"): the fetched chain's hashes (`chain_hashes`) show
+    /// version 1 isn't the pinned one, so it is refused (roster_forked). Without them version 2
+    /// would pass as the next roster.
+    func testAFetchedChainIsCheckedAgainstThePinnedRosterHash() throws {
+        let w = try world()
+        let pinnedHash = try rosterHash(rosterJson: w.roster)
+        var pins = try pinSet(pinsJson: nil, identityJson: w.alicePub, email: "alice@example.com", verified: false, now: 1)
+        pins = try pinsAccept(pinsJson: pins, observationJson: SignedSharing.observation(
+            vaultId: w.vaultId, kind: "sealed", epochPin: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1,
+            rosterHash: pinnedHash, signedShare: true, paused: false))
+        let malloryId = try newId()
+        let mallory = try createAccount(accountId: malloryId, password: "correct horse battery", withSecretKey: false).account
+        let puppet = try mallory.newSigningIdentity().identity
+        let puppetKey = try mallory.newVaultKey(vaultId: w.vaultId).key
+        let members = [Self.member(try puppet.publicIdentityJson(), "owner"), Self.member(w.bobPub, "write")]
+        let v1 = try Self.signRoster(puppet, key: puppetKey, vault: w.vaultId, previous: nil, epoch: 1, members: members)
+        let v2 = try Self.signRoster(puppet, key: puppetKey, vault: w.vaultId, previous: v1, epoch: 1, members: members)
+        let share = try puppet.sealAndSignShare(vaultKey: puppetKey, vaultId: w.vaultId, recipientJson: w.bobPub, role: "write", keyEpoch: 1)
+        let row = SyncVault(id: w.vaultId, meta: "", role: "write", wrappedKey: share.sealedKey, keyKind: "sealed", keyEpoch: 1, seq: 2,
+                            share: try shareJSON(share.signature, puppet, email: "mallory@example.com"), memberRoster: v2, memberRosterSeq: 2)
+        XCTAssertEqual(try check(w, row, pins: pins, newer: [v1, v2]), .refused(.admission("roster_forked")))
+        // The same observation without the chain (what an app sending no `chain_hashes` would say): passes.
+        let key = try w.bob.openVaultKey(vaultId: w.vaultId, wrapped: share.sealedKey, kind: "sealed", keyEpoch: 1, legacyAllowed: true)
+        let bare = try XCTUnwrap(SignedSharing.admit(pins, vaultId: w.vaultId, kind: "sealed", epochPin: try key.epochPinJson(vaultId: w.vaultId, keyEpoch: 1),
+                                                     rosterVersion: 2, rosterHash: try rosterHash(rosterJson: v2), signedShare: true, paused: false))
+        XCTAssertEqual(bare.str("status"), "ok")
+        // An invitation's chain from version 1 carries them too.
+        let inv = SyncInvitation(vaultId: w.vaultId, role: "write", wrappedKey: share.sealedKey, meta: "m", keyEpoch: 1,
+                                 share: try shareJSON(share.signature, puppet, email: "mallory@example.com"), memberRoster: v2, memberRosterSeq: 2)
+        let checked = SignedSharing.checkInvitation(inv, key: key, me: w.bobSelf, pins: pins, remembered: nil, newer: [v1, v2], tooLarge: false)
+        XCTAssertEqual(checked.0, .refused)
+        let fresh = SignedSharing.checkInvitation(inv, key: key, me: w.bobSelf, pins: nil, remembered: nil, newer: [v1, v2], tooLarge: false)
+        XCTAssertEqual(fresh.1?.chainHashes, ["1": try rosterHash(rosterJson: v1), "2": try rosterHash(rosterJson: v2)])
+    }
+
+    /// A vault the account held with its own key wrap, now served sealed with a newer key signed by
+    /// someone: consent (replaced, own), never silently used; the wording names the signer and
+    /// says it was the user's own vault.
+    func testAnOwnVaultServedSealedWithANewKeyNeedsConsentAndSaysSo() throws {
+        let w = try world()
+        let own = try XCTUnwrap(SignedSharing.observe(nil, vaultId: w.vaultId, kind: "account", epochPin: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0),
+                                                      rosterVersion: nil, rosterHash: nil, signedShare: false, paused: false)).pins
+        XCTAssertEqual(try JSON.parse(try XCTUnwrap(own))["epochs"]?[w.vaultId]?["own"]?.bool, true)
+        let next = try w.alice.newVaultKey(vaultId: w.vaultId).key
+        let share = try w.aliceSigning.sealAndSignShare(vaultKey: next, vaultId: w.vaultId, recipientJson: w.bobPub, role: "write", keyEpoch: 1)
+        let roster = try Self.signRoster(w.aliceSigning, key: next, vault: w.vaultId, previous: nil, epoch: 1,
+                                         members: [Self.member(w.alicePub, "owner"), Self.member(w.bobPub, "write")])
+        let row = SyncVault(id: w.vaultId, meta: "", role: "write", wrappedKey: share.sealedKey, keyKind: "sealed", keyEpoch: 1, seq: 2,
+                            share: try shareJSON(share.signature, w.aliceSigning), memberRoster: roster, memberRosterSeq: 1)
+        let got = try check(w, row, pins: own, newer: [roster])
+        guard case .consent(let a, false, true, true, let signer?) = got else { return XCTFail("\(got)") }
+        XCTAssertEqual(signer.pin, .new)
+        XCTAssertEqual(a.kind, "sealed")
+        // Accepting it writes the newer key with its roster (`pins_accept`).
+        let accepted = try JSON.parse(try pinsAccept(pinsJson: own, observationJson: a.observation(vaultId: w.vaultId, paused: false)))
+        XCTAssertEqual(accepted["epochs"]?[w.vaultId]?["key_epoch"]?.number, 1)
+        XCTAssertEqual(accepted["epochs"]?[w.vaultId]?["roster_hash"]?.string, try rosterHash(rosterJson: roster))
+        XCTAssertEqual(SharingText.replaced("Home", signer: signer),
+                       "The key of \u{201C}Home\u{201D} was replaced and signed by someone listed by your server as alice@example.com for the first time. Compare their fingerprint before you accept.")
+        XCTAssertTrue(SharingText.ownVault("Home").hasPrefix("\u{201C}Home\u{201D} was your own vault."))
+        let pinned = SignerInfo(userId: "u", email: "x@evil.example", name: "", fingerprint: "F", deleted: false, pin: .unverified, identity: "{}",
+                                pinnedEmail: "Alice@Example.com")
+        XCTAssertEqual(pinned.heading, "alice@example.com")
+        XCTAssertTrue(SharingText.replaced(nil).contains("by an app that doesn't sign yet"))
+    }
+
+    /// An upgraded signer (pinned legacy, now with a cross-signed signing key) keeps the pinned
+    /// email and its "verified" mark (cross-client rule 4).
+    func testAnUpgradedSignerKeepsThePinnedEmailAndVerified() throws {
+        let w = try world()
+        var pins = try pinSet(pinsJson: nil, identityJson: try w.alice.legacyIdentityJson(), email: "alice@corp.example", verified: true, now: 1)
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: w.vaultId, currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1)
+        let got = try check(w, try bobRow(w), pins: pins, remembered: w.roster)
+        guard case .ok(.signed(let s), _, let p?) = got else { return XCTFail("\(got)") }
+        XCTAssertEqual(s.pin, .upgraded)
+        XCTAssertEqual(s.pinEmailToWrite, "alice@corp.example")
+        XCTAssertTrue(s.pinVerifiedToWrite)
+        let pin = try JSON.parse(p)["pins"]?.array.first { $0.str("user_id") == w.aliceId }
+        XCTAssertEqual(pin?["email"]?.string, "alice@corp.example")
+        XCTAssertEqual(pin?["verified"]?.bool, true)
+        XCTAssertEqual(pin?["signing_key"]?.string, try JSON.parse(w.alicePub).str("signing_key"))
+        // Someone new is pinned with the (normalized) email the server lists, not verified.
+        let fresh = SignerInfo(userId: "u", email: " Bob@B\u{00FC}cher.Example ", name: "", fingerprint: "F", deleted: false, pin: .new, identity: "{}")
+        XCTAssertEqual(fresh.pinEmailToWrite, "bob@xn--bcher-kva.example")
+        XCTAssertFalse(fresh.pinVerifiedToWrite)
+    }
+
+    /// Accepting is bound to the email shown for the signer (cross-client rule 4, review L1).
+    func testTheEmailShownForTheSignerIsPartOfTheDecision() {
+        func signer(_ listed: String, pinned: String? = nil) -> SignerInfo {
+            SignerInfo(userId: "u1", email: listed, name: "", fingerprint: "F", deleted: false, pin: pinned == nil ? .new : .unverified, identity: "{}",
+                       pinnedEmail: pinned, identityHash: "H1")
+        }
+        func inv(_ s: SignerInfo) -> Invitation {
+            var i = Invitation(vaultId: "v", role: "write", name: "Family", trust: .signed(s))
+            i.acceptance = Acceptance(epochPin: "{\"k\":1}", rosterVersion: 1, roster: "r", rosterHash: "R1", signer: s.needsPin ? s : nil)
+            return i
+        }
+        XCTAssertTrue(Invitation.sameDecision(inv(signer("alice@example.com")), inv(signer("Alice@Example.com"))), "one form")
+        XCTAssertFalse(Invitation.sameDecision(inv(signer("alice@example.com")), inv(signer("mallory@example.com"))), "another listed email")
+        XCTAssertFalse(Invitation.sameDecision(inv(signer("x@y.z", pinned: "alice@example.com")), inv(signer("x@y.z", pinned: "bob@example.com"))))
+        var own = inv(signer("alice@example.com"))
+        own.own = true
+        XCTAssertFalse(Invitation.sameDecision(inv(signer("alice@example.com")), own))
+    }
+
+    /// Decline only for invitations and signed consent that names a signer (cross-client rule 1);
+    /// consent headings never say "someone whose account was deleted".
+    func testUnsignedConsentNeverOffersDeclineAndNamesTheServer() {
+        let s = SignerInfo(userId: "u1", email: "alice@example.com", name: "", fingerprint: "F", deleted: false, pin: .unverified, identity: "{}",
+                           pinnedEmail: "alice@example.com")
+        var invitation = Invitation(vaultId: "v", role: "read", name: "Family", trust: .unsigned)
+        XCTAssertTrue(invitation.canDecline, "an invitation can always be declined")
+        var added = Invitation(vaultId: "v", role: "read", name: "Family", trust: .unsigned)
+        added.consent = .added
+        XCTAssertFalse(added.canDecline)
+        XCTAssertEqual(InvitationText.sharerHeading(added), "your server")
+        XCTAssertEqual(InvitationText.from(added), "Listed by your server")
+        XCTAssertFalse(InvitationText.notice([added])?.contains("deleted") ?? true)
+        XCTAssertTrue(InvitationText.notice([added])?.hasPrefix("Your server lists the shared vault \"Family\"") ?? false)
+        XCTAssertEqual(SharingText.consentUnsigned, "This vault isn't signed, so PassAuth can't accept it. Ask the vault's owner to sign this vault.")
+        var signed = Invitation(vaultId: "v", role: "read", name: "Family", trust: .signed(s))
+        signed.consent = .added
+        XCTAssertTrue(signed.canDecline)
+        XCTAssertEqual(InvitationText.sharerHeading(signed), "alice@example.com")
+        signed.consent = .replaced
+        XCTAssertFalse(signed.canDecline, "a replaced key is kept locked instead")
+        signed.consent = .added
+        signed.declineHidden = true
+        XCTAssertFalse(signed.canDecline)
+        invitation.trust = .refused
+        XCTAssertTrue(invitation.canDecline)
+        XCTAssertEqual(SharingText.refusal(.checking), SharingText.checking)
+        XCTAssertTrue(SharingText.checking.hasPrefix("PassAuth is still checking this shared vault"))
+        XCTAssertEqual(SharingText.refusedNotice([RefusedVault(id: "v", name: nil, reason: .checking)]),
+                       "A shared vault isn't shown until PassAuth finishes checking it.")
+        XCTAssertEqual(Acceptance(epochPin: #"{"key_epoch":0,"key_id":"abcdefghijklmnopqrstuvwxyz"}"#, rosterVersion: nil, roster: nil, signer: nil).shownKeyId,
+                       "abcd-efgh-ijkl-mnop")
+    }
+
+    func testTheRateLimitOnKeyReplacementsIsSaid() {
+        XCTAssertEqual(SharingText.keyReplacementLimited(120),
+                       "This vault's key was replaced too often in the last hour, so your server didn't take another replacement. Try again in 2 minutes.")
+        XCTAssertTrue(SharingText.keyReplacementLimited(nil).hasSuffix("Try again later."))
+    }
+
+    /// The device memory's round-4 fields: `proven` keeps the checks on, `seen` doesn't; the
+    /// grandfathering candidates are written once; settling drops the pending identity for good;
+    /// tombstones waiting to be written survive a restart.
+    func testMemoryProvenSeenCandidatesSettledAndTombstones() throws {
+        var r = SharingMemoryRecord()
+        r.seen = ["v1"]
+        XCTAssertTrue(r.isEmpty, "a list of vaults shown doesn't turn the checks on")
+        r.proven = true
+        XCTAssertFalse(r.isEmpty, "a server that showed it signs does")
+        r.candidates = ["v1"]
+        r.pendingIdentity = "H"
+        r.tombstones = ["gone": 3]
+        let back = try JSONDecoder().decode(SharingMemoryRecord.self, from: try JSONEncoder().encode(r))
+        XCTAssertEqual(back, r)
+        var other = SharingMemoryRecord()
+        other.seen = ["v2", "v1"]
+        other.candidates = ["v9"]
+        let merged = r.merging(other)
+        XCTAssertEqual(merged.seen, ["v1", "v2"])
+        XCTAssertEqual(merged.candidates, ["v1"], "recorded once")
+        XCTAssertTrue(merged.proven)
+        XCTAssertEqual(merged.tombstones, ["gone": 3])
+        var done = SharingMemoryRecord()
+        done.settled = true
+        done.tombstones = [:]
+        let settled = merged.merging(done)
+        XCTAssertNil(settled.pendingIdentity)
+        XCTAssertNil(settled.candidates)
+        XCTAssertEqual(settled.tombstones, [:])
+        // A later writer's pending identity can't come back once settled.
+        var late = SharingMemoryRecord()
+        late.pendingIdentity = "H2"
+        XCTAssertNil(settled.merging(late).pendingIdentity)
+        var many = SharingMemoryRecord()
+        many.seen = (0..<(SharingMemoryRecord.maxSeen + 5)).map { "v\($0)" }
+        XCTAssertEqual(SharingMemoryRecord().merging(many).seen?.count, SharingMemoryRecord.maxSeen)
     }
 }

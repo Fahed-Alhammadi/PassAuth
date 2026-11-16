@@ -127,10 +127,15 @@ public struct Invitation: Identifiable, Equatable, Sendable {
     /// accepted (signed sharing's consent): accepting writes only this device's checks, declining
     /// leaves the vault.
     public var consent: Consent?
-    /// A vault waiting for consent while the account's trust memory is missing (or this device
-    /// had no earlier copy of it): Decline isn't offered, only Accept or later (a server can't
-    /// push the user into leaving vaults they really are in).
+    /// The key id an unsigned vault the server added would be accepted by (shown with it).
+    public var shownKeyId: String? { acceptance?.shownKeyId }
+    /// A vault waiting for consent that isn't signed, or that waits while the account's trust
+    /// memory is missing (or this device had no earlier copy of it): Decline isn't offered, only
+    /// Accept or later (a server can't push the user into leaving vaults they really are in).
     public var declineHidden = false
+    /// Signed sharing's consent: the account held this vault with its own key wrap before (a
+    /// personal vault must never silently turn into one whose key someone else sealed).
+    public var own = false
 
     public enum Consent: Equatable, Sendable {
         /// Added without an invitation this account accepted.
@@ -161,16 +166,28 @@ public struct Invitation: Identifiable, Equatable, Sendable {
         return trust == nil || acceptance != nil
     }
 
+    /// Decline is offered: always for an invitation; for a vault the server added only when it is
+    /// signed (a signer is named), not a replaced key (kept locked instead), and not waiting
+    /// while trust memory is missing (cross-client rule 1).
+    public var canDecline: Bool {
+        guard let consent else { return true }
+        guard consent != .replaced, !declineHidden, case .signed? = trust else { return false }
+        return true
+    }
+
     /// Whether `current` (the entry as it is now) is still the decision `shown` showed: the same
     /// vault, kind (invitation or consent), role and listed sharer key, and with signed sharing
-    /// the same key epoch pin, signer identity (hash) and trusted roster (hash). Accepting needs it.
+    /// the same key epoch pin, signer identity (hash) and the email it was shown and is pinned
+    /// with, and trusted roster (hash). Accepting needs it.
     public static func sameDecision(_ shown: Invitation, _ current: Invitation) -> Bool {
-        guard shown.vaultId == current.vaultId, shown.consent == current.consent, shown.role == current.role,
+        guard shown.vaultId == current.vaultId, shown.consent == current.consent, shown.own == current.own, shown.role == current.role,
               shown.invitedBy?.publicKey == current.invitedBy?.publicKey, (shown.trust == nil) == (current.trust == nil) else { return false }
         guard shown.acceptance?.epochPin == current.acceptance?.epochPin, shown.acceptance?.rosterHash == current.acceptance?.rosterHash,
               shown.acceptance?.rosterVersion == current.acceptance?.rosterVersion,
-              shown.acceptance?.signer?.identityHash == current.acceptance?.signer?.identityHash else { return false }
-        return signerHash(shown.trust) == signerHash(current.trust)
+              shown.acceptance?.signer?.identityHash == current.acceptance?.signer?.identityHash,
+              shown.acceptance?.signer?.pinEmailToWrite == current.acceptance?.signer?.pinEmailToWrite,
+              shown.acceptance?.signer?.pinVerifiedToWrite == current.acceptance?.signer?.pinVerifiedToWrite else { return false }
+        return signerHash(shown.trust) == signerHash(current.trust) && signerEmails(shown.trust) == signerEmails(current.trust)
     }
 
     /// The identity hash of whoever signed it (nil: not signed).
@@ -178,6 +195,14 @@ public struct Invitation: Identifiable, Equatable, Sendable {
         switch t {
         case .signed(let s)?, .keyChanged(let s)?: s.identityHash
         default: nil
+        }
+    }
+
+    /// The emails shown for whoever signed it (pinned, listed), in the form pins keep.
+    static func signerEmails(_ t: InvitationTrust?) -> [String] {
+        switch t {
+        case .signed(let s)?, .keyChanged(let s)?: [s.pinnedEmail ?? "", s.listedEmail]
+        default: []
         }
     }
 
@@ -278,6 +303,11 @@ public enum InvitationText {
     /// didn't verify) only as "someone listed by your server as …". Without signed sharing, as the
     /// server lists them.
     public static func sharerHeading(_ inv: Invitation) -> String {
+        if inv.consent != nil {
+            // A vault the server lists for the account: its signer, else only the server.
+            if case .signed(let s)? = inv.trust { return s.heading }
+            return "your server"
+        }
         switch inv.trust {
         case nil:
             return sharer(inv)
@@ -292,6 +322,9 @@ public enum InvitationText {
 
     /// "From alex@example.com, 12 Nov 2026" (`sharerHeading`).
     public static func from(_ inv: Invitation) -> String {
+        if inv.consent != nil, inv.trust.map({ if case .signed = $0 { return false } else { return true } }) ?? true {
+            return "Listed by your server"
+        }
         var t = "From \(sharerHeading(inv))"
         if let at = inv.invitedAt { t += ", " + Date(timeIntervalSince1970: TimeInterval(at)).formatted(date: .abbreviated, time: .omitted) }
         return t
@@ -303,6 +336,8 @@ public enum InvitationText {
         let head: String
         if list.count > 1 {
             head = "You have \(list.count) invitations to shared vaults."
+        } else if first.consent != nil {
+            head = "Your server lists " + (first.name.map { "the shared vault \"\($0)\"" } ?? "a shared vault") + " for your account. It waits for your OK."
         } else {
             let lead = sharerHeading(first)
             let who = first.trust == nil ? (first.invitedBy == nil ? "Someone" : sharerShort(first))
@@ -386,6 +421,10 @@ extension VaultRepository {
             if !inv.canAccept {
                 throw UserError(inv.consent != nil && inv.trust == .unsigned ? SharingText.consentUnsigned : InvitationText.cantAcceptUnverified)
             }
+            if inv.trust != nil, let session = sessions[account], !(sharingMemory.load(account).proven || session.sharingProven) {
+                // Nothing is accepted before the server has shown it signs (cross-client rule 2).
+                throw UserError(SharingText.checking)
+            }
             if inv.consent == nil {
                 do {
                     _ = try await api.call(account, "/vaults/\(Self.pathSegment(vaultId))/invitation/accept", method: "POST")
@@ -410,15 +449,19 @@ extension VaultRepository {
     /// written now is written at the next sync); a vault the server added without an invitation
     /// is left (`DELETE /vaults/{id}/members/{me}`). A vault waiting while the trust memory is
     /// missing (`declineHidden`) or after an unsigned key replacement stays as it is (later).
+    ///
+    /// Unsigned vaults the server added, replaced keys and vaults waiting while trust memory is
+    /// missing can't be declined (they stay locked; throws). A declined invitation for a vault
+    /// this account uses now never tombstones it, and nothing is tombstoned before the server
+    /// has shown it signs (cross-client rules 1–3).
     public func declineInvitation(_ vaultId: String) async throws {
         try await lock.run {
             let account = activeId
             let inv = vault?.invitations.first { $0.vaultId == vaultId }
             let session = sessions[account]
-            if inv?.consent == .replaced || inv?.declineHidden == true {
-                // Kept locked, nothing written: the user may ask and accept it later.
-                return
-            }
+            if let inv, !inv.canDecline { throw UserError(SharingText.cantDecline) }
+            let usable = vault?.vaults.contains { $0.id == vaultId } ?? false
+            let proven = session.map { sharingMemory.load(account).proven || $0.sharingProven } ?? false
             if inv?.consent != nil, let session {
                 // Tombstoned first: if the server keeps listing it, it stays refused.
                 try await leave(account, session, vaultId: vaultId, rosterVersion: inv?.acceptance?.rosterVersion ?? 0)
@@ -429,13 +472,20 @@ extension VaultRepository {
                 do {
                     _ = try await api.call(account, "/vaults/\(Self.pathSegment(vaultId))/invitation", method: "DELETE")
                 } catch let e as ApiError where e.status == 404 {}
-                if let session, signedSharingOn(account, copySnapshot) {
+                if let session, signedSharingOn(account, copySnapshot), proven, !usable {
                     let version = inv?.acceptance?.rosterVersion ?? 0
                     do {
                         try await leave(account, session, vaultId: vaultId, rosterVersion: version)
                     } catch {
-                        // The server took the decline: the tombstone is written at the next sync.
-                        pendingTombstones[account, default: [:]][vaultId] = version
+                        // The server took the decline: the tombstone is written at the next sync
+                        // (kept in this process, and in the device memory as soon as it can be
+                        // written, so a restart doesn't lose it).
+                        pendingTombstones[account, default: [:]][vaultId] = max(pendingTombstones[account]?[vaultId] ?? 0, version)
+                        let stored = loadMemory(account, session)
+                        var update = SharingMemoryRecord().owned(by: session.meId, server: store.get().file.accounts[account]?.server ?? "")
+                        update.tombstones = (stored.unreadable ? [:] : stored.tombstones ?? [:])
+                            .merging(pendingTombstones[account] ?? [:]) { max($0, $1) }
+                        saveMemory(account, session, update)
                     }
                 }
             }

@@ -64,7 +64,10 @@ export interface SignedVectors {
   keyPinsWithheld: core.KeyPins;
   keyPinsUnsigned: core.KeyPins;
   keyPinsRosterMax: core.KeyPins;
+  keyPinsOwn: core.KeyPins;
   admissions: { pins: string; observation: core.VaultObservation; expected: core.Admission }[];
+  accepts: ({ pins: string; observation: core.VaultObservation } & Outcome)[];
+  merges: { name: string; base: core.KeyPins; ours: core.KeyPins; expected: core.KeyPins }[];
   observations: { observation: core.VaultObservation; expected: core.Observed }[];
   emails: { email: string; expected: string }[];
   legacyWraps: { pins: string; expected: boolean }[];

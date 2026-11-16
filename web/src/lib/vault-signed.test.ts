@@ -106,6 +106,8 @@ interface World {
   noSigning?: boolean;
   /** A server from before key epochs: vault rows carry none. */
   noEpoch?: boolean;
+  /** The server leaves the vault out of `/sync` but still answers its members list (a server omitting it on purpose). */
+  omitOnly?: boolean;
 }
 let w: World;
 
@@ -154,7 +156,7 @@ let syncAs: string | null = null;
 function sync() {
   const me = w.me;
   const m = w.vault.members.get(me);
-  const active = m?.status === "active";
+  const active = m?.status === "active" && !w.omitOnly;
   const rec = w.identity.get(me);
   return {
     revision: w.revision,
@@ -238,6 +240,8 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     return { rosters: w.vault.rosters.slice(after), latest: w.vault.rosters.length, more: false };
   }
   if (path === `/vaults/${vid}/members` && method === "GET") {
+    // Like the real server: only members and invitees see the list.
+    if (!w.vault.members.has(w.me)) throw err(404, "not_found");
     return {
       members: [...w.vault.members].map(([u, m]) => ({ ...userRow(u), role: m.role, status: m.status, key_kind: m.key_kind, share: m.share })),
       key_epoch: w.vault.epoch,
@@ -663,6 +667,51 @@ describe("final review fixes (web)", () => {
     await syncNow();
     expect(getState().vaults).toEqual([]);
     expect(getState().blockedVaults).toMatchObject([{ id: vid(), reason: expect.stringMatching(/left or declined/) }]);
+  });
+
+  it("rule 3: a vault one sync omits isn't tombstoned while the server still lists its members; two omitted syncs in a row are", async () => {
+    await signIn("alice");
+    await confirming((c) => shareVault(vid(), found("bob"), "write", { confirmed: c }));
+    await signIn("bob");
+    await acceptInvitation(vid(), shownInvitation());
+    w.omitOnly = true;
+    w.revision++;
+    await syncNow();
+    expect(getState().vaults).toEqual([]);
+    // Listed again: still the accepted vault (no tombstone after one omission).
+    w.omitOnly = false;
+    w.revision++;
+    await syncNow();
+    expect(getState().vaults).toHaveLength(1);
+    // Omitted twice in a row: confirmed, tombstoned.
+    w.omitOnly = true;
+    w.revision++;
+    await syncNow();
+    w.revision++;
+    await syncNow();
+    w.omitOnly = false;
+    w.revision++;
+    await syncNow();
+    expect(getState().vaults).toEqual([]);
+    expect(getState().blockedVaults).toMatchObject([{ id: vid(), reason: expect.stringMatching(/left or declined/) }]);
+  });
+
+  it("rule 1: an unsigned vault waiting for consent is never declined; one that can't be accepted unsigned stays locked", async () => {
+    legacyShare("bob", "write");
+    await signIn("bob");
+    // Trust memory missing (an identity from before, no key pins): accept allowed, decline not.
+    const c = getState().consents[0];
+    expect(c.consent).toMatchObject({ signer: null, unsignedAllowed: true });
+    await expect(declineConsent(vid())).rejects.toThrow(/Ask the vault's owner to sign this vault/);
+    expect(w.calls.some((x) => x.method === "DELETE")).toBe(false);
+  });
+
+  it("a key replacement over the server's limit (429 rate_limited) says so and changes nothing", async () => {
+    await signIn("alice");
+    await confirming((c) => shareVault(vid(), found("bob"), "write", { confirmed: c }));
+    w.next.push({ path: `/vaults/${vid()}/rotate`, error: err(429, "rate_limited") });
+    await expect(rotateVaultKey(vid())).rejects.toThrow(/replaced many times in the last hour/);
+    expect(w.vault.epoch).toBe(0);
   });
 
   it("a fresh device whose identity the server claims this unlock created grandfathers nothing (M-B)", async () => {

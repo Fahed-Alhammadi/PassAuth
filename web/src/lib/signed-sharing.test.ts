@@ -32,6 +32,8 @@ const h = vi.hoisted(() => {
     fail: null as null | { path: string; error: Error },
     /** Next request to this path is handled, but its answer is lost (a network error after the server stored it). */
     lose: null as null | string,
+    /** `GET /vaults/{id}/members` answers per vault (200 unless set: the account is still in the vault). */
+    members: new Map<string, number>(),
   };
   async function api(path: string, opts: { method?: string; body?: unknown } = {}): Promise<unknown> {
     const method = opts.method ?? (opts.body === undefined ? "GET" : "POST");
@@ -59,6 +61,12 @@ const h = vi.hoisted(() => {
       server.pins.set(server.user, { key_pins: b.key_pins, seq: b.seq });
       return { seq: b.seq };
     }
+    const mem = /^\/vaults\/([^/]+)\/members$/.exec(path);
+    if (mem && method === "GET") {
+      const status = server.members.get(decodeURIComponent(mem[1])) ?? 200;
+      if (status !== 200) throw new ApiError(status, status === 403 ? "forbidden" : "not_found", "gone");
+      return { members: [], key_epoch: 0, member_roster: null, member_roster_seq: 0 };
+    }
     const m = /^\/vaults\/([^/]+)\/rosters\?after=(\d+)$/.exec(path);
     if (m) {
       const list = server.rosters.get(decodeURIComponent(m[1])) ?? [];
@@ -85,6 +93,8 @@ import {
   acceptInvitationTrust,
   CHANGED_SINCE_SHOWN,
   checksRemembered,
+  consentAcceptable,
+  consentDeclinable,
   endSigning,
   noteVaultsSeen,
   flushPins,
@@ -109,7 +119,9 @@ import {
 } from "./signed-sharing";
 import {
   ACCOUNT_MISMATCH,
+  MEMORY_UNREADABLE,
   NEW_DEVICE,
+  STILL_CHECKING,
   seenKey,
   PINS_ROLLED_BACK,
   SHARING_PAUSED,
@@ -152,6 +164,7 @@ beforeEach(() => {
   h.server.calls = [];
   h.server.fail = null;
   h.server.lose = null;
+  h.server.members = new Map();
 });
 
 const acct = (name: string) => accounts.get(name)!;
@@ -713,12 +726,17 @@ describe("final review fixes (web)", () => {
     // The server lists none, but already has one (another device made it): 409 identity_exists.
     await as("bob", { identity: null });
     expect(signingReady()).toBe(true);
-    expect((await verdict(unsignedRow())).status).toBe("consent");
+    // Rule 2: the first signed sync isn't finished, so the unsigned vault is held neutrally (no consent, no decline).
+    expect(await verdict(unsignedRow())).toMatchObject({ status: "refused", reason: STILL_CHECKING });
     await flushPins();
     const stored = h.server.pins.get(id("bob"));
     const pins = stored?.key_pins ? acct("bob").account.openKeyPins(stored.key_pins, stored.seq) : null;
     expect(pins?.grandfathered ?? null).toBeNull();
     expect(pinsNotice()).toBeNull();
+    // The next sync knows the identity state: the grandfathered list is written, and only then consent is asked.
+    const a = acct("bob");
+    await prepareSigning(a.account, { id: a.id, identity: h.server.identity.get(a.id) ?? null, key_pins_seq: h.server.pins.get(a.id)?.seq ?? 0 }, async () => null);
+    expect((await verdict(unsignedRow())).status).toBe("consent");
   });
 
   it("L-B: accepting is bound to the consent the dialog showed (signer, key id, epoch, roster)", async () => {
@@ -752,11 +770,36 @@ describe("final review fixes (web)", () => {
     expect(personState(pub("alice")).pinnedEmail).toBe("alice@example.com");
   });
 
-  it("tombstones an accepted shared vault a verified sync no longer lists; it isn't used if served again", async () => {
+  it("tombstones an accepted shared vault only once its removal is confirmed (rule 3): two verified syncs without it", async () => {
     const row = sharedRow("bob", "write");
     await bobAccepts(row);
     expect(await verdict(row)).toMatchObject({ status: "ok" });
+    // One sync omits it while the server still lists its members: not given up.
     await verifySnapshot([], []);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    // Two in a row: tombstoned; served again, it isn't used.
+    await verifySnapshot([], []);
+    await verifySnapshot([], []);
+    expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
+  });
+
+  it("tombstones at once when the vault's members request answers 403/404 (rule 3)", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    h.server.members.set(VID(), 403);
+    await verifySnapshot([], []);
+    expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
+  });
+
+  it("declining an invitation or consent listed under the id of a vault in use doesn't tombstone that vault (rule 3)", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    markLeft(VID(), 1, { decline: true });
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    // Leaving it is still a tombstone.
+    markLeft(VID(), 1);
     expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
   });
 
@@ -794,11 +837,32 @@ describe("final review fixes (web)", () => {
     expect(acct("bob").account.openKeyPins(server.key_pins!, server.seq).left?.["vault-other-tab"]).toBeTruthy();
   });
 
-  it("never writes the local key pins over a stored copy it can't read", async () => {
+  it("never writes the local key pins over a stored copy it can't read (rule 7: shared vaults refused, own vaults still checked)", async () => {
     const row = sharedRow("bob", "write");
     local.set(pinsKey(scope("bob")), "{broken");
-    await bobAccepts(row);
+    await as("bob");
+    const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
+    expect(inv).toEqual({ kind: "refused", reason: MEMORY_UNREADABLE });
+    expect(await verdict(row)).toMatchObject({ status: "refused", reason: MEMORY_UNREADABLE });
+    expect(() => markLeft(VID(), 1)).not.toThrow();
+    expect(() => trustPerson(pub("alice"), EMAIL.alice, { mode: "trust", shownHash: core.verifyIdentity(pub("alice")).hash })).toThrow(MEMORY_UNREADABLE);
+    await flushPins();
+    expect(h.server.calls.some((c) => c.startsWith("PUT /account/key-pins"))).toBe(false);
     expect(local.get(pinsKey(scope("bob")))).toBe("{broken");
+  });
+
+  it("rule 7: unreadable device memory refuses shared vaults but keeps the key id checks of own vaults (server pins, read only)", async () => {
+    await as("alice");
+    const own: SignedVaultRow = { id: VID(), role: "owner", wrapped_key: v.vault.wrappedKey, key_kind: "account", key_epoch: 3, member_roster: null, member_roster_seq: 0, share: null };
+    expect(await verdict(own)).toMatchObject({ status: "ok", trust: { kind: "own" } });
+    await flushPins();
+    local.set(memoryKey(scope("alice")), "not json");
+    await as("alice");
+    expect(await verdict(own)).toMatchObject({ status: "ok", trust: { kind: "own" } });
+    // The server's pins still refuse an older epoch of the same key.
+    expect(await verdict({ ...own, key_epoch: 2 })).toMatchObject({ status: "refused" });
+    expect(await verdict({ ...own, id: "shared-with-alice", key_kind: "sealed", wrapped_key: "x" })).toMatchObject({ status: "refused", reason: MEMORY_UNREADABLE });
+    expect(local.get(memoryKey(scope("alice")))).toBe("not json");
   });
 
   it("after a version-1 review pins and signs the emails the review showed, not a later members answer's", async () => {
@@ -831,5 +895,193 @@ describe("final review fixes (web)", () => {
     expect(p.rows.find((r) => r.user_id === id("bob"))!.email).toBe("bob@example.com");
     pinReviewed(p);
     expect(personState(pub("bob")).pinnedEmail).toBe("bob@example.com");
+  });
+});
+
+describe("round 4 (web)", () => {
+  const unsignedRow = (vaultId = VID()): SignedVaultRow => {
+    const key = vaultId === VID() ? vaultKey() : acct("alice").account.newVaultKey(vaultId).takeKey();
+    const row: SignedVaultRow = { id: vaultId, role: "write", wrapped_key: key.shareTo(vaultId, pub("bob").public_key), key_kind: "sealed", key_epoch: 0, member_roster: null, member_roster_seq: 0, share: null };
+    key.free();
+    return row;
+  };
+  const serverPins = (name: string) => {
+    const stored = h.server.pins.get(id(name))!;
+    return acct(name).account.openKeyPins(stored.key_pins!, stored.seq);
+  };
+
+  it("accepting uses pinsAccept: the key is pinned with the roster's hash, and the signer with the email shown", async () => {
+    const row = sharedRow("bob", "write");
+    row.share = shareOf("alice", (row.share as { signature: string }).signature, { email: " ALICE@Example.COM. " });
+    await as("bob");
+    const c = ((await verdict(row)) as { consent: Consent }).consent;
+    expect(c.signer?.email).toBe("alice@example.com");
+    // Bound to the email shown too (rule 4).
+    expect(() => acceptConsent(c, { ...c, signer: { ...c.signer!, email: "mallory@example.com" } })).toThrow(CHANGED_SINCE_SHOWN);
+    acceptConsent(c, { ...c });
+    await flushPins();
+    const pins = serverPins("bob");
+    expect(pins.epochs?.[VID()]).toMatchObject({ roster_version_max: 1, roster_hash: core.rosterHash(row.member_roster as string), signed_since: 1 });
+    expect(pins.pins.find((p) => p.user_id === id("alice"))?.email).toBe("alice@example.com");
+  });
+
+  it("sends chain_hashes with a fetched chain: a chain re-signed from version 1 can't hide the roster the account pinned", async () => {
+    const key = vaultKey();
+    const members: Members = [["alice", "owner"], ["bob", "write"]];
+    const r1 = signRoster("alice", null, 0, members, key);
+    const share = signers.get("alice")!.sealAndSignShare(key, VID(), pub("bob"), "write", 0);
+    const row = (latest: string, seq: number): SignedVaultRow => ({ id: VID(), role: "write", wrapped_key: share.sealed_key, key_kind: "sealed", key_epoch: 0, member_roster: latest, member_roster_seq: seq, share: shareOf("alice", share.signature) });
+    h.server.rosters.set(VID(), [r1]);
+    await bobAccepts(row(r1, 1));
+    expect(await verdict(row(r1, 1))).toMatchObject({ status: "ok" });
+    await flushPins();
+    // A device with no memory of the vault (only the account's pins: highest roster 1 and its hash) is shown a forked
+    // history: another version 1, then a version 2. Without chain_hashes version 2 would pass.
+    const forked1 = signRoster("alice", null, 0, [["alice", "owner"], ["bob", "write"], ["carol", "read"]], key);
+    const forked2 = signRoster("alice", forked1, 0, members, key);
+    h.server.rosters.set(VID(), [forked1, forked2]);
+    local.clear();
+    await as("bob");
+    expect(await verdict(row(forked2, 2))).toMatchObject({ status: "refused", reason: VAULT_REFUSED });
+    // The genuine history passes (its version 2 differs from the forked one: a roster doesn't name the one before it,
+    // so identical texts can follow different version 1s; that is what chain_hashes catch).
+    const r2 = signRoster("alice", r1, 0, [["alice", "owner"], ["bob", "write"], ["dave", "read"]], key);
+    h.server.rosters.set(VID(), [r1, r2]);
+    expect(await verdict(row(r2, 2))).toMatchObject({ status: "ok" });
+  });
+
+  it("a newer key signed for the first time on a vault without signed history asks, naming the signer; own vaults say so", async () => {
+    await as("alice");
+    const own: SignedVaultRow = { id: VID(), role: "owner", wrapped_key: v.vault.wrappedKey, key_kind: "account", key_epoch: 0, member_roster: null, member_roster_seq: 0, share: null };
+    expect(await verdict(own)).toMatchObject({ status: "ok", trust: { kind: "own" } });
+    // The server makes up an account (Carol's keys), signs a newer key for Alice's personal vault and a roster v1.
+    const fresh = acct("carol").account.newVaultKey(VID()).takeKey();
+    const review = core.rosterReview(VID(), null, signers.get("carol")!.publicIdentity(), inputs([["alice", "write"], ["carol", "owner"]]), null);
+    const r1 = signers.get("carol")!.signRoster(fresh, VID(), null, 1, inputs([["alice", "write"], ["carol", "owner"]]), review.digest);
+    h.server.rosters.set(VID(), [r1]);
+    const sealed = signers.get("carol")!.sealAndSignShare(fresh, VID(), pub("alice"), "write", 1);
+    const puppet: SignedVaultRow = { id: VID(), role: "write", wrapped_key: sealed.sealed_key, key_kind: "sealed", key_epoch: 1, member_roster: r1, member_roster_seq: 1, share: shareOf("carol", sealed.signature) };
+    const c = await verdict(puppet);
+    expect(c).toMatchObject({ status: "consent", consent: { replaced: true, own: true, signer: { email: "carol@example.com", pin: "new" } } });
+    expect(consentDeclinable((c as { consent: Consent }).consent)).toBe(true);
+  });
+
+  it("rule 1: an unsigned consent is never declinable; it's acceptable only while trust memory is missing or for a replaced key", async () => {
+    await as("bob");
+    const c = ((await verdict(unsignedRow())) as { consent: Consent }).consent;
+    expect(c).toMatchObject({ signer: null, unsignedAllowed: true });
+    expect(consentAcceptable(c)).toBe(true);
+    expect(consentDeclinable(c)).toBe(false);
+    await flushPins();
+    await as("bob");
+    const later = ((await verifySnapshot([unsignedRow(), unsignedRow("vault-planted-later")], []))!.vaults.get("vault-planted-later") as { consent: Consent }).consent;
+    expect(consentAcceptable(later)).toBe(false);
+    expect(consentDeclinable(later)).toBe(false);
+    expect(() => acceptConsent(later)).toThrow(/Ask the vault's owner to sign this vault/);
+  });
+
+  it("rule 2: before the first signed sync is finished, unsigned shared vaults are held neutrally and the identity upload is retried every sync", async () => {
+    h.server.identity.set(id("bob"), null);
+    h.server.fail = { path: "/account/identity", error: new h.ApiError(503, "unavailable", "down") };
+    await as("bob", { identity: null });
+    expect(signingReady()).toBe(false);
+    expect(await verdict(unsignedRow())).toMatchObject({ status: "refused", reason: STILL_CHECKING });
+    // The next sync of the same unlock retries the upload (no new unlock needed).
+    const a = acct("bob");
+    await prepareSigning(a.account, { id: a.id, identity: null, key_pins_seq: 0 }, async () => ({ identity: h.server.identity.get(a.id) ?? null }));
+    expect(h.server.calls.filter((c) => c === "PUT /account/identity")).toHaveLength(2);
+    expect(signingReady()).toBe(true);
+    expect((await verdict(unsignedRow())).status).toBe("consent");
+  });
+
+  it("rule 2: nothing is tombstoned or pinned before the server proved it signs", async () => {
+    endSigning();
+    const a = acct("alice");
+    h.server.user = a.id;
+    h.server.identity.set(a.id, null);
+    h.server.fail = { path: "/account/identity", error: new h.ApiError(503, "unavailable", "down") };
+    await prepareSigning(a.account, { id: a.id, identity: null, key_pins_seq: 0 }, async () => ({ identity: null }), false);
+    await verifySnapshot([], []);
+    markLeft(VID(), 1);
+    await flushPins();
+    expect(local.get(pinsKey(scope("alice")))).toBeUndefined();
+    expect(h.server.calls.some((c) => c.startsWith("PUT /account/key-pins"))).toBe(false);
+  });
+
+  it("rule 4: an upgraded signer keeps the pinned email and 'verified'", async () => {
+    await as("bob");
+    const legacy = acct("alice").account.legacyIdentity() as PublicIdentity;
+    trustPerson(legacy, EMAIL.alice, { mode: "trust", shownHash: core.verifyIdentity(legacy).hash });
+    const row = sharedRow("bob", "write");
+    row.share = shareOf("alice", (row.share as { signature: string }).signature, { email: "someone-else@example.com" });
+    const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(VID())!;
+    expect(inv).toMatchObject({ kind: "signed", signer: { pin: "upgraded", email: "alice@example.com" } });
+    if (inv.kind === "signed") acceptInvitationTrust(VID(), inv, inv);
+    expect(personState(pub("alice"))).toMatchObject({ status: "match", verified: true, pinnedEmail: "alice@example.com" });
+  });
+
+  it("rule 5: merges this device's last-known pins into a newer server copy and writes back what it adds", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    await verdict(row);
+    markLeft("vault-left-here", 3);
+    await flushPins();
+    expect(h.server.pins.get(id("bob"))?.seq).toBe(1);
+    // Another device writes version 2 without this device's tombstone (its own copy, not merged).
+    const theirs = core.pinsGrandfather(null, [], false);
+    h.server.pins.set(id("bob"), { key_pins: acct("bob").account.sealKeyPins({ ...theirs, version: 2 }, 2), seq: 2 });
+    await as("bob", { key_pins_seq: 2 });
+    await flushPins();
+    expect(h.server.pins.get(id("bob"))?.seq).toBe(3);
+    const merged = serverPins("bob");
+    expect(merged.left?.["vault-left-here"]).toBeTruthy();
+    expect(merged.epochs?.[VID()]).toBeTruthy();
+  });
+
+  it("merges another tab's unsent change based on a lower version instead of writing over it", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    await verdict(row);
+    await flushPins();
+    markLeft("vault-a", 1);
+    await flushPins();
+    expect(h.server.pins.get(id("bob"))?.seq).toBe(2);
+    // Another tab, still at version 1, declined a vault and hasn't sent it.
+    const v1 = acct("bob").account.openKeyPins(h.server.pins.get(id("bob"))!.key_pins!, 2);
+    const withLeft = core.pinsLeave({ ...v1, version: 1 }, "vault-other-tab", 1, 100);
+    local.set(pinsKey(scope("bob")), JSON.stringify({ seq: 1, sealed: acct("bob").account.sealKeyPins({ ...withLeft, version: 1 }, 1), dirty: true }));
+    trustPerson(pub("alice"), EMAIL.alice, { mode: "verify", shownHash: core.verifyIdentity(pub("alice")).hash });
+    const now = JSON.parse(local.get(pinsKey(scope("bob")))!) as { seq: number; sealed: string; dirty: boolean };
+    expect(now).toMatchObject({ seq: 2, dirty: true });
+    expect(acct("bob").account.openKeyPins(now.sealed, 2).left?.["vault-other-tab"]).toBeTruthy();
+  });
+
+  it("rule 6: the vaults shown before the identity was generated are recorded then, so a first signed sync that slips keeps the new-device allowance", async () => {
+    // A new device: nothing recorded. The upload's answer is lost; this unlock then records its own vaults.
+    h.server.identity.set(id("bob"), null);
+    h.server.lose = "/account/identity";
+    await as("bob", { identity: null });
+    noteVaultsSeen(acct("bob").account, ["bobs-own-vault"]);
+    expect(readMemory(store, scope("bob")).earlier).toBeNull();
+    // Next unlock: the identity opens to the hash generated here; the earlier record (none) decides, not this unlock's.
+    await as("bob");
+    const c = await verdict(unsignedRow());
+    expect(c).toMatchObject({ status: "consent", consent: { unsignedAllowed: true } });
+    expect(pinsNotice()).toBe(NEW_DEVICE);
+    // The first signed sync is finished: the pending identity and the record are cleared.
+    expect(readMemory(store, scope("bob"))).toMatchObject({ generated: [] });
+    expect(readMemory(store, scope("bob")).earlier).toBeUndefined();
+  });
+
+  it("rule 6: a hash generated here doesn't count as created here when an own identity was already known", async () => {
+    h.server.identity.set(id("bob"), null);
+    noteVaultsSeen(acct("bob").account, [VID()]);
+    // The identity is made and uploaded, but this unlock never finishes a sync (no grandfathered list).
+    await as("bob", { identity: null });
+    expect(readMemory(store, scope("bob")).own).toBeTruthy();
+    // Next unlock: the own identity was known before this open, so this isn't its first signed sync any more.
+    await as("bob");
+    expect(await verdict(unsignedRow())).toMatchObject({ status: "consent", consent: { unsignedAllowed: true } });
+    expect(pinsNotice()).toBe(TRUST_MEMORY_MISSING);
   });
 });

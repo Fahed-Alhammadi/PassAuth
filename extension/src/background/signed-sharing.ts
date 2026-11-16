@@ -47,6 +47,15 @@ export const NEW_DEVICE_TEXT = "This browser had no earlier copy of your shared 
 /** Consent for a key replaced without a signature. */
 export const replacedText = (name: string) =>
   `The key of ${name ? `"${name}"` : "a shared vault"} was replaced by an app that doesn't sign yet. Accept it only if someone in this vault just replaced its key.`;
+/**
+ * Consent for the first signed key of a vault never seen signed (round 4, "puppet signer"): the signer is named with
+ * the pinned email first, else only as the server lists them; the notice shows their fingerprint next to it.
+ */
+export const replacedSignedText = (name: string, signer: string, pinned: boolean) =>
+  `The key of ${name ? `"${name}"` : "a shared vault"} was replaced and signed by ${pinned ? signer || "someone" : `someone listed by your server as ${signer || "unknown"}`} for the first time. Compare their fingerprint before you accept.`;
+/** Added to a consent for a vault the account held with its own key wrap (`consent.own`). */
+export const ownVaultText = (name: string) =>
+  `${name ? `"${name}"` : "This vault"} was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change.`;
 /** A share from before signed sharing. */
 export const UNSIGNED_LABEL = "Not yet signed";
 export const changedText = (email: string) => `${email || "Someone"}'s keys changed. Compare their fingerprint with them before you continue.`;
@@ -56,8 +65,21 @@ export const signedByLabel = (email: string, deleted: boolean, pinned = true) =>
   `Signed by ${pinned ? email || "someone" : `${email || "someone"} (as your server lists them)`}${deleted ? " (account deleted)" : ""}`;
 /** A sealed vault the account never accepted (planted, or accepted on an app whose memory was lost). */
 export const waitingText = (name: string) => `Your server added ${name ? `"${name}"` : "a shared vault"} to your account. Accept it only if you expected it.`;
-/** …and it isn't signed: it can't be accepted on a server with signed sharing. */
-export const WAITING_UNSIGNED_TEXT = "It isn't signed, so it can't be accepted. Decline it in the web vault, or ask the person who shared it to update PassAuth and share again.";
+/** A sealed vault the account never accepted, unsigned, where it can't be accepted: locked (with `ASK_OWNER_TEXT`). */
+export const unsignedLockedText = (name: string) => `Your server added ${name ? `"${name}"` : "a shared vault"} to your account. It isn't signed, so PassAuth keeps it locked.`;
+/**
+ * …and it isn't signed, where accepting unsigned vaults isn't allowed (cross-client rule 1): it stays locked, with no
+ * Decline (declining writes a tombstone, and a server could make a real vault look like this).
+ */
+export const ASK_OWNER_TEXT = "Ask the vault's owner to sign this vault.";
+/**
+ * An unsigned shared vault seen before this browser finished the account's first signed sync (cross-client rule 2):
+ * held, neither accepted nor declined, and nothing is remembered about it yet.
+ */
+export const STILL_CHECKING_TEXT = "PassAuth is still checking this shared vault, so it isn't used yet. It's checked again at the next sync.";
+/** What this browser remembers for signed sharing can't be read (rule 7): shared vaults aren't used, nothing is written. */
+export const UNREADABLE_TEXT =
+  "PassAuth couldn't read what this browser remembers about your shared vaults, so they aren't used here and nothing about them is changed. It tries again at the next sync.";
 
 /** Why a vault was refused, in words (`pinsAdmit` reasons and this file's own codes); the generic text otherwise. */
 const REASONS: Record<string, string> = {
@@ -95,17 +117,22 @@ export function cleanText(v: unknown, max = 128): string {
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : one;
 }
 
-/** An email as shown and compared: cleaned, in the core's `normalizeEmail` form (an internationalized domain in punycode). */
-export function showEmail(v: unknown): string {
-  const c = cleanText(v);
-  if (!c) return "";
+/**
+ * An email in the one form this browser compares and pins (cross-client rule: one form everywhere): the core's
+ * `normalizeEmail` of the server's text as it came (invisible characters removed, NFKC, lower case, the domain in
+ * punycode, non-ASCII escaped where IDNA refuses it), never shortened.
+ */
+export function normEmail(v: unknown): string {
+  if (typeof v !== "string") return "";
   try {
-    return cleanText(core.normalizeEmail(c));
+    return core.normalizeEmail(v);
   } catch {
-    return c;
+    return cleanText(v, 1024);
   }
 }
-const sameEmail = (a: string, b: string) => showEmail(a) === showEmail(b);
+/** An email as shown: the compared form (`normEmail`), cleaned for display. */
+export const showEmail = (v: unknown): string => cleanText(normEmail(v));
+const sameEmail = (a: string, b: string) => normEmail(a) === normEmail(b);
 
 // ------------------------------------------------------------------ shapes
 
@@ -139,8 +166,10 @@ export type SignedInvitation = SyncInvitation & { key_epoch?: unknown; share?: u
  */
 export interface SignerView {
   userId: string;
-  /** The pinned email when the person is pinned, else the one the server lists (cleaned). */
+  /** The pinned email when the person is pinned, else the one the server lists (cleaned for display). */
   email: string;
+  /** `email` in full (`normEmail`, not shortened): what accepting binds and pins (cross-client rule 4). */
+  emailFull: string;
   /** Whether `email` is the pinned one (false: only the server's claim, first time seen). */
   pinned: boolean;
   /** What the server lists now when it differs from the pinned email, or the server's name for the person (cleaned). */
@@ -166,6 +195,8 @@ export interface ChangedKey {
   identity: core.PublicIdentity;
   /** The email the server lists with the new keys (cleaned). */
   newEmail: string;
+  /** What "Trust the new key" pins (`normEmail`, in full): the email pinned before, else the one the server lists now. */
+  pinEmail: string;
 }
 
 /** What a vault's check found. */
@@ -183,8 +214,12 @@ export type Trust =
       name: string;
       signer?: SignerView;
       rejoin: boolean;
-      /** A key replaced without a signature (an app from before signing) on a vault already accepted. */
+      /** A new key on a vault already accepted but never seen signed (unsigned, or signed for the first time). */
       replaced: boolean;
+      /** The account held this vault with its own key wrap (`consent.own`): a personal vault now sealed by someone else. */
+      own: boolean;
+      /** The key id of the key shown (accepting an unsigned vault names it; the popup shows it). */
+      keyId: string;
       acceptable: boolean;
       /**
        * What accepting must name ("" when not acceptable): `consentToken` of exactly what was shown (the key id and
@@ -229,12 +264,27 @@ export interface TrustMemory {
   /** Why `missing` is set: "device" = the first signed sync on a browser with no earlier offline copy (M1); absent = lost key pins. */
   missingWhy?: "device";
   /**
-   * The identity hash of a signing identity this browser made and is uploading (`PUT /account/identity`), kept until
-   * the server lists an identity: if that one opens to this hash, this browser created it even though the answer to the
-   * upload was lost (cross-client review B; the server can't make a record that opens under the account key).
+   * The identity hashes of signing identities this browser made and uploaded (`PUT /account/identity`, newest last, at
+   * most `MAX_PENDING`), kept until the key pins with the account's own identity and `grandfathered` are stored: if the
+   * identity the server lists opens to one of them, this browser created it even though the answer to the upload was
+   * lost (cross-client review B; the server can't make a record that opens under the account key).
    */
-  pendingIdentity?: string;
+  pendingIdentities?: string[];
+  /**
+   * The vault ids grandfathering may cover, recorded once when this browser first made a signing identity (cross-client
+   * rule 6): the vaults its offline copy from an earlier session showed as usable then. Cleared with `pendingIdentities`.
+   */
+  candidates?: string[];
+  /**
+   * Accepted (or waiting) shared vaults missing from the last verified sync, not yet confirmed gone (cross-client rule 3):
+   * per vault id, the trusted roster version to remember when leaving and whether it was accepted (`leave`: tombstone
+   * it; else only forget it). Confirmed by a second verified sync without it, or a 403/404 for its rosters.
+   */
+  gone?: Record<string, { roster: number; leave: boolean }>;
 }
+
+/** At most this many identity hashes made here are remembered (`pendingIdentities`). */
+export const MAX_PENDING = 8;
 
 export const emptyMemory = (userId: string): TrustMemory => ({ userId, pinsSeq: 0, pinsSealed: null, pinsDirty: false, rosters: {}, signed: [] });
 
@@ -255,8 +305,28 @@ export function readMemory(v: unknown, userId: string): TrustMemory | null {
     signed: Array.isArray(m.signed) ? m.signed.filter((s): s is string => typeof s === "string") : [],
     ...(Array.isArray(m.missing) ? { missing: m.missing.filter((s): s is string => typeof s === "string") } : {}),
     ...(m.missingWhy === "device" ? { missingWhy: "device" as const } : {}),
-    ...(typeof m.pendingIdentity === "string" ? { pendingIdentity: m.pendingIdentity } : {}),
+    ...pendingOf(m),
+    ...(Array.isArray(m.candidates) ? { candidates: m.candidates.filter((s): s is string => typeof s === "string") } : {}),
+    ...goneOf(m.gone),
   };
+}
+
+/** `pendingIdentities`, also from a record of an extension from before (one `pendingIdentity`). */
+function pendingOf(m: Partial<TrustMemory> & { pendingIdentity?: unknown }): { pendingIdentities?: string[] } {
+  const list = [...(typeof m.pendingIdentity === "string" ? [m.pendingIdentity] : []), ...(Array.isArray(m.pendingIdentities) ? m.pendingIdentities : [])].filter(
+    (s): s is string => typeof s === "string",
+  );
+  return list.length ? { pendingIdentities: [...new Set(list)].slice(-MAX_PENDING) } : {};
+}
+
+function goneOf(v: unknown): { gone?: TrustMemory["gone"] } {
+  if (!v || typeof v !== "object") return {};
+  const gone: NonNullable<TrustMemory["gone"]> = {};
+  for (const [id, g] of Object.entries(v as Record<string, unknown>)) {
+    const x = g as { roster?: unknown; leave?: unknown } | null;
+    if (x && typeof x === "object" && whole(x.roster) !== null) gone[id] = { roster: whole(x.roster)!, leave: x.leave === true };
+  }
+  return Object.keys(gone).length ? { gone } : {};
 }
 
 /** Whether the browser has seen anything signed for the account (then checks run even if the server stops listing `signed_sharing`). */
@@ -300,7 +370,8 @@ export function mergeMemory(stored: TrustMemory | null, ours: TrustMemory, merge
   const editedMeanwhile = basis !== undefined && stored.pinsDirty && stored.pinsSealed !== null && ours.pinsSealed !== null && stored.pinsSealed !== basis && stored.pinsSealed !== ours.pinsSealed;
   if (editedMeanwhile && mergePins) pins = storedHigher ? mergePins(stored, ours) : mergePins(ours, stored);
   else if (storedHigher) pins = ours.pinsDirty && ours.pinsSealed !== null && mergePins ? mergePins(stored, ours) : stored;
-  // `missing` is this browser's own state: ours (the latest check's).
+  // `missing`, `gone`, the identities made here and the grandfathering candidates are this browser's own state: ours
+  // (the latest check's; `ensureIdentity` keeps a new identity's hash in both before it uploads it).
   return {
     userId: ours.userId,
     pinsSeq: pins.pinsSeq,
@@ -309,8 +380,9 @@ export function mergeMemory(stored: TrustMemory | null, ours: TrustMemory, merge
     rosters,
     signed,
     ...(ours.missing ? { missing: ours.missing, ...(ours.missingWhy ? { missingWhy: ours.missingWhy } : {}) } : {}),
-    // This browser's own state too: ours (`ensureIdentity` keeps it in both while an upload is on its way).
-    ...(ours.pendingIdentity ? { pendingIdentity: ours.pendingIdentity } : {}),
+    ...(ours.pendingIdentities?.length ? { pendingIdentities: ours.pendingIdentities } : {}),
+    ...(ours.candidates ? { candidates: ours.candidates } : {}),
+    ...(ours.gone && Object.keys(ours.gone).length ? { gone: ours.gone } : {}),
   };
 }
 
@@ -385,18 +457,31 @@ export const pinsDigest = (pins: core.KeyPins | null) => sha256(JSON.stringify(p
  * The version of these checks. Part of every stamp (review L2): a verdict kept by an older version of the extension is
  * checked again rather than reused offline. Raise it whenever a check changes what it decides.
  */
-export const CHECKS_VERSION = 4;
+export const CHECKS_VERSION = 5;
 
 /** The stamp of a verdict: the row and everything else it depends on (pins, roster memory, paused, own identity, the checks' version). */
 export const contextStamp = (row: SignedVaultRow, c: StampContext, version = CHECKS_VERSION) => sha256(JSON.stringify([version, rowStamp(row), c.pins, c.remembered, c.seenSigned, c.paused, c.me]));
 
 /**
  * What accepting a waiting vault names (review L1): a digest of exactly what the popup showed: the vault, its role, key
- * id and epoch, the signer's identity hash (null: unsigned), the trusted roster's hash (null: none) and the kind of
- * consent. A row that changed in any of these since gets another token, so it is never accepted in the shown one's place.
+ * id and epoch, the signer's identity hash (null: unsigned) and the email shown for them, whether that email is the
+ * pinned one (cross-client rule 4: accepting pins exactly that email), the trusted roster's hash (null: none) and the
+ * kind of consent. A row that changed in any of these since gets another token, so it is never accepted in the shown
+ * one's place.
  */
-export const consentToken = (c: { vaultId: string; role: string; keyId: string; epoch: number; signer: string | null; roster: string | null; replaced: boolean; rejoin: boolean }) =>
-  sha256(JSON.stringify(["passauth/consent/v1", c.vaultId, c.role, c.keyId, c.epoch, c.signer, c.roster, c.replaced, c.rejoin]));
+export const consentToken = (c: {
+  vaultId: string;
+  role: string;
+  keyId: string;
+  epoch: number;
+  signer: string | null;
+  email: string | null;
+  pinned: boolean;
+  roster: string | null;
+  replaced: boolean;
+  rejoin: boolean;
+  own: boolean;
+}) => sha256(JSON.stringify(["passauth/consent/v2", c.vaultId, c.role, c.keyId, c.epoch, c.signer, c.email, c.pinned, c.roster, c.replaced, c.rejoin, c.own]));
 
 /** The error code the core threw (its message), for logs. */
 export const coreCode = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -438,12 +523,14 @@ export async function collectRosters(after: number, page: (after: number) => Pro
 function signerView(share: ShareInfo, info: core.IdentityInfo, status: string, pinned: core.KeyPin | undefined): SignerView {
   const listed = showEmail(share.signer.email);
   const name = cleanText(share.signer.name);
-  const pinnedEmail = status === "match" || status === "upgraded" ? showEmail(pinned?.email) : "";
+  const pinnedFull = status === "match" || status === "upgraded" ? normEmail(pinned?.email) : "";
+  const pinnedEmail = cleanText(pinnedFull);
   const email = pinnedEmail || listed;
-  const listedAs = pinnedEmail && listed && !sameEmail(pinnedEmail, listed) ? listed : name && name !== email ? name : undefined;
+  const listedAs = pinnedEmail && listed && !sameEmail(pinnedFull, share.signer.email) ? listed : name && name !== email ? name : undefined;
   return {
     userId: share.signer.user_id,
     email,
+    emailFull: pinnedFull || normEmail(share.signer.email),
     pinned: !!pinnedEmail,
     ...(listedAs ? { listedAs } : {}),
     deleted: share.signer_deleted,
@@ -498,6 +585,12 @@ export interface VaultCheckInput {
   accept?: string;
   /** This account's trust memory is missing (identity without key pins): unsigned vaults it has may be accepted here. */
   memoryMissing?: boolean;
+  /**
+   * This browser hasn't finished the account's first signed sync yet (the server hasn't proven it signs, the identity
+   * state is unknown, or the key pins have no `grandfathered` list): an unsigned sealed vault needing consent is held
+   * ("still checking"), neither acceptable nor declinable (cross-client rule 2).
+   */
+  holdUnsigned?: boolean;
 }
 
 export interface VaultCheck {
@@ -536,6 +629,9 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
 
     // (b) The member roster chain from the one trusted last, ending exactly at the row's.
     let trusted: string | null = null;
+    // When a chain was fetched: the hash of every roster in it (and of the one it started from), so the account's pinned
+    // highest roster must be in it with its pinned hash (round 4 `chain_hashes`).
+    let chain: Record<string, string> | null = null;
     const head = core.rosterHead(row.id, input.remembered, latest);
     if (head.status === "same") trusted = input.remembered;
     else if (head.status === "fetch" && latest !== null) {
@@ -549,7 +645,14 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
       // Up to the version the row names (a newer one may have been written since): it must be among them.
       const at = newer.indexOf(latest);
       if (at < 0) return refuse("roster not served");
-      trusted = core.verifyRosterChain(row.id, input.remembered, newer.slice(0, at + 1), latest);
+      const checked = newer.slice(0, at + 1);
+      trusted = core.verifyRosterChain(row.id, input.remembered, checked, latest);
+      chain = {};
+      for (const r of input.remembered !== null ? [input.remembered, ...checked] : checked) {
+        const v = rosterVersion(r);
+        if (v === null) return refuse("malformed roster");
+        chain[String(v)] = core.rosterHash(r);
+      }
     }
     const version = trusted !== null ? rosterVersion(trusted) : null;
     if (trusted !== null) {
@@ -565,7 +668,7 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
     // (c) The share of a vault someone shared.
     let view: SignerView | undefined;
     let signerHash: string | null = null;
-    let signerPin: { identity: core.PublicIdentity; email: string } | null = null;
+    let signerPin: { identity: core.PublicIdentity; email: string; verified: boolean } | null = null;
     const signedShare = sealed && share !== null;
     if (sealed && share) {
       const signer = publicOf(share.signer);
@@ -574,8 +677,17 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
       const status = core.pinCheck(input.pins, signer, share.signer.email);
       if (status === "changed" || status === "email_conflict") {
         // changed: the email pinned for the person; email_conflict: the email as pinned for the account it is known under.
-        const known = status === "changed" ? showEmail(pinned?.email) : showEmail(input.pins?.pins.find((p) => sameEmail(p.email, share.signer.email))?.email ?? share.signer.email);
-        const changed: ChangedKey = { kind: status, userId: signer.user_id, email: known, fingerprint: info.fingerprint, identity: signer, newEmail: showEmail(share.signer.email) };
+        const knownFull = status === "changed" ? normEmail(pinned?.email) : normEmail(input.pins?.pins.find((p) => sameEmail(p.email, share.signer.email))?.email ?? share.signer.email);
+        const known = cleanText(knownFull);
+        const changed: ChangedKey = {
+          kind: status,
+          userId: signer.user_id,
+          email: known,
+          fingerprint: info.fingerprint,
+          identity: signer,
+          newEmail: showEmail(share.signer.email),
+          pinEmail: knownFull || normEmail(share.signer.email),
+        };
         return refuse(status, status === "changed" ? changedText(known) : emailConflictText(known), changed);
       }
       core.verifyShare(row.id, me, row.role, epoch, row.wrapped_key, signer, share.signature);
@@ -585,7 +697,10 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
       if (role !== "owner" && role !== "admin") return refuse("signer_not_manager");
       view = signerView(share, info, status, pinned);
       signerHash = info.hash;
-      if (status === "new" || status === "upgraded") signerPin = { identity: signer, email: status === "upgraded" ? showEmail(pinned?.email) || view.email : view.email };
+      // Pinned with exactly the email shown (rule 4): the server's for a new person; an upgraded pin (the same X25519
+      // key, now cross-signed) keeps the email pinned before and whether it was verified.
+      if (status === "new") signerPin = { identity: signer, email: view.emailFull, verified: false };
+      else if (status === "upgraded") signerPin = { identity: signer, email: view.emailFull, verified: pinned?.verified === true };
     } else if (sealed && input.seenSigned) {
       // Seen signed in this browser: an unsigned share now is a rollback (pinsAdmit catches it from the account's pins).
       return refuse("downgraded");
@@ -600,16 +715,19 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
       key: current,
       roster_version: version,
       roster_hash: trusted !== null ? core.rosterHash(trusted) : null,
+      ...(chain ? { chain_hashes: chain } : {}),
       signed_share: signedShare,
       paused: input.paused,
     };
     const observed = core.pinsObserve(input.pins, observation);
     const adm = observed.admission;
     if (adm.status === "refused") return refuse(adm.reason, adm.reason === "paused" ? PAUSED_TEXT : refusedText(adm.reason));
-    const withSigner = (pins: core.KeyPins) => (signerPin ? core.pinSet(pins, signerPin.identity, signerPin.email, false, input.now) : pins);
+    const withSigner = (pins: core.KeyPins) => (signerPin ? core.pinSet(pins, signerPin.identity, signerPin.email, signerPin.verified, input.now) : pins);
     if (adm.status === "consent") {
-      // What the user may accept here: a signed share (from the signer shown), a key replaced by an app that doesn't sign
-      // yet, or, while this account's trust memory is missing, an unsigned vault it had (both: the key shown).
+      // Before the account's first signed sync finished here, an unsigned vault isn't made a consent (rule 2): held.
+      if (!signedShare && input.holdUnsigned) return refuse("checking", STILL_CHECKING_TEXT);
+      // What the user may accept here: a signed share (from the signer shown), a new key on a vault never seen signed,
+      // or, while this account's trust memory is missing, an unsigned vault it had (unsigned: by the key id shown).
       const unsignedOk = !signedShare && (adm.replaced || input.memoryMissing === true);
       const token =
         (signedShare && view) || unsignedOk
@@ -619,22 +737,25 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
               keyId: current.key_id,
               epoch,
               signer: signedShare ? signerHash : null,
+              email: signedShare && view ? view.emailFull : null,
+              pinned: !!view?.pinned,
               roster: trusted !== null ? core.rosterHash(trusted) : null,
               replaced: adm.replaced,
               rejoin: adm.rejoin,
+              own: adm.own,
             })
           : "";
       if (token && input.accept !== undefined && input.accept === token) {
         let pins: core.KeyPins;
         try {
-          // Accepting = pinning its key (clears a tombstone when the re-share qualifies), then what the row shows
-          // (roster version and hash), its signer and its roster.
-          const accepted = core.pinsSetEpoch(input.pins, row.id, current, signedShare ? version : null);
-          const again = core.pinsObserve(accepted, observation);
-          if (again.admission.status !== "ok") return refuse(again.admission.status === "refused" ? again.admission.reason : "consent");
-          pins = withSigner(again.pins);
+          // Accepting = `pinsAccept` of the same observation (round 4: the key, the roster's version and hash, `own`;
+          // clears a tombstone when the re-share qualifies and marks the re-join), then the signer with the email shown.
+          const accepted = core.pinsAccept(input.pins, observation);
+          if (core.pinsAdmit(accepted, observation).status !== "ok") return refuse("consent");
+          pins = withSigner(accepted);
         } catch (e) {
-          return refuse(coreCode(e) === "rollback" ? "left" : coreCode(e));
+          const code = coreCode(e);
+          return refuse(code === "rollback" ? (input.pins?.left?.[row.id] ? "left" : "older") : code);
         }
         const trust: Trust = signedShare && view ? { state: "ok", signer: view } : { state: "unsigned" };
         return { trust, pins, roster: trusted, signed: signedShare };
@@ -647,7 +768,7 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
         name = "";
       }
       return {
-        trust: { state: "waiting", name, ...(view ? { signer: view } : {}), rejoin: adm.rejoin, replaced: adm.replaced, acceptable: !!token, token },
+        trust: { state: "waiting", name, ...(view ? { signer: view } : {}), rejoin: adm.rejoin, replaced: adm.replaced, own: adm.own, keyId: current.key_id, acceptable: !!token, token },
         pins: input.pins,
         roster: null,
         signed: false,

@@ -142,8 +142,10 @@ export interface SharingNotice {
     changed?: { kind: "changed" | "email_conflict"; userId: string; email: string; fingerprint: string; newEmail: string };
   }[];
   /**
-   * Shared vaults the server added to this account that it never accepted: not used until the user accepts (signed
-   * ones, here or in the web vault) or declines them (in the web vault).
+   * Shared vaults the server added to this account that it never accepted, or whose key was replaced on a vault never
+   * seen signed: not used until the user accepts them (here or in the web vault). Only signed ones (with a `signer`) can
+   * be declined (in the web vault); unsigned ones are accepted by the key id shown where that is allowed, else they stay
+   * locked ("Ask the vault's owner to sign this vault").
    */
   waiting: {
     vaultId: string;
@@ -151,10 +153,14 @@ export interface SharingNotice {
     text: string;
     signer?: VaultSigner;
     acceptable: boolean;
-    /** What "sharing:accept" must send: the signer's fingerprint shown, or the key id of an unsigned vault (accepting exactly what was shown). */
+    /** What "sharing:accept" must send: the consent token of exactly what was shown (signer, email, key id, roster, role). */
     token: string;
-    /** A key replaced without a signature: Decline = leave it locked (nothing to do in the web vault). */
+    /** A new key on a vault already accepted but never seen signed: "Not now" keeps it locked (no Decline). */
     replaced: boolean;
+    /** The account held this vault with its own key wrap (the text carries the extra warning). */
+    own?: boolean;
+    /** The key id of an unsigned vault that may be accepted: shown, and what accepting names. */
+    keyId?: string;
     note?: string;
   }[];
   /** Account-wide warnings (sharing paused on this device, an older list of known keys from the server). */

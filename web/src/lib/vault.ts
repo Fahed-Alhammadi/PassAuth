@@ -59,6 +59,8 @@ import * as signed from "./signed-sharing";
 import { RaceError, ReviewNeededError, type Confirmation, type Consent, type InvitationTrust, type KeyChange, type ReviewView, type VaultTrust, type Verdicts } from "./signed-sharing";
 import {
   ACCOUNT_MISMATCH,
+  ASK_OWNER_TO_SIGN,
+  KEY_REPLACEMENTS_LIMIT,
   MEMBERS_SIGNED_UPDATE,
   cleanText,
   identityOf,
@@ -1935,7 +1937,8 @@ export async function acceptInvitation(vaultId: string, shown?: InvitationTrust)
 export async function declineInvitation(vaultId: string) {
   if (signedSharingOn()) {
     const trust = state.invitations.find((i) => i.vaultId === vaultId)?.trust;
-    signed.markLeft(vaultId, trust?.kind === "signed" ? trust.rosterVersion : 0);
+    // Not when the id is a vault in use here (an invitation listed under it must not make the account give it up).
+    signed.markLeft(vaultId, trust?.kind === "signed" ? trust.rosterVersion : 0, { decline: true });
   }
   try {
     await api(`/vaults/${vaultId}/invitation`, { method: "DELETE" });
@@ -1959,10 +1962,17 @@ export async function acceptConsent(vaultId: string, shown: Consent) {
   await sync();
 }
 
-/** Decline a vault the server lists that the account never accepted: tombstoned here, and the membership is left. */
+/**
+ * Decline a vault the server lists that the account never accepted: tombstoned here, and the membership is left. Only a
+ * signed one that names its signer (rule 1: a server could make a real vault look like an unsigned one waiting here),
+ * and never a vault in use here.
+ */
 export async function declineConsent(vaultId: string) {
   const c = state.consents.find((x) => x.id === vaultId);
-  signed.markLeft(vaultId, c?.consent.rosterVersion ?? 0);
+  if (!c) throw new Error("This vault is no longer waiting for you. Reload the page.");
+  if (!signed.consentDeclinable(c.consent)) throw new Error(`This vault isn't signed, so it can't be declined here. ${ASK_OWNER_TO_SIGN}`);
+  if (state.vaults.some((v) => v.id === vaultId)) throw new Error("This vault is in use now, so it wasn't declined. Reload the page.");
+  signed.markLeft(vaultId, c.consent.rosterVersion ?? 0, { decline: true });
   await signed.flushPins().catch(() => {});
   await api(`/vaults/${vaultId}/members/${state.userId}`, { method: "DELETE" }).catch(() => {});
   await sync();
@@ -2166,6 +2176,8 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
         // An item was edited, or the roster moved, while this was being sent: nothing was changed, so sync and redo it.
         if (signing && attempt < ROTATION_TRIES && (revisionConflict(e) || hasErrorCode(e, "member_roster_changed"))) continue;
         if (hasErrorCode(e, "update_required")) throw new Error(MEMBERS_SIGNED_UPDATE);
+        // 30 key replacements per vault and hour (signed sharing's retired key ids stay bounded).
+        if (hasErrorCode(e, "rate_limited") || (e instanceof ApiError && e.status === 429)) throw new Error(KEY_REPLACEMENTS_LIMIT);
         if (!keyChanged(e)) throw e;
         // Someone else replaced the key after our sync, and nothing was changed. Show the vault as it is now and let
         // the user decide again. Their new key also finishes a removal this browser still had to secure.

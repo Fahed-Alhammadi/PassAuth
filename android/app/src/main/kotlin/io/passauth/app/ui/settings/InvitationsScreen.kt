@@ -88,8 +88,9 @@ fun InvitationsScreen(ctx: UiCtx, fromVault: Boolean) {
                 Muted("There are no invitations waiting.")
             }
             sharing.consent.forEach { c ->
-                // While the trust memory is missing: Accept, or leave it for later (no Decline: a server could use it to push you out of real vaults).
-                ConsentCard(c, onAccept = { consenting = c to true }, onDecline = { consenting = c to false }, canDecline = !sharing.memoryMissing)
+                // Decline only for a signed vault naming its signer; never while the trust memory is missing
+                // (a server could use it to push you out of real vaults).
+                ConsentCard(c, sharing.missingWhy, onAccept = { consenting = c to true }, onDecline = { consenting = c to false }, canDecline = c.declinable && !sharing.memoryMissing)
             }
             invitations.forEach { inv ->
                 InvitationCard(inv, onAccept = { answering = Answer(inv, true) }, onDecline = { answering = Answer(inv, false) })
@@ -115,7 +116,7 @@ fun InvitationsScreen(ctx: UiCtx, fromVault: Boolean) {
         }
     }
     answering?.let { a -> AnswerSheet(ctx, a) { answering = null } }
-    consenting?.let { (c, accept) -> ConsentSheet(ctx, c, accept) { consenting = null } }
+    consenting?.let { (c, accept) -> ConsentSheet(ctx, c, accept, sharing.missingWhy) { consenting = null } }
 }
 
 private val dateFormat = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
@@ -198,7 +199,7 @@ internal fun SignerBlock(s: SignerView, deleted: Boolean) {
 
 /** A shared vault the account never accepted: shown like an invitation, used only once accepted. */
 @Composable
-private fun ConsentCard(c: ConsentVault, onAccept: () -> Unit, onDecline: () -> Unit, canDecline: Boolean) {
+private fun ConsentCard(c: ConsentVault, missingWhy: String?, onAccept: () -> Unit, onDecline: () -> Unit, canDecline: Boolean) {
     CardSection(null) {
         Column(Modifier.padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.m)) {
@@ -208,18 +209,12 @@ private fun ConsentCard(c: ConsentVault, onAccept: () -> Unit, onDecline: () -> 
                 }
                 RoleBadge(InvitationText.roleLabel(c.role))
             }
-            WarningNote(if (c.replaced) SignedSharing.CONSENT_REPLACED else SignedSharing.CONSENT)
-            val s = c.signer
-            when {
-                s != null -> SignerBlock(s, c.deleted)
-                c.replaced -> {}
-                c.unsignedAllowed -> Muted(SignedSharing.NOT_YET_SIGNED + ": accept it only if you expected it.")
-                else -> WarningNote(SignedSharing.CONSENT_UNSIGNED)
-            }
+            WarningNote(SignedSharing.consentText(c))
+            ConsentDetails(c, missingWhy)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (c.acceptable) Button(onClick = onAccept) { Text("Accept…") }
-                // A replaced key stays locked until accepted (declining it would leave the vault).
-                if (!c.replaced && canDecline) TextButton(
+                // Only a signed vault naming its signer can be declined (never a replaced key or an unsigned vault).
+                if (canDecline) TextButton(
                     onClick = onDecline,
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.heightIn(min = 48.dp),
@@ -229,9 +224,23 @@ private fun ConsentCard(c: ConsentVault, onAccept: () -> Unit, onDecline: () -> 
     }
 }
 
+/** Who signed a vault held for consent (with the fingerprint), or for an unsigned one its key id and what can be done. */
+@Composable
+private fun ConsentDetails(c: ConsentVault, missingWhy: String?) {
+    val s = c.signer
+    when {
+        s != null -> SignerBlock(s, c.deleted)
+        c.acceptable -> {
+            Muted(SignedSharing.unsignedConsentNote(c, missingWhy))
+            if (c.keyId.isNotEmpty()) FingerprintText(SignedSharing.UNSIGNED_KEY_LABEL, c.keyId)
+        }
+        else -> WarningNote(SignedSharing.CONSENT_UNSIGNED)
+    }
+}
+
 /** Accept or decline a vault held for consent, confirmed in a decision sheet. */
 @Composable
-private fun ConsentSheet(ctx: UiCtx, c: ConsentVault, accept: Boolean, close: () -> Unit) {
+private fun ConsentSheet(ctx: UiCtx, c: ConsentVault, accept: Boolean, missingWhy: String?, close: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     fun confirm() {
@@ -244,7 +253,7 @@ private fun ConsentSheet(ctx: UiCtx, c: ConsentVault, accept: Boolean, close: ()
                     ctx.repo.acceptConsent(c)
                     ctx.notify("${c.name} is in your vault now.")
                 } else {
-                    ctx.repo.declineConsent(c.vaultId)
+                    ctx.repo.declineConsent(c)
                     ctx.notify("Declined. PassAuth won't use ${c.name}.")
                 }
                 close()
@@ -270,8 +279,8 @@ private fun ConsentSheet(ctx: UiCtx, c: ConsentVault, accept: Boolean, close: ()
         },
     ) {
         if (accept) {
-            PromptText(if (c.replaced) SignedSharing.CONSENT_REPLACED else SignedSharing.CONSENT)
-            c.signer?.let { SignerBlock(it, c.deleted) }
+            PromptText(SignedSharing.consentText(c))
+            ConsentDetails(c, missingWhy)
         } else {
             PromptText("PassAuth won't use this vault, and you leave it. It comes back only if someone shares it with you again.")
         }
