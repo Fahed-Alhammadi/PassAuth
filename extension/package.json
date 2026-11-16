@@ -2,7 +2,7 @@
   "name": "passauth-extension",
   "private": true,
   "license": "MIT",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "type": "module",
   "packageManager": "pnpm@10.34.9",
   "scripts": {
