@@ -7,6 +7,8 @@
  *
  * Pure (no WASM, no network, no React) and unit-tested in `invitations.test.ts`; `vault.ts` opens the sealed keys.
  */
+import type { InvitationTrust } from "./signed-sharing";
+import { cleanText, listedAs } from "./signing";
 import type { Role, SyncInvitation } from "./types";
 
 /** An invitation as the app shows it. */
@@ -19,9 +21,15 @@ export interface Invitation {
   invitedBy: { id: string; email: string; name: string; publicKey: string } | null;
   /** Unix seconds; null when the server didn't say. */
   invitedAt: number | null;
+  /**
+   * Signed sharing (servers with `signed_sharing`): how the invitation is vouched for. Only a `signed` one can be
+   * accepted; undefined on servers without the feature (accepted as before, after the fingerprint check).
+   */
+  trust?: InvitationTrust;
 }
 
-const text = (v: unknown): string => (typeof v === "string" ? v : "");
+/** Names and emails from the server: one line, no invisible characters, at most 128 characters. */
+const text = (v: unknown): string => cleanText(v);
 
 /**
  * The `invitations` of a `/sync` answer. Servers without the feature send none (an empty list); an entry without a
@@ -55,6 +63,10 @@ export function readInvitations(value: unknown): SyncInvitation[] {
       meta: v.meta,
       invited_by: invitedBy,
       invited_at: typeof v.invited_at === "number" && Number.isFinite(v.invited_at) ? v.invited_at : null,
+      // Signed sharing: checked by `signed-sharing.ts` (the share and roster with the core).
+      ...(typeof v.key_epoch === "number" && Number.isInteger(v.key_epoch) && v.key_epoch >= 0 ? { key_epoch: v.key_epoch } : {}),
+      ...("share" in v ? { share: v.share } : {}),
+      ...(typeof v.member_roster === "string" || v.member_roster === null ? { member_roster: v.member_roster } : {}),
     });
   }
   return out;
@@ -83,8 +95,16 @@ export function openInvitations(list: SyncInvitation[], open: (inv: SyncInvitati
   });
 }
 
-/** Who shared the vault: "Alex Morgan (alex@example.com)", the email alone, or a note when their account is gone. */
+/** The verified signer of a signed invitation, by the email pinned for them (else the share's); null otherwise. */
+const signerLabel = (inv: Invitation): string | null => (inv.trust?.kind === "signed" ? cleanText(inv.trust.signer.label) || null : null);
+
+/**
+ * Who shared the vault. A signed invitation leads with its verified signer (the pinned email); otherwise what the server
+ * says: "Alex Morgan (alex@example.com)", the email alone, or a note when their account is gone.
+ */
 export function sharerName(inv: Invitation): string {
+  const signer = signerLabel(inv);
+  if (signer) return signer;
   const by = inv.invitedBy;
   if (!by) return "Someone whose account was deleted";
   const name = by.name.trim();
@@ -93,10 +113,18 @@ export function sharerName(inv: Invitation): string {
   return name || email || "Someone on this server";
 }
 
-/** The sharer's name alone, for running text ("Ask Alex Morgan to…"). */
+/** The sharer for running text ("Ask Alex Morgan to…"): the verified signer's pinned email first. */
 export function sharerShortName(inv: Invitation): string {
+  const signer = signerLabel(inv);
+  if (signer) return signer;
   const by = inv.invitedBy;
   return by?.name.trim() || by?.email.trim() || "the person who shared it";
+}
+
+/** "listed by your server as <invited_by email>" when a signed invitation's server-listed sharer isn't its verified signer. */
+export function sharerListedAs(inv: Invitation): string | null {
+  const signer = signerLabel(inv);
+  return signer ? listedAs(signer, inv.invitedBy?.email) : null;
 }
 
 /** One quiet line for the vault list while invitations wait; null when there are none. */
@@ -104,7 +132,7 @@ export function invitationNotice(list: Invitation[]): string | null {
   if (list.length === 0) return null;
   if (list.length > 1) return `You have ${list.length} invitations to shared vaults.`;
   const inv = list[0];
-  const who = inv.invitedBy ? sharerShortName(inv) : "Someone";
+  const who = inv.invitedBy || inv.trust?.kind === "signed" ? sharerShortName(inv) : "Someone";
   return `${who} invited you to ${inv.name ? `the shared vault "${inv.name}"` : "a shared vault"}.`;
 }
 

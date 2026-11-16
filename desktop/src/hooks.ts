@@ -6,6 +6,7 @@ import { toast } from "@web/components/ui";
 import { forgetSecrets, type DesktopHooks } from "@web/lib/platform";
 import { EMAIL_KEY, getState, logout, rememberKey, secretKeyKey } from "@web/lib/vault";
 import { secretStore } from "@web/lib/platform";
+import { isTrustMemoryKey } from "@web/lib/signing";
 import { confirmChangeServer, requestChangeServer } from "./Root";
 import { secrets } from "./secrets";
 import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
@@ -29,8 +30,10 @@ export async function changeServer() {
     ...(email ? [secretStore.set(secretKeyKey(email), null), secretStore.set(rememberKey(email), null)] : []),
   ]);
   forgetSecrets();
+  // Signed sharing's trust memory stays: it is kept per server and account (`<server>|<account>`), so another server's
+  // or account's never mixes in, and coming back to this server must not start from a device that remembers nothing.
   Object.keys(localStorage)
-    .filter((k) => k.startsWith("pa."))
+    .filter((k) => k.startsWith("pa.") && !isTrustMemoryKey(k))
     .forEach((k) => localStorage.removeItem(k));
   requestChangeServer();
 }

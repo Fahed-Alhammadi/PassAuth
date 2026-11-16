@@ -187,6 +187,11 @@ export interface SyncVaultRow {
   key_epoch?: number;
   /** Delta sync: goes up with every write into the vault (servers without the `delta_sync` feature omit it). */
   seq?: number;
+  /** Signed sharing (`signed_sharing`): the latest signed member roster's text (null: none) and its version (0: none). */
+  member_roster?: string | null;
+  member_roster_seq?: number;
+  /** Signed sharing: the share signature of a sealed key and its signer, or null (unsigned); read with `readShare`. */
+  share?: unknown;
 }
 
 export interface SyncItemRow {
@@ -214,11 +219,16 @@ export interface SyncInvitation {
   /** Who shared it, with their public key for the fingerprint; null once their account is deleted. */
   invited_by: { id: string; email: string; name: string; public_key: string } | null;
   invited_at: number | null;
+  /** Signed sharing: the vault's key epoch (signed into the share), the share signature (`readShare`) and the latest roster. */
+  key_epoch?: number;
+  share?: unknown;
+  member_roster?: string | null;
 }
 
 export interface SyncResponse {
   revision: number;
-  user: { id: string; email: string; name: string; email_verified: boolean };
+  /** `identity` and `key_pins_seq`: signed sharing (servers with `signed_sharing`), read by `signed-sharing.ts`. */
+  user: { id: string; email: string; name: string; email_verified: boolean; identity?: unknown; key_pins_seq?: unknown };
   bundle: Bundle;
   vaults: SyncVaultRow[];
   items: SyncItemRow[];
@@ -298,7 +308,9 @@ export const isSyncVaultRow = (v: unknown): v is SyncVaultRow =>
   isStr(v.key_kind) &&
   optNumber(v.rotation_pending) &&
   optNumber(v.key_epoch) &&
-  optNumber(v.seq);
+  optNumber(v.seq) &&
+  optString(v.member_roster) &&
+  optNumber(v.member_roster_seq);
 
 /**
  * Runtime check of the /sync shape, so a server/client mismatch fails loudly instead of half-loading: the revision,

@@ -17,6 +17,15 @@
  * and not accepted yet. Their sealed keys are opened only to read the vault's name, then freed; accepting makes the vault
  * a membership and it arrives whole with the next sync.
  *
+ * Signed sharing (servers with `signed_sharing`; `signed-sharing.ts`): every sync first checks every vault row and
+ * invitation (member roster chain, key commitment, key epoch pins, share signature against the signer's pinned
+ * identity, admission); a vault that fails is never opened and is listed in `State.blockedVaults` instead, and a sealed
+ * vault the account never accepted waits in `State.consents`. The checks are sticky once the server showed it signs
+ * (its config lists the feature, or this device saw signed state for the account); while the server's features are
+ * unknown they run without writing anything sticky, and a 404 on the identity turns them off. Sharing, key replacement and re-signing
+ * are signed, after a member review the user confirms when the vault has no trusted roster yet or people are missing.
+ * Servers without the feature work as before.
+ *
  * Emergency access (`emergency-client.ts`) wraps the keys of the account's personal vaults for its emergency contacts.
  * After anything that can leave a personal vault without those wraps (unlocking, a new vault, a replaced key), the hook
  * set with `onVaultKeysChange` runs once the vault shows the change.
@@ -46,6 +55,22 @@ import { checkCode, secretKeyToKeep, type CodeOutcome } from "./device-login";
 import { afterWrite, applyOwnWrite, knownSeq, mergeSync, noticeAction, sameCiphertext, vaultKeyChanged, type Merged, type OwnWrite, type Snapshot, type SyncNotice } from "./delta";
 import { readVersion, readVersions, restoredItem, type ItemVersion } from "./history";
 import { openInvitations, type Invitation } from "./invitations";
+import * as signed from "./signed-sharing";
+import { RaceError, ReviewNeededError, type Confirmation, type Consent, type InvitationTrust, type KeyChange, type ReviewView, type VaultTrust, type Verdicts } from "./signed-sharing";
+import {
+  ACCOUNT_MISMATCH,
+  MEMBERS_SIGNED_UPDATE,
+  cleanText,
+  identityOf,
+  membersDifferText,
+  namesFromRows,
+  readIdentity,
+  readMemberDiff,
+  readMembersAnswer,
+  type MembersAnswer,
+  type PublicIdentity,
+  type SignedMemberRow,
+} from "./signing";
 import { secretStore } from "./platform";
 import { server } from "./server";
 import { encryptedSizeBound } from "./sizes";
@@ -84,6 +109,31 @@ export interface Vault {
   key: core.VaultKey;
   /** Epoch of `key` (from the same /sync); undefined with servers that don't have key epochs. */
   epoch?: number;
+  /** Signed sharing: how the key is vouched for ("Not yet signed" for shares from before); undefined without the feature. */
+  trust?: VaultTrust;
+  /** Signed sharing: the vault's member roster version (0: none yet, so its owners and admins are asked to sign it). */
+  rosterSeq: number;
+}
+
+/** A vault signed sharing refused: never opened, filled from, saved to or shown (only this notice). */
+export interface BlockedVault {
+  id: string;
+  role: Role;
+  reason: string;
+  /** Someone whose keys changed: the vault can be used again once the user trusts their new key. */
+  changed?: KeyChange;
+}
+
+/**
+ * A sealed vault the server lists for the account that it never accepted (signed sharing): never opened beyond its name,
+ * shown like an invitation. Accepting needs a signed one; declining leaves it for good.
+ */
+export interface ConsentVault {
+  id: string;
+  role: Role;
+  /** The vault's name (cleaned); null when it can't be read. */
+  name: string | null;
+  consent: Consent;
 }
 
 export interface State {
@@ -104,6 +154,14 @@ export interface State {
   policyViolations: Violation[];
   /** Emergency access: why PassAuth left the contacts' keys alone (the server's list of them looked rolled back). */
   emergencyNotice: string | null;
+  /** Signed sharing: vaults that failed their check (empty while locked or without the feature). */
+  blockedVaults: BlockedVault[];
+  /** Signed sharing: sealed vaults the server lists that the account never accepted (Accept / Decline, like invitations). */
+  consents: ConsentVault[];
+  /** Signed sharing: people whose keys changed since this account pinned them (from vaults and invitations). */
+  keyChanges: KeyChange[];
+  /** Signed sharing: sharing paused on this device, or the server's list of known keys looked rolled back. */
+  signingNotice: string | null;
 }
 
 const initial: State = {
@@ -120,6 +178,10 @@ const initial: State = {
   invitations: [],
   policyViolations: [],
   emergencyNotice: null,
+  blockedVaults: [],
+  consents: [],
+  keyChanges: [],
+  signingNotice: null,
 };
 let state: State = initial;
 let account: core.Account | null = null;
@@ -145,6 +207,10 @@ let decrypted = new Map<string, { row: SyncItemRow; entry: VaultEntry | null }>(
 let openedFrom = new Map<string, SyncVaultRow>();
 /** Vault names read from invitations, by vault, sealed key and encrypted name (null: it couldn't be opened). */
 let invitationNames = new Map<string, string | null>();
+/** Signed sharing: the last sync's verdicts (null without the checks); own writes shown without a sync reuse them. */
+let verdicts: Verdicts | null = null;
+/** Signed sharing: whether the last sync ran the checks (the server signs, its features are unknown, or they're sticky). */
+let checksOn = false;
 const subs = new Set<() => void>();
 
 function set(patch: Partial<State>) {
@@ -371,7 +437,11 @@ function dropKeys() {
   decrypted = new Map();
   openedFrom = new Map();
   invitationNames = new Map();
-  if (old.length || state.items.length || state.invitations.length) set({ vaults: [], items: [], invitations: [] });
+  verdicts = null;
+  checksOn = false;
+  signed.endSigning();
+  if (old.length || state.items.length || state.invitations.length || state.blockedVaults.length || state.consents.length)
+    set({ vaults: [], items: [], invitations: [], blockedVaults: [], consents: [], keyChanges: [], signingNotice: null });
   old.forEach((v) => v.key.free());
 }
 
@@ -779,7 +849,7 @@ export async function reauth(password: string): Promise<string> {
 /** Lock this tab; `everywhere` also locks the vault in this browser's other tabs. */
 export function lock(everywhere = true) {
   dropKeys();
-  set({ status: "locked", vaults: [], items: [], revision: 0, warnings: [], invitations: [], emergencyNotice: null });
+  set({ status: "locked", vaults: [], items: [], revision: 0, warnings: [], invitations: [], emergencyNotice: null, blockedVaults: [], consents: [], keyChanges: [], signingNotice: null });
   if (everywhere) channel?.postMessage({ type: "lock" });
 }
 
@@ -842,6 +912,32 @@ export function sync(): Promise<void> {
 
 const UNEXPECTED_SYNC = "The server sent an unexpected response. Reload the page to try again.";
 
+/**
+ * Whether signed sharing's checks run for this sync answer. "proven": the server lists `signed_sharing`, or the checks
+ * are sticky (this device remembers signed state for the account, or the answer carries any identity, share, roster or
+ * key pins). "unproven": its features are unknown (a missing or failing `/api/config` is never "off"): the checks run,
+ * but nothing that keeps them on for good is written until the server shows it signs (review M-A); a server whose
+ * vault rows carry no key epoch predates signing (and key epochs), so it is "off". "off": the server says it doesn't.
+ */
+function decideChecks(acct: core.Account, snap: Snapshot): "proven" | "unproven" | "off" {
+  const config = knownPublicConfig();
+  if ((config !== null && hasFeature(config, "signed_sharing")) || signed.checksRemembered(acct, snap)) return "proven";
+  if (config !== null) return "off";
+  if (snap.vaults.some((v) => typeof v.key_epoch !== "number")) return "off";
+  return "unproven";
+}
+
+/** Whether the last sync ran the signed sharing checks: then every vault is checked and every change signed. */
+function signedSharingOn(): boolean {
+  return checksOn;
+}
+
+/** The account's `/sync` `user` again (its signing identity, after another device made it first), without merging anything. */
+async function refetchUser(): Promise<unknown> {
+  const data = await api(synced?.cursor ? `/sync?since=${encodeURIComponent(synced.cursor)}` : "/sync");
+  return isSyncResponse(data) ? data.user : null;
+}
+
 async function doSync() {
   if (!account) return;
   const gen = generation;
@@ -854,9 +950,29 @@ async function doSync() {
   // A delta this client can't use (malformed, or about data it no longer has): fetch everything once.
   if (merged === "full") merged = await fetchSync(null, gen);
   if (!merged || merged === "full" || gen !== generation || !account) return;
-  if (delta) synced = merged.snapshot;
-  bundle = merged.snapshot.bundle;
-  materialize(merged.snapshot);
+  const snap = merged.snapshot;
+  // "Me" is the account the core unlocked: an answer for another account is never used.
+  if (snap.user.id !== signed.accountIdOf(account)) throw new Error(ACCOUNT_MISMATCH);
+  // Signed sharing: check every vault and invitation before anything of them is used.
+  let checked: Verdicts | null = null;
+  const mode = decideChecks(account, snap);
+  let on = mode !== "off";
+  if (on) {
+    // False: the server answered that it doesn't sign (404 on the identity) before it ever showed it does.
+    on = await signed.prepareSigning(account, snap.user, refetchUser, mode === "proven");
+    if (gen !== generation || !account) return;
+  }
+  if (on) {
+    checked = await signed.verifySnapshot(snap.vaults, snap.invitations);
+    // Never shown unchecked: without verdicts nothing of this answer is used.
+    if (gen !== generation || !account || !checked) return;
+  }
+  checksOn = on;
+  verdicts = checked;
+  if (delta) synced = snap;
+  bundle = snap.bundle;
+  materialize(snap);
+  if (checked) void signed.flushPins().catch(() => {});
   // Not expected: the answer was older than an own write already shown. Ask again rather than keep it stale.
   if (merged.behind) sync().catch(() => {});
 }
@@ -907,7 +1023,25 @@ function materialize(snap: Snapshot) {
   const kept = new Set<core.VaultKey>();
   const opened = new Map<string, SyncVaultRow>();
   const vaults: Vault[] = [];
+  const blocked: BlockedVault[] = [];
+  const consents: ConsentVault[] = [];
   for (const v of snap.vaults) {
+    const verdict = verdicts?.vaults.get(v.id);
+    if (verdicts && verdict?.status === "consent") {
+      // Never accepted: only its name is read (the key opened for that alone and freed), nothing else is used.
+      consents.push({ id: v.id, role: v.role, name: consentName(acct, v), consent: verdict.consent });
+      continue;
+    }
+    if (verdicts && verdict?.status !== "ok") {
+      // Not verified: never opened, so none of its items is decrypted, filled, saved to or shown.
+      blocked.push({
+        id: v.id,
+        role: v.role,
+        reason: verdict?.status === "refused" ? verdict.reason : signed.CHECK_LATER,
+        ...(verdict?.status === "refused" && verdict.changed ? { changed: verdict.changed } : {}),
+      });
+      continue;
+    }
     const old = previous.get(v.id);
     const from = openedFrom.get(v.id);
     let key: core.VaultKey;
@@ -916,7 +1050,7 @@ function materialize(snap: Snapshot) {
       kept.add(key);
     } else {
       try {
-        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind);
+        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, typeof v.key_epoch === "number" ? v.key_epoch : 0, signed.legacyWrapAllowed(v.id));
       } catch {
         warnings.push(`One vault couldn't be opened: its key may have been replaced. Ask the person who manages it to share it with you again.`);
         continue;
@@ -929,9 +1063,20 @@ function materialize(snap: Snapshot) {
     } catch {
       warnings.push(`Couldn't read the name of one of your vaults.`);
     }
-    vaults.push({ id: v.id, name, role: v.role, kind: v.key_kind, key, epoch: typeof v.key_epoch === "number" ? v.key_epoch : undefined });
+    vaults.push({
+      id: v.id,
+      name,
+      role: v.role,
+      kind: v.key_kind,
+      key,
+      epoch: typeof v.key_epoch === "number" ? v.key_epoch : undefined,
+      rosterSeq: verdict?.status === "ok" ? verdict.rosterSeq : typeof v.member_roster_seq === "number" ? v.member_roster_seq : 0,
+      ...(verdict?.status === "ok" ? { trust: verdict.trust } : {}),
+    });
   }
   const byId = new Map(vaults.map((v) => [v.id, v]));
+  // The vaults this device used: grandfathering at a later first signed sync covers only these (review M-B).
+  signed.noteVaultsSeen(acct, [...byId.keys()]);
   const copies = new Map<string, { row: SyncItemRow; entry: VaultEntry | null }>();
   const items: VaultEntry[] = [];
   const failed = new Map<string, number>();
@@ -966,8 +1111,16 @@ function materialize(snap: Snapshot) {
     if (name === undefined) name = invitationName(acct, inv.vault_id, inv.wrapped_key, inv.meta);
     names.set(cacheKey, name);
     return name;
+  }).map((inv) => {
+    const trust = verdicts?.invitations.get(inv.vaultId);
+    // Emails as compared and shown (`normalizeEmail`: a look-alike domain shows in punycode).
+    const shown = inv.invitedBy ? { ...inv, invitedBy: { ...inv.invitedBy, email: signed.emailText(inv.invitedBy.email) } } : inv;
+    return verdicts ? { ...shown, trust: trust ?? { kind: "refused" as const, reason: signed.CHECK_LATER } } : shown;
   });
   invitationNames = names;
+  const changes = new Map<string, KeyChange>();
+  for (const b of blocked) if (b.changed) changes.set(b.changed.identity.user_id, b.changed);
+  for (const inv of invitations) if (inv.trust?.kind === "refused" && inv.trust.changed) changes.set(inv.trust.changed.identity.user_id, inv.trust.changed);
   set({
     status: "unlocked",
     vaults,
@@ -975,6 +1128,10 @@ function materialize(snap: Snapshot) {
     revision: snap.revision,
     warnings,
     invitations,
+    blockedVaults: blocked,
+    consents,
+    keyChanges: [...changes.values()],
+    signingNotice: verdicts ? (signed.signingProblem() ?? signed.pinsNotice()) : null,
     name: snap.user.name,
     emailVerified: snap.user.email_verified,
     pendingRotations: [
@@ -1008,18 +1165,23 @@ function vaultsMoved(before: readonly Vault[], after: readonly Vault[]): boolean
 function invitationName(acct: core.Account, vaultId: string, sealed: string, meta: string): string | null {
   let key: core.VaultKey;
   try {
-    key = acct.openVaultKey(vaultId, sealed, "sealed");
+    key = acct.openVaultKey(vaultId, sealed, "sealed", 0, false);
   } catch {
     return null;
   }
   try {
-    const name = (key.decryptMeta(vaultId, meta) as { name?: unknown } | null)?.name;
-    return typeof name === "string" && name.trim() ? name : "Shared vault";
+    const name = cleanText((key.decryptMeta(vaultId, meta) as { name?: unknown } | null)?.name);
+    return name || "Shared vault";
   } catch {
     return null;
   } finally {
     key.free();
   }
+}
+
+/** The name of a vault needing consent (a sealed key, opened for that alone). */
+function consentName(acct: core.Account, v: SyncVaultRow): string | null {
+  return v.key_kind === "sealed" ? invitationName(acct, v.id, v.wrapped_key, v.meta) : null;
 }
 
 /**
@@ -1573,28 +1735,105 @@ export async function renameVault(id: string, name: string) {
 
 export async function deleteVault(id: string) {
   await api(`/vaults/${id}`, { method: "DELETE" });
+  // A tombstone, not forgetting: the vault served again is refused.
+  if (signedSharingOn()) signed.markLeft(id);
+  await sync();
+  void signed.flushPins().catch(() => {});
+}
+
+/** Leave a vault shared with the account (an admin then replaces its key). */
+export async function leaveVault(id: string) {
+  await api(`/vaults/${id}/members/${state.userId}`, { method: "DELETE" });
+  if (signedSharingOn()) signed.markLeft(id);
+  await sync();
+  void signed.flushPins().catch(() => {});
+}
+
+/** Someone found by `lookupUser`: their public identity (signing key and its signatures null for accounts without one yet). */
+export interface FoundUser extends PublicIdentity {
+  name: string;
+}
+
+/** Someone on this server to share a vault with, by email (404 when there is nobody); their keys checked to be strings. */
+export async function lookupUser(email: string): Promise<FoundUser> {
+  const answer = await api(`/users/lookup?email=${encodeURIComponent(email)}`);
+  const found = readFoundUser(answer);
+  const identity = readIdentity(answer);
+  if (!found || !identity) throw new Error(UNEXPECTED_RESPONSE);
+  return { ...identity, name: cleanText(found.name) };
+}
+
+/** A vault's members with its key epoch and member roster (`GET /vaults/{id}/members`). */
+export async function loadMembers(vaultId: string): Promise<MembersAnswer> {
+  const answer = readMembersAnswer(await api(`/vaults/${vaultId}/members`));
+  if (!answer) throw new Error(UNEXPECTED_RESPONSE);
+  return answer;
+}
+
+/** Whether this vault's changes are signed (the last sync ran signed sharing's checks). */
+export const signsSharing = (): boolean => signedSharingOn();
+
+/** Signed sharing: this account's identity fingerprint (from its own key); null before it has one or without the feature. */
+export const identityFingerprint = (): string | null => signed.identityFingerprint();
+
+/** How someone's identity compares with the account's known keys (for the members list and the share sheet). */
+export const personState = signed.personState;
+
+/**
+ * "Mark as verified" (the identity shown is still the pinned one) or "Trust the new key" after their keys changed, for
+ * exactly the identity shown (`shownHash`). Every vault is checked again.
+ */
+export async function trustPerson(identity: PublicIdentity, email: string, opts: { mode: "verify" | "trust"; shownHash: string }) {
+  signed.trustPerson(identity, email, opts);
+  await signed.flushPins().catch(() => {});
   await sync();
 }
 
-/** Someone on this server to share a vault with, by email (404 when there is nobody); their public key checked to be a string. */
-export async function lookupUser(email: string): Promise<{ user_id: string; name: string; public_key: string }> {
-  const found = readFoundUser(await api(`/users/lookup?email=${encodeURIComponent(email)}`));
-  if (!found) throw new Error(UNEXPECTED_RESPONSE);
-  return found;
+/** Errors of a signed change that a sync and one more try may fix: the roster, the members or the key moved meanwhile. */
+const signedRaced = (e: unknown) => e instanceof RaceError || hasErrorCode(e, "member_roster_changed") || hasErrorCode(e, "vault_key_changed");
+
+/** Names for user ids in messages: the pins first, then the rows the server listed. Never the raw id. */
+const nameFrom =
+  (rows: readonly { user_id: string; email: string; name: string }[]) =>
+  (id: string): string | null =>
+    signed.pinnedName(id) ?? namesFromRows(rows)(id);
+
+/** A 409 `members_changed`: who differs, by name (from the pins, `rows`, then a fresh members list), or the general text. */
+async function membersChangedError(e: unknown, vaultId: string, rows: readonly { user_id: string; email: string; name: string }[], what: string): Promise<Error> {
+  const diff = e instanceof ApiError ? readMemberDiff(e.fields) : null;
+  if (!diff) return e instanceof Error ? e : new Error(String(e));
+  const fresh = await loadMembers(vaultId).catch(() => null);
+  const differ = [...diff.unknown, ...diff.identity_changed, ...diff.role_changed];
+  if (!differ.length) return new Error(`This vault's members changed just now. Check the members, then try again. PassAuth ${what}.`);
+  return new Error(membersDifferText(differ, nameFrom([...rows, ...(fresh?.members ?? [])]), what));
+}
+
+/** Options of a signed change: `confirmed` once the user confirmed the member review (`ReviewNeededError`). */
+export interface ChangeOptions {
+  confirmed?: Confirmation;
 }
 
 /**
  * Share a vault (or change an existing member's or invitee's access). With servers that have invitations, someone who
  * isn't a member yet gets an invitation: "invited" until they accept. Null from older servers (always a member at once).
+ * Signed sharing: throws `ReviewNeededError` when the user has to confirm the members first (the vault's first signed
+ * list, or people who left); call again with `confirmed`.
  */
-export async function shareVault(vaultId: string, user: { user_id: string; public_key: string }, role: Role): Promise<"invited" | "active" | null> {
+export async function shareVault(
+  vaultId: string,
+  user: { user_id: string; public_key: string; signing_key?: string | null; identity_signature?: string | null; x25519_signature?: string | null; email?: string },
+  role: Role,
+  opts: ChangeOptions = {},
+): Promise<"invited" | "active" | null> {
   if (typeof user.user_id !== "string" || typeof user.public_key !== "string" || !user.public_key) throw new Error(UNEXPECTED_RESPONSE);
-  const r = await withCurrentKey(() => {
-    const v = vaultFor(vaultId);
-    return api<{ status?: unknown; rotation_pending?: unknown } | null>(`/vaults/${vaultId}/members`, {
-      body: { user_id: user.user_id, role, sealed_key: v.key.shareTo(vaultId, user.public_key), ...epochOf(v) },
-    });
-  });
+  const r = signedSharingOn()
+    ? await signedShare(vaultId, { ...identityOf({ signing_key: null, identity_signature: null, x25519_signature: null, ...user }), email: cleanText(user.email) }, role, opts)
+    : await withCurrentKey(() => {
+        const v = vaultFor(vaultId);
+        return api<{ status?: unknown; rotation_pending?: unknown } | null>(`/vaults/${vaultId}/members`, {
+          body: { user_id: user.user_id, role, sealed_key: v.key.shareTo(vaultId, user.public_key), ...epochOf(v) },
+        });
+      });
   if (r?.rotation_pending === true) {
     // The vault was personal and wrapped for emergency contacts, who may hold its key: replace it now, for everyone
     // in it (the new invitee too). If that fails, the vault notices keep asking for it.
@@ -1607,8 +1846,74 @@ export async function shareVault(vaultId: string, user: { user_id: string; publi
   return r?.status === "invited" || r?.status === "active" ? r.status : null;
 }
 
-/** Accept a vault shared with the account: it becomes a membership, and the next sync brings the vault whole. */
-export async function acceptInvitation(vaultId: string) {
+/** The member list a roster will list, from a members answer: identity, role and listed email. */
+const rowsOf = (members: readonly SignedMemberRow[], change?: { user: PublicIdentity & { email: string }; role: Role }) => [
+  ...members.filter((m) => m.user_id !== change?.user.user_id).map((m) => signed.memberInput(m)),
+  ...(change ? [{ ...identityOf(change.user), role: change.role, email: change.user.email || null }] : []),
+];
+
+/**
+ * Signed share (step 4): the recipient and the members reviewed against the vault's trusted roster and the known keys
+ * (`planChange`), the recipient pinned, the key sealed and signed at the verified epoch, the members fetched again and
+ * the next roster signed over them (the core refuses a list other than the reviewed one), sent together. When the
+ * roster, members or key moved meanwhile, sync and try once more (a new review if the list changed).
+ */
+async function signedShare(vaultId: string, recipient: PublicIdentity & { email: string }, role: Role, opts: ChangeOptions) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const answer = await loadMembers(vaultId);
+      const v = vaultFor(vaultId);
+      if (v.epoch === undefined) throw new RaceError();
+      const change = { user: recipient, role };
+      const plan = signed.planChange({
+        vaultId,
+        answer,
+        rows: rowsOf(answer.members, change),
+        keyEpoch: v.epoch,
+        target: recipient.user_id,
+        confirmed: opts.confirmed,
+        what: "didn't share the vault",
+        nameOf: nameFrom(answer.members),
+      });
+      signed.pinReviewed(plan);
+      const share = signed.sealAndSign(v.key, vaultId, recipient, role, v.epoch);
+      // Fetched again right before signing: the roster must list exactly what was reviewed.
+      const again = await loadMembers(vaultId);
+      const now = vaultFor(vaultId);
+      if (again.keyEpoch !== v.epoch || now.epoch !== v.epoch || again.rosterSeq !== answer.rosterSeq) throw new RaceError();
+      const roster = signed.signRosterFor(now.key, vaultId, plan, v.epoch, rowsOf(again.members, change));
+      let r: { status?: unknown; rotation_pending?: unknown } | null;
+      try {
+        r = await api<{ status?: unknown; rotation_pending?: unknown } | null>(`/vaults/${vaultId}/members`, {
+          body: { user_id: recipient.user_id, role, sealed_key: share.sealed_key, signature: share.signature, roster, key_epoch: v.epoch },
+        });
+      } catch (e) {
+        if (hasErrorCode(e, "members_changed")) throw await membersChangedError(e, vaultId, answer.members, "didn't share the vault");
+        throw e;
+      }
+      signed.rememberSigned(vaultId, roster);
+      void signed.flushPins().catch(() => {});
+      return r;
+    } catch (e) {
+      if (!signedRaced(e) || attempt > 1) throw e instanceof RaceError ? new Error(KEY_CHANGED_AGAIN) : e;
+      await catchUp();
+    }
+  }
+}
+
+/**
+ * Accept a vault shared with the account: it becomes a membership, and the next sync brings the vault whole. Signed
+ * sharing: only a signed invitation that passed every check can be accepted; its signer and key are pinned and its
+ * roster remembered first.
+ */
+export async function acceptInvitation(vaultId: string, shown?: InvitationTrust) {
+  const trust = state.invitations.find((i) => i.vaultId === vaultId)?.trust;
+  if (signedSharingOn()) {
+    if (trust?.kind !== "signed") throw new Error(trust?.kind === "refused" ? trust.reason : "This invitation isn't signed, so it can't be accepted. Decline it.");
+    // Bound to what the dialog showed (review L-B): the signer, key id, epoch and roster must still be the same.
+    if (!shown) throw new Error(signed.CHANGED_SINCE_SHOWN);
+    signed.acceptInvitationTrust(vaultId, trust, shown);
+  }
   try {
     await api(`/vaults/${vaultId}/invitation/accept`, { method: "POST" });
   } catch (e) {
@@ -1616,20 +1921,50 @@ export async function acceptInvitation(vaultId: string) {
     // Cancelled by the person who shared it, or the vault is gone: show what is there now.
     await sync().catch(() => {});
     throw new Error("This invitation is no longer open. The person who shared the vault may have cancelled it.");
+  } finally {
+    void signed.flushPins().catch(() => {});
   }
   await sync();
 }
 
 /**
  * Decline a vault shared with the account. The server then asks the vault's owners and admins to replace its key: the
- * invitation already gave this account the key. Already gone (404) is fine: the list is refreshed.
+ * invitation already gave this account the key. Already gone (404) is fine: the list is refreshed. Signed sharing: the
+ * vault is tombstoned, so the same invitation served again is refused.
  */
 export async function declineInvitation(vaultId: string) {
+  if (signedSharingOn()) {
+    const trust = state.invitations.find((i) => i.vaultId === vaultId)?.trust;
+    signed.markLeft(vaultId, trust?.kind === "signed" ? trust.rosterVersion : 0);
+  }
   try {
     await api(`/vaults/${vaultId}/invitation`, { method: "DELETE" });
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404)) throw e;
+  } finally {
+    void signed.flushPins().catch(() => {});
   }
+  await sync();
+}
+
+/**
+ * Accept a vault the server lists that the account never accepted (signed sharing; a signed one, or unsigned ones as
+ * `Consent` allows), exactly as its dialog showed it (`shown`, captured when the dialog opened; review L-B).
+ */
+export async function acceptConsent(vaultId: string, shown: Consent) {
+  const c = state.consents.find((x) => x.id === vaultId);
+  if (!c) throw new Error("This vault is no longer waiting for you. Reload the page.");
+  signed.acceptConsent(c.consent, shown);
+  await signed.flushPins().catch(() => {});
+  await sync();
+}
+
+/** Decline a vault the server lists that the account never accepted: tombstoned here, and the membership is left. */
+export async function declineConsent(vaultId: string) {
+  const c = state.consents.find((x) => x.id === vaultId);
+  signed.markLeft(vaultId, c?.consent.rosterVersion ?? 0);
+  await signed.flushPins().catch(() => {});
+  await api(`/vaults/${vaultId}/members/${state.userId}`, { method: "DELETE" }).catch(() => {});
   await sync();
 }
 
@@ -1649,11 +1984,23 @@ function setPendingRotation(vaultId: string, pending: boolean) {
   set({ pendingRotations: list });
 }
 
+/** Options of a key replacement (signed sharing). */
+export interface RotationOptions extends ChangeOptions {
+  /** An automatic flow (emergency access): never creates a vault's first signed member list. */
+  automatic?: boolean;
+  /** The member set the caller checked (user ids): the replacement uses exactly that set, else it stops. */
+  expectMembers?: readonly string[];
+}
+
+export { ReviewNeededError, type ReviewView, type Confirmation };
+
 /**
  * Remove a member and rotate the vault key so they can't read future changes:
  * a fresh key is sealed to every remaining member and all items re-encrypted.
+ * Signed sharing: throws `ReviewNeededError` when the user has to confirm the members first (the vault's first signed
+ * list, or people who left); call again with `confirmed`.
  */
-export async function removeMember(vaultId: string, userId: string) {
+export async function removeMember(vaultId: string, userId: string, opts: RotationOptions = {}) {
   if (!account) throw new Error("Vault is locked.");
   // Rotation must re-encrypt every item, so check that all of them can be read before removing anyone.
   await sync();
@@ -1664,14 +2011,14 @@ export async function removeMember(vaultId: string, userId: string) {
   }
   // Removal and the new key in one request, so nobody is ever removed without the key change.
   try {
-    await sendRotation(vaultId, `/vaults/${vaultId}/members/${userId}/remove`, userId);
+    await sendRotation(vaultId, `/vaults/${vaultId}/members/${userId}/remove`, userId, opts);
   } catch (e) {
     // Servers before 0.6.4 don't have the combined request: remove, then replace the key.
     if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) throw e;
     const r = await api<{ rotation_required?: boolean }>(`/vaults/${vaultId}/members/${userId}`, { method: "DELETE" });
     if (r?.rotation_required === false) return sync();
     setPendingRotation(vaultId, true);
-    await rotateVaultKey(vaultId);
+    await rotateVaultKey(vaultId, opts);
     return;
   }
   setPendingRotation(vaultId, false);
@@ -1681,8 +2028,8 @@ export async function removeMember(vaultId: string, userId: string) {
 }
 
 /** Replace a vault's key and re-encrypt its items (finishes a member removal). */
-export async function rotateVaultKey(vaultId: string) {
-  await sendRotation(vaultId, `/vaults/${vaultId}/rotate`);
+export async function rotateVaultKey(vaultId: string, opts: RotationOptions = {}) {
+  await sendRotation(vaultId, `/vaults/${vaultId}/rotate`, undefined, opts);
   setPendingRotation(vaultId, false);
   await sync();
   vaultKeysChanged();
@@ -1690,16 +2037,18 @@ export async function rotateVaultKey(vaultId: string) {
 
 /**
  * Replace the keys of these vaults, one after the other (after an emergency contact who may have kept their keys was
- * removed). Vaults this account no longer has or can't manage are skipped. The first failure stops it and is thrown;
- * the server keeps asking for the rest (`rotation_pending`).
+ * removed): automatic, so a vault whose member list isn't signed yet and has other members is left for the user.
+ * `members`: the member set (user ids) the caller checked per vault; the replacement uses exactly that set. Vaults this
+ * account no longer has or can't manage are skipped. The first failure stops it and is thrown; the server keeps asking
+ * for the rest (`rotation_pending`).
  */
-export async function rotateVaultKeys(vaultIds: readonly string[]) {
+export async function rotateVaultKeys(vaultIds: readonly string[], members?: ReadonlyMap<string, readonly string[]>) {
   await sync();
   try {
     for (const id of vaultIds) {
       const v = state.vaults.find((x) => x.id === id);
       if (!v || (v.role !== "owner" && v.role !== "admin")) continue;
-      await sendRotation(id, `/vaults/${id}/rotate`);
+      await sendRotation(id, `/vaults/${id}/rotate`, undefined, { automatic: true, ...(members?.has(id) ? { expectMembers: members.get(id) } : {}) });
       setPendingRotation(id, false);
     }
   } finally {
@@ -1708,52 +2057,175 @@ export async function rotateVaultKeys(vaultIds: readonly string[]) {
   }
 }
 
+/** Tries of a key replacement when an item changed or the roster moved while it was being sent (signed sharing). */
+const ROTATION_TRIES = 3;
+const LOCKED_DURING = "The vault was locked. Unlock it and try again.";
+const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && new Set([...a, ...b]).size === a.length;
+
 /**
  * Make a new vault key, seal it to every member except `without`, re-encrypt all
  * items and the vault name with it, and POST that to `path` (rotate, or remove + rotate).
+ *
+ * Signed sharing (step 5): only from the state this same sync verified (key, items, name, epoch), with the members
+ * answer at that epoch and roster. The remaining members are reviewed against the trusted roster (`planChange`):
+ * anyone it doesn't list or lists otherwise stops it, people who left and a vault's first signed list need the
+ * user's confirmation; a vault without a roster whose only remaining member is this account is re-keyed for it alone
+ * (nothing sealed, nothing signed). Every sealed key is signed at the new key epoch, the next roster lists exactly the
+ * remaining members, and every item carries its revision, so an edit made meanwhile is never overwritten (409
+ * `revision_conflict`: synced and sent again, as after the roster moved, at most `ROTATION_TRIES` times).
  */
-async function sendRotation(vaultId: string, path: string, without?: string) {
+async function sendRotation(vaultId: string, path: string, without?: string, opts: RotationOptions = {}) {
   if (!account) throw new Error("Vault is locked.");
   const gen = generation;
-  await sync();
-  if (gen !== generation || !account) throw new Error("The vault was locked. Unlock it and try again.");
-  if (undecryptable.get(vaultId)) throw new Error("Some items in this vault can't be decrypted, so its key can't be replaced yet.");
-  // Every member and invitee gets the new key: a row that can't be read stops the replacement (nobody is skipped).
-  const all = readMembers(await api(`/vaults/${vaultId}/members`));
-  if (!all) throw new Error(UNEXPECTED_RESPONSE);
-  if (gen !== generation || !account) throw new Error("The vault was locked. Unlock it and try again.");
-  const members = all.filter((m) => m.user_id !== without);
-  const nv = account.newVaultKey(vaultId);
-  const fresh = nv.takeKey();
-  try {
-    const keys = members.map((m) =>
-      m.user_id === state.userId
-        ? { user_id: m.user_id, wrapped_key: nv.wrapped, key_kind: "account" }
-        : { user_id: m.user_id, wrapped_key: fresh.shareTo(vaultId, m.public_key), key_kind: "sealed" },
-    );
-    const items = state.items.filter((e) => e.vaultId === vaultId).map((e) => fresh.encryptItem(e.item, e.id, vaultId));
-    const v = state.vaults.find((x) => x.id === vaultId);
-    const meta = v ? fresh.encryptMeta(vaultId, { name: v.name }) : undefined;
-    let r: { key_epoch?: number } | null;
-    try {
-      // key_epoch: the epoch of the key being replaced, from the same sync as the items re-encrypted above.
-      r = await api<{ key_epoch?: number } | null>(path, { body: { keys, items, meta, ...epochOf(v) } });
-    } catch (e) {
-      if (!keyChanged(e)) throw e;
-      // Someone else replaced the key after our sync, and nothing was changed. Show the vault as it is now and let
-      // the user decide again. Their new key also finishes a removal this browser still had to secure.
-      if (!without) setPendingRotation(vaultId, false);
-      await sync().catch(() => {});
-      throw new Error(
-        without
-          ? "Someone else replaced this vault's key just now, so nobody was removed. Check the members, then try again."
-          : "Someone else replaced this vault's key just now. If the vault still asks for a new key, replace it again.",
-      );
+  const signing = signedSharingOn();
+  const what = without ? "didn't remove anyone or change the key" : "didn't change the key";
+  for (let attempt = 1; ; attempt++) {
+    await sync();
+    if (gen !== generation || !account) throw new Error(LOCKED_DURING);
+    if (undecryptable.get(vaultId)) throw new Error("Some items in this vault can't be decrypted, so its key can't be replaced yet.");
+    // Every member and invitee gets the new key: a row that can't be read stops the replacement (nobody is skipped).
+    let answer: MembersAnswer;
+    if (signing) answer = await loadMembers(vaultId);
+    else {
+      const all = readMembers(await api(`/vaults/${vaultId}/members`));
+      if (!all) throw new Error(UNEXPECTED_RESPONSE);
+      answer = {
+        members: all.map((m) => ({ ...m, signing_key: null, identity_signature: null, x25519_signature: null, key_kind: null, share: null })),
+        keyEpoch: undefined,
+        roster: null,
+        rosterSeq: 0,
+      };
     }
-    // Servers from before the vault name moved into the rotation request (they report no key epoch) need it separately.
-    if (meta && !without && typeof r?.key_epoch !== "number") await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
-  } finally {
-    fresh.free();
+    if (gen !== generation || !account) throw new Error(LOCKED_DURING);
+    if (opts.expectMembers && !sameSet(answer.members.map((m) => m.user_id), opts.expectMembers))
+      throw new Error("This vault's members changed just now, so PassAuth didn't replace its key automatically. Check the vault in Settings, Vaults & sharing.");
+    const members = answer.members.filter((m) => m.user_id !== without);
+    // The vault as this sync verified it: its key handle, epoch, items and name, looked up after the request.
+    const v = state.vaults.find((x) => x.id === vaultId);
+    if (signing && (v?.epoch === undefined || answer.keyEpoch !== v.epoch)) {
+      // The key changed between the sync and the members list: sync again.
+      if (attempt < ROTATION_TRIES) continue;
+      throw new Error(KEY_CHANGED_AGAIN);
+    }
+    let plan: signed.ChangePlan | null = null;
+    if (signing && v?.epoch !== undefined) {
+      const trusted = signed.verifiedRoster(vaultId);
+      if (trusted === undefined) throw new Error(signed.CHECK_LATER);
+      const others = members.some((m) => m.user_id !== state.userId);
+      if (trusted !== null || others) {
+        try {
+          plan = signed.planChange({
+            vaultId,
+            answer,
+            rows: rowsOf(members),
+            keyEpoch: v.epoch,
+            ...(without ? { removed: without } : {}),
+            automatic: !!opts.automatic,
+            confirmed: opts.confirmed,
+            what,
+            nameOf: nameFrom(answer.members),
+          });
+        } catch (e) {
+          if (e instanceof RaceError && attempt < ROTATION_TRIES) continue;
+          throw e instanceof RaceError ? new Error(KEY_CHANGED_AGAIN) : e;
+        }
+        signed.pinReviewed(plan);
+      }
+      // No roster and nobody else: re-keyed for this account alone, nothing sealed or signed (the server accepts it
+      // unsigned while the vault has no roster).
+    }
+    const nv = account.newVaultKey(vaultId);
+    const fresh = nv.takeKey();
+    try {
+      let keys: { user_id: string; wrapped_key: string; key_kind: string; signature?: string }[];
+      let roster: string | undefined;
+      if (plan && v?.epoch !== undefined) {
+        ({ keys, roster } = signed.signedRotationKeys(fresh, nv.wrapped, vaultId, plan, v.epoch + 1));
+      } else if (signing) {
+        keys = members.filter((m) => m.user_id === state.userId).map((m) => ({ user_id: m.user_id, wrapped_key: nv.wrapped, key_kind: "account" }));
+        if (keys.length !== members.length) throw new Error(KEY_CHANGED_AGAIN);
+      } else {
+        keys = members.map((m) =>
+          m.user_id === state.userId
+            ? { user_id: m.user_id, wrapped_key: nv.wrapped, key_kind: "account" }
+            : { user_id: m.user_id, wrapped_key: fresh.shareTo(vaultId, m.public_key), key_kind: "sealed" },
+        );
+      }
+      // Signed (also a vault re-keyed for this account alone, without a roster): each item with the revision it was
+      // re-encrypted from (older servers ignore it).
+      const items = state.items
+        .filter((e) => e.vaultId === vaultId)
+        .map((e) => ({ ...(fresh.encryptItem(e.item, e.id, vaultId) as EncryptedItem), ...(signing ? { revision: e.revision } : {}) }));
+      const meta = v ? fresh.encryptMeta(vaultId, { name: v.name }) : undefined;
+      let r: { key_epoch?: number } | null;
+      try {
+        // key_epoch: the epoch of the key being replaced, from the same sync as the items re-encrypted above.
+        r = await api<{ key_epoch?: number } | null>(path, { body: { keys, items, meta, ...epochOf(v), ...(roster ? { roster } : {}) } });
+      } catch (e) {
+        if (roster && hasErrorCode(e, "members_changed")) throw await membersChangedError(e, vaultId, answer.members, what);
+        // An item was edited, or the roster moved, while this was being sent: nothing was changed, so sync and redo it.
+        if (signing && attempt < ROTATION_TRIES && (revisionConflict(e) || hasErrorCode(e, "member_roster_changed"))) continue;
+        if (hasErrorCode(e, "update_required")) throw new Error(MEMBERS_SIGNED_UPDATE);
+        if (!keyChanged(e)) throw e;
+        // Someone else replaced the key after our sync, and nothing was changed. Show the vault as it is now and let
+        // the user decide again. Their new key also finishes a removal this browser still had to secure.
+        if (!without) setPendingRotation(vaultId, false);
+        await sync().catch(() => {});
+        throw new Error(
+          without
+            ? "Someone else replaced this vault's key just now, so nobody was removed. Check the members, then try again."
+            : "Someone else replaced this vault's key just now. If the vault still asks for a new key, replace it again.",
+        );
+      }
+      if (roster) signed.rememberSigned(vaultId, roster);
+      // Servers from before the vault name moved into the rotation request (they report no key epoch) need it separately.
+      if (meta && !without && typeof r?.key_epoch !== "number") await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
+      if (signing) void signed.flushPins().catch(() => {});
+      return;
+    } finally {
+      fresh.free();
+    }
+  }
+}
+
+/**
+ * Sign a vault from before signed sharing (step 6; owners and admins): the member review always comes first (throws
+ * `ReviewNeededError`; call again with `confirmed`), then every sealed member's key is sealed again and signed, and
+ * the next member roster, in one request.
+ */
+export async function resignVault(vaultId: string, opts: ChangeOptions = {}) {
+  if (!signedSharingOn()) throw new Error("Your server doesn't sign shared vaults yet.");
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const answer = await loadMembers(vaultId);
+      const v = vaultFor(vaultId);
+      if (v.epoch === undefined) throw new RaceError();
+      const plan = signed.planChange({
+        vaultId,
+        answer,
+        rows: rowsOf(answer.members),
+        keyEpoch: v.epoch,
+        always: true,
+        confirmed: opts.confirmed,
+        what: "didn't sign the vault",
+        nameOf: nameFrom(answer.members),
+      });
+      signed.pinReviewed(plan);
+      const body = signed.resignBody(v.key, vaultId, answer.members, plan, v.epoch);
+      try {
+        await api(`/vaults/${vaultId}/resign`, { body });
+      } catch (e) {
+        if (hasErrorCode(e, "members_changed")) throw await membersChangedError(e, vaultId, answer.members, "didn't sign the vault");
+        throw e;
+      }
+      signed.rememberSigned(vaultId, body.roster);
+      void signed.flushPins().catch(() => {});
+      await sync();
+      return;
+    } catch (e) {
+      if (!signedRaced(e) || attempt > 1) throw e instanceof RaceError ? new Error(KEY_CHANGED_AGAIN) : e;
+      await catchUp();
+    }
   }
 }
 

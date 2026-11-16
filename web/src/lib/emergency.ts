@@ -277,11 +277,13 @@ export interface OwnVault {
 
 /**
  * Whether this app's own data says a vault is personal, the only kind whose key an emergency contact may get: the
- * account owns it with its own key (`role` owner, `kind` account) and its members (`GET /vaults/{id}/members`, invitees
- * included) are this account (`me`) alone. Unknown vaults and members lists aren't.
+ * account owns it with its own key (`role` owner, `kind` account), its members (`GET /vaults/{id}/members`, invitees
+ * included) are this account (`me`) alone, and (signed sharing) nothing this device trusts says it is or was shared
+ * (`shared`: a trusted member roster listing anyone else, the vault seen signed, its key pin marked signed). Unknown
+ * vaults and members lists aren't.
  */
-export function isPersonal(vault: OwnVault | undefined, members: readonly { user_id: string }[] | null | undefined, me: string): boolean {
-  if (!vault || vault.role !== "owner" || vault.kind !== "account" || !me || !members) return false;
+export function isPersonal(vault: OwnVault | undefined, members: readonly { user_id: string }[] | null | undefined, me: string, shared = false): boolean {
+  if (shared || !vault || vault.role !== "owner" || vault.kind !== "account" || !me || !members) return false;
   return members.length === 1 && members[0].user_id === me;
 }
 

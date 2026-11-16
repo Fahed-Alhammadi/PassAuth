@@ -15,6 +15,8 @@ export class ApiError extends Error {
     public retryAfter?: number,
     /** The server's id for the request (error body `request_id`, else the `x-request-id` header): names it in the server log. */
     public requestId?: string,
+    /** The error answer's other fields (e.g. who differs in a 409 `members_changed`); never shown as they are. */
+    public fields?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -271,7 +273,8 @@ export async function api<T = unknown>(path: string, opts: Options = {}): Promis
       throw new ApiError(res.status, "bad_response", unexpectedResponse(res.status), undefined, requestId);
     if (res.status >= 502 && res.status <= 504) throw new UnreachableError(res.status);
     if (twoStepGate && isTwoStepRequired(res.status, json?.error)) twoStepListeners.forEach((fn) => fn());
-    throw new ApiError(res.status, json?.error ?? "error", json?.message ?? `Request failed (${res.status})`, retryAfter(res), requestId);
+    const fields = json && typeof json === "object" && !Array.isArray(json) ? (json as Record<string, unknown>) : undefined;
+    throw new ApiError(res.status, json?.error ?? "error", json?.message ?? `Request failed (${res.status})`, retryAfter(res), requestId, fields);
   }
   if (json === undefined) throw new ApiError(res.status, "bad_response", unexpectedResponse(res.status));
   return json as T;
@@ -334,6 +337,13 @@ const CODE_TEXT = new Map<string, string>([
   ["emergency_vaults_changed", "Your vaults changed while this was being saved. Try again."],
   ["roster_changed", "Your emergency contacts changed on another device just now. Try again."],
   ["update_required", "This version of PassAuth is too old for your server. Update PassAuth, then try again."],
+  // Signed sharing (servers with `signed_sharing`).
+  ["members_changed", "This vault's members changed just now, so nothing was changed. Check the members, then try again."],
+  ["member_roster_changed", "This vault's members changed just now, so nothing was changed. Try again."],
+  ["key_pins_changed", "Your list of known keys changed on another device just now. Try again."],
+  ["signing_identity_required", "PassAuth is still setting up signing on this device. Reload the page, then try again."],
+  ["bad_signature", "Your server couldn't check this change's signature, so nothing was changed. Reload the page, then try again."],
+  ["identity_exists", "Your account already has a signing key. Reload the page, then try again."],
   ["login_with_device_disabled", "Signing in with another device's approval is turned off on this server. Sign in with your master password."],
   ["upload_in_progress", "This file is being uploaded already. Wait a moment, then try again."],
 ]);

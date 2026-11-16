@@ -4,29 +4,42 @@ import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { SignInRequestsCard } from "../components/DeviceSignIn";
 import { KitActions } from "../components/KitActions";
+import { PersonTrust, PinBadge, ReviewDialog, SignerTrust, SigningNotices, TrustBadge, VerifyDialog, conflictText, personLabel, signerText } from "../components/SignedSharing";
 import { CodeField, MasterPasswordField, RecoveryCodesModal } from "../components/TwoStep";
 import { ConfirmDialog, ConfirmPassword, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast } from "../components/ui";
 import { ATTACHMENT_QUOTA_EXCEEDED, ApiError, api, friendlyError, hasErrorCode, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { clientInfo, deviceKindInfo } from "../lib/clients";
-import { sharerName, sharerShortName, type Invitation } from "../lib/invitations";
+import { sharerListedAs, sharerName, sharerShortName, type Invitation } from "../lib/invitations";
 import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { MIN_MASTER_PASSWORD, clampTimeout, minPasswordLength, minutesLabel, newKeysMeetKdf, timeoutOptions } from "../lib/policies";
 import { server } from "../lib/server";
-import { UNEXPECTED_RESPONSE, readMembers, readRecoveryCodes, type MemberRow, type Role } from "../lib/types";
+import { UNEXPECTED_RESPONSE, readRecoveryCodes, type Role } from "../lib/types";
+import { NOT_YET_SIGNED, cleanText, consentText, firstTimeText, replacedText, unsignedInvitationText, type SignedMemberRow } from "../lib/signing";
+import { KeyChangedError, emailText, needsSigning, type Consent } from "../lib/signed-sharing";
 import { formatBytes } from "../lib/sizes";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
+  acceptConsent,
   acceptInvitation,
   changeKeys,
   createVault,
+  declineConsent,
   declineInvitation,
   deleteVault,
   fingerprint,
   forgetDevice,
   getAccount,
   getBundle,
+  identityFingerprint,
+  leaveVault,
+  loadMembers,
   logout,
   lookupUser,
+  ReviewNeededError,
+  personState,
+  resignVault,
+  signsSharing,
+  type FoundUser,
   notePolicyViolations,
   reauth,
   rememberedSecretKey,
@@ -36,6 +49,9 @@ import {
   shareVault,
   sync,
   useVault,
+  type ConsentVault,
+  type Confirmation,
+  type ReviewView,
   type Vault,
 } from "../lib/vault";
 import { ActivityTab, VaultActivity } from "./Activity";
@@ -73,8 +89,8 @@ export interface PasskeyInfo {
   last_used_at: number | null;
 }
 
-/** A vault member, or someone invited who hasn't accepted yet (`status` "invited"). */
-type Member = MemberRow;
+/** A vault member, or someone invited who hasn't accepted yet (`status` "invited"), with their signing identity. */
+type Member = SignedMemberRow;
 
 interface Session {
   id: string;
@@ -237,7 +253,10 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   // Worked out from this app's own key, never taken from the server: it is what others compare a key the server gave them with.
-  const fp = getAccount()?.fingerprint() ?? (typeof account.fingerprint === "string" ? account.fingerprint : null);
+  // With signed sharing, the identity fingerprint (user id, encryption and signing key); before, the encryption key's.
+  useVault();
+  const identityFp = identityFingerprint();
+  const fp = identityFp ?? getAccount()?.fingerprint() ?? (typeof account.fingerprint === "string" ? account.fingerprint : null);
   const showIcons = useShowIcons();
   const theme = useTheme();
   const desktop = getDesktop();
@@ -315,10 +334,11 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
       {desktop?.app && <DesktopAppCard hook={desktop.app} />}
 
       <section className="card" aria-labelledby="fp-title">
-        <h2 id="fp-title">Your public key fingerprint</h2>
+        <h2 id="fp-title">{identityFp ? "Your identity fingerprint" : "Your public key fingerprint"}</h2>
         <p className="card-text">
           When someone shares a vault with you, PassAuth shows them this fingerprint. Ask them to read it back to you, in person or over a call, and
-          check that it matches exactly. A match means the vault is encrypted for you and nobody else.
+          check that it matches exactly. A match means the vault is encrypted for you and nobody else
+          {identityFp ? ", and that what you share is signed by you." : "."}
         </p>
         {fp ? (
           <div className="secret-box">
@@ -1361,6 +1381,7 @@ function VaultsTab() {
 
   return (
     <>
+      <SigningNotices />
       <InvitationsCard />
       <section className="card" aria-labelledby="newvault-title">
         <h2 id="newvault-title">Create a vault</h2>
@@ -1393,37 +1414,178 @@ const ROLE_SENTENCE: Partial<Record<Role, string>> = {
 
 /** Vaults shared with the user and waiting for an answer (servers with invitations). The invitation email links here. */
 function InvitationsCard() {
-  const { invitations } = useVault();
-  if (invitations.length === 0) return null;
+  const { invitations, consents } = useVault();
+  const total = invitations.length + consents.length;
+  if (total === 0) return null;
   return (
     <section className="card" aria-labelledby="invitations-title">
       <div className="stack-s">
-        <h2 id="invitations-title">{invitations.length === 1 ? "Invitation to a shared vault" : `Invitations to shared vaults (${invitations.length})`}</h2>
+        <h2 id="invitations-title">{total === 1 ? "Invitation to a shared vault" : `Invitations to shared vaults (${total})`}</h2>
         <p className="card-text">A vault shared with you appears in your apps only after you accept it.</p>
       </div>
       {invitations.map((inv) => (
         <InvitationRow key={inv.vaultId} invitation={inv} />
       ))}
+      {consents.map((c) => (
+        <ConsentRow key={c.id} vault={c} />
+      ))}
     </section>
   );
 }
 
-function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
+/** A vault key id as shown for an unsigned vault (accepted by this key: the next sync checks it is still this one). */
+function KeyIdField({ epoch }: { epoch: Consent["epoch"] }) {
+  return (
+    <div className="field">
+      <span>Key id</span>
+      <div className="fingerprint-s">{cleanText(epoch.key_id) || "Unavailable"}</div>
+      <span className="field-hint">The vault is accepted with this key. If its key changes, PassAuth asks again.</span>
+    </div>
+  );
+}
+
+/** A sealed vault the server lists that the account never accepted: shown like an invitation (signed sharing). */
+function ConsentRow({ vault: c }: { vault: ConsentVault }) {
   const [asking, setAsking] = useState<"accept" | "decline" | null>(null);
+  // What the Accept dialog shows, captured when it opens: accepting is bound to exactly this (review L-B).
+  const [shown, setShown] = useState<Consent | null>(null);
+  const titleId = `consent-${c.id}`;
+  const role = ROLE_LABEL[c.role] ?? c.role;
+  const signer = c.consent.signer;
+  const name = c.name ?? "Shared vault";
+  const replaced = c.consent.replaced;
+  // Signed, or (unsigned) a key replaced by an app from before, or while the account's trust memory is missing.
+  const acceptable = !!signer || replaced || c.consent.unsignedAllowed;
+  // While the trust memory is missing, a server could list real vaults here: they're never offered for decline
+  // (Accept, or leave it for later), so nobody is pushed into leaving a vault they use.
+  const declinable = !replaced && !c.consent.unsignedAllowed;
+  return (
+    <div className="person" role="group" aria-labelledby={titleId}>
+      <div className="sheet-context">
+        <span className="tile" aria-hidden="true">
+          <Icon name="share" />
+        </span>
+        <div className="grow">
+          <div className="row-title" id={titleId}>
+            {name}
+          </div>
+          <div className="row-sub">{c.consent.rejoin ? "Shared with you again" : "Added by your server"}</div>
+        </div>
+        <span className="badge">{role}</span>
+      </div>
+      <div className="alert alert-warn small" role="note">
+        {replaced ? replacedText(name) : consentText(name)}
+      </div>
+      {signer ? (
+        <SignerTrust signer={signer} />
+      ) : replaced ? (
+        <>
+          <KeyIdField epoch={c.consent.epoch} />
+          <span className="field-hint">Until you accept, the vault stays locked on this device. You can accept later.</span>
+        </>
+      ) : acceptable ? (
+        <>
+          <span className="badge badge-attn">{NOT_YET_SIGNED}</span>
+          <KeyIdField epoch={c.consent.epoch} />
+        </>
+      ) : (
+        <div className="alert alert-warn small" role="note">
+          This vault isn't signed, so it can't be accepted. Decline it, then ask the person who shared it to update PassAuth and share it again.
+        </div>
+      )}
+      {c.consent.unsignedAllowed && !replaced && (
+        <span className="field-hint">Until you accept, the vault stays locked on this device. If you don't recognise it, leave it for later and ask your server's admin.</span>
+      )}
+      <div className="card-actions">
+        {acceptable && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setShown(c.consent);
+              setAsking("accept");
+            }}
+          >
+            Accept…
+          </button>
+        )}
+        {declinable && (
+          <button type="button" className="btn btn-text btn-danger" onClick={() => setAsking("decline")}>
+            Decline…
+          </button>
+        )}
+      </div>
+      {asking === "accept" && acceptable && shown && (
+        <ConfirmDialog
+          title={`Accept "${name}"?`}
+          subtitle={shown.signer ? signerText(shown.signer) : NOT_YET_SIGNED}
+          icon="share"
+          danger={false}
+          action="Accept vault"
+          busyAction="Accepting…"
+          onConfirm={async () => {
+            await acceptConsent(c.id, shown);
+            toast(`"${name}" accepted`);
+          }}
+          onClose={() => {
+            setAsking(null);
+            setShown(null);
+          }}
+        >
+          <p className="card-text">
+            The vault and its items appear in all your apps. {ROLE_SENTENCE[c.role as Role] ?? ""} Accept only if you expected it.
+          </p>
+          {shown.signer ? <SignerTrust signer={shown.signer} /> : <KeyIdField epoch={shown.epoch} />}
+        </ConfirmDialog>
+      )}
+      {asking === "decline" && declinable && (
+        <ConfirmDialog
+          title="Decline this vault?"
+          subtitle={name}
+          icon="share"
+          action="Decline vault"
+          busyAction="Declining…"
+          onConfirm={async () => {
+            await declineConsent(c.id);
+            toast("Vault declined");
+          }}
+          onClose={() => setAsking(null)}
+        >
+          <p className="card-text">The vault won't appear in your apps. If it's shared with you again, PassAuth asks you again.</p>
+        </ConfirmDialog>
+      )}
+    </div>
+  );
+}
+
+function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
+  const [asking, setAsking] = useState<"accept" | "decline" | "trust" | null>(null);
+  // What the Accept dialog shows, captured when it opens: accepting is bound to exactly this (review L-B).
+  const [shown, setShown] = useState<{ trust: Invitation["trust"] } | null>(null);
+  // A verified signer is named by their pinned email; the server's `invited_by` only as "listed by your server as …".
   const from = sharerName(inv);
   const sharer = sharerShortName(inv);
+  const listedBy = sharerListedAs(inv);
+  const trust = inv.trust;
   const fp = inv.invitedBy?.publicKey ? safeFingerprint(inv.invitedBy.publicKey) : null;
   const titleId = `invitation-${inv.vaultId}`;
   const role = ROLE_LABEL[inv.role] ?? inv.role;
+  // Signed sharing: only a signed invitation that passed every check can be accepted; the rest can only be declined.
+  const acceptable = inv.name !== null && (trust === undefined || trust.kind === "signed");
   // The server says who sent it and gives that account's key: the fingerprint shows which key it lists, but it can't
   // prove the invitation is genuine, so it isn't presented as a check.
-  const listedFor = inv.invitedBy?.email.trim() || sharer;
-  const fingerprintBlock = fp && (
-    <div className="field">
-      <span>Fingerprint your server lists for {listedFor}</span>
-      <div className="fingerprint">{fp}</div>
-    </div>
-  );
+  const listedFor = cleanText(inv.invitedBy?.email) || sharer;
+  const fingerprintBlock =
+    trust?.kind === "signed" ? (
+      <SignerTrust signer={trust.signer} />
+    ) : (
+      fp && (
+        <div className="field">
+          <span>Fingerprint your server lists for {listedFor}</span>
+          <div className="fingerprint">{fp}</div>
+        </div>
+      )
+    );
 
   return (
     <div className="person" role="group" aria-labelledby={titleId}>
@@ -1436,9 +1598,10 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
             {inv.name ?? "Invitation that can't be opened"}
           </div>
           <div className="row-sub">
-            From {from}
+            {trust?.kind === "signed" ? signerText(trust.signer) : `From ${from}`}
             {inv.invitedAt ? `, ${formatDate(inv.invitedAt)}` : ""}
           </div>
+          {listedBy && <div className="row-sub">{listedBy}</div>}
         </div>
         <span className="badge">{role}</span>
       </div>
@@ -1446,7 +1609,22 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
         <div className="alert alert-warn small" role="note">
           Your account's keys can't open this invitation, so PassAuth can't show the vault's name. Decline it, then ask {sharer} to share the vault again.
         </div>
-      ) : fp ? (
+      ) : trust?.kind === "unsigned" ? (
+        <div className="alert alert-warn small" role="note">
+          {unsignedInvitationText(sharer)}
+        </div>
+      ) : trust?.kind === "refused" ? (
+        <div className="alert alert-warn small stack-s" role="note">
+          <span>{trust.reason}</span>
+          {trust.changed && (
+            <div>
+              <button type="button" className="link" onClick={() => setAsking("trust")}>
+                Compare and trust…
+              </button>
+            </div>
+          )}
+        </div>
+      ) : fingerprintBlock ? (
         <>
           {fingerprintBlock}
           <span className="field-hint">Accept only invitations you expected.</span>
@@ -1457,8 +1635,15 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
         </div>
       )}
       <div className="card-actions">
-        {inv.name !== null && (
-          <button type="button" className="btn btn-primary" onClick={() => setAsking("accept")}>
+        {acceptable && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setShown({ trust });
+              setAsking("accept");
+            }}
+          >
             Accept…
           </button>
         )}
@@ -1467,24 +1652,38 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
         </button>
       </div>
 
-      {asking === "accept" && inv.name !== null && (
+      {asking === "trust" && trust?.kind === "refused" && trust.changed && (
+        <VerifyDialog
+          identity={trust.changed.identity}
+          label={trust.changed.email}
+          fingerprint={trust.changed.fingerprint}
+          hash={trust.changed.hash}
+          changed
+          conflict={trust.changed.status === "email_conflict"}
+          onClose={() => setAsking(null)}
+        />
+      )}
+      {asking === "accept" && acceptable && inv.name !== null && shown && (
         <ConfirmDialog
           title={`Accept "${inv.name}"?`}
-          subtitle={`Shared by ${from}`}
+          subtitle={shown.trust?.kind === "signed" ? signerText(shown.trust.signer) : `Shared by ${from}`}
           icon="share"
           danger={false}
           action="Accept invitation"
           busyAction="Accepting…"
           onConfirm={async () => {
-            await acceptInvitation(inv.vaultId);
+            await acceptInvitation(inv.vaultId, shown.trust);
             toast(`You joined "${inv.name}"`);
           }}
-          onClose={() => setAsking(null)}
+          onClose={() => {
+            setAsking(null);
+            setShown(null);
+          }}
         >
           <p className="card-text">
             The vault and its items appear in all your apps. {ROLE_SENTENCE[inv.role] ?? ""} The people who manage it can add and change items in it.
           </p>
-          {fingerprintBlock}
+          {shown.trust?.kind === "signed" ? <SignerTrust signer={shown.trust.signer} /> : fingerprintBlock}
           <p className="small muted">Accept only invitations you expected.</p>
         </ConfirmDialog>
       )}
@@ -1512,14 +1711,25 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
 }
 
 function VaultCard({ vault, count }: { vault: Vault; count: number }) {
-  const { userId } = useVault();
   const [open, setOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const canManage = vault.role === "owner" || vault.role === "admin";
+  // Signed sharing: a vault without a member roster yet may be shared from before; its managers are asked to sign it.
+  const [unsignedShared, setUnsignedShared] = useState(false);
+  const signing = signsSharing();
+  useEffect(() => {
+    if (!signing || !canManage || vault.rosterSeq !== 0) return setUnsignedShared(false);
+    let live = true;
+    loadMembers(vault.id)
+      .then((a) => live && setUnsignedShared(needsSigning(a)))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [signing, canManage, vault.id, vault.rosterSeq]);
 
   async function leave() {
-    await api(`/vaults/${vault.id}/members/${userId}`, { method: "DELETE" });
-    await sync();
+    await leaveVault(vault.id);
     toast(`You left "${vault.name}"`);
   }
 
@@ -1539,6 +1749,8 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
               {vault.kind === "sealed" && ", shared with you"}
             </p>
           </div>
+          <TrustBadge trust={vault.trust} />
+          {unsignedShared && vault.trust?.kind !== "unsigned" && <span className="badge badge-attn">{NOT_YET_SIGNED}</span>}
           <span className="badge">{ROLE_LABEL[vault.role]}</span>
         </div>
         <div className="card-actions">
@@ -1549,7 +1761,7 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
           )}
           {canManage && (
             <button type="button" className="btn" aria-expanded={open} onClick={() => setOpen(!open)}>
-              {open ? "Done" : "Manage and share"}
+              {open ? "Done" : unsignedShared ? "Sign and manage" : "Manage and share"}
             </button>
           )}
         </div>
@@ -1569,6 +1781,11 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
   );
 }
 
+/** What to call a member in a message: the pinned email first, else the server's name or email (cleaned). */
+function memberTitle(m: Member): string {
+  return personLabel(personState(m, m.email).pinnedEmail, m.email, m.name).title;
+}
+
 function VaultManager({ vault, count }: { vault: Vault; count: number }) {
   const { userId, pendingRotations } = useVault();
   const activityLog = hasFeature(usePublicConfig(), "activity_log");
@@ -1576,31 +1793,50 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
   const [secureError, setSecureError] = useState<string | null>(null);
   const needsRotation = pendingRotations.includes(vault.id);
 
-  async function secure() {
+  // Signed sharing: the member review the user confirms before the members are signed (the vault's first signed list,
+  // re-signing, or people the signed list names who are gone). Confirming runs the change again with that review.
+  const [review, setReview] = useState<{ review: ReviewView; title: string; action: string; run: (c: Confirmation) => Promise<void> } | null>(null);
+  const signing = signsSharing();
+
+  async function secure(confirmed?: Confirmation) {
     setSecuring(true);
     setSecureError(null);
     try {
-      await rotateVaultKey(vault.id);
+      await rotateVaultKey(vault.id, { confirmed });
       toast("Vault key replaced");
     } catch (e) {
-      setSecureError(friendly(e));
+      if (e instanceof ReviewNeededError) setReview({ review: e.review, title: "Replace this vault's key?", action: "Replace vault key", run: (c) => secure(c) });
+      else setSecureError(friendly(e));
     } finally {
       setSecuring(false);
     }
+  }
+
+  async function resign(confirmed?: Confirmation) {
+    try {
+      await resignVault(vault.id, { confirmed });
+    } catch (e) {
+      if (!(e instanceof ReviewNeededError)) throw e;
+      setReview({ review: e.review, title: "Sign this vault?", action: "Sign vault", run: (c) => resign(c) });
+      return;
+    }
+    toast("Vault signed");
+    await reloadMembers();
   }
   const [name, setName] = useState(vault.name);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
+  const [unsigned, setUnsigned] = useState(false);
   const [membersError, setMembersError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const loadMembers = useCallback(async () => {
+  const reloadMembers = useCallback(async () => {
     try {
-      const list = readMembers(await api(`/vaults/${vault.id}/members`));
-      if (!list) throw new Error(UNEXPECTED_RESPONSE);
-      setMembers(list);
+      const answer = await loadMembers(vault.id);
+      setMembers(answer.members);
+      setUnsigned(needsSigning(answer));
       setMembersError(null);
     } catch (e) {
       setMembersError(`Couldn't load the members of this vault. ${friendly(e)}`);
@@ -1608,8 +1844,8 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
   }, [vault.id]);
 
   useEffect(() => {
-    loadMembers();
-  }, [loadMembers]);
+    reloadMembers();
+  }, [reloadMembers, vault.rosterSeq, vault.epoch]);
 
   async function rename(e: FormEvent) {
     e.preventDefault();
@@ -1627,13 +1863,25 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
     }
   }
 
-  async function remove() {
-    if (!removing) return;
+  async function remove(who: Member, confirmed?: Confirmation) {
     // Cancelling an invitation is a removal too: the invitee's app could open the vault key to show its name.
-    await removeMember(vault.id, removing.user_id);
-    toast(removing.status === "invited" ? "Invitation cancelled" : `${removing.name || removing.email} removed`);
+    const shown = memberTitle(who);
+    try {
+      await removeMember(vault.id, who.user_id, { confirmed });
+    } catch (e) {
+      if (!(e instanceof ReviewNeededError)) throw e;
+      setRemoving(null);
+      setReview({
+        review: e.review,
+        title: who.status === "invited" ? `Cancel the invitation for ${shown}?` : `Remove ${shown}?`,
+        action: who.status === "invited" ? "Cancel invitation" : "Remove from vault",
+        run: (c) => remove(who, c),
+      });
+      return;
+    }
+    toast(who.status === "invited" ? "Invitation cancelled" : `${shown} removed`);
     setRemoving(null);
-    await loadMembers();
+    await reloadMembers();
   }
 
   async function destroy() {
@@ -1652,8 +1900,22 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
           </span>
           <ErrorText error={secureError} />
           <div>
-            <button type="button" className="btn btn-primary" onClick={secure} disabled={securing}>
+            <button type="button" className="btn btn-primary" onClick={() => void secure()} disabled={securing}>
               {securing ? "Replacing the key…" : "Replace vault key"}
+            </button>
+          </div>
+        </div>
+      )}
+      {signing && unsigned && members && (
+        <div className="alert alert-warn stack-s" role="note">
+          <strong>Sign this vault</strong>
+          <span>
+            This vault was shared before PassAuth signed shared vaults, so the apps of the people in it can't tell its key comes from you. Check each person's
+            fingerprint below, then sign it: PassAuth seals the key to each of them again with your signature and signs the list of members.
+          </span>
+          <div>
+            <button type="button" className="btn btn-primary" onClick={() => resign().catch((e) => setMembersError(friendly(e)))}>
+              Sign this vault…
             </button>
           </div>
         </div>
@@ -1677,33 +1939,43 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
           <div className="fields" role="list" aria-label="Members">
             {members.map((m) => {
               const invited = m.status === "invited";
+              const self = m.user_id === userId;
+              // A known person is called by the email pinned for them; the server's only as "listed by your server as …".
+              const label = signing && !self ? personLabel(personState(m, m.email).pinnedEmail, m.email, m.name) : personLabel(null, m.email, m.name);
               return (
                 <div key={m.user_id} role="listitem">
                   <span className="avatar" aria-hidden="true">
-                    {((m.name || m.email).trim()[0] ?? "?").toUpperCase()}
+                    {(label.title.trim()[0] ?? "?").toUpperCase()}
                   </span>
                   <span className="grow">
                     <span className="row-title">
-                      {m.name || m.email}
-                      {m.user_id === userId && <span className="muted"> (you)</span>}
+                      {label.title}
+                      {self && <span className="muted"> (you)</span>}
                     </span>
-                    {m.name && <span className="row-sub">{m.email}</span>}
+                    {label.sub && <span className="row-sub">{label.sub}</span>}
                     {invited && (
                       <span className="row-sub">
                         Invited{m.invited_at ? ` ${formatDate(m.invited_at)}` : ""}. The vault reaches them once they accept.
                       </span>
                     )}
-                    <span className="fingerprint-s" title="Public key fingerprint">
-                      {safeFingerprint(m.public_key)}
-                    </span>
+                    {signing ? (
+                      <span className="row row-wrap">
+                        <PersonTrust identity={m} email={m.email} compact />
+                        {m.key_kind === "sealed" && m.share === null && <span className="badge badge-attn">{NOT_YET_SIGNED}</span>}
+                      </span>
+                    ) : (
+                      <span className="fingerprint-s" title="Public key fingerprint">
+                        {safeFingerprint(m.public_key)}
+                      </span>
+                    )}
                   </span>
                   {invited && <span className="badge">Invited</span>}
                   <span className="badge">{ROLE_LABEL[m.role] ?? m.role}</span>
-                  {m.role !== "owner" && m.user_id !== userId && (
+                  {m.role !== "owner" && !self && (
                     <button
                       type="button"
                       className="btn btn-text btn-danger btn-sm"
-                      aria-label={invited ? `Cancel the invitation for ${m.name || m.email}` : `Remove ${m.name || m.email}`}
+                      aria-label={invited ? `Cancel the invitation for ${label.title}` : `Remove ${label.title}`}
                       onClick={() => setRemoving(m)}
                     >
                       {invited ? "Cancel invitation" : "Remove"}
@@ -1716,7 +1988,7 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         )}
       </div>
 
-      <AddMember vault={vault} members={members ?? []} onAdded={loadMembers} />
+      <AddMember vault={vault} members={members ?? []} onAdded={reloadMembers} />
 
       {activityLog && <VaultActivity vault={vault} />}
 
@@ -1735,13 +2007,13 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
 
       {removing && removing.status === "invited" && (
         <ConfirmDialog
-          title={`Cancel the invitation for ${removing.name || removing.email}?`}
+          title={`Cancel the invitation for ${memberTitle(removing)}?`}
           subtitle={`To ${vault.name}`}
           icon="person"
           action="Cancel invitation"
           busyAction="Cancelling…"
           cancel="Keep invitation"
-          onConfirm={remove}
+          onConfirm={() => remove(removing)}
           onClose={() => setRemoving(null)}
         >
           <p className="card-text">
@@ -1752,12 +2024,12 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
       )}
       {removing && removing.status !== "invited" && (
         <ConfirmDialog
-          title={`Remove ${removing.name || removing.email}?`}
+          title={`Remove ${memberTitle(removing)}?`}
           subtitle={`From ${vault.name}`}
           icon="person"
           action="Remove from vault"
           busyAction="Removing…"
-          onConfirm={remove}
+          onConfirm={() => remove(removing)}
           onClose={() => setRemoving(null)}
         >
           <p className="card-text">
@@ -1765,6 +2037,20 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
             Anything they already copied or saw stays with them, so change important passwords if needed.
           </p>
         </ConfirmDialog>
+      )}
+
+      {review && (
+        <ReviewDialog
+          review={review.review}
+          title={review.title}
+          action={review.action}
+          onConfirm={async (c) => {
+            const run = review.run;
+            setReview(null);
+            await run(c);
+          }}
+          onClose={() => setReview(null)}
+        />
       )}
 
       {deleting && (
@@ -1787,7 +2073,13 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
 
 function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[]; onAdded: () => Promise<void> }) {
   const [email, setEmail] = useState("");
-  const [found, setFound] = useState<{ user_id: string; name: string; public_key: string; email: string } | null>(null);
+  const [found, setFound] = useState<(FoundUser & { email: string }) | null>(null);
+  const signing = signsSharing();
+  // Signed sharing: their identity against the account's known keys (changed keys stop the share).
+  const person = found && signing ? personState(found, found.email) : null;
+  const blocked = !!person && (person.status === "changed" || person.status === "email_conflict" || person.status === "invalid");
+  const [trusting, setTrusting] = useState(false);
+  const [review, setReview] = useState<ReviewView | null>(null);
   const [role, setRole] = useState<Role>("read");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1803,7 +2095,7 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
     setFound(null);
     try {
       const u = await lookupUser(addr);
-      setFound({ ...u, email: addr });
+      setFound({ ...u, email: cleanText(addr) });
       setRole("read");
     } catch (err) {
       setError(
@@ -1816,14 +2108,21 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
     }
   }
 
-  async function share() {
+  async function share(confirmed?: Confirmation) {
     if (!found) return;
     setBusy(true);
     setError(null);
     try {
       const before = members.find((m) => m.user_id === found.user_id);
-      const status = await shareVault(vault.id, found, role);
-      const who = found.name || found.email;
+      let status: Awaited<ReturnType<typeof shareVault>>;
+      try {
+        status = await shareVault(vault.id, found, role, { confirmed });
+      } catch (err) {
+        // The vault's first signed member list (or people who left): the user checks the members first.
+        if (err instanceof ReviewNeededError) return setReview(err.review);
+        throw err;
+      }
+      const who = personLabel(person?.pinnedEmail ?? null, found.email, found.name).title;
       if (before?.status === "invited") toast(`Invitation for ${who} changed`);
       else if (before) toast(`${who}'s access changed`);
       else if (status === "invited") toast(`Invitation sent to ${who}. "${vault.name}" reaches them once they accept.`);
@@ -1832,13 +2131,14 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
       setEmail("");
       await onAdded();
     } catch (err) {
-      setError(friendly(err));
+      setError(err instanceof KeyChangedError ? err.message : friendly(err));
     } finally {
       setBusy(false);
     }
   }
 
   const existing = found && members.find((m) => m.user_id === found.user_id);
+  const foundLabel = found ? personLabel(person?.pinnedEmail ?? null, found.email, found.name) : null;
   const roles: Role[] = ["read", "write", "admin"];
 
   return (
@@ -1868,21 +2168,68 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
         <div className="person">
           <div className="sheet-context">
             <span className="avatar" aria-hidden="true">
-              {((found.name || found.email).trim()[0] ?? "?").toUpperCase()}
+              {(foundLabel!.title.trim()[0] ?? "?").toUpperCase()}
             </span>
             <div className="grow">
-              <div className="row-title">{found.name || found.email}</div>
-              {found.name && <div className="row-sub">{found.email}</div>}
+              <div className="row-title">{foundLabel!.title}</div>
+              {foundLabel!.sub && <div className="row-sub">{foundLabel!.sub}</div>}
             </div>
           </div>
-          <div className="field">
-            <span>Their key fingerprint</span>
-            <div className="fingerprint">{safeFingerprint(found.public_key)}</div>
-            <span className="field-hint">
-              Ask {found.name || "them"} to open Settings, then Account, and read you their fingerprint. Share only if it matches exactly. If it doesn't,
-              don't share and tell your PassAuth administrator.
-            </span>
-          </div>
+          {person ? (
+            <div className="field">
+              <span>{person.signing ? "Their identity fingerprint" : "Their key fingerprint"}</span>
+              <div className="fingerprint">{person.fingerprint ?? "Unavailable"}</div>
+              <div className="row row-wrap">
+                <PinBadge pin={person.status} verified={person.verified} />
+              </div>
+              {person.status === "changed" || person.status === "email_conflict" ? (
+                <div className="alert alert-warn small stack-s" role="alert">
+                  <span>
+                    {person.status === "email_conflict"
+                      ? conflictText(emailText(found.email))
+                      : `${person.pinnedEmail || emailText(found.email)}'s keys changed. Compare their fingerprint with them before you continue.`}
+                  </span>
+                  {person.fingerprint && (
+                    <div>
+                      <button type="button" className="link" onClick={() => setTrusting(true)}>
+                        Compare and trust…
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : person.status === "invalid" ? (
+                <div className="alert alert-warn small" role="alert">
+                  This account's keys can't be checked, so PassAuth won't share with it. Tell your PassAuth administrator.
+                </div>
+              ) : (
+                <span className="field-hint">
+                  {person.status === "new" || person.status === "upgraded" ? `${firstTimeText(found.email)} ` : ""}
+                  Ask {found.name || "them"} to open Settings, then Account, and read you their fingerprint. Share only if it matches exactly. If it doesn't,
+                  don't share and tell your PassAuth administrator.
+                </span>
+              )}
+              {trusting && person.fingerprint && person.hash && (
+                <VerifyDialog
+                  identity={found}
+                  label={person.pinnedEmail || emailText(found.email)}
+                  fingerprint={person.fingerprint}
+                  hash={person.hash}
+                  changed
+                  conflict={person.status === "email_conflict"}
+                  onClose={() => setTrusting(false)}
+                />
+              )}
+            </div>
+          ) : (
+            <div className="field">
+              <span>Their key fingerprint</span>
+              <div className="fingerprint">{safeFingerprint(found.public_key)}</div>
+              <span className="field-hint">
+                Ask {found.name || "them"} to open Settings, then Account, and read you their fingerprint. Share only if it matches exactly. If it doesn't,
+                don't share and tell your PassAuth administrator.
+              </span>
+            </div>
+          )}
           {existing && existing.status === "invited" && (
             <div className="alert alert-info small" role="note">
               They're already invited with {(ROLE_LABEL[existing.role] ?? existing.role).toLowerCase()} access and haven't accepted yet. Sharing again changes
@@ -1905,7 +2252,7 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
             </select>
           </label>
           <div className="card-actions">
-            <button type="button" className="btn btn-primary" onClick={share} disabled={busy || existing?.role === "owner"}>
+            <button type="button" className="btn btn-primary" onClick={() => void share()} disabled={busy || blocked || existing?.role === "owner"}>
               {busy ? "Sharing…" : existing ? "Change access" : invitations ? "Send invitation" : "Share vault"}
             </button>
             <button type="button" className="btn btn-text" onClick={() => setFound(null)} disabled={busy}>
@@ -1918,6 +2265,18 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
         </div>
       )}
       <ErrorText error={error} />
+      {review && (
+        <ReviewDialog
+          review={review}
+          title={`Share "${vault.name}"?`}
+          action={invitations ? "Send invitation" : "Share vault"}
+          onConfirm={async (c) => {
+            setReview(null);
+            await share(c);
+          }}
+          onClose={() => setReview(null)}
+        />
+      )}
     </div>
   );
 }

@@ -23,7 +23,7 @@
 <body>
 <main>
   <header><img src="/favicon.svg" alt=""><h1>PassAuth privacy policy</h1></header>
-  <p class="updated">Last updated: 15 November 2026</p>
+  <p class="updated">Last updated: 16 November 2026</p>
 
   <p>PassAuth is a self-hosted password manager. This policy covers the PassAuth browser extension and the PassAuth web vault. You choose the PassAuth server they connect to; it is run by you or by the organization that gave you an account, not by the PassAuth developer.</p>
 
@@ -36,6 +36,7 @@
 
   <h2>Encryption</h2>
   <p>Vault items are encrypted on your device with keys derived from your master password (and your Secret Key, if you use one) before they are sent to your PassAuth server. The server stores only encrypted data and can't read your items. Your master password is never sent to the server: sign-in uses the OPAQUE protocol.</p>
+  <p>When you share a vault, your device signs the share with a signing key that is encrypted with your account key, so the people you share with can check it comes from you. To notice when someone's keys change, your apps keep a list of the people you share with (their email address and public keys) and of each shared vault's latest key version, encrypted with your account key on your PassAuth server; a copy of it, and the latest signed member list of each shared vault, are kept on your device.</p>
 
   <h2>Where data goes</h2>
   <ul>

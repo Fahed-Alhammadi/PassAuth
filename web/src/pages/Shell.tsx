@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { SignInRequestSheet } from "../components/DeviceSignIn";
+import { SigningNotices } from "../components/SignedSharing";
 import { StartNewListButton, UseServerListButton } from "../components/EmergencyRoster";
 import { Wordmark } from "../components/Logo";
 import { Icon, toast, type IconName } from "../components/ui";
@@ -371,6 +372,7 @@ export function Notices() {
           </div>
         </div>
       )}
+      <SigningNotices link />
       {warnings.length > 0 && (
         <div className="alert alert-warn small notice" role="alert">
           <div className="grow">

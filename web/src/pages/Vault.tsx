@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode 
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { ItemAttachments, NewItemFiles } from "../components/Attachments";
 import { ItemEditor } from "../components/ItemEditor";
+import { TrustBadge } from "../components/SignedSharing";
 import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, SheetActions, SiteIcon, TotpView, toast, type IconName } from "../components/ui";
 import { errorMessage, friendlyError, hasFeature, usePublicConfig } from "../lib/api";
 import { withAttachmentsOf } from "../lib/attachments";
@@ -127,6 +128,7 @@ export function VaultPage() {
         <div className="list-head">
           <div className="row-between">
             <h2 className="grow">{title}</h2>
+            {filter.startsWith("vault:") && <TrustBadge trust={vaults.find((v) => v.id === filter.slice(6))?.trust} />}
             {filter !== "trash" && (
               <button className="btn btn-primary" onClick={() => setCreating(true)}>
                 <Icon name="plus" /> New item

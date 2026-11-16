@@ -50,6 +50,7 @@ import {
   type RosterEntry,
 } from "./emergency";
 import { readMembers, type Item, type MemberRow } from "./types";
+import { sharedEvidence } from "./signed-sharing";
 import { getAccount, getState, onVaultKeysChange, reauth, rotateVaultKeys, setEmergencyNotice, sync } from "./vault";
 
 const LOCKED = "The vault is locked. Unlock it and try again.";
@@ -332,7 +333,7 @@ export async function startNewRoster(password: string): Promise<void> {
  * Of the vaults the server names, the ones this app's own data says are personal: the latest sync shows the account as
  * their owner with its own key, and their members list holds this account alone (one request per vault).
  */
-async function personalOf(wanted: readonly string[]): Promise<{ wrap: string[]; refused: string[] }> {
+async function personalOf(wanted: readonly string[]): Promise<{ wrap: string[]; refused: string[]; members: Map<string, string[]> }> {
   const me = getState().userId;
   const own = (id: string) => getState().vaults.find((v) => v.id === id);
   const members = new Map<string, MemberRow[] | null>();
@@ -345,7 +346,10 @@ async function personalOf(wanted: readonly string[]): Promise<{ wrap: string[]; 
       if (!(e instanceof ApiError && e.status === 404)) throw e;
     }
   }
-  return vaultsToWrap(wanted, (id) => isPersonal(own(id), members.get(id), me));
+  const { wrap, refused } = vaultsToWrap(wanted, (id) => isPersonal(own(id), members.get(id), me, sharedEvidence(id)));
+  // The member sets checked here: a key replacement deciding on "personal" uses exactly these (no second request decides).
+  const checked = new Map(wrap.map((id) => [id, (members.get(id) ?? []).map((m) => m.user_id)]));
+  return { wrap, refused, members: checked };
 }
 
 /**
@@ -587,9 +591,9 @@ export async function removeContact(g: Grant): Promise<Removal> {
   const named = vaultsToReKey(answer, () => true);
   if (!named.length) return { rotated: 0, failed: null };
   try {
-    const { wrap } = await personalOf(named);
+    const { wrap, members } = await personalOf(named);
     const vaults = vaultsToReKey(answer, (id) => wrap.includes(id));
-    if (vaults.length) await rotateVaultKeys(vaults);
+    if (vaults.length) await rotateVaultKeys(vaults, members);
     return { rotated: vaults.length, failed: null };
   } catch (e) {
     return { rotated: 0, failed: friendlyError(e) };
