@@ -115,13 +115,16 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .item-row:has(.menu), .item-row:focus-within { content-visibility: visible; }
 .item-row + .item-row::before { content: ""; position: absolute; top: -1px; left: 64px; right: 0; border-top: 1px solid var(--line); }
 .item-row:hover { background: var(--surface-2); }
+/* The letter tile is surface-2 too: on a hovered row it keeps its shape. */
+.item-row:hover .avatar:not(.has-img) { background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); }
 .item-row:first-child:hover { border-radius: 11px 11px 0 0; }
 .item-row:last-child:hover { border-radius: 0 0 11px 11px; }
 .item-row:only-child:hover { border-radius: 11px; }
 .item-row .main { all: unset; flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-3); min-height: 48px; padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3); border-radius: var(--radius-s); cursor: pointer; }
 .item-row .main:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.item-row .txt { min-width: 0; display: grid; }
-.item-row .title { font-weight: 500; display: flex; align-items: center; gap: var(--space-1); }
+/* One column that may shrink below the name's width, so a long name ends in "…" instead of running under the actions. */
+.item-row .txt { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.item-row .title { min-width: 0; font-weight: 500; display: flex; align-items: center; gap: var(--space-1); }
 .item-row .title > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-row .title svg { color: var(--ink-3); fill: currentColor; flex: none; }
 .item-row .title .mark-icon { display: inline-flex; flex: none; }
