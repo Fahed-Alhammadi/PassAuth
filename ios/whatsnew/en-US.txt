@@ -1,15 +1,13 @@
-New in 0.7.0
-• Sign in with another device: on a new phone or computer, choose "Sign in with another device" and approve it on your iPhone. You pick the words the new device shows, then type the 6-digit code your iPhone shows on the new device.
-• Faster sync: only what changed since the last sync is downloaded.
-• Vault invitations (Settings): accept or decline when someone invites you to a shared vault.
-• Password health (Settings): weak and reused passwords, and, when you tap "Check for exposed passwords", passwords found in known data breaches. Only the first 5 characters of each password's hash leave your iPhone, and only if your server allows the check.
-• Signed-in devices (Settings → Account security): see where your account is signed in and sign out the devices you don't use.
-• Better website matching: PassAuth now knows every public domain ending (like .co.uk), so AutoFill suggests the right logins on more sites.
-• Your server's account policies (for example, required two-step login) are followed, and error messages are clearer.
-Most new features need PassAuth server 0.10.0 or later.
+New in 0.8.0
+• Send (Settings → Send): share a note through an encrypted link that expires. You choose how long it lasts, how often it can be opened, and an optional password.
+• Attachments: add files and photos to an item, then open or share them from the item page.
+• Emergency access (Settings → Emergency access): name someone you trust who can ask for view-only access to your personal vaults after a waiting period you choose. You can also be someone else's contact.
+• Signed sharing: shared vaults are now checked against the signature of the person who shared them. A vault your server added without an invitation waits for your OK, and you're warned when someone's keys change. Your own fingerprint is in Settings → Account.
+• Editing an item on your iPhone no longer drops its attached files or details saved by newer apps.
+These features need PassAuth server 0.12.0 or later.
 
 Please test:
-1. Open the web vault in a private browser window, choose "Sign in with another device", and approve it on your iPhone: pick the words the browser shows, then type the code on the browser.
-2. Settings → Password health: open a weak or reused password from the list, then tap "Check for exposed passwords".
-3. Settings → Account security → Signed-in devices: sign out the browser from step 1.
-4. Use AutoFill on a few sites you use, including one with a country domain such as .co.uk.
+1. Settings → Send: create a Send with a password and open its link in Safari.
+2. Open a login, add a photo as an attachment, then open it again from the item.
+3. Settings → Emergency access: add a second test account as a contact, confirm it after comparing fingerprints, then remove it.
+4. If someone shares a vault with you: check that Vault invitations shows "Signed by" with their email, and compare the fingerprint with them.

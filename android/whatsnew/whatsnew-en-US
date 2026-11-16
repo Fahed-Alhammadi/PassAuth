@@ -1,6 +1,6 @@
-• Sign in with another device, and approve new devices from your phone: pick the words they show, then enter the 6-digit code there.
-• Faster sync: only changes are downloaded.
-• In Settings: Vault invitations, Password health (the exposed-password check runs only when you ask) and, under Account security, Signed-in devices.
-• Better website matching for domains like .co.uk.
-• Clearer errors; your server's policies are followed.
-Most new features need server 0.10.0.
+• Send: share a note through an encrypted link that expires.
+• Attachments: add files to items, then open or save them.
+• Emergency access: someone you trust can ask for view-only access after a wait you choose.
+• Signed sharing: shared vaults are checked against the sharer's signature; a vault added without an invitation waits for your OK.
+• Editing no longer drops attached files.
+Needs PassAuth server 0.12.0.
