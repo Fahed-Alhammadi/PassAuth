@@ -22,14 +22,15 @@ export interface Bounds extends Size {
 export type Frame = Size;
 
 /** First guess per OS (`chrome.runtime.PlatformInfo.os`) until a window has measured its own frame. */
+const LINUX_FRAME: Frame = { width: 0, height: 37 };
 const DEFAULT_FRAMES: Record<string, Frame> = {
   mac: { width: 0, height: 28 },
   win: { width: 16, height: 39 },
-  linux: { width: 0, height: 37 },
+  linux: LINUX_FRAME,
   cros: { width: 0, height: 32 },
 };
 
-export const defaultFrame = (os: string): Frame => DEFAULT_FRAMES[os] ?? DEFAULT_FRAMES.linux;
+export const defaultFrame = (os: string): Frame => DEFAULT_FRAMES[os] ?? LINUX_FRAME;
 
 /** A measured frame is believable: no page zoom or odd window state distorted it. */
 export function plausibleFrame(f: Partial<Frame> | null | undefined): f is Frame {

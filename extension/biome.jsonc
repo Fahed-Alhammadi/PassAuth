@@ -1,0 +1,55 @@
+// Lint and format the extension (pnpm lint; pnpm format writes the fixes). Biome reads .gitignore.
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true, "root": ".." },
+  "files": { "includes": ["**", "!src/wasm", "!dist", "!node_modules", "!pnpm-lock.yaml"] },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 200 },
+  "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always", "trailingCommas": "all", "arrowParentheses": "always" } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "nursery": {
+        // Every promise is awaited, returned, handled or explicitly `void`ed.
+        "noFloatingPromises": "error",
+        "noMisusedPromises": "error"
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedFunctionParameters": "error",
+        "noUnusedPrivateClassMembers": "error",
+        "useExhaustiveDependencies": "error",
+        "useHookAtTopLevel": "error"
+      },
+      "suspicious": { "noExplicitAny": "error" },
+      "style": {
+        // `!` is used where the code knows a value is there (static markup, checked lengths).
+        "noNonNullAssertion": "off"
+      },
+      "a11y": {
+        // PassAuth's sign-in, unlock and confirmation sheets focus their first field on purpose.
+        "noAutofocus": "off",
+        "noLabelWithoutControl": { "level": "error", "options": { "inputComponents": ["PasswordInput"] } }
+      }
+    }
+  },
+  "css": {
+    "linter": { "enabled": true },
+    // The stylesheets keep the web vault's compact one-rule-per-line style (web/styles/app.css).
+    "formatter": { "enabled": false }
+  },
+  "overrides": [
+    {
+      // The fakes stand in for browser APIs whose types are loose.
+      "includes": ["test/**"],
+      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+    },
+    {
+      // Selectors are ordered on purpose: reordering them for specificity would change the cascade.
+      "includes": ["**/*.css"],
+      "linter": { "rules": { "style": { "noDescendingSpecificity": "off" } } }
+    },
+    { "includes": ["tsconfig/*.json"], "json": { "parser": { "allowComments": true } } }
+  ]
+}

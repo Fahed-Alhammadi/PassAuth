@@ -20,6 +20,14 @@ const stroke = (d: string, size = 16) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
 export const closeSvg = stroke("M6 6l12 12M18 6L6 18", 18);
 export const plusSvg = stroke("M12 5v14M5 12h14", 18);
+/** "⋯" (more actions). */
+export const moreSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>`;
+/** A key (a generated password). */
+export const keySvg = stroke("M20 8.5a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0zM12.3 11.7 4 20m3-3 2 2m1-5 2 2", 18);
+/** A payment card. */
+export const cardSvg = stroke("M3 6.5h18v11H3zM3 10.5h18M7 14.5h3", 20);
+/** A person (an identity). */
+export const personSvg = stroke("M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 8a7 7 0 0 1 14 0", 20);
 
 /** The one elevation of floating PassAuth surfaces, for frames placed in a page (the page's own theme is unknown there). */
 export const panelShadow = "0 2px 6px rgb(8 32 82 / .08), 0 16px 40px rgb(8 32 82 / .16)";

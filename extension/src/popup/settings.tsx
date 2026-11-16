@@ -1,11 +1,209 @@
 /** Settings tab: a list of categories, each opening its own page. */
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+
 import { LogoMark } from "@web/components/Logo";
-import { ActionRow, ErrorText, Icon, Modal, SheetActions, type IconName } from "@web/components/ui";
-import { send, type PopupState, type SecurityKey, type SecurityKeys, type Settings, type VaultTimeout } from "../shared/messages";
-import { msg, seconds, type Ctx } from "./ctx";
+import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "@web/components/ui";
+import { minutesLabel, timeoutOptions } from "@web/lib/policies";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { callPopup } from "../shared/protocol";
+import type { PopupState, SecurityKey, SecurityKeys, Settings, VaultTimeout } from "../shared/types";
+import { type Ctx, msg, seconds } from "./ctx";
 import { Account, Page, PopOut } from "./shell";
 import { applyTheme } from "./theme";
+
+/** The keyboard commands in the order Settings and the welcome page list them, with PassAuth's wording. */
+const COMMANDS: [name: string, label: string, help?: string][] = [
+  ["_execute_action", "Open PassAuth"],
+  ["autofill", "Fill the login for this page", "Press again within 5 seconds for the next login."],
+  ["generate_password", "Copy a strong password", "Uses the generator's options."],
+  ["lock", "Lock PassAuth"],
+];
+
+/** The shortcuts as Chrome has them now (the user can change them on chrome://extensions/shortcuts). */
+export function Shortcuts() {
+  const [commands, setCommands] = useState<chrome.commands.Command[] | null>(null);
+  useEffect(() => {
+    chrome.commands.getAll().then(setCommands, () => setCommands([]));
+  }, []);
+  return (
+    <section className="stack-s" aria-labelledby="keys-title">
+      <h3 className="section-title" id="keys-title">
+        Keyboard shortcuts
+      </h3>
+      {commands && (
+        <ul className="plain-list shortcuts">
+          {COMMANDS.map(([name, label, help]) => {
+            const key = commands.find((c) => c.name === name)?.shortcut;
+            return (
+              <li key={name}>
+                <span className="grow">
+                  {label}
+                  {help && <span className="row-sub">{help}</span>}
+                </span>
+                {key ? <kbd>{key}</kbd> : <span className="small muted">Not set</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <button type="button" className="link" style={{ alignSelf: "flex-start" }} onClick={() => void chrome.tabs.create({ url: "chrome://extensions/shortcuts" })}>
+        Change shortcuts
+      </button>
+    </section>
+  );
+}
+
+/** "Unlock with a PIN": set (PIN twice + the master password) or turn off. Not offered with the timeout "Never". */
+function PinSettings({ state, never, notify, reload }: { state: PopupState; never: boolean; notify: (t: string) => void; reload: () => void }) {
+  const [setting, setSetting] = useState(false);
+  if (never) return null;
+  async function toggle(on: boolean) {
+    if (on) return setSetting(true);
+    try {
+      await callPopup("pin:remove");
+      notify("PIN unlock is off.");
+      reload();
+    } catch (e) {
+      notify(msg(e));
+    }
+  }
+  return (
+    <>
+      <Toggle
+        label="Unlock with a PIN"
+        help="Unlock with 6 or more digits instead of your master password until you close the browser. After 5 wrong PINs, PassAuth asks for your master password."
+        checked={!!state.pinUnlock}
+        onChange={(v) => void toggle(v)}
+      />
+      {setting && (
+        <PinDialog
+          onClose={() => setSetting(false)}
+          onDone={() => {
+            setSetting(false);
+            notify("PIN unlock is on until you close the browser.");
+            reload();
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+const digits = (v: string) => v.replace(/\D+/g, "").slice(0, 64);
+
+function PinDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [pin, setPin] = useState("");
+  const [again, setAgain] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (busy) return;
+    if (pin.length < 6) return setError("Use 6 or more digits.");
+    if (pin !== again) return setError("The two PINs are different. Type the same PIN twice.");
+    if (!password) return setError("Enter your master password to turn on PIN unlock.");
+    setBusy(true);
+    setError(null);
+    try {
+      await callPopup("pin:set", { pin, password });
+      onDone();
+    } catch (err) {
+      setError(msg(err));
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title="Set a PIN" subtitle="Until you close the browser" icon="lock" onClose={() => !busy && onClose()}>
+      <form onSubmit={submit}>
+        <p className="card-text">Your PIN unlocks PassAuth in this browser until it closes. It never leaves this device.</p>
+        <div className="field">
+          <label htmlFor="pin-new">PIN</label>
+          <input
+            id="pin-new"
+            className="input mono"
+            type="password"
+            inputMode="numeric"
+            autoComplete="off"
+            value={pin}
+            onChange={(e) => setPin(digits(e.target.value))}
+            data-autofocus=""
+            disabled={busy}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor="pin-again">PIN again</label>
+          <input id="pin-again" className="input mono" type="password" inputMode="numeric" autoComplete="off" value={again} onChange={(e) => setAgain(digits(e.target.value))} disabled={busy} />
+        </div>
+        <div className="field">
+          <label htmlFor="pin-master">Master password</label>
+          <input
+            id="pin-master"
+            className="input mono"
+            type="password"
+            autoComplete="current-password"
+            aria-describedby="pin-master-why"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={busy}
+          />
+          <span id="pin-master-why" className="field-hint">
+            Confirms it's you before a PIN can open your vault.
+          </span>
+        </div>
+        <ErrorText error={error} />
+        <SheetActions
+          quiet={
+            <button type="button" className="btn btn-text" onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+          }
+        >
+          <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+            {busy ? "Turning on…" : "Turn on PIN unlock"}
+          </button>
+        </SheetActions>
+      </form>
+    </Modal>
+  );
+}
+
+/** Sites where PassAuth hides its inline menu and fill entries (hidden from the inline menu), with "Show again". */
+function HiddenSites({ initial, notify }: { initial: string[]; notify: (t: string) => void }) {
+  const [sites, setSites] = useState(initial);
+  if (!sites.length) return null;
+  return (
+    <section className="stack-s" aria-labelledby="hidden-title">
+      <hr />
+      <h3 className="section-title" id="hidden-title">
+        Hidden on these sites
+      </h3>
+      <p className="small muted">PassAuth shows no inline menu and no fill entries here.</p>
+      <ul className="plain-list">
+        {sites.map((d) => (
+          <li key={d}>
+            <span className="grow clip">{d}</span>
+            <button
+              type="button"
+              className="btn btn-text btn-sm"
+              aria-label={`Show PassAuth again on ${d}`}
+              onClick={() =>
+                callPopup("hiddenSites:remove", { domain: d }).then(
+                  () => {
+                    setSites((all) => all.filter((x) => x !== d));
+                    notify(`PassAuth shows again on ${d}.`);
+                  },
+                  (e) => notify(msg(e)),
+                )
+              }
+            >
+              Show again
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 type Control = chrome.types.LevelOfControl | "no-permission" | "unknown";
 
@@ -14,13 +212,14 @@ type Control = chrome.types.LevelOfControl | "no-permission" | "unknown";
  * address/card autofill (chrome.privacy, an optional permission) so its
  * prompts don't compete with PassAuth's. Turning it off hands control back.
  */
-function DefaultManager({ notify }: { notify: (t: string) => void }) {
+export function DefaultManager({ notify }: { notify: (t: string) => void }) {
   const [control, setControl] = useState<Control>("unknown");
   const read = async () => {
     if (!(await chrome.permissions.contains({ permissions: ["privacy"] }))) return setControl("no-permission");
     const d = await chrome.privacy.services.passwordSavingEnabled.get({});
     setControl(d.levelOfControl);
   };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read once when the page opens (read is recreated on every render)
   useEffect(() => void read(), []);
   const services = () => [chrome.privacy.services.passwordSavingEnabled, chrome.privacy.services.autofillAddressEnabled, chrome.privacy.services.autofillCreditCardEnabled];
 
@@ -68,8 +267,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-
-const TIMEOUTS: [VaultTimeout, string][] = [
+export const TIMEOUTS: [VaultTimeout, string][] = [
   ["immediately", "Immediately"],
   [1, "1 minute"],
   [5, "5 minutes"],
@@ -109,6 +307,7 @@ function Toggle({ label, help, checked, onChange }: { label: string; help?: stri
         <span className="setting-title">{label}</span>
         {help && <span className="setting-desc">{help}</span>}
       </span>
+      {/* biome-ignore lint/a11y/useAriaPropsForRole: a native checkbox reports its checked state to the switch role itself */}
       <input type="checkbox" role="switch" className="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
     </label>
   );
@@ -127,10 +326,14 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
   const [error, setError] = useState<string | null>(null);
 
   const load = () =>
-    send<SecurityKeys>({ type: "securityKeys" }).then(
-      (d) => (setData(d), setLoadError(null)),
+    callPopup("securityKeys").then(
+      (d) => {
+        setData(d);
+        setLoadError(null);
+      },
       (e) => setLoadError(msg(e)),
     );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load once when the page opens (load is recreated on every render)
   useEffect(() => void load(), []);
 
   function cancel() {
@@ -146,7 +349,7 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
     setBusy(true);
     setError(null);
     try {
-      setData(await send<SecurityKeys>({ type: "securityKeys:remove", id: removing.id, password }));
+      setData(await callPopup("securityKeys:remove", { id: removing.id, password }));
       notify(`Security key "${removing.name}" removed.`);
       cancel();
     } catch (err) {
@@ -186,7 +389,18 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
                   {k.last_used_at ? `, last used ${new Date(k.last_used_at * 1000).toLocaleDateString()}` : ", never used"}
                 </span>
               </span>
-              <button type="button" className="btn btn-icon" aria-label={`Remove security key ${k.name}`} title="Remove" onClick={() => (setRemoving(k), setPassword(""), setError(null))} disabled={busy}>
+              <button
+                type="button"
+                className="btn btn-icon"
+                aria-label={`Remove security key ${k.name}`}
+                title="Remove"
+                onClick={() => {
+                  setRemoving(k);
+                  setPassword("");
+                  setError(null);
+                }}
+                disabled={busy}
+              >
                 <Icon name="trash" />
               </button>
             </li>
@@ -204,7 +418,17 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
             <ErrorText error={error} />
             <div className="field">
               <label htmlFor="sk-password">Master password</label>
-              <input id="sk-password" className="input mono" type="password" autoComplete="current-password" aria-describedby="sk-reason" data-autofocus="" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} />
+              <input
+                id="sk-password"
+                className="input mono"
+                type="password"
+                autoComplete="current-password"
+                aria-describedby="sk-reason"
+                data-autofocus=""
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={busy}
+              />
               <span id="sk-reason" className="field-hint">
                 Confirms it's you before the key is removed.
               </span>
@@ -227,6 +451,42 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
   );
 }
 
+/**
+ * "Forget this browser": the account's Secret Key and two-step "remember this
+ * device" token stored here go, so the next unlock or sign-in asks for them again.
+ */
+function ForgetBrowser({ state, notify, reload }: { state: PopupState; notify: (t: string) => void; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const nothing = !state.secretKeyStored && !state.rememberedDevice;
+  async function forget() {
+    setBusy(true);
+    try {
+      await callPopup("account:forgetBrowser");
+      notify("This browser no longer remembers your Secret Key or skips two-step login.");
+      reload();
+    } catch (e) {
+      notify(msg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="stack-s" aria-labelledby="forget-title">
+      <h3 className="section-title" id="forget-title">
+        This browser
+      </h3>
+      <p className="small muted">
+        {nothing
+          ? "This browser doesn't keep your Secret Key or a two-step login pass for this account."
+          : "Forgetting it means your next sign-in here asks for your Secret Key (if you use one) and a two-step code again."}
+      </p>
+      <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={forget} disabled={busy || nothing}>
+        Forget this browser
+      </button>
+    </section>
+  );
+}
+
 function formatTime(ms: number) {
   if (!ms) return "never";
   const d = new Date(ms);
@@ -244,14 +504,21 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
 
   const update = (patch: Partial<Settings>) => {
     setSettings({ ...settings, ...patch });
-    send<Settings>({ type: "settings", patch }).then(setSettings, (e) => notify(msg(e)));
+    callPopup("settings", { patch }).then(
+      (saved) => {
+        setSettings(saved);
+        // The rest of the popup follows these (the PIN option, the list's density).
+        if ("vaultTimeout" in patch || "density" in patch) ctx.reload();
+      },
+      (e) => notify(msg(e)),
+    );
   };
   async function sync() {
     if (syncing) return;
     setSyncing(true);
     try {
-      await send({ type: "sync" });
-      const s = await send<PopupState>({ type: "state" });
+      await callPopup("sync");
+      const s = await callPopup("state");
       setLastSync(s.lastSync);
       setSynced(true);
       notify("Sync complete. Your vault is up to date.");
@@ -262,52 +529,67 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
     }
   }
   const timeoutValue = String(settings.vaultTimeout);
-  const isMac = navigator.platform.toLowerCase().includes("mac");
+  // The servers' policies may set a longest timeout: only the choices within it (the limit itself included).
+  const limit = state.timeoutLimit ?? 0;
+  const timeouts = timeoutOptions(TIMEOUTS, limit);
+  const lowered = state.timeoutLowered;
+  const loweredFrom =
+    limit && lowered !== undefined && settings.vaultTimeout === limit ? (TIMEOUTS.find(([v]) => v === lowered)?.[1] ?? (typeof lowered === "number" ? minutesLabel(lowered) : undefined)) : undefined;
 
-  const sections: { key: string; title: string; icon: IconName; body: ReactNode; /** The body brings its own cards. */ plain?: boolean }[] = [
+  const sections: { key: string; title: string; icon: IconName; body: ReactNode /** The body brings its own cards. */; plain?: boolean }[] = [
     {
       key: "security",
       title: "Account security",
       icon: "lock",
       body: (
         <>
-        <label className="field">
-          <span>Vault timeout</span>
-          <select
-            className="select"
-            value={timeoutValue}
-            onChange={(e) => {
-              const v = TIMEOUTS.find(([t]) => String(t) === e.target.value)![0];
-              update({ vaultTimeout: v });
-            }}
-          >
-            {TIMEOUTS.map(([v, label]) => (
-              <option key={String(v)} value={String(v)}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        {settings.vaultTimeout === "never" && (
-          <div className="alert alert-error small">With "Never", your vault key is stored on this device without the master password protecting it. Anyone who can use this browser profile can open your vault.</div>
-        )}
-        <label className="field">
-          <span>Timeout action</span>
-          <select className="select" value={settings.timeoutAction} onChange={(e) => update({ timeoutAction: e.target.value as Settings["timeoutAction"] })}>
-            <option value="lock">Lock</option>
-            <option value="logout">Sign out</option>
-          </select>
-        </label>
-        <p className="small muted">
-          {settings.timeoutAction === "lock"
-            ? "Locking keeps your encrypted vault here; unlock with your master password."
-            : "Signing out removes the vault from this browser; sign in again (with two-step login) to use it."}
-        </p>
-        <button className="btn" onClick={() => send({ type: "lock" }).then(ctx.reload)}>
-          <Icon name="lock" /> Lock now
-        </button>
-        <hr />
-        <SecurityKeysSettings notify={notify} />
+          <label className="field">
+            <span>Vault timeout</span>
+            <select
+              className="select"
+              value={timeoutValue}
+              onChange={(e) => {
+                const v = timeouts.find(([t]) => String(t) === e.target.value)![0];
+                update({ vaultTimeout: v });
+              }}
+            >
+              {timeouts.map(([v, label]) => (
+                <option key={String(v)} value={String(v)}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {limit > 0 && (
+            <p className="small muted">
+              Your server allows a vault timeout of at most {minutesLabel(limit)}.{loweredFrom ? ` Your choice (${loweredFrom}) was lowered to ${minutesLabel(limit)}.` : ""}
+            </p>
+          )}
+          {settings.vaultTimeout === "never" && (
+            <div className="alert alert-error small">
+              With "Never", your vault key is stored on this device without the master password protecting it. Anyone who can use this browser profile can open your vault.
+            </div>
+          )}
+          <label className="field">
+            <span>Timeout action</span>
+            <select className="select" value={settings.timeoutAction} onChange={(e) => update({ timeoutAction: e.target.value as Settings["timeoutAction"] })}>
+              <option value="lock">Lock</option>
+              <option value="logout">Sign out</option>
+            </select>
+          </label>
+          <p className="small muted">
+            {settings.timeoutAction === "lock"
+              ? "Locking keeps your encrypted vault here; unlock with your master password."
+              : "Signing out removes the vault from this browser; sign in again (with two-step login) to use it."}
+          </p>
+          <PinSettings state={state} never={settings.vaultTimeout === "never"} notify={notify} reload={ctx.reload} />
+          <button type="button" className="btn" onClick={() => callPopup("lock").then(ctx.reload)}>
+            <Icon name="lock" /> {state.accounts.length > 1 ? "Lock all accounts now" : "Lock now"}
+          </button>
+          <hr />
+          <ForgetBrowser state={state} notify={notify} reload={ctx.reload} />
+          <hr />
+          <SecurityKeysSettings notify={notify} />
         </>
       ),
     },
@@ -317,50 +599,59 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "wand",
       body: (
         <>
-        <DefaultManager notify={notify} />
-        <label className="field">
-          <span>Show inline autofill menu</span>
-          <select className="select" value={settings.inlineMenu} onChange={(e) => update({ inlineMenu: e.target.value as Settings["inlineMenu"] })}>
-            <option value="focus">When a login field is selected</option>
-            <option value="click">When I click the PassAuth icon in a field</option>
-            <option value="off">Off</option>
-          </select>
-        </label>
-        <label className="field">
-          <span>Default URI match detection</span>
-          <select className="select" value={settings.defaultMatch} onChange={(e) => update({ defaultMatch: e.target.value as Settings["defaultMatch"] })}>
-            {MATCHES.map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <p className="small muted">{MATCH_HELP[settings.defaultMatch]} Applies to websites set to "Default" in an item.</p>
-        <Toggle
-          label="Copy verification code automatically"
-          help="After filling a login that has an authenticator key, the current code is copied so you can paste it."
-          checked={settings.autoCopyTotp}
-          onChange={(v) => update({ autoCopyTotp: v })}
-        />
-        <p className="small muted">
-          Fill the login for the current page with <kbd>{isMac ? "⌘ ⇧ L" : "Ctrl+Shift+L"}</kbd>.{" "}
-          <button className="link" onClick={() => chrome.tabs.create({ url: "chrome://extensions/shortcuts" })}>
-            Change shortcuts
-          </button>
-        </p>
-        <label className="field">
-          <span>Clear clipboard</span>
-          <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
-            <option value={0}>Never</option>
-            {[10, 20, 30, 60, 120, 300].map((s) => (
-              <option key={s} value={s}>
-                After {seconds(s)}
-              </option>
-            ))}
-          </select>
-          <span className="small muted">Applies to everything PassAuth copies: passwords, usernames and verification codes.</span>
-        </label>
+          <DefaultManager notify={notify} />
+          <label className="field">
+            <span>Show inline autofill menu</span>
+            <select className="select" value={settings.inlineMenu} onChange={(e) => update({ inlineMenu: e.target.value as Settings["inlineMenu"] })}>
+              <option value="focus">When a login field is selected</option>
+              <option value="click">When I click the PassAuth icon in a field</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Default URI match detection</span>
+            <select className="select" value={settings.defaultMatch} onChange={(e) => update({ defaultMatch: e.target.value as Settings["defaultMatch"] })}>
+              {MATCHES.map(([v, label]) => (
+                <option key={v} value={v}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="small muted">{MATCH_HELP[settings.defaultMatch]} Applies to websites set to "Default" in an item.</p>
+          <Toggle
+            label="Offer a strong password on sign-up forms"
+            help="The inline menu suggests a new password from the generator on sign-up and change-password fields."
+            checked={settings.inlineOnSignup}
+            onChange={(v) => update({ inlineOnSignup: v })}
+          />
+          <Toggle
+            label="Show PassAuth in the right-click menu"
+            help="Fill, copy a user name, password or code, or a strong password, from the page's right-click menu."
+            checked={settings.contextMenu}
+            onChange={(v) => update({ contextMenu: v })}
+          />
+          <Toggle
+            label="Copy verification code automatically"
+            help="After filling a login that has an authenticator key, the current code is copied so you can paste it."
+            checked={settings.autoCopyTotp}
+            onChange={(v) => update({ autoCopyTotp: v })}
+          />
+          <hr />
+          <Shortcuts />
+          <label className="field">
+            <span>Clear clipboard</span>
+            <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>
+              <option value={0}>Never</option>
+              {[10, 20, 30, 60, 120, 300].map((s) => (
+                <option key={s} value={s}>
+                  After {seconds(s)}
+                </option>
+              ))}
+            </select>
+            <span className="small muted">Applies to everything PassAuth copies: passwords, usernames and verification codes.</span>
+          </label>
+          <HiddenSites initial={state.hiddenSites} notify={notify} />
         </>
       ),
     },
@@ -370,30 +661,31 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "bell",
       body: (
         <>
-        <Toggle label="Ask to save and update logins" checked={settings.askToSave} onChange={(v) => update({ askToSave: v })} />
-        {neverSave.length > 0 && (
-          <section className="stack-s" aria-labelledby="never-title">
-            <hr />
-            <h3 className="section-title" id="never-title">
-              Never ask on these sites
-            </h3>
-            <ul className="plain-list">
-              {neverSave.map((d) => (
-                <li key={d}>
-                  <span className="grow clip">{d}</span>
-                  <button
-                    className="btn btn-icon"
-                    aria-label={`Ask again on ${d}`}
-                    title="Ask again on this site"
-                    onClick={() => send({ type: "neverSave:remove", domain: d }).then(() => setNeverSave(neverSave.filter((x) => x !== d)))}
-                  >
-                    <Icon name="close" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+          <Toggle label="Ask to save and update logins" checked={settings.askToSave} onChange={(v) => update({ askToSave: v })} />
+          {neverSave.length > 0 && (
+            <section className="stack-s" aria-labelledby="never-title">
+              <hr />
+              <h3 className="section-title" id="never-title">
+                Never ask on these sites
+              </h3>
+              <ul className="plain-list">
+                {neverSave.map((d) => (
+                  <li key={d}>
+                    <span className="grow clip">{d}</span>
+                    <button
+                      type="button"
+                      className="btn btn-icon"
+                      aria-label={`Ask again on ${d}`}
+                      title="Ask again on this site"
+                      onClick={() => callPopup("neverSave:remove", { domain: d }).then(() => setNeverSave(neverSave.filter((x) => x !== d)))}
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </>
       ),
     },
@@ -404,7 +696,13 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       plain: true,
       body: (
         <div className="choices">
-          <ActionRow icon="sync" title={syncing ? "Syncing…" : "Sync vault now"} sub={<span aria-live="polite">Last sync: {formatTime(lastSync)}</span>} done={synced && !syncing ? "Up to date" : undefined} onClick={sync} />
+          <ActionRow
+            icon="sync"
+            title={syncing ? "Syncing…" : "Sync vault now"}
+            sub={<span aria-live="polite">Last sync: {formatTime(lastSync)}</span>}
+            done={synced && !syncing ? "Up to date" : undefined}
+            onClick={sync}
+          />
           <ActionRow icon="upload" title="Import items" sub="Opens the web vault" onClick={() => chrome.tabs.create({ url: `${state.server}/import` })} />
           <ActionRow icon="external" title="Open web vault" sub={new URL(state.server).host} onClick={() => chrome.tabs.create({ url: state.server })} />
         </div>
@@ -416,36 +714,42 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "eye",
       body: (
         <>
-        <label className="field">
-          <span>Theme</span>
-          <select
-            className="select"
-            value={settings.theme}
-            onChange={(e) => {
-              const theme = e.target.value as Settings["theme"];
-              applyTheme(theme);
-              update({ theme });
-            }}
-          >
-            {(Object.keys(THEMES) as Settings["theme"][]).map((t) => (
-              <option key={t} value={t}>
-                {t === "system" ? "Same as system" : THEMES[t]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Toggle
-          label="Show the number of logins on the PassAuth icon"
-          help="The toolbar icon shows how many saved logins match the site you're on."
-          checked={settings.badge}
-          onChange={(v) => update({ badge: v })}
-        />
-        <Toggle
-          label="Show website icons"
-          help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
-          checked={settings.showIcons}
-          onChange={(v) => update({ showIcons: v })}
-        />
+          <label className="field">
+            <span>Theme</span>
+            <select
+              className="select"
+              value={settings.theme}
+              onChange={(e) => {
+                const theme = e.target.value as Settings["theme"];
+                applyTheme(theme);
+                update({ theme });
+              }}
+            >
+              {(Object.keys(THEMES) as Settings["theme"][]).map((t) => (
+                <option key={t} value={t}>
+                  {t === "system" ? "Same as system" : THEMES[t]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Toggle
+            label="Compact list"
+            help="Smaller rows, so more of your vault fits in the popup."
+            checked={settings.density === "compact"}
+            onChange={(v) => update({ density: v ? "compact" : "comfortable" })}
+          />
+          <Toggle
+            label="Show the number of logins on the PassAuth icon"
+            help="The toolbar icon shows how many saved logins match the site you're on."
+            checked={settings.badge}
+            onChange={(v) => update({ badge: v })}
+          />
+          <Toggle
+            label="Show website icons"
+            help="Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
+            checked={settings.showIcons}
+            onChange={(v) => update({ showIcons: v })}
+          />
         </>
       ),
     },
@@ -455,23 +759,23 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "info",
       body: (
         <>
-        <div className="about-brand">
-          <LogoMark size={40} />
-          <div>
-            <span className="name">PassAuth</span>
-            <span className="sub">Version {chrome.runtime.getManifest().version}</span>
-            <span className="sub">© Fahed Alhammadi</span>
+          <div className="about-brand">
+            <LogoMark size={40} />
+            <div>
+              <span className="name">PassAuth</span>
+              <span className="sub">Version {chrome.runtime.getManifest().version}</span>
+              <span className="sub">© Fahed Alhammadi</span>
+            </div>
           </div>
-        </div>
-        <hr />
-        <div>
-          <Field label="Signed in as">{state.email}</Field>
-          <Field label="Server">{state.server}</Field>
-        </div>
-        <p className="small muted">To use another PassAuth server, sign out and choose "Change server" on the sign-in screen.</p>
-        <button className="btn btn-danger" onClick={() => send({ type: "logout" }).then(ctx.reload)}>
-          <Icon name="logout" /> Sign out
-        </button>
+          <hr />
+          <div>
+            <Field label="Signed in as">{state.email}</Field>
+            <Field label="Server">{state.server}</Field>
+          </div>
+          <p className="small muted">To use another PassAuth server, sign out and choose "Change server" on the sign-in screen.</p>
+          <button type="button" className="btn btn-danger" onClick={ctx.signOut}>
+            <Icon name="logout" /> Sign out…
+          </button>
         </>
       ),
     },
@@ -486,7 +790,16 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
     );
   }
   return (
-    <Page title="Settings" brand actions={<><PopOut /><Account state={state} onChange={ctx.reload} /></>}>
+    <Page
+      title="Settings"
+      brand
+      actions={
+        <>
+          <PopOut />
+          <Account state={state} onChange={ctx.reload} onSignOut={ctx.signOut} />
+        </>
+      }
+    >
       <nav className="choices" aria-label="Settings">
         {sections.map((x) => (
           <ActionRow key={x.key} icon={x.icon} title={x.title} onClick={() => ctx.go({ tab: "settings", section: x.key })} />

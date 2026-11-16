@@ -1,4 +1,4 @@
-import type { Settings } from "../shared/messages";
+import type { Settings } from "../shared/types";
 
 /** Light/dark choice from Settings → Appearance ("system" follows the OS). */
 export function applyTheme(theme: Settings["theme"]) {

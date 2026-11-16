@@ -7,12 +7,7 @@
 // native implementation. Nothing is exposed on `window`; the only data the page
 // ever receives is a normal PublicKeyCredential-like result or DOMException.
 
-import type {
-  AuthenticationResponseJSON,
-  BridgeToPageMessage,
-  PasskeyKind,
-  RegistrationResponseJSON,
-} from "../shared/passkey-types";
+import type { AuthenticationResponseJSON, BridgeToPageMessage, PasskeyKind, RegistrationResponseJSON } from "../shared/passkey-types";
 
 (() => {
   const w = window;
@@ -39,16 +34,8 @@ import type {
   const ACK_TIMEOUT_MS = 1500; // no bridge ack within this window → native
   const DEFAULT_TIMEOUT_MS = 120_000;
   const MIN_TIMEOUT_MS = 10_000;
-  const MAX_TIMEOUT_MS = 600_000;
-  const ERROR_NAMES = new Set([
-    "NotAllowedError",
-    "InvalidStateError",
-    "SecurityError",
-    "NotSupportedError",
-    "AbortError",
-    "ConstraintError",
-    "UnknownError",
-  ]);
+  const MAX_TIMEOUT_MS = 240_000; // PassAuth's confirmation window waits at most 4 minutes (background/passkey-handler.ts)
+  const ERROR_NAMES = new Set(["NotAllowedError", "InvalidStateError", "SecurityError", "NotSupportedError", "AbortError", "ConstraintError", "UnknownError"]);
 
   type PublicKeyOptions = Record<string, unknown> & { timeout?: unknown };
   type CredOptions = { publicKey?: PublicKeyOptions; mediation?: string; signal?: AbortSignal };
@@ -107,10 +94,7 @@ import type {
     return target;
   }
 
-  function toCredential(
-    kind: PasskeyKind,
-    json: RegistrationResponseJSON | AuthenticationResponseJSON,
-  ): PublicKeyCredential {
+  function toCredential(kind: PasskeyKind, json: RegistrationResponseJSON | AuthenticationResponseJSON): PublicKeyCredential {
     let response: AuthenticatorResponse;
     if (kind === "create") {
       const r = (json as RegistrationResponseJSON).response;
@@ -195,11 +179,7 @@ import type {
     return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, t));
   }
 
-  function intercept(
-    kind: PasskeyKind,
-    options: CredOptions,
-    callNative: () => Promise<Credential | null>,
-  ): Promise<Credential | null> {
+  function intercept(kind: PasskeyKind, options: CredOptions, callNative: () => Promise<Credential | null>): Promise<Credential | null> {
     const publicKey = options.publicKey!;
     const signal = options.signal;
     if (signal?.aborted) return Promise.reject(abortReason(signal));
@@ -214,8 +194,9 @@ import type {
 
     const id = newId();
     return new Promise<Credential | null>((resolve, reject) => {
-      let ackTimer: ReturnType<typeof setTimeout> | undefined;
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      // The window's own timers (captured above): numbers, whatever else the type checker has loaded.
+      let ackTimer: number | undefined;
+      let timer: number | undefined;
 
       const finish = (): void => {
         pending.delete(id);

@@ -1,23 +1,45 @@
 /*
- * Inline autofill menu: a small PassAuth surface under the login field.
- * Colours and radii are the shared tokens (@web/styles/app.css, loaded first);
- * heights must match shared/inline-layout.ts, which sizes the frame.
+ * Inline autofill menu: a small PassAuth surface under the field. Colours and radii are the shared tokens
+ * (@web/styles/app.css, loaded first); the heights must match shared/inline-layout.ts, which sizes the frame. The
+ * frame has one size whatever it shows: the list scrolls and messages wrap inside it.
  */
 :root { --radius-s: 8px; --radius-m: 12px; }
 html, body { margin: 0; height: 100%; background: transparent; }
 body { font-size: 15px; line-height: 1.4; }
-main { height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; }
-.head { flex: none; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--ink-2); }
-.head svg { flex: none; }
-.rows { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
-.row { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; height: 52px; padding: 0 8px; border-radius: var(--radius-s); cursor: pointer; }
-.row:hover, .row:focus-visible { background: var(--surface-2); }
+main { position: relative; height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; }
+.head { flex: none; display: flex; align-items: center; justify-content: space-between; height: 36px; padding: 0 4px 0 12px; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.brand svg { flex: none; }
+.head .more { width: 28px; height: 28px; }
+.ico { display: grid; place-items: center; }
+.ico svg { display: block; }
+.body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.rows { padding: 4px; }
+.row { box-sizing: border-box; display: flex; align-items: center; gap: 12px; height: 52px; padding: 0 8px; border-radius: var(--radius-s); cursor: pointer; outline: none; }
+.row:hover, .row[aria-selected="true"] { background: var(--surface-2); }
 .row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.row .avatar { width: 36px; height: 36px; border-radius: var(--radius-s); }
+.row .avatar, .row .tile { width: 36px; height: 36px; border-radius: var(--radius-s); }
 .txt { min-width: 0; flex: 1; display: grid; }
 .name, .user { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .name { font-weight: 500; }
 .user { font-size: 13px; color: var(--ink-3); }
-.locked { flex: 1; display: grid; align-content: center; gap: 12px; padding: 12px; }
-.locked p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.locked .btn { height: 36px; }
+.code { flex: none; display: grid; justify-items: end; line-height: 1.2; }
+.digits { font-family: var(--mono); font-variant-ligatures: none; font-weight: 500; letter-spacing: 0.02em; color: var(--ink); }
+.left { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+/* Messages (locked, nothing saved, an error) wrap inside the same box; a long one scrolls. */
+.message { box-sizing: border-box; min-height: 100%; display: grid; align-content: center; justify-items: start; gap: 12px; padding: 12px; }
+.message p { margin: 0; overflow-wrap: anywhere; }
+.message .btn { height: 36px; }
+.message .error { color: var(--danger); }
+.foot { flex: none; display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 4px; border-top: 1px solid var(--line); }
+.foot:empty { display: none; }
+.foot .btn { height: 34px; padding: 0 8px; gap: 6px; font-size: 13px; }
+.foot .btn:only-child { margin-right: auto; }
+.foot .ico svg { width: 16px; height: 16px; }
+.popover { position: absolute; top: 34px; right: 6px; min-width: 190px; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-s); box-shadow: var(--shadow); }
+.popover[hidden] { display: none; }
+.menuitem { all: unset; box-sizing: border-box; display: block; width: 100%; height: 36px; padding: 0 12px; border-radius: 6px; font-size: 14px; line-height: 36px; cursor: pointer; }
+.menuitem:hover { background: var(--surface-2); }
+.menuitem:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.hint { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); margin: 0; padding: 4px 12px; border-radius: 999px; background: var(--ink); color: var(--surface); font-size: 12px; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 120ms; }
+.hint.show { opacity: 1; }

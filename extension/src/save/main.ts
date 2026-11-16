@@ -6,21 +6,52 @@
  *
  * Clickjacking: buttons and choices only react to real (trusted) events, and
  * only once the frame has been fully visible — not covered, transparent or
- * filtered by the page around it — for half a second.
+ * filtered by the page around it — for half a second (content/guard.ts; a tap
+ * needs a confirm tap on the same button). Keys count only after the content
+ * script gave this frame the focus with its nonce, or after a click here that
+ * passed those checks. This frame never posts to the page around it: "touch"
+ * goes to the worker with the nonce.
+ *
+ * Focus: the prompt has the keyboard focus only when the content script gave it
+ * (the form was submitted from the keyboard); otherwise it announces itself
+ * politely and leaves the focus where the user is. It goes away after 30 s, but
+ * not while the pointer or the focus is in it, and only Esc pressed inside it
+ * (or its own buttons) dismisses it: the page can't.
  */
 import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@web/styles/app.css";
 import "./save.css";
-import { describeSave, NEW_LOGIN } from "../background/save-plan";
 import { closeSvg, logoSvg, plusSvg } from "../content/brand";
-import { visibilityGate } from "../content/guard";
-import { send, type SaveAnswer, type SaveOffer } from "../shared/messages";
+import { againHint, clickGate, inputKind } from "../content/guard";
+import { onFocusRequest, onMoved, receiveNonce, reportTouch } from "../shared/dom/frame-channel";
+import { callSave } from "../shared/protocol";
+import { describeSave, NEW_LOGIN, sharedWarning, type TextPart } from "../shared/save-text";
+import type { SaveAnswer, SaveOffer } from "../shared/types";
 
-const nonce = location.hash.slice(1);
+/** Set once the content script that placed this frame has handed it over (frame-channel.ts). */
+let nonce = "";
 const root = document.getElementById("prompt")!;
-const gate = visibilityGate(document.documentElement);
+const gate = clickGate(document.documentElement);
+onMoved(gate.moved);
+/** A finger or pen touched the frame before the nonce arrived: said once it has. */
+let touchPending = false;
+const sendTouch = () => void callSave("save:touch", { nonce }).catch(() => {});
+// A finger or pen: the content script then checks this frame in every animation frame (confirm taps).
+reportTouch(() => {
+  if (nonce) sendTouch();
+  else touchPending = true;
+});
+// After a keyboard submit the content script gives this frame the focus and says so with the nonce: keys count from
+// now until the frame loses the focus. The dialog takes the focus, never a button.
+onFocusRequest(
+  () => nonce,
+  () => {
+    gate.armKeys();
+    if (!root.contains(document.activeElement) || document.activeElement === document.body) root.focus({ preventScroll: true });
+  },
+);
 
 /** Element with text set through `textContent`; markup is only ever the static icons. */
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
@@ -38,12 +69,32 @@ function tile(content: string, svg = false) {
   return t;
 }
 
+/**
+ * "Click again", "Tap again" or "Press Enter again" for a moment, over the bottom of the prompt: it never changes
+ * the prompt's height (a new size would make the frame wait again, and a touch user's confirm tap would never count).
+ */
+const hint = el("p", "hint");
+hint.setAttribute("role", "status");
+document.body.append(hint);
+let hintTimer: ReturnType<typeof setTimeout> | undefined;
+function showHint(text: string) {
+  hint.textContent = text;
+  hint.classList.add("show");
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => hint.classList.remove("show"), 2000);
+}
+
 function button(className: string, text: string, onClick: () => void) {
   const b = el("button", className, text);
   b.type = "button";
   b.addEventListener("click", (e) => {
-    // Only real clicks (or key presses) on a prompt the user can see.
-    if (!e.isTrusted || !gate.ok() || busy) return;
+    // Only real clicks (or key presses) on a prompt the user can see, with the pointer resting on it (a touch: a confirm tap).
+    if (!e.isTrusted || busy) return;
+    if (!gate.ok(e)) {
+      // A key press while the keyboard isn't armed (the frame got the focus some other way) does nothing, silently.
+      if (inputKind(e) !== "key" || gate.keysArmed()) showHint(againHint(e));
+      return;
+    }
     onClick();
   });
   return b;
@@ -52,17 +103,22 @@ function button(className: string, text: string, onClick: () => void) {
 let busy = false;
 let selected = NEW_LOGIN;
 let timer: ReturnType<typeof setTimeout> | undefined;
-/** After the user has used the prompt, it also stays while the keyboard focus is in it. */
-let used = false;
+let pointerInside = false;
+let focusInside = document.hasFocus();
+let announced = false;
+/** Says the prompt is there when it opens without the focus (a screen reader reads it out; nothing moves). */
+const live = el("div", "sr-only");
+live.setAttribute("role", "status");
+document.body.append(live);
 
 async function answer(accept: "save" | "never" | "dismiss") {
-  if (busy) return;
+  if (busy || !nonce) return;
   busy = true;
   clearTimeout(timer);
   root.setAttribute("aria-busy", "true");
   let reply: SaveAnswer;
   try {
-    reply = await send<SaveAnswer>({ type: "save:answer", nonce, accept, target: selected });
+    reply = await callSave("save:answer", { nonce, accept, target: selected });
   } catch (e) {
     // The pending save is gone (expired, locked, another account): nothing more to do here.
     reply = { error: e instanceof Error ? e.message : String(e), retry: false };
@@ -103,14 +159,22 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
 
   const note = el("p", "sheet-note");
   note.id = "note";
+  // Shown while a login in a shared vault is selected (never preselected: the save rule).
+  const warn = el("p", "alert alert-warn");
+  warn.setAttribute("role", "status");
+  warn.hidden = true;
   const primary = button("btn btn-primary btn-block", "", () => void answer("save"));
+  const parts = (list: TextPart[]) => list.map((part) => (typeof part === "string" ? part : el("strong", "", part.strong)));
 
-  // Title, button and the sentence that names what will be saved all follow the selection.
+  // Title, button, the sentence that names what will be saved and the shared-vault warning all follow the selection.
   const update = () => {
     const target = targets.find((t) => t.id === selected);
     title.textContent = target ? "Update login?" : "Save login?";
     primary.textContent = target ? "Update" : "Save";
-    note.replaceChildren(...describeSave(target, username, site).map((part) => (typeof part === "string" ? part : el("strong", "", part.strong))));
+    note.replaceChildren(...parts(describeSave(target, username, site)));
+    const shared = sharedWarning(target);
+    warn.hidden = !shared;
+    warn.replaceChildren(...parts(shared ?? []));
   };
 
   const body = el("div", "modal-body");
@@ -132,7 +196,7 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
     };
     for (const t of targets) {
       const user = t.username || "No user name";
-      // A login in a shared vault (only ever the one already saved under this user name) says so.
+      // A login in a shared vault (only one saved under the typed user name, never preselected) says so.
       list.append(row(t.id, t.name, t.vault ? `In ${t.vault}: ${user}` : user, tile(t.name)));
     }
     list.append(row(NEW_LOGIN, "New login", username || site, tile(plusSvg, true)));
@@ -140,13 +204,19 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
     group.addEventListener("change", (e) => {
       const input = e.target as HTMLInputElement;
       // Only the user changes the choice (clicks and arrow keys are trusted events).
-      if (!e.isTrusted || busy) return void (list.querySelector<HTMLInputElement>(`input[value="${CSS.escape(selected)}"]`)!.checked = true);
+      if (!e.isTrusted || busy) {
+        const shown = list.querySelector<HTMLInputElement>(`input[value="${CSS.escape(selected)}"]`);
+        if (shown) shown.checked = true;
+        return;
+      }
       selected = input.value;
       update();
     });
     body.append(group);
   }
-  if (!state.closed) body.append(note);
+  if (!state.closed) body.append(note, warn);
+  // A password PassAuth generated on this page: nobody else knows it yet.
+  if (offer.generated && !state.closed) body.append(el("p", "sheet-note", "PassAuth generated this password. Save it so you can sign in again."));
   const message = state.error ?? state.notice;
   if (message) {
     const alert = el("p", state.error ? "alert alert-error" : "alert alert-warn", message);
@@ -168,27 +238,40 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
   body.append(actions);
   update();
   root.replaceChildren(bar, body);
-  // Focus on the dialog itself, never on a button: a key press that was already on its way can't accept anything.
-  root.focus({ preventScroll: true });
+  // With the focus (a keyboard submit): on the dialog itself, never on a button, so a key press that was already on
+  // its way can't accept anything. Without it: announced, and the focus stays in the page.
+  if (document.hasFocus()) root.focus({ preventScroll: true });
+  else if (!announced) {
+    announced = true;
+    setTimeout(() => (live.textContent = `PassAuth: ${title.textContent} ${site}`), 100);
+  }
   arm();
 }
 
-// Disappears after 30 s, but not while the pointer is on it or the user is working in it.
+// Disappears after 30 s, but not while the pointer or the focus is in it (a generated password's prompt stays until answered).
 function arm() {
   clearTimeout(timer);
+  if (pointerInside || focusInside || last?.generated) return;
   timer = setTimeout(() => void answer("dismiss"), 30_000);
 }
-document.documentElement.addEventListener("pointerenter", () => clearTimeout(timer));
-document.documentElement.addEventListener("pointerleave", () => !busy && arm());
-const noteUse = (e: Event) => {
-  if (!e.isTrusted) return;
-  used = true;
+document.documentElement.addEventListener("pointerenter", () => {
+  pointerInside = true;
   clearTimeout(timer);
-};
-document.addEventListener("pointerdown", noteUse, true);
-document.addEventListener("keydown", noteUse, true);
-document.addEventListener("focusin", () => used && clearTimeout(timer));
-addEventListener("blur", () => !busy && arm());
+});
+document.documentElement.addEventListener("pointerleave", () => {
+  pointerInside = false;
+  if (!busy) arm();
+});
+addEventListener("focus", () => {
+  focusInside = true;
+  clearTimeout(timer);
+  // The content script focused the frame (a keyboard submit): the dialog takes it, not a button.
+  if (document.activeElement === document.body || document.activeElement === null) root.focus({ preventScroll: true });
+});
+addEventListener("blur", () => {
+  focusInside = false;
+  if (!busy) arm();
+});
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && e.isTrusted) void answer("dismiss");
@@ -198,15 +281,20 @@ document.addEventListener("keydown", (e) => {
 let reported = 0;
 new ResizeObserver(() => {
   const height = Math.ceil(root.getBoundingClientRect().height);
-  if (!height || height === reported) return;
+  if (!nonce || !height || height === reported) return;
   reported = height;
-  void send({ type: "save:resize", nonce, height }).catch(() => {});
+  // An expired prompt keeps its size until the page side removes it.
+  void callSave("save:resize", { nonce, height }).catch(() => {});
 }).observe(root);
 
-// Only as a frame directly inside a page's top frame (where the content script put it).
+// Only as a frame directly inside a page's top frame (where the content script put it); nothing is asked before the nonce arrives.
 const framed = window.top !== window && window.parent === window.top;
-if (framed && nonce) {
-  send<SaveOffer>({ type: "save:offer", nonce }).then(render, () => {
-    /* expired or not for this tab: the background has told the content script to remove the frame */
+if (framed) {
+  void receiveNonce().then((n) => {
+    nonce = n;
+    if (touchPending) sendTouch();
+    callSave("save:offer", { nonce }).then(render, () => {
+      /* expired, or not this frame's to show: nothing to do here (the real prompt is left alone) */
+    });
   });
 }

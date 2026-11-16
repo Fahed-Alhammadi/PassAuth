@@ -1,6 +1,8 @@
 # Web vault + Chrome extension.
-# - Push to main / pull request: builds the web vault and the extension (and runs the extension
-#   tests) against the browser build of the core.
+# - Push to main / pull request: builds and tests the web vault, checks that the shared golden
+#   vectors (testdata/vectors.json) are the answers of the core being built (the extension's site
+#   logic is the core's), then lints (Biome), tests (incl. its wrappers against the vectors) and
+#   builds the extension against the browser build of the core.
 # - Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
 #   extension and submit it to the Chrome Web Store. There is no GitHub release: the zip
 #   (passauth-extension-1.2.3.zip) is kept as a download on the workflow run for 90 days. The version comes from extension/package.json and
@@ -22,6 +24,7 @@ on:
       - "Cargo.lock"
       - ".cargo/**"
       - "scripts/build-wasm.sh"
+      - "testdata/**"
       - ".github/workflows/extension.yml"
   pull_request:
     paths:
@@ -32,6 +35,7 @@ on:
       - "Cargo.lock"
       - ".cargo/**"
       - "scripts/build-wasm.sh"
+      - "testdata/**"
       - ".github/workflows/extension.yml"
   workflow_dispatch:
 
@@ -64,16 +68,22 @@ jobs:
         run: |
           v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
           cargo install wasm-bindgen-cli --version "$v" --locked
+      # The extension's packageManager field (extension/package.json) names the same pnpm.
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 10
+          version: 10.34.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
       - run: scripts/build-wasm.sh web/src/wasm extension/src/wasm
-      - run: pnpm install --frozen-lockfile && pnpm build
+      - name: Web vault (build, unit tests)
+        run: pnpm install --frozen-lockfile && pnpm build && pnpm test
         working-directory: web
-      - run: pnpm install --frozen-lockfile && pnpm build && pnpm test
+      # The browser build above is the core the vectors must come from (no second build).
+      - name: Golden vectors match the core
+        run: node testdata/generate-vectors.mjs --check --wasm extension/src/wasm
+      - name: Extension (lint, unit tests, type check + build)
+        run: pnpm install --frozen-lockfile && pnpm lint && pnpm test && pnpm build
         working-directory: extension
 
   store-check:
@@ -116,10 +126,11 @@ jobs:
           cargo install wasm-bindgen-cli --version "$v" --locked
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 10
+          version: 10.34.9
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
+      # pnpm package: a reproducible zip (fixed file times, sorted entries, zip -X; extension/package.mjs).
       - name: Build Chrome extension
         run: |
           # The extension reuses web vault components, which import the web copy of the core.

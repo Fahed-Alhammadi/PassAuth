@@ -1,0 +1,13 @@
+{
+  // Content scripts: run in every frame of web pages (DOM), with chrome.* messaging. No site rules here: the
+  // background decides with the core and sends each document the origin it checked.
+  "extends": "./base.json",
+  "compilerOptions": {
+    "outDir": "../node_modules/.cache/tsc/content",
+    "tsBuildInfoFile": "../node_modules/.cache/tsc/content.tsbuildinfo",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["chrome"]
+  },
+  "include": ["../src/content", "../src/shared"],
+  "references": [{ "path": "./web.json" }]
+}

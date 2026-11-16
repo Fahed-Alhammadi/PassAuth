@@ -1,34 +1,18 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "lib": [
-      "ES2023",
-      "DOM",
-      "DOM.Iterable",
-      "WebWorker"
-    ],
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "skipLibCheck": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "allowImportingTsExtensions": true,
-    "types": [
-      "chrome",
-      "vite/client"
-    ],
-    "paths": {
-      "@web/*": [
-        "../web/src/*"
-      ]
-    }
-  },
-  "include": [
-    "src",
-    "test"
+  // One TypeScript project per context the extension's code runs in, so each is checked against what exists there
+  // (`tsc -b` builds them all; declarations go to node_modules/.cache/tsc, nothing else is emitted):
+  //   worker       src/background: the service worker (no DOM)
+  //   content      src/content: content scripts in web pages (DOM + chrome)
+  //   main-world   src/page: the WebAuthn shim in the page's own world (DOM only, no chrome)
+  //   pages        src/popup, inline, save, offscreen: PassAuth's own pages (DOM + React + chrome)
+  //   test         test/: the unit tests (Node, with a fake chrome)
+  //   web          the web vault code the extension reuses (@web/*), with the web vault's own settings
+  "files": [],
+  "references": [
+    { "path": "./tsconfig/worker.json" },
+    { "path": "./tsconfig/content.json" },
+    { "path": "./tsconfig/main-world.json" },
+    { "path": "./tsconfig/pages.json" },
+    { "path": "./tsconfig/test.json" }
   ]
 }

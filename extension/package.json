@@ -4,11 +4,15 @@
   "license": "MIT",
   "version": "0.6.0",
   "type": "module",
+  "packageManager": "pnpm@10.34.9",
   "scripts": {
     "wasm": "../scripts/build-wasm.sh extension/src/wasm",
-    "build": "tsc --noEmit && node build.mjs",
-    "test": "node test/passkeys.test.mjs && node test/urls.test.mjs && node test/save-plan.test.mjs && node test/passkey-targets.test.mjs && node test/window-place.test.mjs",
-    "package": "node build.mjs && cd dist && zip -qr ../passauth-extension.zip ."
+    "build": "tsc -b && node build.mjs",
+    "typecheck": "tsc -b",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "package": "node build.mjs && node package.mjs"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",
@@ -17,11 +21,14 @@
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.4",
     "@types/chrome": "^0.3.7",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.2.1",
+    "happy-dom": "21.0.4",
     "typescript": "^7.0.2",
-    "vite": "^8.3.6"
+    "vite": "^8.3.6",
+    "vitest": "5.0.5"
   }
 }

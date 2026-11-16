@@ -1,8 +1,10 @@
 // Builds the extension into dist/: popup, inline menu, save prompt, offscreen clipboard + background (ES modules, WASM as a
-// file) and the two content scripts (classic IIFE bundles).
-import { build } from "vite";
-import react from "@vitejs/plugin-react";
+// file) and the content scripts (classic IIFE bundles): the document_start passkey bridge (bridge.js) and the WebAuthn
+// shim (webauthn.js, page world), and the main content script at document_idle (content.js).
+
 import { cpSync, rmSync } from "node:fs";
+import react from "@vitejs/plugin-react";
+import { build } from "vite";
 
 // dedupe: shared web components must use this package's single React copy.
 const base = {
@@ -22,13 +24,17 @@ await build({
     assetsInlineLimit: 0,
     modulePreload: false,
     rollupOptions: {
-      input: { popup: "popup.html", "inline-menu": "inline-menu.html", "save-prompt": "save-prompt.html", offscreen: "offscreen.html", background: "src/background/index.ts" },
+      input: { popup: "popup.html", "inline-menu": "inline-menu.html", "save-prompt": "save-prompt.html", offscreen: "offscreen.html", background: "src/background/main.ts" },
       output: { entryFileNames: "[name].js", chunkFileNames: "chunks/[name]-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" },
     },
   },
 });
 
-for (const [entry, name] of [["src/content/index.ts", "content"], ["src/page/webauthn.ts", "webauthn"]]) {
+for (const [entry, name] of [
+  ["src/content/bridge.ts", "bridge"],
+  ["src/content/index.ts", "content"],
+  ["src/page/webauthn.ts", "webauthn"],
+]) {
   await build({
     ...base,
     build: {

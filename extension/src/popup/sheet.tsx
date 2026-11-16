@@ -8,8 +8,9 @@
  * same classes the web vault's dialogs use; dialogs inside the popup use the
  * shared <Modal> / <ConfirmDialog> directly.
  */
-import { useId, type ReactNode } from "react";
+
 import { LogoMark } from "@web/components/Logo";
+import { type ReactNode, useId } from "react";
 
 /** Logo and name. The window has its own close button, so there is none here. */
 export function BrandBar() {
@@ -106,6 +107,7 @@ export function Choices({
 /** The same card with a single row and nothing to choose (e.g. the only passkey for a site). */
 export function OnlyChoice({ label, choice }: { label: string; choice: Choice }) {
   return (
+    // biome-ignore lint/a11y/useSemanticElements: styled like the choice cards around it; a fieldset would bring its own border and spacing
     <div className="choices" role="group" aria-label={label}>
       <div className="choice choice-static">
         <ChoiceText choice={choice} />

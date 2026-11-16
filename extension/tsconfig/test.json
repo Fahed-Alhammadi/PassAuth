@@ -1,0 +1,13 @@
+{
+  // Unit tests (vitest in Node with a fake chrome, test/chrome.ts), type-checked against the browser libraries.
+  "extends": "./base.json",
+  "compilerOptions": {
+    "outDir": "../node_modules/.cache/tsc/test",
+    "tsBuildInfoFile": "../node_modules/.cache/tsc/test.tsbuildinfo",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["chrome", "vite/client"]
+  },
+  "include": ["../test", "../src", "../vitest.config.ts"],
+  "references": [{ "path": "./web.json" }]
+}

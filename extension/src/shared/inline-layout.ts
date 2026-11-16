@@ -1,24 +1,22 @@
 /**
- * Size of the inline autofill menu. The content script sizes the frame before
- * the menu page (inline/main.ts, inline.css) has loaded, so both use these numbers.
+ * Size of the inline autofill menu frame. It is the same whatever the menu shows (locked, no logins, one login or
+ * many, an error): the page can measure the frame's host element, so its size must not tell it whether PassAuth is
+ * locked or how many logins it has for the site. The list scrolls inside, and messages wrap inside the same box
+ * (inline/main.ts, inline.css).
  */
 export const INLINE_MENU = {
-  /** Brand line at the top. */
-  head: 32,
+  /** Brand line with "⋯" at the top. */
+  head: 36,
   row: 52,
   /** Padding around the rows, top and bottom together. */
   listPad: 8,
+  /** Rows that fit; half of the next one peeks out to say there is more. */
+  rows: 2.5,
+  /** The footer ("New login", "Use a strong password"). */
+  foot: 44,
   /** Top and bottom border together. */
   border: 2,
-  /** Rows that show before the list scrolls; half of the next one peeks out to say there is more. */
-  maxRows: 4,
-  /** The "locked" message with its button. */
-  locked: 96,
 } as const;
 
-export function inlineMenuHeight(locked: boolean, count: number): number {
-  const m = INLINE_MENU;
-  if (locked) return m.border + m.head + m.locked;
-  const rows = count > m.maxRows ? m.maxRows + 0.5 : Math.max(count, 1);
-  return m.border + m.head + m.listPad + rows * m.row;
-}
+/** The menu frame's one height. */
+export const INLINE_MENU_HEIGHT = INLINE_MENU.border + INLINE_MENU.head + INLINE_MENU.listPad + INLINE_MENU.rows * INLINE_MENU.row + INLINE_MENU.foot;

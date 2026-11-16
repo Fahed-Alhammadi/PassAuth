@@ -1,0 +1,11 @@
+{
+  // The WebAuthn shim (src/page/webauthn.ts) runs in the page's own JavaScript world: DOM only, no chrome.* at all.
+  "extends": "./base.json",
+  "compilerOptions": {
+    "outDir": "../node_modules/.cache/tsc/main-world",
+    "tsBuildInfoFile": "../node_modules/.cache/tsc/main-world.tsbuildinfo",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": ["../src/page", "../src/shared/passkey-types.ts"]
+}

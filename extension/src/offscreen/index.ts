@@ -3,6 +3,8 @@
  * copies and the timed clipboard clear run here. It outlives the popup, so the
  * clear still happens after the popup closes.
  */
+import type { Message, OffscreenApi } from "../shared/protocol";
+
 let clearTimer: ReturnType<typeof setTimeout> | undefined;
 
 function write(text: string) {
@@ -21,10 +23,15 @@ function write(text: string) {
   ta.remove();
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, respond) => {
+const isCopy = (msg: unknown): msg is Message<OffscreenApi, "offscreen:copy"> => {
+  const m = msg as Partial<Message<OffscreenApi, "offscreen:copy">> | null;
+  return !!m && m.type === "offscreen:copy" && typeof m.text === "string" && typeof m.clearAfter === "number";
+};
+
+chrome.runtime.onMessage.addListener((msg: unknown, sender, respond) => {
   // Every extension page hears runtime messages. Only the service worker may
   // write the clipboard (content scripts also have this extension's id).
-  if (msg?.target !== "offscreen" || sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("background.js")) return false;
+  if (!isCopy(msg) || sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("background.js")) return false;
   write(msg.text);
   clearTimeout(clearTimer);
   if (msg.clearAfter > 0) clearTimer = setTimeout(() => write(""), msg.clearAfter * 1000);

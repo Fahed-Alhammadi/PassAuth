@@ -1,14 +1,36 @@
 /**
  * Background vault: authentication, key handles and decrypted items.
  * The service worker can be stopped at any time; unlocked keys survive in
- * chrome.storage.session and are restored on demand.
+ * chrome.storage.session and are restored on demand (`ensureUnlocked`, single-flight),
+ * and the vault opens from the offline copy (`openVault`, single-flight) before it
+ * checks the server. Syncs are coalesced: calls during one share one follow-up.
+ *
+ * Delta sync (servers with the `delta_sync` feature; merge rules in `@web/lib/delta`, the extension's own in
+ * sync-rules.ts): the offline copy is a snapshot, the last answer with every later change merged in, written as one
+ * IndexedDB record with its cursor and vault numbers. A sync asks `GET /sync?since=<cursor>&trash=summary` (the
+ * extension never shows the trash) and decrypts only what changed. After this browser's own writes, the answer's
+ * `vault_seq` decides: the next number → shown as sent without asking; anything else → a delta sync. Live sync
+ * (live-sync.ts) asks `liveNotice` whether a message needs a sync.
  */
-import init, * as core from "../wasm/passauth_core";
-import type { EncryptedItem, Item, Role } from "@web/lib/types";
-import { kindOf, siteHost } from "@web/lib/types";
-import { api, logoutRemote, setSessionLostHandler, timeoutSignal } from "./api";
-import { activeId, local, scratch, session, syncCache, type AccountData, type SessionData } from "./storage";
-import type { AccountSummary, ItemSummary, PopupState, SecurityKey, SecurityKeys, Status, TwoFactorChallenge } from "../shared/messages";
+
+import { afterWrite, applyOwnWrite, knownSeq, type Merged, mergeSync, noticeAction, type OwnWrite, type Snapshot, type SyncNotice, sameCiphertext, vaultKeyChanged } from "@web/lib/delta";
+import { approval, type SignInRequest, secretKeyToKeep } from "@web/lib/device-login";
+import { WEAK_BITS } from "@web/lib/health";
+import type { Bundle, EncryptedItem, Item, LoginFinishResponse, PreloginResponse, Role, SyncItemRow, SyncResponse, SyncVaultRow } from "@web/lib/types";
+import { isSyncResponse, kindOf, siteHost } from "@web/lib/types";
+import { AppError, codeOf, EXPIRED, FAILED, lockedError, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
+import { log, logged } from "../shared/log";
+import { POPUP_VIEW_KEY } from "../shared/storage-keys";
+import { totpExpiry } from "../shared/totp";
+import type { AccountSummary, DeviceSignIn, EditorInfo, ItemSummary, LoginResult, PopupState, SecurityKey, SecurityKeys, Status, TotpCode } from "../shared/types";
+import * as core from "../wasm/passauth_core";
+import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, refreshServerInfo, serverConfig, serverInfo } from "./api";
+import { initCore } from "./core";
+import { forgetLastUsed } from "./last-used";
+import { type IndexedLogin, type MatchIndex, matchIndex } from "./match-index";
+import { forgetPolicyState, noteTwoStepDone, policyState } from "./policies";
+import { type AccountData, accountKey, activeId, local, pinCopies, type SessionData, scratch, session, syncCache } from "./storage";
+import { fromStored, isStale, type RevisionAnswer, readRevision, type StoredSync, toStored } from "./sync-rules";
 
 export interface Entry {
   id: string;
@@ -25,9 +47,10 @@ interface Vault {
   /** "account": wrapped with this account's own key (the user's vaults); "sealed": shared by someone else. */
   kind: string;
   key: core.VaultKey;
+  /** The vault key's `key_epoch` from /sync (newer servers): sent with every write made with this key. */
+  epoch: number | undefined;
 }
 
-let ready: Promise<unknown> | null = null;
 let account: core.Account | null = null;
 /** Local id of the account whose keys are loaded (`account`, `vaults`, `entries`). */
 let currentId = "";
@@ -39,32 +62,66 @@ let currentId = "";
 let generation = 0;
 /** Single-flight restore after a service-worker restart. */
 let restoring: { id: string; p: Promise<boolean> } | null = null;
-let bundle: any = null;
+/** Single-flight first load of the unlocked account (offline copy or first sync), per generation. */
+let opening: { gen: number; p: Promise<void> } | null = null;
+let bundle: Bundle | null = null;
 let vaults: Vault[] = [];
 let entries: Entry[] = [];
 let revision = 0;
 /** Whether the unlocked account has synced at least once (an empty vault is still "loaded"). */
 let loaded = false;
+/** The loaded account's match index (match-index.ts), kept in memory too. */
+let index: MatchIndex | null = null;
+/**
+ * The loaded account's encrypted rows: the last answer with every later change merged in (`@web/lib/delta`
+ * `Snapshot`), the same as its offline copy holds. Without delta sync it is simply the last answer (no cursor).
+ */
+let synced: Snapshot | null = null;
+/** Per vault, the row its key handle was opened from: the handle is kept while the key fields stay the same. */
+let openedFrom = new Map<string, SyncVaultRow>();
+/** Per item, the row it was decrypted from and the result (null: it can't be decrypted), reused while the ciphertext stays. */
+let decrypted = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
+/** Sign-in waiting for its two-step code: the derived keys, and the Secret Key to remember once it succeeds. */
 let pendingMaster: core.MasterKeys | null = null;
-let pendingEmail = "";
+let pendingLogin: { server: string; email: string; secretKey?: string } | null = null;
 
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-
-export function initWasm() {
-  // Vite emits the .wasm as a packaged extension file and rewrites this URL.
-  ready ??= init({ module_or_path: new URL("../wasm/passauth_core_bg.wasm", import.meta.url) });
-  return ready;
-}
-
-setSessionLostHandler(async (id) => {
-  await clearUnlocked(id);
-});
 
 /** Set by the service worker: runs the "Immediately" vault timeout if the popup closed while the worker was asleep. */
 let lockCheck: () => Promise<void> = async () => {};
 export function setLockCheck(fn: () => Promise<void>) {
   lockCheck = fn;
+}
+
+/** Install the keys of `id` (after dropping whatever was loaded). */
+function install(acct: core.Account, b: Bundle, id: string) {
+  unload();
+  account = acct;
+  bundle = b;
+  currentId = id;
+}
+
+/** Set by the service worker: the user just unlocked or signed in (sign-in requests waiting for an answer are listed). */
+let onUnlocked: () => void = () => {};
+export function setUnlockedHandler(fn: () => void) {
+  onUnlocked = fn;
+}
+
+/**
+ * The user unlocked or signed in to `server`: its features and policies are asked for again now, so a policy the
+ * admin changed (a lower `max_vault_timeout_minutes`) applies from this unlock instead of within the hour. Requests
+ * meanwhile (the popup's next state) wait for the answer.
+ */
+function unlocked(server: string) {
+  void refreshServerInfo(server).catch(logged("Asking the server for its features and policies"));
+  onUnlocked();
+}
+
+/** Keep whether the account needs a Secret Key in its record (the lock screen reads it there), when it changed. */
+function noteSecretKey(id: string, b: Bundle) {
+  const enabled = !!b.secret_key_enabled;
+  void local.update((l) => (l.accounts[id] && l.accounts[id].secretKeyEnabled !== enabled ? { secretKeyEnabled: enabled } : null), id).catch(logged("Noting the Secret Key setting"));
 }
 
 // ------------------------------------------------------------------ state
@@ -73,6 +130,14 @@ async function statusOf(a: AccountData | undefined, id: string, neverTimeout: bo
   if (!a?.server) return "setup";
   if (!a.tokens) return "logged-out";
   return (await session.get(id)) || (neverTimeout && a.persistedKeys) ? "unlocked" : "locked";
+}
+
+/** Whether the active account needs a Secret Key: from its record; records from before 0.7 look it up once. */
+async function secretKeyRequired(l: { activeId: string; secretKeyEnabled?: boolean }, s: SessionData | null): Promise<boolean> {
+  if (typeof l.secretKeyEnabled === "boolean" || !l.activeId) return !!l.secretKeyEnabled;
+  const b = (currentId === l.activeId ? bundle : null) ?? s?.bundle ?? (await syncCache.get(l.activeId))?.bundle;
+  if (b) noteSecretKey(l.activeId, b);
+  return !!b?.secret_key_enabled;
 }
 
 export async function state(): Promise<PopupState> {
@@ -92,12 +157,30 @@ export async function state(): Promise<PopupState> {
     name: l.name,
     server: l.server,
     email: l.email,
-    secretKeyRequired: !!((currentId === l.activeId ? bundle : null) ?? s?.bundle ?? (await syncCache.get(l.activeId))?.bundle)?.secret_key_enabled,
-    secretKeyStored: !!l.secretKeys[l.email],
+    secretKeyRequired: await secretKeyRequired(l, s),
+    secretKeyStored: !!l.secretKeys[accountKey(l.server, l.email)],
+    rememberedDevice: !!l.rememberTokens[accountKey(l.server, l.email)],
     settings: l.settings,
     lastSync: l.lastSync,
     neverSave: l.neverSave,
+    hiddenSites: l.hiddenSites,
+    pinUnlock: !!l.tokens && !never && !!(await pinCopies.get(l.activeId)),
+    ...(l.tokens ? await policyState(l.activeId) : {}),
+    iconsShown: await iconsShown(l.server, l.settings.showIcons),
+    ...(status === "logged-out" && (await serverInfo(l.server))?.features.has("login_with_device") ? { deviceSignIn: true } : {}),
   };
+}
+
+/**
+ * The active account's state for the toolbar icon and the right-click menu, without loading any keys: signed out
+ * (or no server yet), locked, or unlocked (keys in memory or in the session; on disk only with the timeout "never").
+ */
+export async function lockStatus(): Promise<"signed-out" | "locked" | "unlocked"> {
+  const { id, data } = await local.account();
+  if (!data?.server || !data.tokens) return "signed-out";
+  if ((account && currentId === id) || (await session.get(id))) return "unlocked";
+  if (data.persistedKeys && (await local.get()).settings.vaultTimeout === "never") return "unlocked";
+  return "locked";
 }
 
 export async function setServer(url: string) {
@@ -107,29 +190,64 @@ export async function setServer(url: string) {
     throw new Error("Use an https:// address. Plain http is only allowed for localhost.");
   }
   const origin = u.origin + u.pathname.replace(/\/+$/, "");
-  const r = await fetch(`${origin}/api/config`, { signal: timeoutSignal() }).catch(() => null);
-  const cfg = r?.ok ? await r.json().catch(() => null) : null;
+  const cfg = await serverConfig(origin);
   if (cfg?.name !== "PassAuth") throw new Error("No PassAuth server answered at that address.");
+  forgetServerFeatures(origin);
   await clearUnlocked();
   await local.set({ server: origin, tokens: null });
 }
 
 // ------------------------------------------------------------------- login
 
-async function deviceInfo() {
-  const { deviceId } = await local.get();
-  return { id: deviceId, name: `PassAuth extension (${navigator.userAgent.includes("Edg/") ? "Edge" : "Chrome"})`, kind: "extension" };
+/** How this browser names itself to the server at sign-in (also for a sign-in approved from another device). */
+export async function deviceInfo() {
+  return { id: await local.deviceId(), name: `PassAuth extension (${navigator.userAgent.includes("Edg/") ? "Edge" : "Chrome"})`, kind: "extension" };
 }
 
-export async function login(email: string, password: string, secretKey?: string): Promise<{ done: true } | { twoFactor: TwoFactorChallenge }> {
-  await initWasm();
+const secretKeyMissing = () => new AppError(SECRET_KEY_REQUIRED, "This account uses a Secret Key. Enter it from your Emergency Kit.");
+
+/** A server's answer that isn't what PassAuth asked for. */
+const UNEXPECTED_ANSWER = "Your PassAuth server sent an unexpected answer. Try again in a moment.";
+
+/**
+ * A server value the core takes as text: a string, or the request fails here. The core's bindings don't check: a
+ * number traps inside the core, and an object with a large `length` makes its glue allocate memory it never frees.
+ */
+function serverText(v: unknown): string {
+  if (typeof v !== "string") throw new AppError(FAILED, UNEXPECTED_ANSWER);
+  return v;
+}
+
+/** `POST /auth/prelogin`, with what the core takes from it checked (a strict yes for `secret_key_required`). */
+async function prelogin(email: string, accountId?: string): Promise<PreloginResponse> {
+  const pre = await api<PreloginResponse>("/auth/prelogin", { body: { email }, auth: false, ...(accountId ? { accountId } : {}) });
+  if (!pre || typeof pre !== "object") throw new AppError(FAILED, UNEXPECTED_ANSWER);
+  return { ...pre, account_id: serverText(pre.account_id), secret_key_required: pre.secret_key_required === true };
+}
+
+/** `POST /auth/login/start`: its `login_id` and OPAQUE `message`, both checked to be text. */
+async function loginStart(email: string, message: string, accountId?: string): Promise<{ login_id: string; message: string }> {
+  const resp = await api<{ login_id?: unknown; message?: unknown } | null>("/auth/login/start", { body: { email, message }, auth: false, ...(accountId ? { accountId } : {}) });
+  return { login_id: serverText(resp?.login_id), message: serverText(resp?.message) };
+}
+
+export async function login(email: string, password: string, secretKey?: string): Promise<LoginResult> {
+  await initCore();
   const l = await local.get();
-  const sk = secretKey?.trim() || l.secretKeys[email.trim().toLowerCase()];
-  const pre = await api("/auth/prelogin", { body: { email }, auth: false });
-  if (pre.secret_key_required && !sk) throw new Error("secret_key_required");
+  const server = l.server;
+  const typed = secretKey?.trim();
+  const sk = typed || l.secretKeys[accountKey(server, email)];
+  const pre = await prelogin(email);
+  if (pre.secret_key_required && !sk) throw secretKeyMissing();
   const master = core.deriveMasterKeys(password, pre.secret_key_required ? sk : undefined, pre.account_id, pre.kdf, pre.secret_key_required);
   const start = core.opaqueLoginStart(master);
-  const resp = await api("/auth/login/start", { body: { email, message: start.message }, auth: false });
+  let resp: { login_id: string; message: string };
+  try {
+    resp = await loginStart(email, start.message);
+  } catch (e) {
+    master.free();
+    throw e;
+  }
   let fin: string;
   try {
     fin = core.opaqueLoginFinish(start.state, master, resp.message);
@@ -137,60 +255,117 @@ export async function login(email: string, password: string, secretKey?: string)
     master.free();
     throw new Error("Wrong email, master password or Secret Key.");
   }
-  const key = email.trim().toLowerCase();
-  const result = await api("/auth/login/finish", {
+  const result = await api<LoginFinishResponse>("/auth/login/finish", {
     auth: false,
-    body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), remember_token: l.rememberTokens[`${l.server}|${key}`] },
+    body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), remember_token: l.rememberTokens[accountKey(server, email)] },
   });
-  if (sk && pre.secret_key_required) await local.set({ secretKeys: { ...l.secretKeys, [key]: sk } });
+  // Remembered only once the sign-in has worked (after the two-step code, if any).
+  const remember = { server, email, ...(sk && pre.secret_key_required ? { secretKey: sk } : {}) };
   if (result.two_factor_required) {
     pendingMaster?.free();
     pendingMaster = master;
-    pendingEmail = `${l.server}|${key}`;
-    return { twoFactor: { token: result.two_factor_token, providers: result.providers } };
+    pendingLogin = remember;
+    return { twoFactor: { token: result.two_factor_token ?? "", providers: result.providers ?? [] } };
   }
-  await finishLogin(master, result);
+  await finishLogin(master, result, remember);
   return { done: true };
 }
 
+/** `remember`: keep a "remember this device" token, so this browser skips the two-step code for 30 days. */
 export async function verifyTwoFactor(token: string, provider: string, code: string, remember: boolean) {
-  const result = await api("/auth/2fa/verify", { body: { two_factor_token: token, provider, code, remember }, auth: false });
-  if (!pendingMaster) throw new Error("Sign-in expired. Start again.");
+  const result = await api<LoginFinishResponse>("/auth/2fa/verify", { body: { two_factor_token: token, provider, code, remember }, auth: false });
+  if (!pendingMaster || !pendingLogin) throw new Error("Sign-in expired. Start again.");
   const master = pendingMaster;
+  const who = pendingLogin;
   pendingMaster = null;
-  if (result.remember_token) {
-    const l = await local.get();
-    await local.set({ rememberTokens: { ...l.rememberTokens, [pendingEmail]: result.remember_token } });
-  }
-  await finishLogin(master, result);
+  pendingLogin = null;
+  // A token this browser had didn't spare the code (expired or revoked): it goes, unless a new one was asked for.
+  await local.setRememberToken(who.server, who.email, remember && typeof result.remember_token === "string" ? result.remember_token : null);
+  await finishLogin(master, result, who);
 }
 
-export const sendTwoFactorEmail = (token: string) => api("/auth/2fa/email", { body: { two_factor_token: token }, auth: false });
+export async function sendTwoFactorEmail(token: string) {
+  await api("/auth/2fa/email", { body: { two_factor_token: token }, auth: false });
+}
 
-async function finishLogin(master: core.MasterKeys, result: any) {
+async function finishLogin(master: core.MasterKeys, result: LoginFinishResponse, who: { server: string; email: string; secretKey?: string }) {
+  let id: string;
   try {
+    if (typeof result.access_token !== "string" || typeof result.refresh_token !== "string" || typeof result.email !== "string" || !result.bundle) {
+      throw new AppError(FAILED, UNEXPECTED_ANSWER);
+    }
     await local.set({ tokens: { access: result.access_token, refresh: result.refresh_token }, email: result.email });
-    const id = await activeId();
-    const acct = master.unlock(result.bundle);
-    unload();
-    account = acct;
-    bundle = result.bundle;
-    currentId = id;
+    id = await activeId();
+    install(master.unlock(result.bundle), result.bundle, id);
   } finally {
     master.free();
   }
+  noteSecretKey(id, result.bundle);
+  unlocked(who.server);
+  if (who.secretKey) await local.setSecretKey(who.server, who.email, who.secretKey);
   await persistUnlocked();
   await markVerified();
-  await sync();
+  try {
+    await sync();
+  } catch (e) {
+    // Signed in, but the server requires two-step login first: the popup shows what to do (policies.ts).
+    if (codeOf(e) !== TWO_STEP_REQUIRED) throw e;
+  }
+}
+
+/**
+ * Finish a sign-in that another device approved. The popup ran the request (its key can't be saved, so it never
+ * leaves the popup), opened the approval's sealed key with it and unlocked the account bundle: `keys` is that
+ * account (`Account.toSessionBytes()`, base64) for the session the same answer brought. Installed like a password
+ * sign-in, for the account the request was made from (`account`, which must still be active and signed out), except
+ * that it never counts as typing the master password here: passkey user verification still asks for it. A Secret Key
+ * that came along is kept only for the email typed on this device (`typedEmail`) when the session is for that same
+ * email, and never over a different Secret Key already kept for it (a server can't swap a stored Secret Key this way).
+ */
+export async function finishDeviceSignIn(account: string, s: DeviceSignIn, typedEmail?: string): Promise<void> {
+  await initCore();
+  const l = await local.get();
+  if (l.activeId !== account || !l.server) throw new AppError(EXPIRED, "PassAuth switched accounts while you signed in. Start again.");
+  if (l.tokens) throw new AppError(EXPIRED, "This account is signed in already.");
+  if (!s.bundle || s.bundle.account_id !== s.accountId) throw new Error("The approval doesn't belong to this account. Start again.");
+  let acct: core.Account;
+  try {
+    acct = core.accountFromSessionBytes(s.accountId, unb64(s.keys));
+  } catch {
+    throw new Error("The approved sign-in couldn't be opened. Start again.");
+  }
+  try {
+    await local.set({ tokens: { access: s.accessToken, refresh: s.refreshToken }, email: s.email }, account);
+  } catch (e) {
+    acct.free();
+    throw e;
+  }
+  install(acct, s.bundle, account);
+  noteSecretKey(account, s.bundle);
+  unlocked(l.server);
+  // The Secret Key the approving app sent, kept like one typed here (for unlocking with the master password later):
+  // only for the email typed here, and never in place of a different one kept for it (the web vault's rule).
+  const kept = typedEmail ? (l.secretKeys[accountKey(l.server, typedEmail)] ?? null) : null;
+  const keep = typedEmail ? secretKeyToKeep(typedEmail, s.email, s.secretKey, kept) : null;
+  if (keep && typedEmail && keep !== kept) await local.setSecretKey(l.server, typedEmail, keep);
+  if (s.rememberToken) await local.setRememberToken(l.server, s.email, s.rememberToken);
+  await persistUnlocked();
+  try {
+    await sync();
+  } catch (e) {
+    // Signed in, but the server requires two-step login first: the popup shows what to do (policies.ts).
+    if (codeOf(e) !== TWO_STEP_REQUIRED) throw e;
+  }
 }
 
 /** Derive the master keys and open the account bundle (throws a user-facing error). */
-function openBundle(b: any, password: string, sk: string | undefined): core.Account {
-  const master = core.deriveMasterKeys(password, sk, b.account_id, b.kdf, b.secret_key_enabled);
+function openBundle(b: Bundle, password: string, sk: string | undefined): core.Account {
+  const master = core.deriveMasterKeys(password, sk, serverText(b?.account_id), b.kdf, b.secret_key_enabled === true);
   try {
     return master.unlock(b);
   } catch {
-    throw new Error(b.secret_key_enabled && !sk ? "secret_key_required" : "Wrong master password or Secret Key.");
+    if (b.secret_key_enabled && !sk) throw secretKeyMissing();
+    throw new Error("Wrong master password or Secret Key.");
   } finally {
     master.free();
   }
@@ -203,43 +378,44 @@ function openBundle(b: any, password: string, sk: string | undefined): core.Acco
  * a fresh one is fetched and tried.
  */
 export async function unlock(password: string, secretKey?: string) {
-  await initWasm();
+  await initCore();
   const l = await local.get();
   const id = l.activeId;
   const cached = await syncCache.get(id);
-  let fresh: any = null;
+  let fresh: SyncResponse | null = null;
   let b = cached?.bundle;
   if (!b) {
-    fresh = await api("/sync", { accountId: id });
+    fresh = await fetchFull(id);
     b = fresh.bundle;
   }
-  const sk = secretKey?.trim() || l.secretKeys[l.email];
+  const typed = secretKey?.trim();
+  const sk = typed || l.secretKeys[accountKey(l.server, l.email)];
   let acct: core.Account;
   try {
     acct = openBundle(b, password, sk);
   } catch (e) {
     if (fresh) throw e;
-    fresh = await api("/sync", { accountId: id }).catch(() => null);
+    fresh = await fetchFull(id).catch((err: unknown) => {
+      log.debug("Fetching a newer bundle failed:", err);
+      return null;
+    });
     if (!fresh || JSON.stringify(fresh.bundle) === JSON.stringify(b)) throw e;
     b = fresh.bundle;
     acct = openBundle(b, password, sk);
   }
-  unload();
-  account = acct;
-  bundle = b;
-  currentId = id;
-  if (secretKey?.trim()) await local.set({ secretKeys: { ...l.secretKeys, [l.email]: secretKey.trim() } });
+  install(acct, b, id);
+  noteSecretKey(id, b);
+  unlocked(l.server);
+  // Started now, so a request that arrives meanwhile waits for this load instead of starting its own.
+  const opened = fresh ? acceptFull(fresh, id) : openVault(id, cached);
+  if (typed) await local.setSecretKey(l.server, l.email, typed);
   await persistUnlocked();
   await markVerified();
-  if (fresh) await applyAndStore(fresh, id);
-  else if (cached) {
-    apply(cached);
-    void refreshIfStale().catch(() => {});
-  } else await sync();
+  await opened;
 }
 
 async function persistUnlocked() {
-  if (!account) return;
+  if (!account || !bundle) return;
   const data: SessionData = { accountId: bundle.account_id, keys: b64(account.toSessionBytes()), bundle };
   await session.set(data, currentId);
   await persistForNever();
@@ -247,39 +423,116 @@ async function persistUnlocked() {
 
 /** Vault timeout "never": keep unlocked keys on disk so a browser restart stays unlocked; otherwise remove them for every account. */
 export async function persistForNever() {
-  const { settings, accounts } = await local.get();
+  const { accounts } = await local.get();
+  let never = false;
   for (const id of Object.keys(accounts)) {
-    if (settings.vaultTimeout !== "never") {
-      if (accounts[id].persistedKeys) await local.set({ persistedKeys: null }, id);
-      continue;
-    }
-    const data = await session.get(id);
-    if (data) await local.set({ persistedKeys: data }, id);
+    await local.update(async (l) => {
+      const record = l.accounts[id];
+      if (!record) return null;
+      never = l.settings.vaultTimeout === "never";
+      if (!never) return record.persistedKeys ? { persistedKeys: null } : null;
+      // Read inside the write queue: a lock that cleared the session keys meanwhile wins.
+      const data = await session.get(id);
+      return data ? { persistedKeys: data } : null;
+    }, id);
   }
+  // PIN unlock isn't offered with "never" (nothing locks by itself), so a PIN set before doesn't linger unseen.
+  if (never) await pinCopies.remove(Object.keys(accounts));
+}
+
+/** "Forget this browser" for the active account: its remember-device token and stored Secret Key. */
+export async function forgetBrowser() {
+  const { server, email } = await local.get();
+  if (server && email) await local.forgetDevice(server, email);
 }
 
 // ------------------------------------------------------- user verification
 
+/** How long a master-password entry counts as user verification (WebAuthn UV) for passkeys. */
+export const VERIFIED_MS = 5 * 60_000;
+
 const verifiedKey = (id: string) => `verified:${id}`;
 
-/** The user just proved they know the master password (unlock, sign-in, or a passkey prompt). */
+/**
+ * The user just typed the master password for the loaded account (unlock,
+ * sign-in, reauth, a passkey prompt). Kept in session storage, so it lasts for
+ * this browser session only; keys restored from disk (timeout "never") never
+ * count as an entry.
+ */
 async function markVerified() {
   if (currentId) await scratch.set(verifiedKey(currentId), Date.now());
 }
 
-/** Whether the master password was entered for the active account within `ms`. */
-export async function recentlyVerified(ms: number) {
+/** Whether the master password was entered for the loaded account within `ms`. */
+export async function recentlyVerified(ms = VERIFIED_MS) {
   const at = currentId ? await scratch.get<number>(verifiedKey(currentId)) : undefined;
-  return !!at && Date.now() - at < ms;
+  return typeof at === "number" && Date.now() - at < ms && Date.now() >= at;
 }
 
-/** Check the master password again (passkey user verification); throws a user-facing error. */
+/** Check the master password again, locally (passkey user verification); throws a user-facing error. */
 export async function verifyMasterPassword(password: string) {
-  if (!account || !bundle) throw new Error("locked");
-  await initWasm();
+  if (!account || !bundle) throw lockedError();
+  await initCore();
   const l = await local.get();
-  openBundle(bundle, password, l.secretKeys[l.email]).free();
+  openBundle(bundle, password, l.secretKeys[accountKey(l.server, l.email)]).free();
   await markVerified();
+}
+
+// ------------------------------------------------------------- PIN unlock (pin.ts)
+
+/**
+ * The loaded account's keys re-wrapped under a key the core derives from `pin` (its Argon2id, a new salt; no
+ * Secret Key), with the bundle they came from and who owned them. The result is only ever kept in session storage.
+ */
+export async function wrapForPin(pin: string): Promise<{ wrapped: Bundle; base: Bundle; owner: { id: string; generation: number } }> {
+  if (!account || !bundle) throw lockedError();
+  await initCore();
+  const o = owner();
+  const base = bundle;
+  const fresh = account.rewrap(base, pin, false, undefined);
+  try {
+    return { wrapped: fresh.bundle as Bundle, base, owner: o };
+  } finally {
+    // Frees the copies of the keys the core handed back (the Account Key, the key pair and the derived keys).
+    fresh.free();
+  }
+}
+
+/**
+ * Unlock `id` with a PIN-wrapped copy: false for a wrong PIN. The account's own bundle (`base`) is installed as
+ * after a master-password unlock, but a PIN is never a master-password entry: passkey user verification still
+ * asks for the master password (`recentlyVerified` stays as it was).
+ */
+export async function unlockWithPin(wrapped: Bundle, base: Bundle, pin: string, id: string): Promise<boolean> {
+  await initCore();
+  const gen = generation;
+  let acct: core.Account;
+  try {
+    acct = openBundle(wrapped, pin, undefined);
+  } catch {
+    return false;
+  }
+  // Locked, signed out or switched while the PIN was checked: that wins.
+  if (gen !== generation || (await activeId()) !== id) {
+    acct.free();
+    throw lockedError();
+  }
+  install(acct, base, id);
+  noteSecretKey(id, base);
+  void local.account(id).then((a) => unlocked(a.data?.server ?? ""), logged("Reading the account's server"));
+  const opened = openVault(id);
+  await persistUnlocked();
+  await opened;
+  return true;
+}
+
+/** A sync brought a different account bundle than the one a PIN copy was made from: the master password or Secret Key changed, so the copy goes. */
+async function dropStalePin(id: string, b: Bundle) {
+  const copy = await pinCopies.get(id);
+  if (copy && stableJson(copy.base) !== stableJson(b)) {
+    await pinCopies.update(id, (c) => (c && stableJson(c.base) !== stableJson(b) ? null : undefined));
+    log.debug("The account's master password or Secret Key changed: PIN unlock was turned off.");
+  }
 }
 
 /**
@@ -287,39 +540,64 @@ export async function verifyMasterPassword(password: string) {
  * login with purpose "reauth" for the active account. Returns the reauth token.
  */
 async function reauthToken(password: string): Promise<string> {
-  await initWasm();
+  await initCore();
   const { id: accountId } = await local.account();
   const l = await local.get();
   const email = l.email;
-  const sk = l.secretKeys[email.trim().toLowerCase()];
-  const pre = await api("/auth/prelogin", { body: { email }, auth: false, accountId });
+  const sk = l.secretKeys[accountKey(l.server, email)];
+  const pre = await prelogin(email, accountId);
   if (pre.secret_key_required && !sk) throw new Error("Your Secret Key isn't saved in this browser. Sign out and sign in again with it.");
   const master = core.deriveMasterKeys(password, pre.secret_key_required ? sk : undefined, pre.account_id, pre.kdf, pre.secret_key_required);
   try {
     const start = core.opaqueLoginStart(master);
-    const resp = await api("/auth/login/start", { body: { email, message: start.message }, auth: false, accountId });
+    const resp = await loginStart(email, start.message, accountId);
     let fin: string;
     try {
       fin = core.opaqueLoginFinish(start.state, master, resp.message);
     } catch {
       throw new Error("Wrong master password.");
     }
-    const result = await api("/auth/login/finish", {
+    const result = await api<LoginFinishResponse>("/auth/login/finish", {
       body: { login_id: resp.login_id, message: fin, device: await deviceInfo(), purpose: "reauth" },
       accountId,
     });
-    if (!result.reauth_token) throw new Error("Your server didn't confirm your master password. Try again.");
-    return result.reauth_token as string;
+    if (!result.reauth_token || typeof result.reauth_token !== "string") throw new Error("Your server didn't confirm your master password. Try again.");
+    if (accountId === currentId) await markVerified();
+    return result.reauth_token;
   } finally {
     master.free();
   }
 }
 
+/** `POST /account/auth-requests/{id}` approving a request. */
+export interface ApprovalBody {
+  approve: true;
+  sealed_key: string;
+  proof: string;
+}
+
+/**
+ * Approve a sign-in request from another device with the loaded (active, unlocked) account, for the words the user
+ * picked (`phrase`), by the web vault's rule (`@web/lib/device-login` `approval`): the core refuses with
+ * `phrase_mismatch` unless they are the request key's own; otherwise the account key — and the Secret Key this browser
+ * keeps, so the new device can later unlock with the master password (one the core can't read is left out) — sealed
+ * to the request's own key, the request's challenge opened as proof, and the 6-digit code the user then enters on
+ * the new device.
+ */
+export async function approveSignIn(req: Pick<SignInRequest, "id" | "publicKey" | "challenge">, phrase: string): Promise<{ body: ApprovalBody; code: string }> {
+  const l = await local.get();
+  const acct = account;
+  if (!acct || currentId !== l.activeId) throw lockedError();
+  const { body, code } = approval(acct, req, phrase, l.secretKeys[accountKey(l.server, l.email)] ?? null);
+  if (!body.approve) throw new Error("unexpected approval");
+  return { body, code };
+}
+
 /** Two-step login security keys of the active account. */
 export async function securityKeys(): Promise<SecurityKeys> {
-  const a = await api("/account");
-  const methods = ((a.two_factor ?? []) as string[]).filter((p) => p !== "recovery");
-  return { keys: (a.passkeys ?? []) as SecurityKey[], methods };
+  const a = await api<{ two_factor?: string[]; passkeys?: SecurityKey[] }>("/account");
+  const methods = (a.two_factor ?? []).filter((p) => p !== "recovery");
+  return { keys: a.passkeys ?? [], methods };
 }
 
 /** Remove a two-step login security key, after the master password. */
@@ -348,35 +626,62 @@ export async function ensureUnlocked(): Promise<boolean> {
   return p;
 }
 
+/**
+ * Load the keys of `id` from the session (or, with the timeout "never", from
+ * disk). A lock, sign-out or account switch while this waits (any of them bumps
+ * `generation`) or the session keys being gone aborts it, so a restore that
+ * started before a lock can never install the keys after it.
+ */
 async function restore(id: string): Promise<boolean> {
+  const gen = generation;
+  const stale = () => gen !== generation;
   let s = await session.get(id);
+  if (stale()) return false;
   if (!s) {
     const l = await local.get();
-    if (l.activeId !== id || l.settings.vaultTimeout !== "never" || !l.persistedKeys || !l.tokens) return false;
+    if (stale() || l.activeId !== id || l.settings.vaultTimeout !== "never" || !l.persistedKeys || !l.tokens) return false;
     s = l.persistedKeys;
     await session.set(s, id);
+    if (stale()) {
+      // Locked meanwhile: take back what was just written.
+      await session.clear(id);
+      return false;
+    }
   }
-  await initWasm();
-  if ((await activeId()) !== id) return false;
-  unload();
-  account = core.accountFromSessionBytes(s.accountId, unb64(s.keys));
-  bundle = s.bundle;
-  currentId = id;
+  await initCore();
+  if (stale() || (await activeId()) !== id) return false;
+  const still = await session.get(id);
+  if (stale() || !still || still.keys !== s.keys) return false;
+  install(core.accountFromSessionBytes(s.accountId, unb64(s.keys)), s.bundle, id);
   await openVault(id);
   return true;
 }
 
-/** Show the offline copy straight away and refresh in the background; without one, sync now. */
-async function openVault(id: string) {
+/**
+ * The first load of the unlocked account, once per generation (concurrent callers share it): the offline copy
+ * straight away with a cheap revision check behind it, or without one a full sync. `cached`: the copy the caller
+ * already read.
+ */
+function openVault(id: string, cached?: StoredSync): Promise<void> {
+  if (opening?.gen === generation) return opening.p;
   const gen = generation;
-  const cached = await syncCache.get(id);
-  if (gen !== generation || currentId !== id) return;
-  if (cached && !loaded) {
-    apply(cached);
-    void refreshIfStale().catch(() => {});
-    return;
-  }
-  await sync();
+  const p = (async () => {
+    const copy = cached ?? (await syncCache.get(id));
+    if (gen !== generation || currentId !== id || loaded) return;
+    // The copy is checked like a server's answer (sync-rules.ts `fromStored`); one that isn't one is replaced by a sync.
+    const snap = copy ? fromStored(copy) : null;
+    if (snap) {
+      show(snap);
+      void refreshIfStale().catch(logged("Checking for changes"));
+      return;
+    }
+    await sync();
+  })().finally(() => {
+    // Done (or failed: the next request tries again).
+    if (opening?.p === p) opening = null;
+  });
+  opening = { gen, p };
+  return p;
 }
 
 /**
@@ -385,22 +690,32 @@ async function openVault(id: string) {
  * to the unlocked account, like a typed login waiting to be saved, goes too.
  * Not called when the service worker merely reloads the keys from the session.
  */
-let keysDropped: () => void = () => {};
-export function setKeysDroppedHandler(fn: () => void) {
+let keysDropped: (accountId?: string) => void = () => {};
+/** `fn(accountId)`: the keys of that one account went (a lost session); without it, the active account's or every account's. */
+export function setKeysDroppedHandler(fn: (accountId?: string) => void) {
   keysDropped = fn;
 }
 
-/** Drop the keys of `id` (default: the active account), in memory, in the session and on disk. */
-async function clearUnlocked(id?: string) {
-  keysDropped();
+/** Drop the keys of `id` (default: the active account), in memory, in the session and on disk. Also what a lost session (refresh token refused) does. */
+export async function clearUnlocked(id?: string) {
+  keysDropped(id);
   const aid = id ?? (await activeId());
-  if (!id || aid === currentId) unload();
+  if (!id || aid === currentId || restoring?.id === aid) {
+    unload();
+    restoring = null;
+  }
   await session.clear(aid);
+  await scratch.remove([verifiedKey(aid), POPUP_VIEW_KEY]);
+  // Signed out (or the server ended the session): a PIN can't open this account any more.
+  await pinCopies.remove([aid]);
+  await matchIndex.clear([aid]);
+  await forgetPolicyState([aid]);
   await local.set({ persistedKeys: null }, aid);
 }
 
+/** Lock: every account, like the vault timeout (one click must not leave other accounts open). */
 export async function lock() {
-  await clearUnlocked();
+  await lockAll();
 }
 
 /** Sign out of the active account. With other accounts present it's removed from the list and the next one becomes active. */
@@ -408,11 +723,14 @@ export async function logout() {
   try {
     await api("/auth/logout", { method: "POST" });
   } catch {
-    /* already signed out */
+    /* already signed out, or the server is unreachable: signed out here either way */
   }
-  const { activeId: id, accounts } = await local.get();
+  const { activeId: id, accounts, server, email } = await local.get();
   await clearUnlocked(id);
   await syncCache.clear(id);
+  await forgetLastUsed(id);
+  // Signing out forgets this browser for the account: its Secret Key and two-step "remember" token go too.
+  if (server && email) await local.forgetDevice(server, email);
   if (Object.values(accounts).filter((a) => a.server).length > 1) await local.removeAccount(id);
   else await local.set({ tokens: null }, id);
 }
@@ -420,17 +738,23 @@ export async function logout() {
 /** Forget the loaded keys in memory only (the session stays, so switching back is instant). */
 function unload() {
   generation++;
-  vaults.forEach((v) => v.key.free());
+  for (const v of vaults) v.key.free();
   vaults = [];
   entries = [];
   revision = 0;
   loaded = false;
+  index = null;
+  synced = null;
+  openedFrom = new Map();
+  decrypted = new Map();
+  opening = null;
   account?.free();
   account = null;
   currentId = "";
   bundle = null;
   pendingMaster?.free();
   pendingMaster = null;
+  pendingLogin = null;
 }
 
 export async function switchAccount(id: string) {
@@ -439,13 +763,19 @@ export async function switchAccount(id: string) {
   if (id === activeId) return;
   keysDropped();
   unload();
+  // PIN unlock belongs to the account it was set for while it stays active: switching away turns it off.
+  await pinCopies.remove([activeId]);
+  await scratch.remove(POPUP_VIEW_KEY);
   await local.setActive(id);
 }
 
 export async function addAccount() {
   keysDropped();
   unload();
+  const { activeId } = await local.get();
   await local.addAccount();
+  await pinCopies.remove([activeId]);
+  await scratch.remove(POPUP_VIEW_KEY);
 }
 
 /** Leave an unfinished "add account" (no sign-in yet) and go back to a signed-in account. */
@@ -457,12 +787,21 @@ export async function cancelAddAccount() {
   await local.removeAccount(activeId);
 }
 
-/** Vault timeout: lock every account. */
+/** Vault timeout and Lock: lock every account. */
 export async function lockAll() {
   keysDropped();
-  const { accounts } = await local.get();
+  // Before anything else (and before the first await): a restore still on its way sees the new generation and gives up.
   unload();
-  for (const id of Object.keys(accounts)) await session.clear(id);
+  restoring = null;
+  const { accounts } = await local.get();
+  const ids = Object.keys(accounts);
+  for (const id of ids) {
+    await session.clear(id);
+    await scratch.remove(verifiedKey(id));
+  }
+  // Where the popup was (an open item, the search) goes with the keys. PIN copies stay: they are what a PIN unlocks.
+  await scratch.remove(POPUP_VIEW_KEY);
+  await matchIndex.clear(ids);
   for (const [id, a] of Object.entries(accounts)) if (a.persistedKeys) await local.set({ persistedKeys: null }, id);
 }
 
@@ -478,78 +817,361 @@ export async function anyUnlocked() {
 export async function logoutAll() {
   const { accounts } = await local.get();
   await lockAll();
+  await pinCopies.remove(Object.keys(accounts));
+  await forgetPolicyState(Object.keys(accounts));
   for (const [id, a] of Object.entries(accounts)) {
     await syncCache.clear(id);
+    await forgetLastUsed(id);
     if (!a.tokens) continue;
     await logoutRemote(a.server, a.tokens);
     await local.set({ tokens: null }, id);
   }
 }
 
+/** The account whose keys are loaded, and the generation they were loaded in (see `stillOwner`). */
+export function owner(): { id: string; generation: number } {
+  return { id: currentId, generation };
+}
+
+/** Whether the keys loaded at `o` are still loaded: not locked, signed out or switched since. */
+export function stillOwner(o: { id: string; generation: number }) {
+  return !!account && !!o.id && currentId === o.id && generation === o.generation;
+}
+
+/**
+ * The active account's match index (match-index.ts) when it is unlocked, without loading its keys: from memory
+ * when the vault is open here, else from the session (after a service-worker restart). Null when locked or when
+ * there is none yet: then the caller opens the vault (`ensureUnlocked`).
+ */
+export async function unlockedIndex(): Promise<MatchIndex | null> {
+  await lockCheck();
+  const id = await activeId();
+  if (!id) return null;
+  if (account && currentId === id) return loaded ? index : null;
+  if (!(await session.get(id))) return null;
+  return matchIndex.get(id);
+}
+
 // -------------------------------------------------------------------- sync
 
-export async function sync() {
+let syncing: Promise<void> | null = null;
+let syncAgain: Promise<void> | null = null;
+
+/**
+ * Fetch /sync and apply it. A call while one is running doesn't start a second
+ * one alongside: every such call shares a single follow-up that starts when the
+ * running one ends, so each caller still gets the server's state from after its call.
+ */
+export function sync(): Promise<void> {
+  if (!syncing) {
+    const p = syncNow().finally(() => {
+      if (syncing === p) syncing = null;
+    });
+    syncing = p;
+    return p;
+  }
+  syncAgain ??= syncing
+    .catch(() => {}) // the running sync's own callers get its failure
+    .then(() => {
+      syncAgain = null;
+      return sync();
+    });
+  return syncAgain;
+}
+
+/** Resolves once no sync is running (its failure belongs to its own callers). */
+async function syncIdle() {
+  const running = syncing;
+  if (running) await running.catch(() => {});
+}
+
+const UNEXPECTED_SYNC = "Your PassAuth server sent an unexpected answer. Try again in a moment.";
+
+/** Whether `id`'s server has delta sync (`delta_sync` in its features; unknown while unreachable: no). */
+async function deltaFor(id: string): Promise<boolean> {
+  const server = (await local.account(id)).data?.server ?? "";
+  return !!server && !!(await serverInfo(server))?.features.has("delta_sync");
+}
+
+/** The whole vault of `id` (with delta sync `trash=summary`: the extension never shows the trash). */
+async function fetchFull(id: string): Promise<SyncResponse> {
+  const data = await api<unknown>((await deltaFor(id)) ? "/sync?trash=summary" : "/sync", { accountId: id });
+  if (!isSyncResponse(data)) throw new AppError(FAILED, UNEXPECTED_SYNC);
+  return data;
+}
+
+async function syncNow() {
   if (!account) return;
   const id = currentId;
   const gen = generation;
-  const data = await api("/sync", { accountId: id });
-  // Locked, signed out or switched meanwhile, or an older response than what's shown.
-  if (gen !== generation || !account || currentId !== id) return;
-  if (loaded && data.revision < revision) return;
-  await applyAndStore(data, id);
+  // Locked, signed out or switched meanwhile: the answer is dropped.
+  const stale = () => gen !== generation || !account || currentId !== id;
+  const delta = await deltaFor(id);
+  if (stale()) return;
+  // Older servers get the whole vault every time, as before; a copy without a cursor gets it once.
+  let merged = await fetchSync(id, delta, delta ? synced : null, stale);
+  // A delta this browser can't use (malformed, or about data it doesn't have): everything, once.
+  if (merged === "full") merged = await fetchSync(id, delta, null, stale);
+  if (!merged || merged === "full" || stale()) return;
+  await accept(merged.snapshot, id);
+  await noteTwoStepDone(id);
+  // Not expected: the answer was older than an own write already shown. Ask again rather than keep it stale.
+  if (merged.behind) void sync().catch(logged("Syncing again"));
 }
 
-async function applyAndStore(data: any, id: string) {
-  apply(data);
-  await syncCache.set(id, data);
-  await local.set({ lastSync: Date.now(), name: data.user?.name ?? "" }, id);
+/**
+ * One `GET /sync`: with `base`'s cursor only what changed since (`trash=summary`), merged into `base`. Null when the
+ * answer is dropped (locked or switched meanwhile, or older than what is shown); "full" when a delta can't be used.
+ */
+async function fetchSync(id: string, delta: boolean, base: Snapshot | null, stale: () => boolean): Promise<Merged | "full" | null> {
+  const since = base?.cursor ?? null;
+  const path = !delta ? "/sync" : since ? `/sync?since=${encodeURIComponent(since)}&trash=summary` : "/sync?trash=summary";
+  const data = await api<unknown>(path, { accountId: id });
+  if (stale()) return null;
+  if (!isSyncResponse(data)) {
+    if (since) return "full";
+    throw new AppError(FAILED, UNEXPECTED_SYNC);
+  }
+  if (loaded && data.revision < revision) return null;
+  let merged: Merged | null = null;
+  try {
+    merged = mergeSync(since ? base : null, data);
+  } catch (e) {
+    log.debug("A sync answer couldn't be used:", e);
+  }
+  if (merged) return merged;
+  if (since) return "full";
+  throw new AppError(FAILED, UNEXPECTED_SYNC);
 }
 
-/** Decrypt a /sync response (fresh or the offline copy) into vaults and entries. */
-function apply(data: any) {
-  if (!account) return;
-  if (data.bundle) bundle = data.bundle;
+/** A new snapshot for the loaded account: shown, kept as its offline copy, and the time noted. */
+async function accept(snap: Snapshot, id: string) {
+  show(snap);
+  await persist(id);
+  await local.set({ lastSync: Date.now(), name: typeof snap.user?.name === "string" ? snap.user.name : "" }, id);
+}
+
+/** A whole vault fetched while unlocking (no offline copy, or a newer account bundle). */
+async function acceptFull(data: SyncResponse, id: string) {
+  const merged = mergeSync(null, data);
+  if (!merged || !account || currentId !== id) return;
+  await accept(merged.snapshot, id);
+}
+
+/** Called whenever the loaded account's vault was opened or changed (live-sync.ts keeps its socket up then). */
+let opened: () => void = () => {};
+export function setOpenedHandler(fn: () => void) {
+  opened = fn;
+}
+
+/** Show `snap` for the loaded account (decrypting only what changed). */
+function show(snap: Snapshot) {
+  synced = snap;
+  materialize(snap);
+  opened();
+}
+
+let storing: Promise<void> = Promise.resolve();
+
+/**
+ * Keep the loaded account's snapshot as its offline copy: one IndexedDB record, so the cursor and the vault numbers
+ * are never kept without the rows they describe, and a write that doesn't happen (the worker stopped) leaves the
+ * previous copy whole. Writes run one after another and each takes the newest snapshot; none after a lock,
+ * sign-out or switch.
+ */
+function persist(id: string): Promise<void> {
+  const gen = generation;
+  const p = storing.then(async () => {
+    if (gen !== generation || currentId !== id || !synced) return;
+    await syncCache.set(id, toStored(synced));
+  });
+  storing = p.catch(() => {});
+  return p;
+}
+
+const byName = new Intl.Collator(undefined, { sensitivity: "base" });
+
+function decryptRow(key: core.VaultKey, row: SyncItemRow): Entry | null {
+  // Trash summaries (and anything else without ciphertext) can't be opened.
+  if (typeof row.item_key !== "string" || typeof row.data !== "string") return null;
+  const enc: EncryptedItem = { id: row.id, vault_id: row.vault_id, key: row.item_key, data: row.data };
+  try {
+    return { id: row.id, item: key.decryptItem(enc) as Item, vaultId: row.vault_id, revision: row.revision, enc };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decrypt `snap` into vaults and entries, and publish the match index. A vault's key handle is kept while its key
+ * fields (`wrapped_key`, `key_kind`, `key_epoch`) stay the same, otherwise it is opened again and its items decrypted
+ * again; an item whose ciphertext didn't change keeps its decrypted copy. The trash isn't shown.
+ */
+function materialize(snap: Snapshot) {
+  const acct = account;
+  if (!acct) return;
+  if (snap.bundle) {
+    bundle = snap.bundle;
+    void dropStalePin(currentId, snap.bundle).catch(logged("Checking the PIN copy"));
+  }
+  const previous = new Map(vaults.map((v) => [v.id, v]));
+  const kept = new Set<core.VaultKey>();
+  const keysFrom = new Map<string, SyncVaultRow>();
   const next: Vault[] = [];
-  for (const v of data.vaults) {
-    try {
-      const key = account.openVaultKey(v.id, v.wrapped_key, v.key_kind);
-      let name = "Vault";
+  for (const v of snap.vaults) {
+    // What the core takes as text must be text (serverText): a row that isn't stays closed, like a key it can't open.
+    if (typeof v.id !== "string" || typeof v.wrapped_key !== "string" || typeof v.key_kind !== "string") continue;
+    const old = previous.get(v.id);
+    const from = openedFrom.get(v.id);
+    let key: core.VaultKey;
+    let name: string | null = null;
+    if (old && from && !vaultKeyChanged(from, v)) {
+      key = old.key;
+      kept.add(key);
+      if (from.meta === v.meta) name = old.name;
+    } else {
       try {
-        name = key.decryptMeta(v.id, v.meta).name ?? name;
+        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind);
       } catch {
-        /* keep default name */
+        continue; // vault key unavailable (replaced): its items stay hidden
       }
-      next.push({ id: v.id, name, role: v.role, kind: v.key_kind, key });
-    } catch {
-      /* vault key unavailable (rotated); skip */
     }
+    if (name === null) {
+      try {
+        const meta = typeof v.meta === "string" ? (key.decryptMeta(v.id, v.meta) as { name?: unknown }) : null;
+        name = typeof meta?.name === "string" ? meta.name : "Vault";
+      } catch {
+        name = "Vault";
+      }
+    }
+    keysFrom.set(v.id, v);
+    // A role that isn't text is read as the least: view only.
+    const role: Role = typeof v.role === "string" ? v.role : "read";
+    next.push({ id: v.id, name, role, kind: v.key_kind, key, epoch: Number.isSafeInteger(v.key_epoch) ? v.key_epoch : undefined });
   }
   const byId = new Map(next.map((v) => [v.id, v]));
+  const copies = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
   const list: Entry[] = [];
-  for (const row of data.items) {
+  for (const row of snap.items.values()) {
     const vault = byId.get(row.vault_id);
     if (!vault || row.deleted_at) continue;
-    const enc: EncryptedItem = { id: row.id, vault_id: row.vault_id, key: row.item_key, data: row.data };
-    try {
-      list.push({ id: row.id, item: vault.key.decryptItem(enc) as Item, vaultId: row.vault_id, revision: row.revision, enc });
-    } catch {
-      /* undecryptable item; skip */
+    const old = decrypted.get(row.id);
+    let entry: Entry | null;
+    if (old && kept.has(vault.key) && sameCiphertext(old.row, row)) {
+      entry = old.entry && old.entry.revision !== row.revision ? { ...old.entry, revision: row.revision } : old.entry;
+    } else {
+      entry = decryptRow(vault.key, row);
     }
+    copies.set(row.id, { row, entry });
+    if (entry) list.push(entry);
   }
-  list.sort((a, b) => a.item.name.localeCompare(b.item.name, undefined, { sensitivity: "base" }));
-  vaults.forEach((v) => v.key.free());
+  list.sort((a, b) => byName.compare(a.item.name, b.item.name));
+  // Handles the new state no longer uses (a vault gone, or its key replaced).
+  for (const v of vaults) if (!kept.has(v.key)) v.key.free();
   vaults = next;
   entries = list;
-  revision = data.revision;
+  decrypted = copies;
+  openedFrom = keysFrom;
+  revision = snap.revision;
   loaded = true;
+  const logins: IndexedLogin[] = list.flatMap((e) => (e.item.login ? [{ id: e.id, urls: e.item.login.urls, personal: isPersonal(e) }] : []));
+  index = { revision, logins, cards: list.filter((e) => e.item.card).length, identities: list.filter((e) => e.item.identity).length };
+  void matchIndex.set(currentId, index).catch(logged("Storing the match index"));
+  if (bundle) noteSecretKey(currentId, bundle);
 }
 
-/** Re-sync if the server has newer data (cheap revision check). */
+/** `GET /sync/revision` for `id` (with every vault's number on servers with delta sync). */
+async function revisionOf(id: string): Promise<RevisionAnswer> {
+  const r = readRevision(await api<unknown>("/sync/revision", { accountId: id }));
+  if (!r) throw new AppError(FAILED, UNEXPECTED_SYNC);
+  // It answered: whatever two-step setup the server asked for is done.
+  await noteTwoStepDone(id);
+  return r;
+}
+
+/** Re-sync if the server has something the vault doesn't (cheap revision check; sync-rules.ts `isStale`). */
 export async function refreshIfStale() {
   if (!account) return;
   const id = currentId;
-  const r = await api("/sync/revision", { accountId: id }).catch(() => null);
-  if (r && currentId === id && r.revision > revision) await sync();
+  const r = await revisionOf(id).catch((e: unknown) => {
+    // Offline or the server is down: the vault stays as it is.
+    log.debug("Revision check failed:", e);
+    return null;
+  });
+  if (r && account && currentId === id && isStale(r, synced)) await sync();
+}
+
+/** The snapshot of `id` without decrypting anything: in memory when its vault is open here, else its offline copy. */
+async function snapshotOf(id: string): Promise<Snapshot | null> {
+  if (account && currentId === id && synced) return synced;
+  const copy = id ? await syncCache.get(id) : undefined;
+  return copy ? fromStored(copy) : null;
+}
+
+/** What the check before a live-sync connection found (live-sync.ts). */
+export type LiveCheck = "ok" | "unsupported" | "signed_out" | "two_step" | "offline";
+
+/**
+ * Before the live-sync socket (re)connects, and on its fallback alarm: is the active account still signed in, and
+ * does its server have delta sync (the socket is used only then; older servers keep today's behaviour)? Asks
+ * `GET /sync/revision`, which also refreshes an expired access token, and syncs when the copy lacks something. The
+ * copy's numbers come from memory or the offline copy: no keys are loaded unless there is something to sync.
+ */
+export async function checkForChanges(): Promise<LiveCheck> {
+  const { id, data } = await local.account();
+  if (!id || !data?.server || !data.tokens) return "signed_out";
+  const info = await serverInfo(data.server);
+  if (!info) return "offline";
+  if (!info.features.has("delta_sync")) return "unsupported";
+  try {
+    const r = await revisionOf(id);
+    if ((await activeId()) === id && isStale(r, await snapshotOf(id)) && (await ensureUnlocked())) await sync();
+    return "ok";
+  } catch (e) {
+    const code = codeOf(e);
+    if (code === SIGNED_OUT) return "signed_out";
+    if (code === TWO_STEP_REQUIRED) return "two_step";
+    log.debug("Checking for changes failed:", e);
+    return "offline";
+  }
+}
+
+/**
+ * A live-sync `sync` message for the active account: sync only when it announces something the copy doesn't have yet
+ * (`noticeAction`: a newer or unknown vault number, `vaults: {}`, or without delta sync a newer revision). A sync
+ * already on its way may bring it, so that one is waited for first. The message's origin is never a reason to skip
+ * it: every PassAuth context sharing this session shares it. Nothing is unlocked for it.
+ */
+export async function liveNotice(msg: SyncNotice): Promise<void> {
+  const id = await activeId();
+  await syncIdle();
+  const snap = await snapshotOf(id);
+  if (!snap) return;
+  if (noticeAction(msg, (v) => knownSeq(snap, v), snap.revision, !!snap.cursor) !== "sync") return;
+  if ((await activeId()) !== id || !(await ensureUnlocked())) return;
+  await sync();
+}
+
+/**
+ * A live-sync `logout` message: sessions of the account were ended on the server. A request tells whether this one
+ * was: an ended session signs the account out here (api.ts: refresh token refused); a live one stays.
+ */
+export async function checkSession(): Promise<void> {
+  const { id, data } = await local.account();
+  if (!id || !data?.tokens) return;
+  await api("/sync/revision", { accountId: id }).catch((e: unknown) => log.debug("Checking the session:", e));
+}
+
+/** Vaults shared with the active account and not accepted yet (servers with `vault_invitations`): how many, and which (for the popup's notice). */
+export function invitations(): { count: number; key: string } {
+  const list = synced?.invitations ?? [];
+  return {
+    count: list.length,
+    key: list
+      .map((i) => i.vault_id)
+      .sort()
+      .join(","),
+  };
 }
 
 // ------------------------------------------------------------------- items
@@ -566,13 +1188,33 @@ export function vaultName(id: string) {
   return vaults.find((v) => v.id === id)?.name ?? "Vault";
 }
 
+/**
+ * A list row's second line. It never carries a secret or a note's text (a secure note says "Secure note"): lists
+ * are drawn on screen in full, often with someone nearby.
+ */
+export function subtitleOf(i: Item): string {
+  const kind = kindOf(i);
+  if (kind === "login") return i.login?.username || siteHost(i);
+  if (kind === "card") {
+    const last4 = (i.card?.number ?? "").replace(/\s+/g, "").slice(-4);
+    return [i.card?.brand, last4 ? `•••• ${last4}` : ""].filter(Boolean).join(" ") || "Card";
+  }
+  if (kind === "identity") {
+    const id = i.identity;
+    const name = [id?.first_name, id?.last_name].filter(Boolean).join(" ");
+    return [name, id?.email].filter(Boolean).join(" · ") || "Identity";
+  }
+  if (kind === "ssh_key") return i.ssh_key?.fingerprint || "SSH key";
+  return "Secure note";
+}
+
 export function summarize(e: Entry): ItemSummary {
   const i = e.item;
   const host = siteHost(i);
   return {
     id: e.id,
     name: i.name || "Untitled",
-    subtitle: i.login?.username || host || (i.card ? `•••• ${i.card.number.slice(-4)}` : i.notes.split("\n")[0].slice(0, 50)),
+    subtitle: subtitleOf(i),
     host,
     url: i.login?.urls.find((u) => u.match !== "regex" && /^https?:\/\//i.test(u.url))?.url ?? (host ? `https://${host}` : ""),
     folder: i.folder ?? "",
@@ -582,6 +1224,11 @@ export function summarize(e: Entry): ItemSummary {
     hasTotp: !!i.login?.totp,
     passkeys: i.login?.passkeys.length ?? 0,
     vaultName: vaultName(e.vaultId),
+    vaultId: e.vaultId,
+    shared: !isPersonal(e),
+    username: i.login?.username ?? "",
+    websites: (i.login?.urls ?? []).map((u) => u.url).filter(Boolean),
+    tags: i.tags ?? [],
   };
 }
 
@@ -598,42 +1245,206 @@ function personalVault(): Vault {
   return v;
 }
 
-export async function createItem(item: Item, vaultId?: string): Promise<string> {
-  const chosen = vaultId ? vaults.find((v) => v.id === vaultId) : undefined;
-  if (vaultId && (!chosen || chosen.role === "read")) throw new Error("You can't add items to that vault.");
-  const vault = chosen ?? personalVault();
-  const id = core.newId();
-  const now = Math.floor(Date.now() / 1000);
-  const enc = vault.key.encryptItem({ ...item, created_at: now, updated_at: now }, id, vault.id);
-  await api("/items", { body: enc });
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An item id a client may choose itself (so a retried create keeps it): a UUID. */
+export const validItemId = (id: unknown): id is string => typeof id === "string" && UUID.test(id);
+
+/** The write carries the epoch of the vault key it was encrypted with, when the server supports it (API v2 `key_epoch`). */
+function withEpoch<T extends object>(body: T, vault: Vault, features: ReadonlySet<string>): T & { key_epoch?: number } {
+  return features.has("key_epoch") && vault.epoch !== undefined ? { ...body, key_epoch: vault.epoch } : body;
+}
+
+const isCode = (e: unknown, code: string) => e instanceof ApiError && e.status === 409 && e.code === code;
+
+/** JSON with object keys in a fixed order, so two decryptions of the same item compare equal. */
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableJson((v as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/** Same item content, apart from what re-encrypting may change (the format stamp) and the times a create sets. */
+export function sameContent(a: Item, b: Item, ignoreTimes = false): boolean {
+  const strip = ({ format: _f, ...rest }: Item) => (ignoreTimes ? { ...rest, created_at: 0, updated_at: 0 } : rest);
+  return stableJson(strip(a)) === stableJson(strip(b));
+}
+
+/** Sync, and fail if the vault was locked or switched meanwhile (what follows would use another account's keys). */
+async function syncFor(gen: number) {
   await sync();
-  return id;
+  if (gen !== generation || !account) throw lockedError();
+}
+
+/** What item writes answer: the item's new revision and, with delta sync, the vault's number after the write. */
+type WriteAnswer = { revision?: unknown; vault_seq?: unknown } | null;
+
+/**
+ * After one of this browser's item writes, bring the vault up to date with the least work. Without delta sync: a
+ * sync, as before. With it, the answer's `vault_seq` decides (`afterWrite`): a number the copy already has → a sync
+ * since brought the write; exactly the next one → the write was the only change, so `own()` (the row as the server
+ * stored it) is shown and kept without asking; anything else → a delta sync. A sync that was already asking before
+ * the write was answered may not include it, so it is waited for first.
+ */
+async function settle(vaultId: string | undefined, answer: WriteAnswer, own?: (vaultSeq: number) => OwnWrite | null): Promise<void> {
+  const gen = generation;
+  const id = currentId;
+  const vaultSeq = answer?.vault_seq;
+  if (!vaultId || typeof vaultSeq !== "number" || !synced?.cursor) return sync();
+  await syncIdle();
+  if (gen !== generation || currentId !== id || !synced) return;
+  const action = afterWrite(knownSeq(synced, vaultId), vaultSeq, !!own);
+  if (action === "none") return;
+  if (action === "apply" && own) {
+    const write = own(vaultSeq);
+    if (write) {
+      show(applyOwnWrite(synced, write));
+      await persist(id);
+      return;
+    }
+  }
+  return sync();
+}
+
+/** The row the server stored for an item this browser just sent (`enc`); `base`: its row before (an edit keeps its times and trash state). */
+function storedRow(enc: EncryptedItem, answer: WriteAnswer, base: SyncItemRow | undefined): SyncItemRow | null {
+  if (typeof answer?.revision !== "number") return null;
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id: enc.id,
+    vault_id: enc.vault_id,
+    item_key: enc.key,
+    data: enc.data,
+    revision: answer.revision,
+    deleted_at: base?.deleted_at ?? null,
+    created_at: base?.created_at ?? now,
+    updated_at: now,
+  };
+}
+
+/**
+ * Add an item. `id`: the caller's own id for this new item, so that trying
+ * again after a failure or a timeout re-sends the same item instead of
+ * creating a second one (API v2: a create of an existing id with the same
+ * content succeeds; older servers say it exists, and then the copy that
+ * arrived earlier is used).
+ */
+export async function createItem(item: Item, vaultId?: string, id?: string): Promise<string> {
+  if (id !== undefined && !validItemId(id)) throw new Error("Not allowed.");
+  const itemId = id ?? core.newId();
+  const gen = generation;
+  const owner = currentId;
+  // By id: after a sync the vault objects (and keys) are new.
+  const target = vaultId ?? personalVault().id;
+  const now = Math.floor(Date.now() / 1000);
+  const plain: Item = { ...item, created_at: now, updated_at: now };
+  const features = (await serverInfo((await local.account(owner)).data?.server ?? ""))?.features ?? new Set<string>();
+  for (let attempt = 0; ; attempt++) {
+    if (gen !== generation || !account) throw lockedError();
+    const vault = vaults.find((v) => v.id === target);
+    if (!vault || vault.role === "read") throw new Error(vaultId ? "You can't add items to that vault." : "PassAuth couldn't find your own vault to save to.");
+    const enc = vault.key.encryptItem(plain, itemId, vault.id) as EncryptedItem;
+    let answer: WriteAnswer;
+    try {
+      answer = await api<WriteAnswer>("/items", { body: withEpoch(enc, vault, features), accountId: owner });
+    } catch (e) {
+      if (attempt === 0 && isCode(e, "vault_key_changed")) {
+        // A member was removed and the vault has a new key: sync brings it; the item is encrypted again with it, once.
+        await syncFor(gen);
+        continue;
+      }
+      // An earlier try reached the server: the sync that found out shows it (brought up to date if it was changed).
+      if (isCode(e, "item_exists") && (await arrivedEarlier(itemId, target, plain, gen))) return itemId;
+      throw e;
+    }
+    await settle(target, answer, (vaultSeq) => {
+      const row = storedRow(enc, answer, undefined);
+      return row && { kind: "upsert", row, vaultSeq };
+    });
+    return itemId;
+  }
+}
+
+/**
+ * A create was refused because the id exists: an earlier try of this very
+ * create (one that timed out) reached the server. Use it, bringing its
+ * content up to date if the item was changed before trying again.
+ */
+async function arrivedEarlier(id: string, vaultId: string, plain: Item, gen: number): Promise<boolean> {
+  await syncFor(gen);
+  const existing = getEntry(id);
+  if (!existing || existing.vaultId !== vaultId) return false;
+  if (!sameContent(existing.item, plain, true)) await updateItem(existing, { ...plain, created_at: existing.item.created_at });
+  return true;
 }
 
 export async function updateItem(entry: Entry, item: Item) {
-  const vault = vaults.find((v) => v.id === entry.vaultId);
-  if (!vault) throw new Error("Vault not found.");
-  if (vault.role === "read") throw new Error("You can only view items in this vault.");
-  const now = Math.floor(Date.now() / 1000);
-  const next = { ...item, updated_at: now };
-  const old = entry.item.login?.password;
-  // Compare by content: items from the popup arrive as structured clones, never the same object.
-  if (next.login && old && old !== next.login.password && next.password_history[0]?.password !== old) {
-    next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
+  const gen = generation;
+  const features = (await serverInfo((await local.account(currentId)).data?.server ?? ""))?.features ?? new Set<string>();
+  let base = entry;
+  for (let attempt = 0; ; attempt++) {
+    if (gen !== generation || !account) throw lockedError();
+    const vault = vaults.find((v) => v.id === base.vaultId);
+    if (!vault) throw new Error("Vault not found.");
+    if (vault.role === "read") throw new Error("You can only view items in this vault.");
+    const now = Math.floor(Date.now() / 1000);
+    const next = { ...item, updated_at: now };
+    const old = base.item.login?.password;
+    // Compare by content: items from the popup arrive as structured clones, never the same object.
+    if (next.login && old && old !== next.login.password && next.password_history[0]?.password !== old) {
+      next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
+    }
+    const enc = vault.key.updateItem(base.enc, next) as EncryptedItem;
+    let answer: WriteAnswer;
+    try {
+      answer = await api<WriteAnswer>(`/items/${base.id}`, { method: "PUT", body: withEpoch({ ...enc, revision: base.revision }, vault, features), accountId: currentId });
+    } catch (e) {
+      if (isCode(e, "revision_conflict")) {
+        // Changed on another device: get the latest so the next try starts from it.
+        await sync().catch(logged("Syncing after a conflict"));
+        throw e;
+      }
+      if (attempt > 0 || !isCode(e, "vault_key_changed")) throw e;
+      // The vault has a new key (a member was removed): sync brings it and the item re-encrypted under it.
+      // The same change is then applied to that copy, once, unless the item itself was changed meanwhile.
+      await syncFor(gen);
+      const fresh = getEntry(base.id);
+      if (!fresh || fresh.vaultId !== base.vaultId || !sameContent(fresh.item, base.item)) {
+        throw new ApiError(409, "revision_conflict", "This item was changed on another device. PassAuth has the latest version now; check it and try again.");
+      }
+      base = fresh;
+      continue;
+    }
+    // An edit in place: the row as stored is known (the item keeps its vault, times and trash state).
+    const vaultId = base.vaultId;
+    await settle(vaultId, answer, (vaultSeq) => {
+      const before = synced?.items.get(enc.id);
+      const row = before?.vault_id === vaultId ? storedRow(enc, answer, before) : null;
+      return row && { kind: "upsert", row, vaultSeq };
+    });
+    return;
   }
-  const enc = vault.key.updateItem(entry.enc, next);
-  await api(`/items/${entry.id}`, { method: "PUT", body: { ...enc, revision: entry.revision } });
-  await sync();
 }
 
 export async function trashItem(entry: Entry) {
   if (!canWrite(entry)) throw new Error("You can only view items in this vault.");
-  await api(`/items/${entry.id}`, { method: "DELETE" });
-  await sync();
+  const answer = await api<WriteAnswer>(`/items/${entry.id}`, { method: "DELETE" });
+  // Shown as in the trash (which the extension never shows) until the next delta brings the server's own row.
+  await settle(entry.vaultId, answer, (vaultSeq) => {
+    const before = synced?.items.get(entry.id);
+    if (!before || before.vault_id !== entry.vaultId || typeof answer?.revision !== "number") return null;
+    const now = Math.floor(Date.now() / 1000);
+    return { kind: "upsert", vaultSeq, row: { ...before, deleted_at: now, revision: answer.revision, updated_at: now } };
+  });
 }
 
 /** Vaults the user can add items to, and folder names in use (for the item editor). */
-export function editorInfo() {
+export function editorInfo(): EditorInfo {
   // The user's own vault first: the editor preselects the first one.
   let own: Vault | undefined;
   try {
@@ -647,7 +1458,7 @@ export function editorInfo() {
     vaults: ordered.map((v) => ({ id: v.id, name: v.name })),
     /** Preselected only when it's the user's own vault; shared vaults are never picked for them. */
     defaultVault: own?.id ?? "",
-    folders: [...new Set(entries.map((e) => e.item.folder).filter(Boolean))] as string[],
+    folders: [...new Set(entries.map((e) => e.item.folder).filter((f): f is string => !!f))],
   };
 }
 
@@ -660,16 +1471,20 @@ export function isPersonal(entry: Entry) {
   return vaults.find((v) => v.id === entry.vaultId)?.kind === "account";
 }
 
-/** Weak if it would take few guesses (same threshold as the web vault's "easy to guess"). */
+/** Weak if it would take few guesses: the web vault's threshold (`WEAK_BITS`, the same in every client). */
 export function weakPassword(password: string) {
-  return !!password && core.estimateBits(password) < 50;
+  // Item data is whatever a vault member saved: only text goes to the core.
+  return typeof password === "string" && !!password && core.estimateBits(password) < WEAK_BITS;
 }
 
-export function totp(secret: string) {
-  return core.totpCode(secret, Date.now() / 1000) as { code: string; remaining: number; period: number };
+/** The current code; `expires`: when it changes (ms, see shared/totp.ts). */
+export function totp(secret: string, now = Date.now()): TotpCode {
+  if (typeof secret !== "string") throw new Error("This verification code key can't be read.");
+  const t = core.totpCode(secret, now / 1000) as { code: string; remaining: number; period: number };
+  return { ...t, expires: totpExpiry(t.period, now) };
 }
 
-export async function generate(mode: "password" | "passphrase", options?: Record<string, unknown>) {
-  await initWasm();
+export async function generate(mode: "password" | "passphrase", options?: Record<string, unknown>): Promise<string> {
+  await initCore();
   return mode === "password" ? core.generatePassword(options) : core.generatePassphrase(options);
 }

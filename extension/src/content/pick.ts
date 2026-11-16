@@ -1,4 +1,4 @@
-/** Pure helpers for the save prompt (no DOM), unit-tested in test/urls.test.mjs. */
+/** Pure helpers for the save prompt (no DOM), unit-tested in test/urls.test.ts. */
 
 export interface PasswordFieldInfo {
   value: string;
@@ -15,10 +15,10 @@ export interface PasswordFieldInfo {
 export function submittedPassword(fields: PasswordFieldInfo[]): string {
   const filled = fields.filter((f) => f.value);
   if (!filled.length) return "";
-  const fresh = filled.filter((f) => /\bnew-password\b/i.test(f.autocomplete));
-  if (fresh.length) return fresh[fresh.length - 1].value;
-  if (filled.length === 1) return filled[0].value;
+  const fresh = filled.filter((f) => /\bnew-password\b/i.test(f.autocomplete)).at(-1);
+  if (fresh) return fresh.value;
   const [a, b] = filled.slice(-2);
+  if (!a || !b) return filled[0]?.value ?? "";
   if (a.value === b.value) return b.value;
   const notCurrent = filled.filter((f) => !/\bcurrent-password\b/i.test(f.autocomplete));
   return (notCurrent.at(-1) ?? b).value;

@@ -1,0 +1,20 @@
+{
+  // Settings every extension project shares (tsconfig.json lists the projects).
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "rootDir": "..",
+    "paths": { "@web/*": ["../../web/src/*"] }
+  }
+}

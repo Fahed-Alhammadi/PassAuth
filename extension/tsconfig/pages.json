@@ -1,0 +1,15 @@
+{
+  // PassAuth's own pages: the popup (and its windows), the inline menu and save prompt frames, the offscreen
+  // document. DOM, React (with the web vault's shared components), chrome.* APIs, Vite's CSS imports. The popup
+  // loads the core itself for what can't leave it (a sign-in request's key, decrypting a downloaded file).
+  "extends": "./base.json",
+  "compilerOptions": {
+    "outDir": "../node_modules/.cache/tsc/pages",
+    "tsBuildInfoFile": "../node_modules/.cache/tsc/pages.tsbuildinfo",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["chrome", "vite/client"]
+  },
+  "include": ["../src/popup", "../src/inline", "../src/save", "../src/offscreen", "../src/shared", "../src/content/brand.ts", "../src/content/guard.ts", "../src/wasm/*.d.ts"],
+  "references": [{ "path": "./web.json" }]
+}

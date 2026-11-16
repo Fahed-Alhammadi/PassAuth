@@ -10,23 +10,13 @@
 //   - PasskeyError:    surface to the page as DOMException(message, name).
 // Use `errorReply(e)` to turn any thrown value into a PasskeyRuntimeReply.
 
-import type {
-  AuthenticationResponseJSON,
-  ClientExtensionResultsJSON,
-  CreateRequest,
-  GetRequest,
-  Passkey,
-  PasskeyRuntimeReply,
-  RegistrationResponseJSON,
-} from "../shared/passkey-types";
-import { MULTI_LABEL_PUBLIC_SUFFIXES } from "./psl.ts";
+import type { AuthenticationResponseJSON, ClientExtensionResultsJSON, CreateRequest, GetRequest, Passkey, PasskeyRuntimeReply, RegistrationResponseJSON } from "../shared/passkey-types";
+import * as core from "../wasm/passauth_core";
 
 type Bytes = Uint8Array<ArrayBuffer>;
 
 /** PassAuth authenticator AAGUID (random, fixed): bbc747a1-4ff9-29df-6533-dfaa44f86a18. */
-export const PASSAUTH_AAGUID: Uint8Array = new Uint8Array([
-  0xbb, 0xc7, 0x47, 0xa1, 0x4f, 0xf9, 0x29, 0xdf, 0x65, 0x33, 0xdf, 0xaa, 0x44, 0xf8, 0x6a, 0x18,
-]);
+export const PASSAUTH_AAGUID: Uint8Array = new Uint8Array([0xbb, 0xc7, 0x47, 0xa1, 0x4f, 0xf9, 0x29, 0xdf, 0x65, 0x33, 0xdf, 0xaa, 0x44, 0xf8, 0x6a, 0x18]);
 
 export const COSE_ALG_ES256 = -7;
 
@@ -39,11 +29,18 @@ const FLAG_AT = 0x40; // attested credential data included
 const assertionFlags = (uv: boolean) => FLAG_UP | (uv ? FLAG_UV : 0) | FLAG_BE | FLAG_BS;
 const createFlags = (uv: boolean) => assertionFlags(uv) | FLAG_AT;
 
-/** Whether the site insists on user verification (then PassAuth asks for the master password unless it was just entered). */
-export function uvRequired(kind: "create" | "get", options: unknown): boolean {
-  if (!isObj(options)) return false;
+export type UserVerification = "required" | "preferred" | "discouraged";
+
+/**
+ * What the site asks for about user verification (WebAuthn `userVerification`;
+ * missing or unknown values mean "preferred", the WebAuthn default).
+ * "required": PassAuth asks for the master password unless it was entered in
+ * the last few minutes; "preferred": UV only when it was; "discouraged": never.
+ */
+export function userVerification(kind: "create" | "get", options: unknown): UserVerification {
+  if (!isObj(options)) return "preferred";
   const uv = kind === "create" ? (isObj(options.authenticatorSelection) ? options.authenticatorSelection.userVerification : undefined) : options.userVerification;
-  return uv === "required";
+  return uv === "required" || uv === "discouraged" ? uv : "preferred";
 }
 
 const TRANSPORTS = ["internal", "hybrid"];
@@ -232,68 +229,27 @@ export function rawSignatureToDer(raw: Uint8Array): Bytes {
 
 // ------------------------------------------------------------------ RP ID validation
 
-
-
-function isPublicSuffix(domain: string): boolean {
-  if (!domain.includes(".")) return domain !== "localhost";
-  return MULTI_LABEL_PUBLIC_SUFFIXES.has(domain);
-}
-
-function isIpHost(host: string): boolean {
-  return host.startsWith("[") || /^\d+\.\d+\.\d+\.\d+$/.test(host);
-}
-
-/** Canonical (lower-case, punycoded) domain, or null if not a valid domain string. */
-function canonicalDomain(s: string): string | null {
-  if (s.length === 0 || s.length > 253 || /[\s/\\?#@:[\]%*]/.test(s)) return null;
-  let host: string;
-  try {
-    host = new URL(`https://${s}/`).hostname;
-  } catch {
-    return null;
-  }
-  if (host === "" || host.startsWith(".") || host.endsWith(".") || host.includes("..") || isIpHost(host)) return null;
-  return host;
-}
-
 function securityError(message: string): PasskeyError {
   return new PasskeyError("SecurityError", message);
 }
 
-function parseOrigin(origin: string): { origin: string; host: string } {
-  let url: URL;
-  try {
-    url = new URL(origin);
-  } catch {
-    throw securityError("Invalid origin.");
-  }
-  if (url.origin !== origin) throw securityError("Invalid origin.");
-  const host = url.hostname;
-  const localhost = host === "localhost" || host.endsWith(".localhost");
-  if (!(url.protocol === "https:" || (url.protocol === "http:" && localhost))) {
-    throw securityError("WebAuthn requires a secure (https) origin.");
-  }
-  if (isIpHost(host)) throw securityError("The origin's host is not a valid domain.");
-  return { origin: url.origin, host };
-}
-
 /**
- * The RP ID to use for a request from `origin`: `requestedRpId` if it equals the
- * origin's host or is a registrable-domain suffix of it, otherwise throws a
- * SecurityError PasskeyError. Defaults to the origin's host. Only https origins
- * (plus http://localhost and http://*.localhost) are accepted.
+ * The RP ID to use for a request from `origin`: `requestedRpId` if it equals the origin's host or is a registrable
+ * domain suffix of it (the full Public Suffix List: no public suffix is ever accepted), otherwise a SecurityError
+ * PasskeyError with the message the page sees. Defaults to the origin's host. Only canonical https origins (plus
+ * http://localhost and http://*.localhost) with a domain host are accepted, so once this returns, `origin` is one
+ * WebAuthn may use as it is. The rule is the core's (`effectiveRpId`, crates/core/src/site); the core must be loaded.
  */
 export function effectiveRpId(requestedRpId: string | undefined, origin: string): string {
-  const { host } = parseOrigin(origin);
-  if (requestedRpId == null) return host;
-  if (typeof requestedRpId !== "string") throw securityError("Invalid RP ID.");
-  const rpId = canonicalDomain(requestedRpId);
-  if (rpId === null) throw securityError("Invalid RP ID.");
-  if (rpId === host) return rpId;
-  if (!host.endsWith(`.${rpId}`) || isPublicSuffix(rpId)) {
-    throw securityError("The RP ID is not a registrable domain suffix of the origin.");
+  // Whatever the page put there: only a string is an RP ID.
+  if (requestedRpId != null && typeof requestedRpId !== "string") throw securityError("Invalid RP ID.");
+  if (typeof origin !== "string") throw securityError("Invalid origin.");
+  try {
+    return core.effectiveRpId(requestedRpId ?? null, origin);
+  } catch (e) {
+    if (e instanceof Error && e.name === "SecurityError") throw securityError(e.message);
+    throw e;
   }
-  return rpId;
 }
 
 // ------------------------------------------------------------------ request validation
@@ -356,9 +312,7 @@ export function supportsCreateRequest(req: CreateRequest): boolean {
 
 function clientDataJSON(type: "webauthn.create" | "webauthn.get", challenge: string, origin: string): Bytes {
   // Byte-exact key order per WebAuthn L3 §5.8.1.1 (limited verification algorithm compatible).
-  return utf8(
-    `{"type":${JSON.stringify(type)},"challenge":${JSON.stringify(challenge)},"origin":${JSON.stringify(origin)},"crossOrigin":false}`,
-  );
+  return utf8(`{"type":${JSON.stringify(type)},"challenge":${JSON.stringify(challenge)},"origin":${JSON.stringify(origin)},"crossOrigin":false}`);
 }
 
 /** COSE_Key (RFC 9053) for an uncompressed P-256 point 0x04||x||y. */
@@ -395,15 +349,11 @@ export function excludedPasskeyExists(req: CreateRequest, origin: string, all: P
  * Throws PasskeyFallback when the request is unsupported (no ES256, cross-platform
  * attachment) or malformed, PasskeyError(SecurityError) for a bad origin / RP ID.
  */
-export async function createPasskey(
-  req: CreateRequest,
-  origin: string,
-  { uv = true }: { uv?: boolean } = {},
-): Promise<{ passkey: Passkey; response: RegistrationResponseJSON }> {
+export async function createPasskey(req: CreateRequest, origin: string, { uv = true }: { uv?: boolean } = {}): Promise<{ passkey: Passkey; response: RegistrationResponseJSON }> {
   checkCreateRequest(req);
+  // Also checks the origin: from here on it is a canonical web origin WebAuthn may use.
   const rpId = effectiveRpId(req.rp.id, origin);
   if (!supportsCreateRequest(req)) throw new PasskeyFallback("unsupported algorithm or attachment");
-  const { origin: normOrigin } = parseOrigin(origin);
 
   const keyPair = await crypto.subtle.generateKey(EC_P256, true, ["sign", "verify"]);
   const rawPublicKey = new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey));
@@ -411,16 +361,8 @@ export async function createPasskey(
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keyPair.privateKey));
   const credentialId = crypto.getRandomValues(new Uint8Array(16));
 
-  const authData = concat(
-    await sha256(utf8(rpId)),
-    [createFlags(uv)],
-    u32be(0),
-    PASSAUTH_AAGUID,
-    [credentialId.length >> 8, credentialId.length & 255],
-    credentialId,
-    coseEc2Key(rawPublicKey),
-  );
-  const cdj = clientDataJSON("webauthn.create", canonicalB64u(req.challenge)!, normOrigin);
+  const authData = concat(await sha256(utf8(rpId)), [createFlags(uv)], u32be(0), PASSAUTH_AAGUID, [credentialId.length >> 8, credentialId.length & 255], credentialId, coseEc2Key(rawPublicKey));
+  const cdj = clientDataJSON("webauthn.create", canonicalB64u(req.challenge)!, origin);
   const attestationObject = cborEncode(
     new Map<string, CborValue>([
       ["fmt", "none"],
@@ -482,20 +424,14 @@ export function matchingPasskeys(req: GetRequest, origin: string, all: Passkey[]
  * signature counter is always 0 (synced passkey); the stored counter is
  * returned unchanged.
  */
-export async function getAssertion(
-  req: GetRequest,
-  origin: string,
-  passkey: Passkey,
-  { uv = true }: { uv?: boolean } = {},
-): Promise<{ response: AuthenticationResponseJSON; counter: number }> {
+export async function getAssertion(req: GetRequest, origin: string, passkey: Passkey, { uv = true }: { uv?: boolean } = {}): Promise<{ response: AuthenticationResponseJSON; counter: number }> {
   if (matchingPasskeys(req, origin, [passkey]).length !== 1) {
     throw new PasskeyError("NotAllowedError", "The selected passkey is not valid for this request.");
   }
   const rpId = effectiveRpId(req.rpId, origin);
-  const { origin: normOrigin } = parseOrigin(origin);
 
   const authData = concat(await sha256(utf8(rpId)), [assertionFlags(uv)], u32be(0));
-  const cdj = clientDataJSON("webauthn.get", canonicalB64u(req.challenge)!, normOrigin);
+  const cdj = clientDataJSON("webauthn.get", canonicalB64u(req.challenge)!, origin);
   const key = await crypto.subtle.importKey("pkcs8", b64uDecode(passkey.private_key), EC_P256, false, ["sign"]);
   const rawSig = new Uint8Array(await crypto.subtle.sign(ECDSA_SHA256, key, concat(authData, await sha256(cdj))));
 

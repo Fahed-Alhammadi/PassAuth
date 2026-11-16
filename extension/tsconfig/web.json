@@ -1,0 +1,25 @@
+{
+  // The web vault code the extension imports (@web/*), checked with the web vault's own settings
+  // (web/tsconfig.json); the extension's projects see it as declarations only.
+  "compilerOptions": {
+    "composite": true,
+    "emitDeclarationOnly": true,
+    "outDir": "../node_modules/.cache/tsc/web",
+    "tsBuildInfoFile": "../node_modules/.cache/tsc/web.tsbuildinfo",
+    "rootDir": "../../web/src",
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "types": ["vite/client"]
+  },
+  "include": ["../../web/src/lib/*.ts", "../../web/src/components/*.tsx", "../../web/src/wasm/*.d.ts"],
+  "exclude": ["../../web/src/**/*.test.ts"]
+}

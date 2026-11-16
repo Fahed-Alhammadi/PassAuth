@@ -8,12 +8,25 @@
  * @web/styles/app.css (shared with the web vault). This file only lays the
  * popup out; it uses the tokens, never its own values.
  */
+/*
+ * Type in rem (the shared scale's sizes at the default 16 px), so the popup follows the browser's font size. Only
+ * here: the web vault keeps its own values.
+ */
+:root { --text-caption: 0.8125rem; --text-body: 0.9375rem; --text-title: 1.0625rem; --text-page: 1.25rem; --text-auth: 1.75rem; }
 html, body { width: 380px; margin: 0; }
 html.popout, html.popout body { width: 100%; }
 body { background: var(--paper); }
-#root { min-height: 520px; display: flex; flex-direction: column; }
-.pop { height: 600px; display: flex; flex-direction: column; position: relative; }
+/*
+ * Chrome sizes a toolbar popup to its content (at most 600 px tall), so the content's own height must not depend on
+ * the viewport: #root asks for the full 600 px (every screen, so unlocking doesn't resize the popup), and .pop shrinks
+ * to the viewport only when Chrome can't show that much (a small screen): its header and tab bar stay in view.
+ */
+#root { min-height: 600px; display: flex; flex-direction: column; }
+.pop { height: min(600px, 100vh); display: flex; flex-direction: column; position: relative; }
 html.popout .pop { height: 100vh; }
+html.popout #root { min-height: 100vh; }
+/* The list stays mounted while an item is open: its frame takes no box of its own, and none at all while hidden. */
+.pg-frame:not([hidden]) { display: contents; }
 /* A desktop pointer, not a phone: the shared stylesheet's touch sizes for narrow screens don't apply here. */
 dialog.modal .btn { min-height: var(--control-h); }
 dialog.modal .btn-icon { min-width: 36px; min-height: 36px; }
@@ -28,7 +41,8 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .pg-foot { flex: none; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--line); background: var(--paper); }
 .pg-foot .btn:not(.btn-icon) { min-width: 88px; }
 
-.btn-new { height: 36px; padding: 0 var(--space-4) 0 var(--space-3); gap: var(--space-1); }
+/* Outlined: the list's one filled button is a row's Fill. */
+.btn-new { height: 36px; padding: 0 var(--space-4) 0 var(--space-3); gap: var(--space-1); color: var(--accent-ink); border-color: var(--line-strong); background: var(--surface); font-weight: 600; }
 .avatar-btn { all: unset; cursor: pointer; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-fill); color: var(--on-accent); font-size: var(--text-caption); font-weight: 600; }
 .avatar-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .avatar-round { border-radius: 50%; font-size: var(--text-caption); font-weight: 600; }
@@ -62,12 +76,29 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .search input::-webkit-search-cancel-button { display: none; }
 .search .btn-icon { width: 32px; height: 32px; }
 .search-bar > .btn-icon.on { color: var(--accent-ink); background: var(--accent-soft); }
-.filters { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); margin-top: calc(-1 * var(--space-1)); }
+.filters { display: grid; gap: var(--space-2); margin-top: calc(-1 * var(--space-1)); }
+/* Quiet notices above the list (notices.tsx): a fill problem, policy notices, waiting invitations. */
+.notices { display: grid; gap: var(--space-2); }
+.notices .notice > .grow { gap: var(--space-1); }
+.notices .notice .link { color: inherit; }
+.chips { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.chip { display: inline-flex; align-items: center; gap: var(--space-1); height: 28px; padding: 0 var(--space-3); border-radius: 999px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink-2); font: inherit; font-size: var(--text-caption); font-weight: 500; cursor: pointer; }
+.chip:hover { background: var(--surface-2); }
+.chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* On: tinted, a heavier label and a check-like inset (never colour alone). */
+.chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
+.chip svg { fill: currentColor; }
 
 /* --------------------------------------------------- groups and cards */
 .group { display: flex; flex-direction: column; gap: var(--space-2); }
 .group-title { display: flex; justify-content: space-between; align-items: baseline; font-size: var(--text-caption); font-weight: 600; color: var(--ink-2); margin: 0 var(--space-1); }
 .group-title .count { font-weight: 500; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.group-title .btn-icon { width: 28px; height: 28px; margin: -6px -4px -6px 0; }
+.sections { display: flex; flex-direction: column; gap: var(--space-4); }
+.disclosure { all: unset; display: inline-flex; align-items: center; gap: var(--space-1); cursor: pointer; border-radius: 4px; }
+.disclosure svg { transition: transform var(--dur-fast) var(--ease-out); }
+.disclosure[aria-expanded="true"] svg { transform: rotate(90deg); }
+.disclosure:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 /* The rows' menus drop out of the card, so it must not clip (the shared .list scrolls). */
 .pop .list, .card-box { flex: none; overflow: visible; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
 .card-box { padding: var(--space-1) var(--space-4); }
@@ -76,8 +107,12 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 /* Grouped rows on a page (settings, accounts) show in full; the page scrolls, not the card. */
 .pop .choices, .other-accounts .choices { max-height: none; }
 
-/* List rows: avatar · title · subtitle · quiet actions; dividers start at the text column. */
-.item-row { position: relative; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-1); transition: background-color var(--dur-fast) var(--ease-out); }
+/*
+ * List rows: avatar · title · subtitle · quiet actions; dividers start at the text column. Large vaults: rows outside
+ * the view skip layout and paint (as in the web vault); a row with an open menu draws it outside its box.
+ */
+.item-row { position: relative; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-2) var(--space-1) var(--space-1); transition: background-color var(--dur-fast) var(--ease-out); content-visibility: auto; contain-intrinsic-size: auto 56px; }
+.item-row:has(.menu), .item-row:focus-within { content-visibility: visible; }
 .item-row + .item-row::before { content: ""; position: absolute; top: -1px; left: 64px; right: 0; border-top: 1px solid var(--line); }
 .item-row:hover { background: var(--surface-2); }
 .item-row:first-child:hover { border-radius: 11px 11px 0 0; }
@@ -89,6 +124,12 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .item-row .title { font-weight: 500; display: flex; align-items: center; gap: var(--space-1); }
 .item-row .title > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-row .title svg { color: var(--ink-3); fill: currentColor; flex: none; }
+.item-row .title .mark-icon { display: inline-flex; flex: none; }
+/* The star is filled; the passkey mark is a line drawing. */
+.item-row .title .mark-icon.passkey svg { fill: none; }
+.mark { flex: none; padding: 0 6px; border-radius: 999px; border: 1px solid var(--line-strong); font-size: 0.75rem; font-weight: 600; line-height: 1.5; color: var(--ink-2); }
+.avatar.glyph { color: var(--ink-2); }
+.btn-icon.done { color: var(--ok); }
 .item-row .sub { font-size: var(--text-caption); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-row .btn-icon { width: 32px; height: 32px; }
 .btn-fill { height: 32px; padding: 0 var(--space-3); font-size: var(--text-caption); font-weight: 600; background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
@@ -100,6 +141,7 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .item-head .avatar { width: 40px; height: 40px; }
 .item-head h2 { font-size: var(--text-title); overflow-wrap: anywhere; }
 .item-head .row > svg { color: var(--ink-3); fill: currentColor; flex: none; }
+.item-head .kind { font-size: var(--text-caption); color: var(--ink-3); }
 .item-head .meta { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: var(--text-caption); color: var(--ink-3); }
 .item-head .meta span { display: inline-flex; align-items: center; gap: var(--space-1); }
 .kv { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) 0; border-bottom: 1px solid var(--line); min-height: 56px; }
@@ -107,11 +149,17 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .kv .k { font-size: var(--text-caption); color: var(--ink-3); }
 .kv .v { overflow-wrap: anywhere; }
 .kv .v .sub { display: block; font-size: var(--text-caption); color: var(--ink-3); }
+.kv .v .sub.warn-text { color: var(--warn); white-space: normal; }
 .kv .acts { display: flex; align-items: center; gap: var(--space-2); flex: none; }
 .kv .acts .btn-icon { width: 32px; height: 32px; }
 .kv .grow { min-width: 0; }
 .clip { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pop .totp { display: inline; font-family: var(--mono); font-size: var(--text-page); letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+.pop .totp { display: inline-flex; gap: 0.5em; font-family: var(--mono); font-size: var(--text-page); letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+/* A row that opens a page (password history). */
+.kv-link { all: unset; box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: var(--space-2); cursor: pointer; color: var(--accent-ink); font-weight: 500; }
+.kv-link:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; border-radius: var(--radius-s); }
+.btn-large-type span { font-weight: 600; font-size: var(--text-caption); }
+.fav-toggle[aria-pressed="true"] { color: var(--warn); }
 .warn { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; margin: calc(-1 * var(--space-1)) 0 var(--space-3); font-size: var(--text-caption); color: var(--warn); }
 .notes { margin: var(--space-3) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .history { margin: var(--space-3) 0; display: grid; gap: var(--space-1); font-size: var(--text-caption); color: var(--ink-3); }
@@ -123,11 +171,13 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .ring .track { stroke: var(--surface-2); }
 .ring .arc { stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
 .ring.low .arc { stroke: var(--danger); }
-.ring .n { font-size: 0.68rem; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.ring .n { font-size: 0.75rem; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink-2); }
 @media (prefers-reduced-motion: reduce) { .ring .arc { transition: none; } }
 
 /* --------------------------------------------------------------- notes */
+/* The one live region for notes: always in the page (so every new text is announced), invisible while empty. */
 .pop-note { position: absolute; left: var(--space-4); right: var(--space-4); bottom: 80px; z-index: 30; padding: var(--space-3) var(--space-4); border-radius: var(--radius-m); background: var(--ink); color: var(--paper); box-shadow: var(--shadow); font-size: var(--text-caption); font-weight: 500; animation: note-in var(--dur) var(--ease-out); }
+.pop-note:empty { opacity: 0; pointer-events: none; animation: none; }
 @keyframes note-in { from { opacity: 0; transform: translateY(4px); } }
 
 /* ------------------------------------------------------------- tab bar */
@@ -153,14 +203,52 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .about-brand { display: flex; align-items: center; gap: var(--space-3); }
 .about-brand .name { font-size: var(--text-title); font-weight: 600; }
 .about-brand .sub { display: block; font-size: var(--text-caption); color: var(--ink-3); }
+.shortcuts kbd { flex: none; white-space: nowrap; }
+.shortcuts li { padding: var(--space-2) 0; }
+.pin-input { letter-spacing: 0.3em; }
+
+/* ------------------------------------------------------------- compact */
+.pop.compact .item-row { contain-intrinsic-size: auto 44px; }
+.pop.compact .item-row .main { min-height: 36px; gap: var(--space-2); padding-left: var(--space-2); }
+.pop.compact .item-row .avatar { width: 28px; height: 28px; font-size: var(--text-caption); }
+.pop.compact .item-row + .item-row::before { left: 48px; }
+.pop.compact .item-row .btn-icon, .pop.compact .btn-fill { height: 28px; }
+.pop.compact .item-row .btn-icon { width: 28px; }
+.pop.compact .pg-body { gap: var(--space-3); }
+
+/* ------------------------------------------------- welcome tab (first install) */
+html.welcome-page, html.welcome-page body { width: 100%; }
+html.welcome-page #root { min-height: 100vh; }
+.welcome { max-width: 720px; margin: 0 auto; padding: var(--space-6) var(--space-4) 48px; display: flex; flex-direction: column; gap: var(--space-5); }
+.welcome-head { display: grid; justify-items: center; gap: var(--space-2); text-align: center; }
+.welcome-head h1 { font-size: var(--text-auth); }
+.welcome-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-3); }
+.welcome-step { display: flex; gap: var(--space-4); align-items: flex-start; padding: var(--space-4) var(--space-5); }
+.welcome-step h2 { font-size: var(--text-title); }
+.welcome-step p { margin: 0; color: var(--ink-2); }
+.welcome-step .section-title { display: none; }
 
 /* ----------------------------------------------------------- generator */
 .gen { padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-4); }
 .gen .segmented { display: flex; gap: var(--space-1); padding: var(--space-1); background: var(--surface-2); border-radius: var(--radius-s); }
 .gen .segmented button { flex: 1; border: 0; background: none; color: var(--ink-2); border-radius: 4px; height: 32px; font: inherit; font-weight: 500; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
 .gen .segmented button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
-.gen-out { font-family: var(--mono); font-variant-ligatures: none; font-size: var(--text-title); line-height: 1.4; padding: var(--space-3) var(--space-4); background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-s); word-break: break-all; min-height: 72px; }
-.gen input[type="range"] { accent-color: var(--accent); width: 100%; margin: 0; }
+.gen-out { display: block; font-family: var(--mono); font-variant-ligatures: none; font-size: var(--text-title); line-height: 1.4; padding: var(--space-3) var(--space-4); background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-s); word-break: break-all; min-height: 72px; }
+.gen hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 0; }
+.gen .check-grid { grid-template-columns: 1fr; gap: var(--space-2); }
+
+/* -------------------------------------- passwords character by character */
+/* Digits: accent and underlined; symbols: danger colour on a tinted box. The marks don't depend on colour. */
+.pw-chars { font-family: var(--mono); font-variant-ligatures: none; word-break: break-all; }
+.ch-digit { color: var(--accent-ink); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.ch-symbol { color: var(--danger); background: var(--surface-2); border-radius: 2px; box-shadow: inset 0 0 0 1px var(--line); }
+.large-type { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr)); gap: var(--space-1); }
+.large-type li { display: grid; justify-items: center; padding: var(--space-1) 0; border-radius: var(--radius-s); background: var(--paper); border: 1px solid var(--line); }
+.large-type .glyph { font-family: var(--mono); font-variant-ligatures: none; font-size: 1.75rem; line-height: 1.2; }
+.large-type .num { font-size: 0.75rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.large-type li.ch-digit { text-decoration: none; }
+.large-type li.ch-digit .glyph { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 4px; }
+.large-type li.ch-symbol { box-shadow: none; }
 
 /* -------------------------------------- item editor (shared with the web vault) */
 .pop-editor .detail { padding: 0; max-width: none; gap: var(--space-4); }
@@ -195,6 +283,8 @@ html.sheet-window #root { height: auto; min-height: 0; }
 /* Until the window has taken the sheet's height, an estimate that is a line short must not flash a scrollbar. */
 html.sheet-window:not(.fitted) { overflow: hidden; }
 .sheet { display: flex; flex-direction: column; }
+/* The sheet takes the focus when the window opens (Passkey.tsx); the keyboard ring belongs to its controls. */
+.sheet:focus { outline: none; }
 .sheet .sheet-bar { height: 48px; min-height: 0; padding: 0 var(--space-4); }
 .sheet .modal-body { overflow: visible; padding: 4px var(--space-4) 16px; gap: 16px; }
 .sheet .sheet-context { min-height: 40px; }
@@ -219,3 +309,22 @@ html.sheet-window:not(.fitted) { overflow: hidden; }
 .sheet .sheet-quiet { flex-wrap: nowrap; justify-content: space-between; gap: 0; margin: 0 calc(-1 * var(--space-3)); }
 .sheet .sheet-quiet .btn { height: 36px; }
 .sheet .sheet-quiet > :only-child { margin: 0 auto; }
+
+/* ------------------------------------------ sign-in from another device */
+/* The five words of a sign-in request, large enough to compare at a glance: the same on both screens. */
+.pop-phrase { list-style: none; margin: 0; padding: var(--space-4); display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2) var(--space-4); border-radius: var(--radius-m); background: var(--surface-2); text-align: center; }
+.pop-phrase li { font-family: var(--mono); font-variant-ligatures: none; font-size: 1.375rem; font-weight: 500; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }
+.pop-countdown { margin: 0; text-align: center; font-size: var(--text-caption); color: var(--ink-3); }
+.pop-countdown .countdown { font-variant-numeric: tabular-nums; }
+/* Who asks to sign in: device, app, address, time. */
+.pop-facts { display: grid; gap: var(--space-1); margin: 0; font-size: var(--text-caption); }
+.pop-facts > div { display: flex; gap: var(--space-3); }
+.pop-facts dt { flex: none; width: 5.5em; color: var(--ink-3); }
+.pop-facts dd { margin: 0; min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+/* The passkey window: "Click again" for an accept that came too soon after it appeared, over the sheet's bottom edge. */
+.sheet-window form.sheet { position: relative; }
+.again-hint { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); margin: 0; padding: 4px 12px; border-radius: 999px; background: var(--ink); color: var(--surface); font-size: var(--text-caption); white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity 120ms; }
+.again-hint.show { opacity: 1; }
+/* An item's files: a thin bar while one downloads. */
+.file-progress { display: block; height: 3px; margin-top: var(--space-1); border-radius: 2px; background: var(--surface-2); overflow: hidden; }
+.file-progress i { display: block; height: 100%; background: var(--accent); transition: width 120ms; }

@@ -140,11 +140,10 @@ export interface BridgeToPageMessage {
 /** bridge -> background, via chrome.runtime.sendMessage. `origin` is computed by the bridge from its own frame. */
 export type PasskeyRuntimeMessage =
   | { type: "passkey:create"; options: CreateRequest; origin: string; topLevel: boolean; bridgeId: string }
-  | { type: "passkey:get"; options: GetRequest; origin: string; topLevel: boolean; bridgeId: string }
-  | { type: "passkey:cancel"; bridgeId: string };
+  /** `activated`: the page had a recent click or key press (transient user activation, read in the isolated world). */
+  | { type: "passkey:get"; options: GetRequest; origin: string; topLevel: boolean; bridgeId: string; activated: boolean }
+  /** `gone`: the page is going away (navigation, reload, closing), rather than the page aborting its request. */
+  | { type: "passkey:cancel"; bridgeId: string; gone?: boolean };
 
 /** background -> bridge reply. */
-export type PasskeyRuntimeReply =
-  | { result: RegistrationResponseJSON | AuthenticationResponseJSON }
-  | { fallback: true }
-  | { error: PasskeyErrorJSON };
+export type PasskeyRuntimeReply = { result: RegistrationResponseJSON | AuthenticationResponseJSON } | { fallback: true } | { error: PasskeyErrorJSON };
