@@ -112,14 +112,6 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
     // Vaults this item can move to: only ones where the user may add items (owner, admin, write).
     val targets = v.vaults.filter { it.id != entry.vaultId && it.role in setOf(Role.Owner, Role.Admin, Role.Write) }
 
-    var code by remember { mutableStateOf<TotpCodeView?>(null) }
-    LaunchedEffect(l?.totp) {
-        val secret = l?.totp?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect run { code = null }
-        while (true) {
-            code = runCatching { currentTotp(secret).let { TotpCodeView(it.code, it.remaining.toInt(), it.period.toInt()) } }.getOrNull()
-            delay(1000 - System.currentTimeMillis() % 1000)
-        }
-    }
 
     if (confirmDelete) {
         DecisionSheet(
@@ -193,111 +185,18 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
                 }
                 FlowRow(Modifier.padding(bottom = 8.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     Meta(Icons.Outlined.Folder, i.folder?.takeIf { it.isNotEmpty() } ?: "No folder")
-                    Meta(Icons.Outlined.Lock, v.vaultName(entry.vaultId))
+                    Meta(
+                        Icons.Outlined.Lock,
+                        v.vaultName(entry.vaultId) + (v.vaults.firstOrNull { it.id == entry.vaultId }?.trust?.let(io.passauth.app.data.SignedSharing::label)?.let { " · $it" } ?: ""),
+                    )
                 }
             }
 
-            val c = code
-            if (l != null && (l.username.isNotEmpty() || l.password.isNotEmpty() || l.passkeys.isNotEmpty() || c != null)) {
-                CardSection("Login credentials") {
-                    if (l.username.isNotEmpty()) {
-                        KeyValue("Username", actions = { CopyButton(ctx, l.username, "Username") }) { ValueText(l.username) }
-                    }
-                    if (l.password.isNotEmpty()) {
-                        Secret(ctx, "Password", l.password)
-                        PasswordNotes(ctx, v, entry, onChange = if (canWrite) ({ ctx.go(Route.Edit(id, fromHealth)) }) else null)
-                    }
-                    l.passkeys.forEach { p ->
-                        KeyValue("Passkey") {
-                            ValueText(p.userName.ifEmpty { p.rpId })
-                            Text("${p.rpId} · Created ${formatDate(p.createdAt)}", style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
-                        }
-                    }
-                    if (c != null) {
-                        KeyValue("Verification code", actions = {
-                            TotpRing(c.remaining, c.period)
-                            CopyButton(ctx, c.code, "Verification code")
-                        }) {
-                            Text(
-                                if (c.code.length == 6) "${c.code.take(3)} ${c.code.drop(3)}" else c.code,
-                                style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                    }
-                }
+            ItemDetailCards(ctx, i) {
+                PasswordNotes(ctx, v, entry, onChange = if (canWrite) ({ ctx.go(Route.Edit(id, fromHealth)) }) else null)
             }
 
-            i.card?.let { card ->
-                CardSection("Card details") {
-                    if (card.cardholderName.isNotEmpty()) KeyValue("Cardholder name", actions = { CopyButton(ctx, card.cardholderName, "Cardholder name") }) { ValueText(card.cardholderName) }
-                    if (card.brand.isNotEmpty()) KeyValue("Brand") { ValueText(card.brand) }
-                    if (card.number.isNotEmpty()) Secret(ctx, "Number", card.number)
-                    if (card.expMonth.isNotEmpty() || card.expYear.isNotEmpty()) KeyValue("Expires") { ValueText("${card.expMonth}/${card.expYear}") }
-                    if (card.code.isNotEmpty()) Secret(ctx, "Security code", card.code)
-                }
-            }
-
-            i.identity?.let { idn ->
-                val rows = listOf(
-                    "Name" to listOf(idn.title, idn.firstName, idn.middleName, idn.lastName).filter { it.isNotEmpty() }.joinToString(" "),
-                    "Username" to idn.username,
-                    "Email" to idn.email,
-                    "Phone" to idn.phone,
-                    "Company" to idn.company,
-                    "Address" to listOf(idn.address1, idn.address2, idn.city, idn.state, idn.postalCode, idn.country).filter { it.isNotEmpty() }.joinToString(", "),
-                    "Passport number" to idn.passportNumber,
-                    "Licence number" to idn.licenseNumber,
-                ).filter { it.second.isNotEmpty() }
-                if (rows.isNotEmpty() || idn.ssn.isNotEmpty()) {
-                    CardSection("Personal details") {
-                        rows.forEach { (k, value) -> KeyValue(k, actions = { CopyButton(ctx, value, k) }) { ValueText(value) } }
-                        if (idn.ssn.isNotEmpty()) Secret(ctx, "National ID number", idn.ssn)
-                    }
-                }
-            }
-
-            i.sshKey?.let { k ->
-                CardSection("SSH key") {
-                    if (k.publicKey.isNotEmpty()) KeyValue("Public key", actions = { CopyButton(ctx, k.publicKey, "Public key") }) { ValueText(k.publicKey, mono = true, maxLines = 2) }
-                    if (k.fingerprint.isNotEmpty()) KeyValue("Fingerprint", actions = { CopyButton(ctx, k.fingerprint, "Fingerprint") }) { ValueText(k.fingerprint, mono = true) }
-                    if (k.privateKey.isNotEmpty()) Secret(ctx, "Private key", k.privateKey, maxLines = 3)
-                }
-            }
-
-            val urls = l?.urls.orEmpty().filter { it.url.isNotEmpty() }
-            if (urls.isNotEmpty()) {
-                CardSection("Autofill options") {
-                    urls.forEachIndexed { n, u ->
-                        KeyValue(if (urls.size > 1) "Website ${n + 1}" else "Website", actions = {
-                            if (u.match != UrlMatch.Regex && UrlMatcher.parse(u.url)?.scheme?.startsWith("http") == true && u.url.contains("://")) {
-                                IconButton(onClick = { ctx.openUrl(u.url) }) { Icon(Icons.AutoMirrored.Outlined.OpenInNew, "Open website") }
-                            }
-                            CopyButton(ctx, u.url, "Website")
-                        }) { ValueText(u.url, maxLines = 1) }
-                    }
-                }
-            }
-
-            if (i.fields.isNotEmpty()) {
-                CardSection("Custom fields") {
-                    i.fields.forEach { f ->
-                        when (f.type) {
-                            FieldType.Hidden -> Secret(ctx, f.name.ifEmpty { "Hidden field" }, f.value)
-                            FieldType.Boolean -> KeyValue(f.name.ifEmpty { "Field" }) { ValueText(if (f.value == "true") "Yes" else "No") }
-                            FieldType.Text -> KeyValue(f.name.ifEmpty { "Field" }, actions = {
-                                if (f.value.isNotEmpty()) CopyButton(ctx, f.value, f.name.ifEmpty { "Field" })
-                            }) { ValueText(f.value) }
-                        }
-                    }
-                }
-            }
-
-            if (i.notes.isNotEmpty()) {
-                CardSection("Notes") {
-                    Text(i.notes, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(vertical = 8.dp))
-                }
-            }
+            AttachmentsCard(ctx, entry.id, i, canWrite)
 
             CardSection("Item history") {
                 val muted = PassAuthTheme.colors.muted
@@ -329,6 +228,126 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
             }
         }
     }
+}
+
+/**
+ * The detail cards of an item (login, card, personal details, SSH key, websites, custom fields,
+ * notes), each value with copy and, for secrets, show buttons. Shared by the item page and the
+ * read-only view of a grantor's vault ([passwordNotes]: what the item page adds under a password).
+ */
+@Composable
+fun ItemDetailCards(ctx: UiCtx, i: io.passauth.app.data.Item, passwordNotes: @Composable () -> Unit = {}) {
+    val l = i.login
+    var code by remember { mutableStateOf<TotpCodeView?>(null) }
+    LaunchedEffect(l?.totp) {
+        val secret = l?.totp?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect run { code = null }
+        while (true) {
+            code = runCatching { currentTotp(secret).let { TotpCodeView(it.code, it.remaining.toInt(), it.period.toInt()) } }.getOrNull()
+            delay(1000 - System.currentTimeMillis() % 1000)
+        }
+    }
+    val c = code
+    if (l != null && (l.username.isNotEmpty() || l.password.isNotEmpty() || l.passkeys.isNotEmpty() || c != null)) {
+        CardSection("Login credentials") {
+            if (l.username.isNotEmpty()) {
+                KeyValue("Username", actions = { CopyButton(ctx, l.username, "Username") }) { ValueText(l.username) }
+            }
+            if (l.password.isNotEmpty()) {
+                Secret(ctx, "Password", l.password)
+                passwordNotes()
+            }
+            l.passkeys.forEach { p ->
+                KeyValue("Passkey") {
+                    ValueText(p.userName.ifEmpty { p.rpId })
+                    Text("${p.rpId} · Created ${formatDate(p.createdAt)}", style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+                }
+            }
+            if (c != null) {
+                KeyValue("Verification code", actions = {
+                    TotpRing(c.remaining, c.period)
+                    CopyButton(ctx, c.code, "Verification code")
+                }) {
+                    Text(
+                        if (c.code.length == 6) "${c.code.take(3)} ${c.code.drop(3)}" else c.code,
+                        style = MaterialTheme.typography.headlineSmall, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+        }
+    }
+
+    i.card?.let { card ->
+        CardSection("Card details") {
+            if (card.cardholderName.isNotEmpty()) KeyValue("Cardholder name", actions = { CopyButton(ctx, card.cardholderName, "Cardholder name") }) { ValueText(card.cardholderName) }
+            if (card.brand.isNotEmpty()) KeyValue("Brand") { ValueText(card.brand) }
+            if (card.number.isNotEmpty()) Secret(ctx, "Number", card.number)
+            if (card.expMonth.isNotEmpty() || card.expYear.isNotEmpty()) KeyValue("Expires") { ValueText("${card.expMonth}/${card.expYear}") }
+            if (card.code.isNotEmpty()) Secret(ctx, "Security code", card.code)
+        }
+    }
+
+    i.identity?.let { idn ->
+        val rows = listOf(
+            "Name" to listOf(idn.title, idn.firstName, idn.middleName, idn.lastName).filter { it.isNotEmpty() }.joinToString(" "),
+            "Username" to idn.username,
+            "Email" to idn.email,
+            "Phone" to idn.phone,
+            "Company" to idn.company,
+            "Address" to listOf(idn.address1, idn.address2, idn.city, idn.state, idn.postalCode, idn.country).filter { it.isNotEmpty() }.joinToString(", "),
+            "Passport number" to idn.passportNumber,
+            "Licence number" to idn.licenseNumber,
+        ).filter { it.second.isNotEmpty() }
+        if (rows.isNotEmpty() || idn.ssn.isNotEmpty()) {
+            CardSection("Personal details") {
+                rows.forEach { (k, value) -> KeyValue(k, actions = { CopyButton(ctx, value, k) }) { ValueText(value) } }
+                if (idn.ssn.isNotEmpty()) Secret(ctx, "National ID number", idn.ssn)
+            }
+        }
+    }
+
+    i.sshKey?.let { k ->
+        CardSection("SSH key") {
+            if (k.publicKey.isNotEmpty()) KeyValue("Public key", actions = { CopyButton(ctx, k.publicKey, "Public key") }) { ValueText(k.publicKey, mono = true, maxLines = 2) }
+            if (k.fingerprint.isNotEmpty()) KeyValue("Fingerprint", actions = { CopyButton(ctx, k.fingerprint, "Fingerprint") }) { ValueText(k.fingerprint, mono = true) }
+            if (k.privateKey.isNotEmpty()) Secret(ctx, "Private key", k.privateKey, maxLines = 3)
+        }
+    }
+
+    val urls = l?.urls.orEmpty().filter { it.url.isNotEmpty() }
+    if (urls.isNotEmpty()) {
+        CardSection("Autofill options") {
+            urls.forEachIndexed { n, u ->
+                KeyValue(if (urls.size > 1) "Website ${n + 1}" else "Website", actions = {
+                    if (u.match != UrlMatch.Regex && UrlMatcher.parse(u.url)?.scheme?.startsWith("http") == true && u.url.contains("://")) {
+                        IconButton(onClick = { ctx.openUrl(u.url) }) { Icon(Icons.AutoMirrored.Outlined.OpenInNew, "Open website") }
+                    }
+                    CopyButton(ctx, u.url, "Website")
+                }) { ValueText(u.url, maxLines = 1) }
+            }
+        }
+    }
+
+    if (i.fields.isNotEmpty()) {
+        CardSection("Custom fields") {
+            i.fields.forEach { f ->
+                when (f.type) {
+                    FieldType.Hidden -> Secret(ctx, f.name.ifEmpty { "Hidden field" }, f.value)
+                    FieldType.Boolean -> KeyValue(f.name.ifEmpty { "Field" }) { ValueText(if (f.value == "true") "Yes" else "No") }
+                    FieldType.Text -> KeyValue(f.name.ifEmpty { "Field" }, actions = {
+                        if (f.value.isNotEmpty()) CopyButton(ctx, f.value, f.name.ifEmpty { "Field" })
+                    }) { ValueText(f.value) }
+                }
+            }
+        }
+    }
+
+    if (i.notes.isNotEmpty()) {
+        CardSection("Notes") {
+            Text(i.notes, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(vertical = 8.dp))
+        }
+    }
+
 }
 
 /** Choose the vault to move an item to (re-encrypted with that vault's key). */

@@ -18,6 +18,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.outlined.ContactEmergency
 import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteForever
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.outlined.GroupAdd
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Sync
@@ -141,6 +144,13 @@ private val SECTIONS = listOf(
     Section("about", "About", Icons.Outlined.Info),
 )
 
+/** Sharing tools, each on its own page. */
+private val TOOLS = listOf(
+    Section("sends", "Send", Icons.AutoMirrored.Outlined.Send),
+    Section("emergency", "Emergency access", Icons.Outlined.ContactEmergency),
+    Section("sharing", "Shared vaults and keys", Icons.Outlined.Key),
+)
+
 /** Settings: a list of categories, each opening its own page (like the extension popup). */
 @Composable
 fun SettingsScreen(ctx: UiCtx, section: String?) {
@@ -149,6 +159,9 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
     if (section == "two-step") return TwoStepScreen(ctx)
     if (section == "sessions") return SessionsScreen(ctx)
     if (section == HEALTH) return HealthScreen(ctx)
+    if (section == "sends") return SendsScreen(ctx)
+    if (section == "emergency") return EmergencyScreen(ctx)
+    if (section == "sharing") return SharingScreen(ctx)
     val open = SECTIONS.firstOrNull { it.key == section }
     if (open == null) {
         Scaffold(topBar = { PageBar("Settings", brand = true) { AccountMenu(ctx) } }) { padding ->
@@ -177,6 +190,20 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
                             Icon(Icons.Outlined.GroupAdd, null, tint = MaterialTheme.colorScheme.primary)
                             Text("Vault invitations", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                             CountBadge(waiting)
+                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+                        }
+                    }
+                }
+                CardSection(null) {
+                    TOOLS.forEachIndexed { n, s ->
+                        if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = Space.m),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(Space.m),
+                        ) {
+                            Icon(s.icon, null, tint = MaterialTheme.colorScheme.primary)
+                            Text(s.title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                             Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
                         }
                     }
@@ -225,7 +252,7 @@ private fun UiCtx.update(f: (Settings) -> Settings) = launch { repo.updateSettin
 
 /** A small count in the accent colour (invitations waiting). */
 @Composable
-private fun CountBadge(n: Int) {
+internal fun CountBadge(n: Int) {
     androidx.compose.material3.Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(50), color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
         Text("$n", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
     }

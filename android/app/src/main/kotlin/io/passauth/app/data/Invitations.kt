@@ -28,6 +28,9 @@ data class InvitedBy(
     val email: String = "",
     val name: String = "",
     @SerialName("public_key") val publicKey: String = "",
+    /** Signed sharing: their signing identity (null for an account without one). */
+    @SerialName("signing_key") val signingKey: String? = null,
+    @SerialName("identity_signature") val identitySignature: String? = null,
 )
 
 /** A pending invitation as `/sync` lists it (the vault key and name still encrypted). */
@@ -43,6 +46,13 @@ data class SyncInvitation(
     @SerialName("invited_by") val invitedBy: InvitedBy? = null,
     /** Unix seconds; null when the server didn't say. */
     @SerialName("invited_at") val invitedAt: Long? = null,
+    /** The vault's key epoch (signed into the share); null from older servers. */
+    @SerialName("key_epoch") val keyEpoch: Long? = null,
+    /** Signed sharing: `{signature, signer, signer_deleted}`, or null (not signed). */
+    val share: JsonElement? = null,
+    /** Signed sharing: the vault's latest member roster (JSON text) and its version (0: none). */
+    @SerialName("member_roster") val memberRoster: String? = null,
+    @SerialName("member_roster_seq") val memberRosterSeq: Long? = null,
 )
 
 /** An invitation as the app shows it. */
@@ -53,7 +63,12 @@ data class Invitation(
     val name: String?,
     val invitedBy: InvitedBy?,
     val invitedAt: Long?,
-)
+    /** Its signature, checked (servers with signed sharing); [InvitationTrust.Unchecked] otherwise. */
+    val trust: InvitationTrust = InvitationTrust.Unchecked,
+) {
+    /** It can be accepted: checked and signed, or from a server without signed sharing. */
+    val acceptable: Boolean get() = name != null && (trust is InvitationTrust.Signed || trust == InvitationTrust.Unchecked)
+}
 
 object Invitations {
     /** The `/api/config` feature of servers with invitations. */
@@ -80,12 +95,22 @@ object Invitations {
             val meta = text(o["meta"])?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val role = text(o["role"])?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val by = (o["invited_by"] as? JsonObject)?.let { b ->
-                text(b["id"])?.let { id -> InvitedBy(id, text(b["email"]).orEmpty(), text(b["name"]).orEmpty(), text(b["public_key"]).orEmpty()) }
+                text(b["id"])?.let { id ->
+                    // Server-chosen text: shown cleaned (one line, no invisible characters, capped).
+                    InvitedBy(id, CleanText.oneLine(text(b["email"]), 128), CleanText.oneLine(text(b["name"]), 128), text(b["public_key"]).orEmpty(), text(b["signing_key"]), text(b["identity_signature"]))
+                }
             }
-            val at = (o["invited_at"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull
+            fun whole(v: JsonElement?) = (v as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull
                 ?.takeIf { it.isFinite() && it == Math.floor(it) }?.toLong()
+            val at = whole(o["invited_at"])
             seen += vaultId
-            SyncInvitation(vaultId, role, wrapped, meta, by, at)
+            SyncInvitation(
+                vaultId, role, wrapped, meta, by, at,
+                keyEpoch = whole(o["key_epoch"]),
+                share = (o["share"] as? JsonObject),
+                memberRoster = text(o["member_roster"]),
+                memberRosterSeq = whole(o["member_roster_seq"]),
+            )
         }
     }
 
@@ -102,13 +127,20 @@ object Invitations {
         Invitation(inv.vaultId, inv.role, name, inv.invitedBy, inv.invitedAt)
     }
 
+    /**
+     * Whether the invitation listed now is the one a sheet showed ([shown]): the same vault, role,
+     * name, sharer and the same check (signer, key and roster). Accepting binds to it, so a server
+     * that changes the invitation between the check and the tap gets [InvitationText.CHANGED].
+     */
+    fun sameAsShown(current: Invitation?, shown: Invitation): Boolean = current != null && current == shown
+
     /** What identifies an opened name: the vault, its sealed key and encrypted name. */
     fun cacheKey(inv: SyncInvitation) = "${inv.vaultId}\n${inv.wrappedKey}\n${inv.meta}"
 
     /** A vault's name from its decrypted `meta` JSON: a non-blank `name`, else [UNNAMED]. */
     fun nameOf(meta: JsonElement?): String {
-        val name = text((meta as? JsonObject)?.get("name"))
-        return if (name != null && name.isNotBlank()) name else UNNAMED
+        val name = CleanText.oneLine(text((meta as? JsonObject)?.get("name")), 64)
+        return name.ifEmpty { UNNAMED }
     }
 }
 
@@ -122,10 +154,24 @@ object InvitationText {
     const val NO_LONGER_OPEN = "This invitation is no longer open. The person who shared the vault may have cancelled it."
     const val DECLINE_BODY = "The vault won't appear in your apps. The invitation already gave your account the vault's key, " +
         "so the people who manage the vault will be asked to replace it."
+    const val CHANGED = "This invitation changed since it was shown. Check it again before you accept."
     private const val NOBODY = "the person who shared it"
 
-    /** Who shared the vault: "Alex Morgan (alex@example.com)", the email alone, or a note when their account is gone. */
+    /**
+     * The checked signer of a signed invitation as shown: the pinned email (the one its share lists
+     * when they're new), never the server's `invited_by`; a different email the server lists only as
+     * "listed by your server as …" (re-review M). Null for an invitation that isn't signed and checked.
+     */
+    fun signer(inv: Invitation): String? {
+        val t = inv.trust as? InvitationTrust.Signed ?: return null
+        val listed = t.signer.listedEmail
+            ?: inv.invitedBy?.email?.takeIf { it.isNotBlank() && !SignedSharing.sameEmail(it, t.signer.email) }?.let { SignedSharing.clean(SignedSharing.normalized(it)) }
+        return t.signer.email + (listed?.let { " (listed by your server as $it)" } ?: "")
+    }
+
+    /** Who shared the vault: "Alex Morgan (alex@example.com)", the email alone, or a note when their account is gone (a signed one: [signer]). */
     fun sharerName(inv: Invitation): String {
+        signer(inv)?.let { return it }
         val by = inv.invitedBy ?: return "Someone whose account was deleted"
         val name = by.name.trim()
         val email = by.email.trim()
@@ -135,7 +181,7 @@ object InvitationText {
 
     /** The sharer's name alone, for running text ("ask Alex Morgan to…"). */
     fun sharerShort(inv: Invitation): String =
-        inv.invitedBy?.name?.trim()?.ifEmpty { null } ?: inv.invitedBy?.email?.trim()?.ifEmpty { null } ?: NOBODY
+        (inv.trust as? InvitationTrust.Signed)?.signer?.email ?: inv.invitedBy?.name?.trim()?.ifEmpty { null } ?: inv.invitedBy?.email?.trim()?.ifEmpty { null } ?: NOBODY
 
     fun title(inv: Invitation): String = inv.name ?: CANT_OPEN_TITLE
 
@@ -194,7 +240,7 @@ object InvitationText {
         val tail = " Nothing from ${if (list.size == 1) "it" else "them"} reaches your apps until you accept."
         if (list.size > 1) return "You have ${list.size} invitations to shared vaults.$tail"
         val inv = list[0]
-        val who = if (inv.invitedBy == null) "Someone" else sharerShort(inv)
+        val who = if (inv.invitedBy == null && inv.trust !is InvitationTrust.Signed) "Someone" else sharerShort(inv)
         val what = inv.name?.let { "the shared vault \"$it\"" } ?: "a shared vault"
         return "$who invited you to $what.$tail"
     }

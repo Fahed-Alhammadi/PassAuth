@@ -40,6 +40,9 @@ class AppGraph(app: Application) {
     val clipboard = ClipboardHelper(app, scope) { repo.state.value.settings.clearClipboard }
     val icons = IconLoader(api.http)
 
+    /** Attachment uploads and downloads (decrypted copies in the cache, deleted when the vault locks). */
+    val files = io.passauth.app.data.AttachmentManager(app, repo, scope)
+
     /** Sign-in requests from new devices waiting for this app's answer (shown while unlocked). */
     val inbox = AuthRequestInbox(repo)
     val live = LiveSync(repo, store, api.http, inbox)
@@ -99,6 +102,8 @@ class PassAuthApp : Application() {
         super.onCreate()
         graph = AppGraph(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(graph.lock)
+        // Decrypted attachment copies handed out a while ago go when the app leaves the screen.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(graph.files)
         graph.lock.watchScreen(this)
         // Vault timeout "never": stay unlocked across app restarts.
         graph.restoreJob = graph.scope.launch { runCatching { graph.repo.restorePersisted() } }

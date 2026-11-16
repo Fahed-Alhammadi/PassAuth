@@ -146,7 +146,8 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null, fromHealt
         ctx.scope.launch {
             try {
                 if (entry != null) {
-                    ctx.repo.updateItem(entry, clean)
+                    // The editor never changes the file list: it is the one of the item as read.
+                    ctx.repo.updateItem(entry, io.passauth.app.data.Attachments.withListOf(clean, entry.item))
                     ctx.notify("Changes saved.")
                     done(entry.id)
                 } else {
@@ -173,7 +174,8 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null, fromHealt
             try {
                 ctx.repo.sync()
                 val latest = ctx.repo.vault.value?.get(original.id) ?: throw UserException("This item was deleted on another device.")
-                ctx.repo.updateItem(latest, mine.copy(passwordHistory = latest.item.passwordHistory))
+                // Files added or removed meanwhile stay as the newer version has them.
+                ctx.repo.updateItem(latest, io.passauth.app.data.Attachments.withListOf(mine.copy(passwordHistory = latest.item.passwordHistory), latest.item))
                 ctx.notify("Changes saved.")
                 done(original.id)
             } catch (e: ConflictException) {

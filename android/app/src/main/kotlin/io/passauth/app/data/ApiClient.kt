@@ -35,6 +35,8 @@ class ApiException(
     message: String,
     val retryAfter: Long? = null,
     val requestId: String? = null,
+    /** The error answer's JSON body (its extra fields, e.g. `members_changed`'s lists); null when there was none. */
+    val body: JsonObject? = null,
 ) : Exception(message) {
     /** The server (or a proxy in front of it) refused because of too many requests. */
     val isRateLimited: Boolean get() = status == 429 || code == "rate_limited"
@@ -158,12 +160,64 @@ class ApiClient(private val store: SecureStore) {
         method: String,
         auth: Boolean,
         headers: Map<String, String>,
+    ): Response = respondWith(accountId, path, method, auth, headers) {
+        body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET") null else ByteArray(0).toRequestBody()
+    }
+
+    /**
+     * `PUT` a stream of exactly [length] bytes that [write] produces (an attachment's encrypted
+     * file), on account [accountId]'s session. After a 401 the session is renewed and [write] runs
+     * again. A failure inside [write] reaches the caller as a [BodyFailure].
+     */
+    suspend fun upload(accountId: String, path: String, length: Long, write: (java.io.OutputStream) -> Unit): JsonElement = gate(accountId, true) {
+        val type = "application/octet-stream".toMediaType()
+        parse(
+            respondWith(accountId, path, "PUT", true, emptyMap()) {
+                object : okhttp3.RequestBody() {
+                    override fun contentType() = type
+                    override fun contentLength() = length
+
+                    // The stream is made once per request (a renewed session builds a new one): OkHttp must never send it again itself.
+                    override fun isOneShot() = true
+                    override fun writeTo(sink: okio.BufferedSink) {
+                        try {
+                            write(sink.outputStream())
+                        } catch (e: IOException) {
+                            throw e
+                        } catch (e: Throwable) {
+                            // Anything else would escape OkHttp's call thread.
+                            throw BodyFailure(e)
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    /** `GET` a raw answer (an attachment's file) on account [accountId]'s session; the caller reads and closes it. */
+    suspend fun download(accountId: String, path: String): Response = gate(accountId, true) {
+        respondWith(accountId, path, "GET", true, emptyMap()) { null }
+    }
+
+    /** Throws the server's error for a failed raw answer (and closes it). */
+    suspend fun fail(res: Response): Nothing {
+        parse(res)
+        throw ApiException(res.code, "error", "Request failed (${res.code})")
+    }
+
+    private suspend fun respondWith(
+        accountId: String,
+        path: String,
+        method: String,
+        auth: Boolean,
+        headers: Map<String, String>,
+        makeBody: () -> okhttp3.RequestBody?,
     ): Response {
         suspend fun send(): Response {
             val a = store.get().accounts[accountId]
             val server = a?.server?.takeIf { it.isNotEmpty() } ?: throw UserException("Set your PassAuth server address first.")
             val req = serverRequest("$server/api$path")
-                .method(method, body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET") null else ByteArray(0).toRequestBody())
+                .method(method, makeBody())
                 .apply { if (auth && a.tokens != null) header("Authorization", "Bearer ${a.tokens.access}") }
                 .apply { headers.forEach { (k, v) -> header(k, v) } }
                 .build()
@@ -247,7 +301,11 @@ class ApiClient(private val store: SecureStore) {
 
     private suspend fun execute(req: Request): Response = try {
         http.newCall(req).await()
+    } catch (e: BodyFailure) {
+        throw e.cause ?: e
     } catch (e: IOException) {
+        // A failure while sending a body that the app made (an upload) keeps its own reason.
+        (e.cause as? BodyFailure)?.let { throw it.cause ?: it }
         throw UserException(UNREACHABLE)
     }
 
@@ -286,6 +344,7 @@ fun failedResponse(status: Int, body: String, retryAfterHeader: String?, request
         text("message") ?: "Request failed ($status)",
         retryAfter,
         text("request_id") ?: requestIdHeader,
+        o,
     )
 }
 

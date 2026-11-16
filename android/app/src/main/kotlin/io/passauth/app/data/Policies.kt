@@ -60,7 +60,14 @@ data class KdfMinimums(val memoryMib: Int, val iterations: Int)
  * `GET /api/config` as the app reads it: sign-ups, features, the API version ([api]: null when the
  * server sent no number, as servers before API 2 did) and (with the `policies` feature) policies.
  */
-data class ServerConfig(val signupsAllowed: Boolean?, val features: List<String>, val policies: Policies, val api: Int? = null) {
+data class ServerConfig(
+    val signupsAllowed: Boolean?,
+    val features: List<String>,
+    val policies: Policies,
+    val api: Int? = null,
+    /** `/api/config` `limits` as sent (Send and attachment sizes are read from it). */
+    val limits: JsonObject? = null,
+) {
     companion object {
         fun parse(o: JsonObject): ServerConfig {
             val features = (o["features"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
@@ -69,6 +76,7 @@ data class ServerConfig(val signupsAllowed: Boolean?, val features: List<String>
                 features = features,
                 policies = if (PolicyRules.FEATURE in features) PolicyRules.read(o["policies"]) else Policies(),
                 api = (o["api"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() }?.toInt(),
+                limits = o["limits"] as? JsonObject,
             )
         }
     }

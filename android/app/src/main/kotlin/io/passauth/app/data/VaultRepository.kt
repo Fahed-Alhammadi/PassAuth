@@ -37,6 +37,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
@@ -109,6 +110,10 @@ data class VaultInfo(
      * (`key_epoch`), so the server refuses them once the key was replaced ([ItemWrites]).
      */
     val keyEpoch: Long? = null,
+    /** The server asks for a new key of this vault (`rotation_pending`: a member or an emergency contact who held it left). */
+    val rotationPending: Boolean = false,
+    /** How far its key was checked (signed sharing); [VaultTrust.Unchecked] on servers without it. */
+    val trust: VaultTrust = VaultTrust.Unchecked,
 ) {
     val personal: Boolean get() = keyKind == KEY_KIND_ACCOUNT
 
@@ -122,6 +127,50 @@ data class VaultInfo(
          */
         fun defaultSaveVault(vaults: List<VaultInfo>): VaultInfo? =
             vaults.firstOrNull { it.personal && it.role == Role.Owner } ?: vaults.firstOrNull { it.personal && it.role != Role.Read }
+    }
+}
+
+/**
+ * What replacing vault keys did: [rotated] vaults got a new key; [shared] (names) are shared with
+ * other people, so this app can't replace their keys; [unreadable] (names) were left as they are
+ * because their name didn't decrypt (a new key would lose it).
+ */
+data class RotationReport(
+    val rotated: Int,
+    val shared: List<String> = emptyList(),
+    val unreadable: List<String> = emptyList(),
+    /**
+     * Vaults whose new key waits for the user to review its members (the first signed member list:
+     * every member's fingerprint; or people the signed list names but the server no longer lists).
+     */
+    val reviews: List<MemberReview> = emptyList(),
+) {
+    /** What's left for the user, in words; null when every vault got its new key. */
+    val leftover: String?
+        get() {
+            val parts = mutableListOf<String>()
+            if (shared.isNotEmpty()) parts += sharedText(shared)
+            if (reviews.isNotEmpty()) parts += reviewText(reviews.map { it.vaultName })
+            if (unreadable.isNotEmpty()) {
+                parts += "The name of ${names(unreadable)} couldn't be decrypted on this phone, so ${if (unreadable.size == 1) "its key wasn't" else "their keys weren't"} " +
+                    "replaced: a new key would lose the name. Sync and try again, or replace ${if (unreadable.size == 1) "it" else "them"} in the web vault."
+            }
+            return parts.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        }
+
+    companion object {
+        val NONE = RotationReport(0)
+
+        private fun names(list: List<String>) = if (list.size == 1) list[0] else list.dropLast(1).joinToString(", ") + " and " + list.last()
+
+        /** Why vaults shared with others get their new keys elsewhere (servers without signed sharing, or sharing paused). */
+        fun sharedText(shared: List<String>): String =
+            if (shared.size == 1) "${shared[0]} is shared, so replace its key in the web vault or the desktop app."
+            else "${names(shared)} are shared, so replace their keys in the web vault or the desktop app."
+
+        /** Vaults whose members the user checks first (Settings → Emergency access → Replace keys). */
+        fun reviewText(vaults: List<String>): String =
+            "Check who can open ${names(vaults)} before ${if (vaults.size == 1) "its key is" else "their keys are"} replaced: open Replace keys again."
     }
 }
 
@@ -208,9 +257,23 @@ class DeviceCodeRequest internal constructor(
     override fun toString() = "DeviceCodeRequest($record)"
 }
 
-/** Unlocked keys of one account, in memory only (Rust handles). */
+/** Unlocked keys of one account, in memory only (Rust handles); [sharing]: its signed sharing (servers with it). */
 private class Session(val accountId: String, val account: Account) {
-    fun close() = account.destroy()
+    var sharing: SharingSession? = null
+
+    /**
+     * This phone's own offline copy of the account from before this unlock (read when the session
+     * opened): its vault ids, and those of its shared (sealed) rows. Only these may be grandfathered,
+     * and an accepted shared vault they had that a verified sync no longer lists gets a tombstone.
+     */
+    var earlierVaults: Set<String> = emptySet()
+    var earlierShared: Set<String> = emptySet()
+
+    fun close() {
+        sharing?.close()
+        sharing = null
+        account.destroy()
+    }
 }
 
 /**
@@ -534,16 +597,7 @@ class VaultRepository(
         // Signing in again to an account that is already listed replaces the old record.
         val dupes = before.accounts.filter { (k, v) -> k != id && v.server == server && v.email.equals(email, true) }.keys
         dupes.forEach { closeSession(it); store.deleteCache(it); Keystore.deleteBiometricKey(it) }
-        store.update { s ->
-            val a = (s.accounts[id] ?: AccountData()).copy(
-                email = email,
-                tokens = Tokens(result.str("access_token"), result.str("refresh_token")),
-                bundle = bundle,
-                biometric = null,
-                persistedKeys = null,
-            )
-            s.copy(activeId = id, accounts = s.accounts - dupes + (id to a))
-        }
+        store.update { s -> s.signedIn(id, email, Tokens(result.str("access_token"), result.str("refresh_token")), bundle, dupes) }
         Keystore.deleteBiometricKey(id)
         openSession(id, Session(bundleAccountId(bundle), account))
     }
@@ -870,6 +924,11 @@ class VaultRepository(
     }
 
     private suspend fun openSession(id: String, session: Session) {
+        // The copy this phone kept from an earlier session (none on a fresh install or a re-added account).
+        runCatching { readSnapshot(id) }.getOrNull()?.let { earlier ->
+            session.earlierVaults = earlier.vaults.map { it.id }.toSet()
+            session.earlierShared = earlier.vaults.filter { it.keyKind == "sealed" }.map { it.id }.toSet()
+        }
         sessions.remove(id)?.close()
         sessions[id] = session
         sessionIds.value = sessions.keys.toSet()
@@ -899,6 +958,9 @@ class VaultRepository(
         invitationNames = emptyMap()
         copy = null
         _vault.value = null
+        _sharing.value = SharingStatus()
+        keysSignature = null
+        _emergencyNotice.value = null
         onVaultClosed?.invoke()
     }
 
@@ -951,7 +1013,7 @@ class VaultRepository(
         if (listed.size > 1 || !listed.containsKey(id)) {
             removeAccount(id)
         } else {
-            store.updateAccount(id) { it.copy(tokens = null, biometric = null, bundle = null, lastSync = 0) }
+            store.update { it.signedOutRecord(id) }
         }
     }
 
@@ -962,11 +1024,7 @@ class VaultRepository(
     }
 
     private suspend fun removeAccount(id: String) {
-        store.update { s ->
-            val rest = s.accounts - id
-            val next = if (s.activeId == id) rest.entries.firstOrNull { it.value.tokens != null }?.key ?: rest.keys.firstOrNull() ?: "" else s.activeId
-            s.copy(accounts = rest, activeId = next)
-        }
+        store.update { it.withoutRecord(id) }
         if (sessions.containsKey(activeId())) syncLocked(fallbackToCache = true)
     }
 
@@ -1220,9 +1278,16 @@ class VaultRepository(
      */
     private suspend fun show(id: String, session: Session, snap: SyncSnapshot, offline: Boolean, mode: CopyStore) {
         if (sessions[id] !== session) return
+        // Signed sharing: every vault and invitation checked before anything of it is used.
+        val shownBefore = copy?.takeIf { it.first == id }?.second?.vaults?.filter { it.keyKind == "sealed" }?.map { it.id }?.toSet()
+        val checks = verifySharing(id, session, snap, online = !offline && mode != CopyStore.None, sharedBefore = shownBefore ?: session.earlierShared)
+        if (sessions[id] !== session) return
+        // An identity uploaded at this sync goes into the copy kept, so an offline unlock later opens it (instead of pausing).
+        @Suppress("NAME_SHADOWING")
+        val snap = checks?.identityRecord?.let { withIdentity(snap, it) } ?: snap
         val previous = if (copy?.first == id) _vault.value?.let { Opened(it, vaultKeys, vaultHeaders, emptyList()) } else null
         val names = if (copy?.first == id) invitationNames else emptyMap()
-        val opened = core { decryptVault(session.account, snap, previous, names) }
+        val opened = core { decryptVault(session.account, snap, previous, names, checks) }
         if (sessions[id] !== session) {
             opened.fresh.forEach { it.destroy() }
             return
@@ -1248,6 +1313,7 @@ class VaultRepository(
         invitationNames = opened.invitationNames
         copy = id to snap
         _vault.value = opened.data.copy(offline = offline)
+        if (!offline) vaultKeysMaybeChanged(id, opened.data.vaults)
     }
 
     /**
@@ -1313,7 +1379,7 @@ class VaultRepository(
      * (rotated) is skipped with its items, and so is an undecryptable item; trashed items aren't
      * shown (the app has no trash view; with `trash=summary` they have no data anyway).
      */
-    private fun decryptVault(account: Account, snap: SyncSnapshot, previous: Opened?, previousNames: Map<String, String?>): Opened {
+    private fun decryptVault(account: Account, snap: SyncSnapshot, previous: Opened?, previousNames: Map<String, String?>, checks: SharingChecks? = null): Opened {
         val keys = mutableMapOf<String, VaultKey>()
         val headers = mutableMapOf<String, SyncVault>()
         val kept = mutableSetOf<String>()
@@ -1321,6 +1387,10 @@ class VaultRepository(
         val vaults = mutableListOf<VaultInfo>()
         val oldNames = previous?.data?.vaults.orEmpty().associate { it.id to it.name }
         for (v in snap.vaults) {
+            // With signed sharing only a vault that passed is opened: one refused, held for consent or
+            // unopened is never shown, filled or saved to.
+            val check = checks?.vaults?.get(v.id)
+            if (checks != null && check !is VaultCheck.Ok) continue
             val old = previous?.headers?.get(v.id)
             val oldKey = previous?.keys?.get(v.id)
             var name: String? = null
@@ -1330,7 +1400,8 @@ class VaultRepository(
                 oldKey
             } else {
                 try {
-                    account.openVaultKey(v.id, v.wrappedKey, v.keyKind).also { fresh += it }
+                    val legacy = checks?.legacyAllowed?.invoke(v.id) ?: true
+                    account.openVaultKey(v.id, v.wrappedKey, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, (v.keyEpoch ?: 0).toULong(), legacy).also { fresh += it }
                 } catch (_: CoreException) {
                     continue // vault key unavailable (rotated); skip
                 }
@@ -1345,7 +1416,8 @@ class VaultRepository(
             }
             keys[v.id] = key
             headers[v.id] = v
-            vaults += VaultInfo(v.id, shown, role, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, v.keyEpoch)
+            val trust = (check as? VaultCheck.Ok)?.trust ?: VaultTrust.Unchecked
+            vaults += VaultInfo(v.id, shown, role, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, v.keyEpoch, v.rotationPending == 1L, trust)
         }
         val before = previous?.data?.entries.orEmpty().associateBy { it.id }
         val entries = mutableListOf<Entry>()
@@ -1373,14 +1445,262 @@ class VaultRepository(
             val name = if (previousNames.containsKey(key)) previousNames[key] else invitationName(account, inv)
             names[key] = name
             name
-        }
+        }.map { inv -> checks?.invitations?.get(inv.vaultId)?.let { inv.copy(trust = it) } ?: inv }
         return Opened(VaultData(entries, vaults, snap.revision, invitations = invitations), keys, headers, fresh, names)
     }
+
+    // ------------------------------------------------------- signed sharing
+
+    /**
+     * What signed sharing said about a sync's vaults and invitations (by vault id); [legacyAllowed]:
+     * whether an `account` wrap of a vault may be a v1 wrap (the key pins' rule).
+     */
+    private class SharingChecks(
+        val vaults: Map<String, VaultCheck>,
+        val invitations: Map<String, InvitationTrust>,
+        val legacyAllowed: (String) -> Boolean,
+        /** The identity record this session uploaded, for a copy whose `user.identity` is still null. */
+        val identityRecord: String? = null,
+    )
+
+    /** [snap] with [record] as `user.identity` when it lists none (the sync answer was read before the upload). */
+    private fun withIdentity(snap: SyncSnapshot, record: String): SyncSnapshot {
+        val user = snap.user as? JsonObject ?: return snap
+        if (user["identity"].let { it != null && it !is kotlinx.serialization.json.JsonNull }) return snap
+        val parsed = runCatching { AppJson.parseToJsonElement(record) }.getOrNull() ?: return snap
+        return snap.copy(user = JsonObject(user + ("identity" to parsed)))
+    }
+
+    private val _sharing = MutableStateFlow(SharingStatus())
+
+    /** Signed sharing of the active account (own fingerprint, refused vaults, changed identities, pinned people, vaults to consent to). */
+    val sharing: StateFlow<SharingStatus> = _sharing.asStateFlow()
+
+    /**
+     * Whether account [id] checks signed sharing. The checks are sticky: on once its server lists
+     * `signed_sharing` (now, [online], or in the list kept: a missing or failing `/api/config` means
+     * "unknown", never "off"), once this phone has trust memory for the account, or once the server
+     * sent any identity, share, roster or key pins version ([snap]); a server that stops listing the
+     * feature can't switch them off.
+     */
+    private suspend fun signedSharingOn(id: String, session: Session, online: Boolean, snap: SyncSnapshot? = null): Boolean {
+        val kept = store.get().accounts[id]?.features
+        val features = if (online && kept?.contains(SignedSharing.FEATURE) != true) featuresOf(id) else kept
+        val s = store.get()
+        val server = s.accounts[id]?.server.orEmpty()
+        val me = session.sharing?.me ?: session.accountId
+        return SignedSharing.checksOn(kept, features, !s.signingMemory(server, me).isEmpty, snap != null && signedSignals(snap))
+    }
+
+    /** The server sent something only a server with signed sharing sends. */
+    private fun signedSignals(snap: SyncSnapshot): Boolean {
+        val user = snap.user as? JsonObject
+        if (user?.get("identity").let { it != null && it !is kotlinx.serialization.json.JsonNull }) return true
+        if ((SignedSharing.number(user, "key_pins_seq") ?: 0) > 0) return true
+        if (snap.vaults.any { (it.share != null && it.share !is kotlinx.serialization.json.JsonNull) || it.memberRoster != null || (it.memberRosterSeq ?: 0) > 0 }) return true
+        return snap.invitations.any { (it.share != null && it.share !is kotlinx.serialization.json.JsonNull) || it.memberRoster != null }
+    }
+
+    /** The signed sharing of [session] (made once per unlock, on account [id]'s requests and this phone's memory). */
+    private suspend fun sharingFor(id: String, session: Session): SharingSession {
+        session.sharing?.let { return it }
+        val server = store.get().accounts[id]?.server.orEmpty()
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        val api = object : SharingApi {
+            override suspend fun putIdentity(recordJson: String): Boolean {
+                val answer = api.call(id, "/account/identity", AppJson.parseToJsonElement(recordJson), "PUT") as? JsonObject
+                return (answer?.get("created") as? JsonPrimitive)?.content == "true"
+            }
+
+            override suspend fun currentIdentity(): JsonElement? =
+                ((AppJson.parseToJsonElement(api.callText(id, "/sync")) as? JsonObject)?.get("user") as? JsonObject)?.get("identity")
+
+            override suspend fun getKeyPins(): Pair<String?, Long> {
+                val o = api.call(id, "/account/key-pins") as? JsonObject ?: throw UserException(EmergencyClient.UNEXPECTED)
+                return SignedSharing.text(o, "key_pins") to (SignedSharing.number(o, "seq") ?: throw UserException(EmergencyClient.UNEXPECTED))
+            }
+
+            override suspend fun putKeyPins(sealed: String, seq: Long) {
+                api.call(id, "/account/key-pins", buildJsonObject { put("key_pins", sealed); put("seq", seq) }, "PUT")
+            }
+
+            override suspend fun rosters(vaultId: String, after: Long): Pair<List<String>, Boolean> {
+                val o = api.call(id, "/vaults/${enc(vaultId)}/rosters?after=$after") as? JsonObject
+                    ?: throw ApiException(200, "malformed", EmergencyClient.UNEXPECTED)
+                val list = (o["rosters"] as? kotlinx.serialization.json.JsonArray)?.map { r ->
+                    (r as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw ApiException(200, "malformed", EmergencyClient.UNEXPECTED)
+                } ?: throw ApiException(200, "malformed", EmergencyClient.UNEXPECTED)
+                return list to ((o["more"] as? JsonPrimitive)?.content == "true")
+            }
+        }
+        // Memory is keyed by the server and the account id the core authenticated (never the server's word).
+        var made: SharingSession? = null
+        val memoryStore = object : SigningMemoryStore {
+            override suspend fun read(): SigningMemory = store.get().signingMemory(server, made!!.me)
+            override suspend fun write(transform: (SigningMemory) -> SigningMemory) {
+                store.update { it.updatingSigning(server, made!!.me, transform) }
+            }
+        }
+        made = SharingSession(session.account, api, memoryStore)
+        session.sharing = made
+        return made
+    }
+
+    /** The (cleaned) name of a vault row, read with its key only for this; "Shared vault" when it can't be. */
+    private fun rowName(account: Account, v: SyncVault, legacyAllowed: Boolean): String {
+        val name = runCatching {
+            val key = account.openVaultKey(v.id, v.wrappedKey, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, (v.keyEpoch ?: 0).toULong(), legacyAllowed)
+            try {
+                Invitations.nameOf(AppJson.parseToJsonElement(key.decryptMeta(v.id, v.meta)))
+            } finally {
+                key.destroy()
+            }
+        }.getOrNull()
+        return SignedSharing.cleanName(name).ifEmpty { Invitations.UNNAMED }
+    }
+
+    /**
+     * Signed sharing for a copy about to be shown: the account named must be this one, its identity
+     * and key pins brought up to date ([online]: from the server; else this phone's copies, and newer
+     * rosters can't be fetched), the vaults of the first signed sync grandfathered, every vault's key
+     * and every invitation checked, new pins written. Null when the account's server doesn't sign
+     * shares (nothing is checked, as before).
+     */
+    private suspend fun verifySharing(id: String, session: Session, snap: SyncSnapshot, online: Boolean, sharedBefore: Set<String>): SharingChecks? {
+        if (!signedSharingOn(id, session, online, snap)) {
+            if (id == activeId()) _sharing.value = SharingStatus()
+            return null
+        }
+        return withContext(Dispatchers.Default) {
+            val sh = sharingFor(id, session)
+            try {
+                sh.refresh(snap.user, online)
+            } catch (e: WrongAccountException) {
+                throw e
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Identity or pins not reachable now: checked with what this phone has.
+            }
+            // Only the unsigned shared vaults present now that this phone's copy from an earlier session had (signed ones are checked on their own).
+            sh.grandfather(snap.vaults.filter { it.keyKind == "sealed" && (it.share == null || it.share is kotlinx.serialization.json.JsonNull) }.map { it.id }, session.earlierVaults, online)
+            sh.beginChecks()
+            val vaults = mutableMapOf<String, VaultCheck>()
+            val names = mutableMapOf<String, String>()
+            for (v in snap.vaults) {
+                val kind = v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }
+                val check = sh.checkVault(
+                    v,
+                    open = { legacy -> session.account.openVaultKey(v.id, v.wrappedKey, kind, (v.keyEpoch ?: 0).toULong(), legacy) },
+                    nameOf = { rowName(session.account, v, sh.legacyAllowed(v.id)) },
+                    online = online,
+                )
+                vaults[v.id] = check
+                if (check is VaultCheck.Refused) names[v.id] = rowName(session.account, v, sh.legacyAllowed(v.id))
+            }
+            val invitations = mutableMapOf<String, InvitationTrust>()
+            for (inv in snap.invitations) {
+                invitations[inv.vaultId] = sh.checkInvitation(
+                    inv,
+                    { i -> runCatching { session.account.openVaultKey(i.vaultId, i.wrappedKey, "sealed", 0u, false) }.getOrNull() },
+                    online,
+                )
+            }
+            // Accepted shared vaults this verified sync no longer lists: tombstoned (the server can't bring the old copy back).
+            sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, online)
+            if (online) savePinsQuietly(sh)
+            if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names)
+            SharingChecks(vaults, invitations, { vid -> sh.legacyAllowed(vid) }, sh.uploadedRecord)
+        }
+    }
+
+    /** Write changed key pins; a failure leaves them for the next sync. */
+    private suspend fun savePinsQuietly(sh: SharingSession) {
+        try {
+            sh.savePins()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun publishSharing(sh: SharingSession, vaults: Map<String, VaultCheck>? = null, names: Map<String, String> = emptyMap()) {
+        val before = _sharing.value
+        val refused = vaults?.mapNotNull { (vid, c) -> (c as? VaultCheck.Refused)?.let { RefusedVault(vid, names[vid] ?: Invitations.UNNAMED, it.reason) } } ?: before.refused
+        val consent = vaults?.mapNotNull { (_, c) -> (c as? VaultCheck.Consent)?.vault } ?: before.consent
+        _sharing.value = SharingStatus(true, sh.fingerprint, sh.paused, sh.pinsProblem, refused, sh.changed, SignedSharing.people(sh.pins), consent, sh.memoryMissing)
+    }
+
+    /** Signed sharing of the active, unlocked account; a [UserException] otherwise. */
+    private fun activeSharing(): SharingSession {
+        val (_, session) = unlockedAccount()
+        return session.sharing ?: throw UserException("Sync your vault first.")
+    }
+
+    /** "Mark as verified": the user compared [userId]'s identity fingerprint of [identityHash] (the one shown) with them. */
+    suspend fun markVerified(userId: String, identityHash: String) = mutex.withLock {
+        val sh = activeSharing()
+        if (!sh.markVerified(userId, identityHash)) throw UserException("Their keys changed since this fingerprint was shown. Compare it again.")
+        try {
+            sh.savePins()
+        } finally {
+            publishSharing(sh)
+        }
+    }
+
+    /** "Trust the new key" of the change [shown] in the sheet (its identity and the email it pins; [compared]: the user compared the new fingerprint with them); the vault syncs again. */
+    suspend fun trustNewKey(shown: IdentityChange, compared: Boolean) {
+        mutex.withLock {
+            val sh = activeSharing()
+            if (!sh.trustNewKey(shown, compared)) throw UserException("Their keys changed again since this fingerprint was shown. Compare it again.")
+            try {
+                sh.savePins()
+            } finally {
+                publishSharing(sh)
+            }
+        }
+        syncAfterAnswer()
+    }
+
+    /**
+     * Accept a shared vault held for consent (the account never accepted it) exactly as [shown] (the
+     * sheet's; a vault checked differently since is refused): its key and roster become what this
+     * phone trusts, its signer is pinned (written to the server first), and the vault syncs again.
+     */
+    suspend fun acceptConsent(shown: ConsentVault) {
+        mutex.withLock {
+            activeSharing().acceptConsent(shown)
+        }
+        syncAfterAnswer()
+    }
+
+    /**
+     * Decline a shared vault held for consent: a tombstone in the key pins (it never comes back unless
+     * shared again with a newer signed member list), and the account leaves it on the server.
+     */
+    suspend fun declineConsent(vaultId: String) {
+        val (id, me) = mutex.withLock {
+            val sh = activeSharing()
+            sh.declineConsent(vaultId)
+            sh.savePins()
+            activeId() to sh.me
+        }
+        try {
+            api.call(id, "/vaults/${java.net.URLEncoder.encode(vaultId, "UTF-8")}/members/${java.net.URLEncoder.encode(me, "UTF-8")}", method = "DELETE")
+        } catch (e: ApiException) {
+            // Already gone, or the server won't let this account leave (it stays refused here).
+            if (e.status !in setOf(400, 403, 404, 409)) throw e
+        }
+        syncAfterAnswer()
+    }
+
+    /** This phone can replace the keys of vaults shared with others (signed sharing is on and the account can sign). */
+    fun canReplaceSharedKeys(): Boolean = sessions[state.value.activeId]?.sharing?.canSign == true && _sharing.value.enabled
 
     /** The vault name of an invitation, read with its sealed key (never kept); null when the account can't open it. */
     private fun invitationName(account: Account, inv: SyncInvitation): String? {
         val key = try {
-            account.openVaultKey(inv.vaultId, inv.wrappedKey, "sealed")
+            account.openVaultKey(inv.vaultId, inv.wrappedKey, "sealed", 0u, false)
         } catch (_: Exception) {
             return null
         }
@@ -1712,11 +2032,49 @@ class VaultRepository(
 
     // -------------------------------------------------------- invitations
 
-    /** Accept an invitation (the vault arrives with the sync that follows). */
-    suspend fun acceptInvitation(vaultId: String) = InvitationActions(securityTransport(activeId())) { syncAfterAnswer() }.accept(vaultId)
+    /**
+     * Accept an invitation (the vault arrives with the sync that follows). On a server that signs
+     * shares only a checked, signed invitation: its roster and key epoch become what this phone
+     * trusts for the vault and a new signer is pinned, before the server is told.
+     */
+    suspend fun acceptInvitation(shown: Invitation) {
+        val vaultId = shown.vaultId
+        // The account is captured inside the lock: the answer goes to the account whose invitation was checked.
+        val id = mutex.withLock {
+            val (id, session) = unlockedAccount()
+            val inv = _vault.value?.invitations?.firstOrNull { it.vaultId == vaultId } ?: throw UserException(InvitationText.NO_LONGER_OPEN)
+            // Bound to what the sheet showed: checked differently since (another signer, key or roster) → refused.
+            if (!Invitations.sameAsShown(inv, shown)) throw UserException(InvitationText.CHANGED)
+            when (val t = inv.trust) {
+                InvitationTrust.Unchecked -> {}
+                InvitationTrust.Unsigned -> throw UserException(SignedSharing.unsignedInvitation(InvitationText.sharerShort(inv)))
+                is InvitationTrust.Refused -> throw UserException(t.reason)
+                is InvitationTrust.Signed -> {
+                    val sh = session.sharing ?: throw UserException("Sync your vault first.")
+                    // Pins written to the server before it is told (a failure leaves them as before).
+                    sh.prepareAccept(vaultId, t)
+                }
+            }
+            id
+        }
+        if (activeId() != id) throw UserException("You switched to another account meanwhile. Switch back and try again.")
+        InvitationActions(securityTransport(id)) { if (activeId() == id) syncAfterAnswer() }.accept(vaultId)
+    }
 
-    /** Decline an invitation; its vault's managers are asked to replace the key. */
-    suspend fun declineInvitation(vaultId: String) = InvitationActions(securityTransport(activeId())) { syncAfterAnswer() }.decline(vaultId)
+    /** Decline an invitation (a tombstone in the key pins with signed sharing); its vault's managers are asked to replace the key. */
+    suspend fun declineInvitation(shown: Invitation) {
+        val vaultId = shown.vaultId
+        val id = mutex.withLock {
+            val (id, session) = unlockedAccount()
+            session.sharing?.let { sh ->
+                // The tombstone at the roster version the check verified (a later share needs a newer one).
+                sh.leave(vaultId, (shown.trust as? InvitationTrust.Signed)?.rosterVersion)
+                savePinsQuietly(sh)
+            }
+            id
+        }
+        InvitationActions(securityTransport(id)) { if (activeId() == id) syncAfterAnswer() }.decline(vaultId)
+    }
 
     private fun securityTransport(id: String) = SecurityTransport { path, body, method, auth, headers -> api.call(id, path, body, method, auth, headers) }
 
@@ -1830,8 +2188,10 @@ class VaultRepository(
             store.deleteCache(id)
             val email = a.email.lowercase()
             val sameEmailElsewhere = s.accounts.any { (k, v) -> k != id && v.email.equals(email, ignoreCase = true) }
+            val deletedUser = Stored.bundleUserId(a.bundle)
             store.update { st ->
-                st.copy(
+                // The account is gone from the server: its roster memory goes too.
+                (if (deletedUser != null) st.forgettingRoster(a.server, deletedUser) else st).copy(
                     secretKeys = if (sameEmailElsewhere) st.secretKeys else st.secretKeys - email,
                     rememberTokens = st.rememberTokens - "${a.server}|$email",
                 )
@@ -1870,7 +2230,406 @@ class VaultRepository(
     /** The unlocked vault's items as a JSON array in the item format (input of the core's export functions). */
     fun itemsJsonForExport(): String {
         val v = requireVault()
-        return v.entries.joinToString(",", "[", "]") { ItemCodec.encode(it.item) }
+        // Files aren't exported: no file key leaves in an export file.
+        return v.entries.joinToString(",", "[", "]") { ItemCodec.encode(Attachments.strip(it.item)) }
+    }
+
+    // ------------------------------------------- Send, attachments, emergency access
+
+    /** The active account's server's `/api/config` features (asked again when stale); null when unknown. */
+    suspend fun features(): List<String>? = featuresOf(activeId())
+
+    /** Account record [id]'s server's `/api/config` features (asked again when stale); null when unknown. */
+    private suspend fun featuresOf(id: String): List<String>? {
+        val a = store.get().accounts[id] ?: return null
+        val now = System.currentTimeMillis()
+        if (a.features != null && now >= a.featuresAt && now - a.featuresAt < FEATURES_MAX_AGE_MS) return a.features
+        return refreshConfig(id)?.features ?: a.features
+    }
+
+    /** The active account's server's `/api/config` `limits`, asked now; null when it couldn't be read. */
+    suspend fun serverLimits(): JsonObject? = publicConfig()?.limits
+
+    /** The unlocked account of the active record, or a [UserException]. */
+    private fun unlockedAccount(): Pair<String, Session> {
+        val id = state.value.activeId
+        val session = sessions[id] ?: throw UserException("Your vault is locked.")
+        return id to session
+    }
+
+    /** Send, the owner's side, on the active account (its keys looked up at each call: a lock frees them). */
+    fun sends(): SendActions {
+        val id = state.value.activeId
+        return SendActions(securityTransport(id)) { CoreSendCrypto(sessions[id]?.account ?: throw UserException("Your vault is locked.")) }
+    }
+
+    /** The link of a Send (made on this account's server). */
+    fun sendLink(id: String, key: String): String = Sends.link(state.value.server, id, key)
+
+    /** The unlocked account's key fingerprint (what an emergency contact or a sharer checks with this person). */
+    fun ownFingerprint(): String? = sessions[state.value.activeId]?.account?.let { runCatching { it.fingerprint() }.getOrNull() }
+
+    /** The account's own user id (as the server names it), while unlocked. */
+    fun userId(): String? = sessions[state.value.activeId]?.accountId
+
+    /** An item's attachment flows (`files`) need these: the account and its session's requests. */
+    fun uploadSteps(): UploadSteps {
+        val (id, _) = unlockedAccount()
+        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        return object : UploadSteps {
+            override fun newId(): String = io.passauth.core.newId()
+            override fun newKey(): String = io.passauth.core.fileNewKey()
+            override fun encryptedSize(plain: Long): Long = io.passauth.core.fileEncryptedSize(plain.toULong()).toLong()
+            override fun encryptor(key: String, itemId: String, attachmentId: String): FileCipher = EncryptingCipher(key, itemId, attachmentId)
+            override suspend fun register(itemId: String, id2: String, size: Long) {
+                api.call(id, "/items/${enc(itemId)}/attachments", buildJsonObject { put("id", id2); put("size", size) })
+            }
+            override suspend fun put(id2: String, size: Long, write: (java.io.OutputStream) -> Unit) {
+                api.upload(id, "/attachments/${enc(id2)}", size, write)
+            }
+            override suspend fun discard(id2: String) {
+                api.call(id, "/attachments/${enc(id2)}", method = "DELETE")
+            }
+        }
+    }
+
+    /** `GET` an attachment's encrypted file ([path]: the item's own, or an emergency access's) on the active account's session. */
+    suspend fun openDownload(path: String): okhttp3.Response = api.download(state.value.activeId, path)
+
+    /** Throws the server's error for a failed download answer. */
+    suspend fun downloadFailed(res: okhttp3.Response): Nothing = api.fail(res)
+
+    /** The files the server keeps for an item (`GET /items/{id}/attachments`). */
+    suspend fun storedAttachments(itemId: String): List<StoredAttachment> =
+        Attachments.readStored(api.call(activeId(), "/items/${java.net.URLEncoder.encode(itemId, "UTF-8")}/attachments"))
+
+    /** Delete a file on the server; already gone counts as done. */
+    suspend fun deleteStoredAttachment(attachmentId: String) {
+        try {
+            api.call(activeId(), "/attachments/${java.net.URLEncoder.encode(attachmentId, "UTF-8")}", method = "DELETE")
+        } catch (e: ApiException) {
+            if (e.status != 404) throw e
+        }
+    }
+
+    // ---------------------------------------------------------- emergency
+
+    private val _emergencyNotice = MutableStateFlow<String?>(null)
+
+    /** The vault notice about the emergency roster ([EmergencyClient.ROSTER_ROLLED_BACK] / [EmergencyClient.ROSTER_UNREADABLE]). */
+    val emergencyNotice: StateFlow<String?> = _emergencyNotice.asStateFlow()
+
+    /** The vaults and key epochs the last fill saw (a change runs the fill again). */
+    private var keysSignature: String? = null
+
+    /** Emergency access of the active account (the web vault's `emergency-client.ts`); each operation pins the account it started on. */
+    val emergency: EmergencyClient = EmergencyClient(object : EmergencyEnv {
+        override suspend fun pin(): EmergencyAccount? {
+            val s = store.get()
+            val id = s.activeId
+            val a = s.accounts[id]?.takeIf { it.tokens != null && it.server.isNotEmpty() } ?: return null
+            val user = sessions[id]?.accountId ?: Stored.bundleUserId(a.bundle) ?: return null
+            return EmergencyAccount(id, a.server, user)
+        }
+
+        /** [a] is still the active account, unlocked as the same user (the vault, its keys and its notice are the active account's). */
+        private fun current(a: EmergencyAccount) = state.value.activeId == a.record && sessions[a.record]?.accountId == a.userId
+
+        override suspend fun call(a: EmergencyAccount, path: String, body: JsonElement?, method: String, headers: Map<String, String>): JsonElement =
+            api.call(a.record, path, body, method, headers = headers)
+        override suspend fun features(a: EmergencyAccount): List<String>? = featuresOf(a.record)
+        override fun crypto(a: EmergencyAccount): EmergencyCrypto? {
+            if (!current(a)) return null
+            val s = sessions[a.record] ?: return null
+            // Vault keys are looked up when used: none once the account is no longer the active one.
+            return CoreEmergencyCrypto(s.account) { vid -> if (current(a)) vaultKeys[vid] else null }
+        }
+        override fun unlocked(a: EmergencyAccount): Boolean = current(a) && _vault.value != null
+        override fun vaults(a: EmergencyAccount): List<VaultInfo> = if (current(a)) _vault.value?.vaults.orEmpty() else emptyList()
+        override suspend fun reauth(a: EmergencyAccount, password: String): String = reauthToken(a.record, password, null)
+        override suspend fun rotateVaultKeys(a: EmergencyAccount, ids: List<String>): RotationReport =
+            this@VaultRepository.rotateVaultKeys(ids, a.record to a.userId, personalOnly = true)
+        override suspend fun sharedBefore(a: EmergencyAccount, vaultId: String): Boolean {
+            if (!current(a)) return true
+            val sh = sessions[a.record]?.sharing ?: return false
+            return sh.sharedBefore(vaultId)
+        }
+        override suspend fun sync(a: EmergencyAccount) {
+            if (current(a)) this@VaultRepository.sync()
+        }
+        override fun setNotice(a: EmergencyAccount, text: String?) {
+            if (current(a)) _emergencyNotice.value = text
+        }
+        override suspend fun seenVersion(a: EmergencyAccount): Long = store.get().roster(a.server, a.userId).seen
+        override suspend fun trustedSealed(a: EmergencyAccount): String? = store.get().roster(a.server, a.userId).trusted
+        override suspend fun remember(a: EmergencyAccount, version: Long, sealed: String?) {
+            store.update { it.rememberingRoster(a.server, a.userId, version, sealed) }
+        }
+    })
+
+    /**
+     * After a sync: when the vault list or a key epoch changed (a new vault, one no longer shared,
+     * a replaced key), the emergency fill adds the wraps the server asks for (servers with emergency
+     * keys only; in the background, never holding the lock).
+     */
+    private fun vaultKeysMaybeChanged(id: String, vaults: List<VaultInfo>) {
+        val sig = id + "|" + vaults.sortedBy { it.id }.joinToString(";") { "${it.id},${it.role},${it.keyKind},${it.keyEpoch}" }
+        if (sig == keysSignature) return
+        keysSignature = sig
+        scope.launch {
+            try {
+                emergency.fillEmergencyKeys()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Tried again after the next change; the server keeps asking for the wraps.
+            }
+        }
+    }
+
+    /**
+     * Of [vaultIds], the vaults whose only member is this account ([own]: their keys can be replaced
+     * here) and the ones shared with others ([shared]: replaced in the web vault or the desktop app).
+     * A vault whose members can't be read now counts as own: replacing its key checks again.
+     */
+    suspend fun splitShared(vaultIds: List<String>): Pair<List<String>, List<String>> {
+        val (id, session) = unlockedAccount()
+        val own = mutableListOf<String>()
+        val shared = mutableListOf<String>()
+        for (vid in vaultIds) {
+            val alone = try {
+                onlyMember(id, vid, session.accountId)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                true
+            }
+            if (alone) own += vid else shared += vid
+        }
+        return own to shared
+    }
+
+    /** Whether account [userId] is the only member of vault [vaultId] (`GET /vaults/{id}/members`); throws when that can't be read. */
+    private suspend fun onlyMember(id: String, vaultId: String, userId: String): Boolean {
+        val enc = java.net.URLEncoder.encode(vaultId, "UTF-8")
+        val members = (api.call(id, "/vaults/$enc/members") as? JsonObject)?.get("members") as? kotlinx.serialization.json.JsonArray
+            ?: throw UserException(EmergencyClient.UNEXPECTED)
+        val ids = members.map { ((it as? JsonObject)?.get("user_id") as? JsonPrimitive)?.contentOrNull ?: throw UserException(EmergencyClient.UNEXPECTED) }
+        return ids == listOf(userId)
+    }
+
+    /** What one vault's key replacement did. */
+    private sealed interface Rotation {
+        data object Done : Rotation
+        data object Skipped : Rotation
+        data class Shared(val name: String) : Rotation
+        data class Unreadable(val name: String) : Rotation
+        data class Review(val review: MemberReview) : Rotation
+    }
+
+    /**
+     * Replace the keys of these vaults, one after the other (after an emergency contact who may have
+     * kept their keys was removed, or when the server asks for it). A vault shared with other people
+     * gets its new key sealed and signed for every member with a signed member list (servers with
+     * signed sharing, on an account that can sign; [Rotation.Shared] and the report's text otherwise).
+     * A vault that needs the user to check its members first (its first signed member list, or people
+     * the list names but the server no longer does) is replaced only with the user's confirmation of
+     * exactly that review ([approvals], by vault id); else the report lists the review
+     * ([RotationReport.reviews]). A vault whose name doesn't open is left as it is (its new key would
+     * lose the name) and listed too. Any other failure stops it and is thrown; the server keeps asking
+     * for the rest (`rotation_pending`). [pinned]: the record and user id the caller started on
+     * (emergency access, [personalOnly]: only vaults whose members are this account alone); null for
+     * the active account.
+     */
+    suspend fun rotateVaultKeys(
+        vaultIds: List<String>,
+        pinned: Pair<String, String>? = null,
+        approvals: Map<String, ReviewApproval> = emptyMap(),
+        personalOnly: Boolean = false,
+    ): RotationReport {
+        var rotated = 0
+        val shared = mutableListOf<String>()
+        val unreadable = mutableListOf<String>()
+        val reviews = mutableListOf<MemberReview>()
+        try {
+            for (vid in vaultIds) {
+                when (val r = mutex.withLock { rotateLocked(vid, pinned, approvals[vid], personalOnly) }) {
+                    Rotation.Done -> rotated++
+                    Rotation.Skipped -> {}
+                    is Rotation.Shared -> shared += r.name
+                    is Rotation.Unreadable -> unreadable += r.name
+                    is Rotation.Review -> reviews += r.review
+                }
+            }
+        } finally {
+            try {
+                sync()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+        return RotationReport(rotated, shared, unreadable, reviews)
+    }
+
+    /**
+     * A new key for vault [vaultId]: every item (trash included, each with its revision when signed)
+     * and the vault's name re-encrypted with it, in one request. Everything is re-encrypted only from
+     * the state verified by a sync in this same call, under the lock (the vault's key, name and epoch;
+     * items are read from a fresh `/sync` but must open with that key, under the same key header).
+     * With other members (or a signed member list, here or remembered) the key is sealed and signed
+     * for each and the next roster signed after the user's review ([SharingSession.planRotation]). An
+     * item changed meanwhile (409 `revision_conflict`) starts it again, a few times at most.
+     */
+    private suspend fun rotateLocked(vaultId: String, pinned: Pair<String, String>?, approval: ReviewApproval?, personalOnly: Boolean): Rotation {
+        val id = activeId()
+        val session = sessions[id] ?: throw UserException("Your vault is locked.")
+        if (pinned != null && (pinned.first != id || pinned.second != session.accountId)) {
+            throw UserException("You switched to another account meanwhile. Switch back and try again.")
+        }
+        val enc = java.net.URLEncoder.encode(vaultId, "UTF-8")
+        repeat(ROTATE_ATTEMPTS) { attempt ->
+            // The state this rotation re-encrypts: verified by this sync, under this lock.
+            syncLocked()
+            if (sessions[id] !== session || activeId() != id) throw UserException("Your vault is locked.")
+            val own = _vault.value?.vaults?.firstOrNull { it.id == vaultId } ?: return Rotation.Skipped
+            if (own.role != Role.Owner && own.role != Role.Admin) return Rotation.Skipped
+            val header = vaultHeaders[vaultId] ?: return Rotation.Skipped
+            val oldKey = vaultKeys[vaultId] ?: return Rotation.Skipped
+            val oldEpoch = header.keyEpoch
+            val sh = session.sharing?.takeIf { signedSharingOn(id, session, online = true) }
+            val me = sh?.me ?: session.accountId
+            val members = api.call(id, "/vaults/$enc/members") as? JsonObject ?: throw UserException(EmergencyClient.UNEXPECTED)
+            val rows = (members["members"] as? kotlinx.serialization.json.JsonArray)?.map { it as? JsonObject ?: throw UserException(EmergencyClient.UNEXPECTED) }
+                ?: throw UserException(EmergencyClient.UNEXPECTED)
+            val ids = rows.map { SignedSharing.text(it, "user_id") ?: throw UserException(EmergencyClient.UNEXPECTED) }
+            val alone = ids == listOf(me)
+            // The member set that decides (emergency access: personal) is the one the new key goes to.
+            if (personalOnly && !alone) return Rotation.Shared(own.name)
+            val rosterSeq = SignedSharing.number(members, "member_roster_seq") ?: 0
+            val latestRoster = SignedSharing.text(members, "member_roster")
+            val trusted = sh?.rememberedRoster(vaultId)
+            // A vault with a signed member list (listed or remembered) or other members is replaced
+            // only signed; without signing, only a vault this account alone holds.
+            val signed = RotationRules.mustSign(trusted, rosterSeq, latestRoster, alone)
+            if (signed && (sh == null || !sh.canSign)) return Rotation.Shared(own.name)
+            // Every item, trash included, as the server has it now (a trash summary has no data to
+            // re-encrypt): only under the key header this sync verified, and each must open with its key.
+            val text = api.callText(id, "/sync")
+            val full = core { AppJson.decodeFromString(SyncResponse.serializer(), text) }
+            val fresh = full.vaults?.firstOrNull { it.id == vaultId }
+            // The members answer, the roster and the items must all belong to the state this sync verified.
+            val membersEpoch = if (sh != null) SignedSharing.number(members, "key_epoch") else oldEpoch
+            if (RotationRules.checkBase(header, membersEpoch, fresh, signed, trusted, rosterSeq, latestRoster) == RotationRules.Base.Retry) {
+                if (attempt < ROTATE_ATTEMPTS - 1) return@repeat
+                throw UserException(SignedSharing.CHANGED_JUST_NOW)
+            }
+            var plan: RotationPlan.Ready? = null
+            if (signed) {
+                sh!!
+                if (trusted != null && !core { oldKey.matchesRoster(vaultId, trusted) }) throw UserException(SignedSharing.REFUSED)
+                when (val p = core { sh.planRotation(vaultId, own.name, trusted, rows, approval) }) {
+                    is RotationPlan.NeedsReview -> return Rotation.Review(p.review)
+                    is RotationPlan.Ready -> plan = p
+                }
+            }
+            val newEpoch = (oldEpoch ?: 0) + 1
+            val items = full.items.orEmpty().filter { it.vaultId == vaultId }
+            if (signed && items.any { it.revision == null }) throw UserException(SignedSharing.NEEDS_REVISIONS)
+            var roster: String? = null
+            var epochPin: String? = null
+            val body = core {
+                // The vault's name must survive the new key: one that doesn't open now stops this vault.
+                val metaPlain = if (header.meta.isEmpty()) null else runCatching { oldKey.decryptMeta(vaultId, header.meta) }.getOrNull() ?: return@core null
+                val made = session.account.newVaultKey(vaultId)
+                try {
+                    val reencrypted = kotlinx.serialization.json.buildJsonArray {
+                        for (r in items) {
+                            val json = try {
+                                oldKey.decryptItem(EncryptedItem(r.id, vaultId, r.itemKey ?: throw UserException(CANT_REKEY), r.data ?: throw UserException(CANT_REKEY)))
+                            } catch (_: CoreException) {
+                                throw UserException(CANT_REKEY)
+                            }
+                            val e = made.key.encryptItem(json, r.id, vaultId)
+                            add(buildJsonObject {
+                                put("id", e.id)
+                                put("vault_id", e.vaultId)
+                                put("key", e.key)
+                                put("data", e.data)
+                                r.revision?.let { put("revision", it) }
+                            })
+                        }
+                    }
+                    val meta = metaPlain?.let { made.key.encryptMeta(vaultId, it) }
+                    val keys = kotlinx.serialization.json.buildJsonArray {
+                        add(buildJsonObject { put("user_id", me); put("wrapped_key", made.key.wrapFor(session.account, vaultId)); put("key_kind", VaultInfo.KEY_KIND_ACCOUNT) })
+                        if (plan != null) {
+                            for ((n, row) in rows.withIndex()) {
+                                if (ids[n] == me) continue
+                                val share = sh!!.sealAndSign(made.key, vaultId, row, newEpoch)
+                                add(buildJsonObject {
+                                    put("user_id", ids[n])
+                                    put("wrapped_key", share.sealedKey)
+                                    put("key_kind", "sealed")
+                                    put("signature", share.signature)
+                                })
+                            }
+                        }
+                    }
+                    if (plan != null) roster = sh!!.signRoster(made.key, vaultId, plan!!, newEpoch, rows)
+                    epochPin = made.key.epochPinJson(vaultId, newEpoch.toULong())
+                    buildJsonObject {
+                        put("keys", keys)
+                        put("items", reencrypted)
+                        meta?.let { put("meta", it) }
+                        oldEpoch?.let { put("key_epoch", it) }
+                        roster?.let { put("roster", it) }
+                    }
+                } finally {
+                    made.destroy()
+                }
+            } ?: return Rotation.Unreadable(own.name)
+            try {
+                api.call(id, "/vaults/$enc/rotate", body)
+            } catch (e: ApiException) {
+                when {
+                    ItemWrites.vaultKeyChanged(e) -> {
+                        syncAfterWrite()
+                        throw UserException("Someone else replaced this vault's key just now. If the vault still asks for a new key, replace it again.")
+                    }
+                    e.status == 409 && e.hasCode("members_changed") -> {
+                        syncAfterWrite()
+                        throw UserException(membersChangedText(e, rows))
+                    }
+                    // An item edited, or the member list signed, meanwhile: start again with what the server has now.
+                    e.status == 409 && (e.hasCode("revision_conflict") || e.hasCode("member_roster_changed")) && attempt < ROTATE_ATTEMPTS - 1 -> return@repeat
+                    e.status == 409 && (e.hasCode("revision_conflict") || e.hasCode("member_roster_changed")) -> {
+                        syncAfterWrite()
+                        throw UserException(SignedSharing.CHANGED_JUST_NOW)
+                    }
+                    else -> throw e
+                }
+            }
+            val pin = epochPin
+            if (sh != null && pin != null) {
+                sh.rememberRotation(vaultId, roster, pin, plan?.newPins.orEmpty())
+                savePinsQuietly(sh)
+            }
+            syncAfterWrite()
+            return Rotation.Done
+        }
+        throw UserException(SignedSharing.CHANGED_JUST_NOW)
+    }
+
+    /** Who differs, from a 409 `members_changed` answer ([rows]: the member rows sent), named by (cleaned) email where known. */
+    private fun membersChangedText(e: ApiException, rows: List<JsonObject>): String {
+        val known = SignedSharing.people(sessions[state.value.activeId]?.sharing?.pins).associate { it.userId to it.email }
+        val emails = rows.associate { SignedSharing.text(it, "user_id").orEmpty() to SignedSharing.clean(SignedSharing.text(it, "email")) }
+        val ids = listOf("unknown", "identity_changed", "role_changed", "missing")
+            .flatMap { k -> (e.body?.get(k) as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull } }
+            .distinct()
+        if (ids.isEmpty()) return SignedSharing.CHANGED_JUST_NOW
+        return SignedSharing.membersDiffer(ids.map { known[it]?.ifEmpty { null } ?: emails[it]?.ifEmpty { null } ?: SignedSharing.someone(it) })
     }
 
     // ---------------------------------------------- queries (autofill, phase 2)
@@ -1899,6 +2658,11 @@ class VaultRepository(
 
         /** How long the server's `/api/config` features are trusted before asking again. */
         private const val FEATURES_MAX_AGE_MS = 6 * 60 * 60 * 1000L
+
+        private const val CANT_REKEY = "Some items in this vault can't be decrypted, so its key can't be replaced yet."
+
+        /** A key replacement starts again this often when an item or the member list changed meanwhile. */
+        private const val ROTATE_ATTEMPTS = 3
 
         /** The server address as an origin (plus path), https only except local development hosts. */
         fun normalizeServer(url: String): String {

@@ -1,7 +1,11 @@
 package io.passauth.app.data
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 const val MAX_ACCOUNTS = 5
 
@@ -82,6 +86,7 @@ data class Tokens(val access: String, val refresh: String)
 @Serializable
 data class Sealed(val iv: String, val data: String)
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class AccountData(
     val server: String = "",
@@ -103,7 +108,21 @@ data class AccountData(
     val api: Int? = null,
     /** The server's account policies when last asked (with [features]); null until then or from servers without them. */
     val policies: Policies? = null,
+    /**
+     * Before [Stored.rosters]: the roster memory kept in the record (so a log out or another account
+     * on the record lost or inherited it). Only read to move it there once ([Stored.migrated]).
+     */
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val rosterSeen: Long = 0,
+    @EncodeDefault(EncodeDefault.Mode.NEVER) val rosterTrusted: String? = null,
 )
+
+/**
+ * Emergency access: this device's memory of one account's contact roster. [seen] is the highest
+ * version it has opened (0: none; never goes down), [trusted] the last roster it trusted, sealed as
+ * the server keeps it (null: none).
+ */
+@Serializable
+data class RosterMemory(val seen: Long = 0, val trusted: String? = null)
 
 /**
  * First-launch "Set up PassAuth" (permissions) screen, shared by all accounts.
@@ -130,8 +149,69 @@ data class Stored(
     val secretKeys: Map<String, String> = emptyMap(),
     val settings: Settings = Settings(),
     val onboarding: Onboarding = Onboarding(),
+    /**
+     * Emergency access roster memory by account, keyed [rosterKey] (server and the account's user
+     * id): outside the account records, so a log out, signing in again or another account on the
+     * same record neither loses nor inherits it (the web vault's `pa.roster.<userId>`).
+     */
+    val rosters: Map<String, RosterMemory> = emptyMap(),
+    /**
+     * Signed sharing memory by account, keyed [rosterKey] like [rosters] (untouched by log out; gone
+     * with the account): the highest key-pins version opened here and the rosters trusted per vault.
+     */
+    val signing: Map<String, SigningMemory> = emptyMap(),
 ) {
     val active: AccountData? get() = accounts[activeId]
+
+    /** The roster memory of user [userId] on [server] (none yet: version 0). */
+    fun roster(server: String, userId: String): RosterMemory = rosters[rosterKey(server, userId)] ?: rosters[rawKey(server, userId)] ?: RosterMemory()
+
+    /** Remember a roster this device trusts for user [userId] on [server]: never below the version it already opened. */
+    fun rememberingRoster(server: String, userId: String, version: Long, sealed: String?): Stored {
+        if (server.isEmpty() || userId.isEmpty() || version < roster(server, userId).seen) return this
+        return copy(rosters = rosters - rawKey(server, userId) + (rosterKey(server, userId) to RosterMemory(version, sealed)))
+    }
+
+    /** Without the roster and signed-sharing memory of user [userId] on [server] (the account was deleted). */
+    fun forgettingRoster(server: String, userId: String): Stored =
+        copy(rosters = rosters - rosterKey(server, userId) - rawKey(server, userId), signing = signing - rosterKey(server, userId) - rawKey(server, userId))
+
+    /** The signed-sharing memory of user [userId] on [server] (none yet: empty). */
+    fun signingMemory(server: String, userId: String): SigningMemory {
+        val canonical = signing[rosterKey(server, userId)]
+        val raw = rawKey(server, userId).takeIf { it != rosterKey(server, userId) }?.let { signing[it] }
+        // Memory kept under the address as it was typed before (Info): merged in, never lost.
+        return when {
+            canonical == null -> raw ?: SigningMemory()
+            raw == null -> canonical
+            else -> canonical.merge(raw)
+        }
+    }
+
+    /** [transform] applied to the signed-sharing memory of user [userId] on [server]. */
+    fun updatingSigning(server: String, userId: String, transform: (SigningMemory) -> SigningMemory): Stored {
+        if (server.isEmpty() || userId.isEmpty()) return this
+        return copy(signing = signing - rawKey(server, userId) + (rosterKey(server, userId) to transform(signingMemory(server, userId))))
+    }
+
+    /**
+     * Roster memory still kept in account records (before [rosters]) moved out once: to the user id
+     * of the record's current account (its bundle's `account_id`), or dropped when that's unknown.
+     */
+    fun migrated(): Stored {
+        if (accounts.values.none { it.rosterSeen != 0L || it.rosterTrusted != null }) return this
+        var out = rosters
+        val records = accounts.mapValues { (_, a) ->
+            if (a.rosterSeen == 0L && a.rosterTrusted == null) return@mapValues a
+            val uid = bundleUserId(a.bundle)
+            if (uid != null && a.server.isNotEmpty()) {
+                val key = rosterKey(a.server, uid)
+                if (a.rosterSeen >= (out[key]?.seen ?: 0)) out = out + (key to RosterMemory(a.rosterSeen, a.rosterTrusted))
+            }
+            a.copy(rosterSeen = 0, rosterTrusted = null)
+        }
+        return copy(accounts = records, rosters = out)
+    }
 
     /**
      * Show the permissions screen: only on a first launch (never shown, and no server
@@ -151,5 +231,43 @@ data class Stored(
     fun withoutRememberToken(id: String): Stored {
         val a = accounts[id] ?: return this
         return copy(rememberTokens = rememberTokens - "${a.server}|${a.email.lowercase()}")
+    }
+
+    /**
+     * A sign-in on record [id]: its account's email, tokens and bundle, the other records of the same
+     * account ([dupes]) dropped. Roster memory ([rosters]) is the account's, not the record's: untouched.
+     */
+    fun signedIn(id: String, email: String, tokens: Tokens, bundle: String, dupes: Set<String>): Stored {
+        val a = (accounts[id] ?: AccountData()).copy(email = email, tokens = tokens, bundle = bundle, biometric = null, persistedKeys = null)
+        return copy(activeId = id, accounts = accounts - dupes + (id to a))
+    }
+
+    /** Record [id] removed (log out with other accounts listed); the next signed-in one becomes active. [rosters] stay. */
+    fun withoutRecord(id: String): Stored {
+        val rest = accounts - id
+        val next = if (activeId == id) rest.entries.firstOrNull { it.value.tokens != null }?.key ?: rest.keys.firstOrNull() ?: "" else activeId
+        return copy(accounts = rest, activeId = next)
+    }
+
+    /** Record [id] signed out but kept (the last account: the sign-in screen remembers server and email). [rosters] stay. */
+    fun signedOutRecord(id: String): Stored {
+        val a = accounts[id] ?: return this
+        return copy(accounts = accounts + (id to a.copy(tokens = null, biometric = null, bundle = null, lastSync = 0)))
+    }
+
+    companion object {
+        /** Memory keys use the server address normalized (scheme and host in lower case, no default port or trailing slash), so another spelling of it keeps its memory. */
+        fun rosterKey(server: String, userId: String) = "${serverKey(server)}|$userId"
+
+        /** The key as earlier versions wrote it (the address as stored), read and replaced on write. */
+        internal fun rawKey(server: String, userId: String) = "$server|$userId"
+
+        internal fun serverKey(server: String): String =
+            runCatching { VaultRepository.normalizeServer(server) }.getOrNull() ?: server.trim().trimEnd('/')
+
+        /** The user id (`account_id`) of an account bundle; null when there's none or it can't be read. */
+        fun bundleUserId(bundle: String?): String? = bundle?.let {
+            runCatching { ((AppJson.parseToJsonElement(it) as? JsonObject)?.get("account_id") as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.getOrNull()
+        }?.takeIf { it.isNotEmpty() }
     }
 }

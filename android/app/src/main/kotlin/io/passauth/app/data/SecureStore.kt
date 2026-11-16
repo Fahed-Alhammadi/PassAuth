@@ -25,7 +25,7 @@ private object StoredSerializer : Serializer<Stored> {
         if (blob.isEmpty()) return defaultValue
         return try {
             val plain = Keystore.decrypt(Keystore.storeKey(), blob)
-            AppJson.decodeFromString(Stored.serializer(), plain.decodeToString())
+            AppJson.decodeFromString(Stored.serializer(), plain.decodeToString()).migrated()
         } catch (e: SerializationException) {
             throw CorruptionException("stored state unreadable", e)
         } catch (e: java.security.GeneralSecurityException) {

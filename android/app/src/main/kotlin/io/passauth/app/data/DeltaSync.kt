@@ -37,6 +37,11 @@ data class SyncVault(
     @SerialName("key_epoch") val keyEpoch: Long? = null,
     /** Goes up with every write into the vault (delta sync); null from older servers. */
     val seq: Long? = null,
+    /** Signed sharing: `{signature, signer, signer_deleted}` of a sealed key, or null (not signed; older servers). */
+    val share: JsonElement? = null,
+    /** Signed sharing: the vault's latest signed member roster (JSON text as signed) and its version (0: none). */
+    @SerialName("member_roster") val memberRoster: String? = null,
+    @SerialName("member_roster_seq") val memberRosterSeq: Long? = null,
 ) {
     /** The same vault key as [other] describes (wrapping, kind and epoch): an opened key can be kept. */
     fun sameKey(other: SyncVault): Boolean = wrappedKey == other.wrappedKey && keyKind == other.keyKind && keyEpoch == other.keyEpoch

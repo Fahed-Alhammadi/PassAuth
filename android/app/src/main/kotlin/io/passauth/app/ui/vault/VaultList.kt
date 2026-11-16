@@ -120,8 +120,10 @@ fun currentTotp(secret: String) = totpCode(secret, (System.currentTimeMillis() /
 @Composable
 fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> Unit) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
+    val emergencyNotice by ctx.repo.emergencyNotice.collectAsStateWithLifecycle()
     val dismissed by ctx.repo.dismissed.collectAsStateWithLifecycle()
     val violationsByAccount by ctx.repo.violations.collectAsStateWithLifecycle()
+    val sharing by ctx.repo.sharing.collectAsStateWithLifecycle()
     var showFilter by rememberSaveable { mutableStateOf(filter.kind != null || filter.folder != null || filter.favorites) }
     var refreshing by remember { mutableStateOf(false) }
     var newMenu by remember { mutableStateOf(false) }
@@ -220,6 +222,42 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                             listOf(NoticeLine(inviteText, InvitationText.noticeAction(invitations)) { ctx.go(Route.Invitations(fromVault = true)) }),
                             onDismiss = { ctx.repo.dismissNotice(inviteKey) },
                         )
+                    }
+                }
+                // Signed sharing: a shared vault PassAuth refused, someone's keys changed, sharing paused, or the known keys rolled back.
+                val sharingLines = buildList {
+                    if (sharing.paused) add(io.passauth.app.data.SignedSharing.PAUSED)
+                    sharing.pinsProblem?.let { add(it) }
+                    if (sharing.memoryMissing) add(io.passauth.app.data.SignedSharing.MEMORY_MISSING)
+                    sharing.changed.forEach { add(it.text) }
+                    if (sharing.consent.isNotEmpty()) {
+                        add(
+                            if (sharing.consent.size == 1) io.passauth.app.data.SignedSharing.consentTitle(sharing.consent[0].name) + ". Accept it only if you expected it."
+                            else "Your server added ${sharing.consent.size} vaults to your account. Accept them only if you expected them.",
+                        )
+                    }
+                    if (sharing.refused.isNotEmpty()) add(io.passauth.app.data.SignedSharing.REFUSED)
+                }
+                if (sharingLines.isNotEmpty() && sharing.noticeKey !in dismissed) {
+                    item(key = "notice:sharing") {
+                        NoticeCard(
+                            Icons.Outlined.Policy,
+                            sharingLines.mapIndexed { n, text -> NoticeLine(text, if (n == sharingLines.lastIndex) "Review" else null) { ctx.go(Route.Settings("sharing")) } },
+                            onDismiss = { ctx.repo.dismissNotice(sharing.noticeKey) },
+                        )
+                    }
+                }
+                // The emergency contact list from the server can't be trusted (older than one seen here, or unreadable).
+                emergencyNotice?.let { text ->
+                    val key = "emg:$text"
+                    if (key !in dismissed) {
+                        item(key = "notice:emergency") {
+                            NoticeCard(
+                                Icons.Outlined.Policy,
+                                listOf(NoticeLine(text, "Review the list") { ctx.go(Route.Settings("emergency")) }),
+                                onDismiss = { ctx.repo.dismissNotice(key) },
+                            )
+                        }
                     }
                 }
                 // What the account still has to change for the server's policies.

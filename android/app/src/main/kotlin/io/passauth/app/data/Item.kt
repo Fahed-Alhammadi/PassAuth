@@ -2,9 +2,18 @@ package io.passauth.app.data
 
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.KeepGeneratedSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonObject
 
 /**
  * The decrypted item, in exactly the JSON shape of `passauth_core::item` and the
@@ -29,6 +38,11 @@ data class Item(
     @SerialName("password_history") val passwordHistory: List<PasswordChange> = emptyList(),
     @SerialName("created_at") val createdAt: Long = 0,
     @SerialName("updated_at") val updatedAt: Long = 0,
+    /**
+     * Top-level fields this app doesn't model (`attachments`, fields of newer apps), as the item
+     * had them: [ItemCodec] keeps them through an edit, so saving here never erases them.
+     */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 ) {
     val kind: ItemKind
         get() = when {
@@ -74,13 +88,19 @@ enum class UrlMatch(val wire: String) {
     @SerialName("never") Never("never"),
 }
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = LoginUrlSerializer::class)
 data class LoginUrl(
     val url: String = "",
     val match: UrlMatch = UrlMatch.Default,
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = PasskeySerializer::class)
 data class Passkey(
     @SerialName("credential_id") val credentialId: String = "",
     @SerialName("rp_id") val rpId: String = "",
@@ -93,18 +113,26 @@ data class Passkey(
     val counter: Long = 0,
     val discoverable: Boolean = true,
     @SerialName("created_at") val createdAt: Long = 0,
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = LoginSerializer::class)
 data class Login(
     val username: String = "",
     val password: String = "",
     val urls: List<LoginUrl> = emptyList(),
     val totp: String? = null,
     val passkeys: List<Passkey> = emptyList(),
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = CardSerializer::class)
 data class Card(
     @SerialName("cardholder_name") val cardholderName: String = "",
     val brand: String = "",
@@ -112,9 +140,13 @@ data class Card(
     @SerialName("exp_month") val expMonth: String = "",
     @SerialName("exp_year") val expYear: String = "",
     val code: String = "",
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = IdentitySerializer::class)
 data class Identity(
     val title: String = "",
     @SerialName("first_name") val firstName: String = "",
@@ -133,13 +165,19 @@ data class Identity(
     val ssn: String = "",
     @SerialName("passport_number") val passportNumber: String = "",
     @SerialName("license_number") val licenseNumber: String = "",
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = SshKeySerializer::class)
 data class SshKey(
     @SerialName("private_key") val privateKey: String = "",
     @SerialName("public_key") val publicKey: String = "",
     val fingerprint: String = "",
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
 @Serializable
@@ -149,17 +187,25 @@ enum class FieldType {
     @SerialName("boolean") Boolean,
 }
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = FieldSerializer::class)
 data class Field(
     val name: String = "",
     val value: String = "",
     val type: FieldType = FieldType.Text,
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
-@Serializable
+@OptIn(ExperimentalSerializationApi::class)
+@KeepGeneratedSerializer
+@Serializable(with = PasswordChangeSerializer::class)
 data class PasswordChange(
     val password: String = "",
     @SerialName("changed_at") val changedAt: Long = 0,
+    /** Fields this app doesn't model (from newer apps), kept through an edit. */
+    @Transient val extra: JsonObject = EMPTY_EXTRA,
 )
 
 enum class ItemKind(val label: String) {
@@ -178,9 +224,77 @@ val AppJson = Json {
     coerceInputValues = true
 }
 
-object ItemCodec {
-    fun decode(json: String): Item = AppJson.decodeFromString(Item.serializer(), json)
+val EMPTY_EXTRA = JsonObject(emptyMap())
 
-    /** `format` is left to the core (it stamps the current format on encrypt). */
-    fun encode(item: Item): String = AppJson.encodeToString(Item.serializer(), item)
+/**
+ * The plugin's serializer of [T] plus the object's fields it doesn't model, kept in the value's
+ * `extra` (like [Item.extra]): an item from a newer app keeps every nested field through an edit
+ * here (a login's, a website's, a passkey's, a card's…). Only for JSON; other formats get the plain one.
+ */
+abstract class KeepUnknownSerializer<T : Any>(
+    private val base: KSerializer<T>,
+    private val extraOf: (T) -> JsonObject,
+    private val withExtra: (T, JsonObject) -> T,
+) : KSerializer<T> {
+    override val descriptor: SerialDescriptor get() = base.descriptor
+    private val known: Set<String> by lazy { (0 until base.descriptor.elementsCount).map(base.descriptor::getElementName).toSet() }
+
+    override fun deserialize(decoder: Decoder): T {
+        val d = decoder as? JsonDecoder ?: return base.deserialize(decoder)
+        val element = d.decodeJsonElement()
+        val value = d.json.decodeFromJsonElement(base, element)
+        val extra = (element as? JsonObject)?.filterKeys { it !in known }.orEmpty()
+        return if (extra.isEmpty()) value else withExtra(value, JsonObject(extra))
+    }
+
+    override fun serialize(encoder: Encoder, value: T) {
+        val extra = extraOf(value)
+        val e = encoder as? JsonEncoder
+        if (e == null || extra.isEmpty()) return base.serialize(encoder, value)
+        val o = e.json.encodeToJsonElement(base, value) as JsonObject
+        e.encodeJsonElement(JsonObject(o + extra.filterKeys { it !in o }))
+    }
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+object LoginUrlSerializer : KeepUnknownSerializer<LoginUrl>(LoginUrl.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object PasskeySerializer : KeepUnknownSerializer<Passkey>(Passkey.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object LoginSerializer : KeepUnknownSerializer<Login>(Login.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object CardSerializer : KeepUnknownSerializer<Card>(Card.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object IdentitySerializer : KeepUnknownSerializer<Identity>(Identity.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object SshKeySerializer : KeepUnknownSerializer<SshKey>(SshKey.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object FieldSerializer : KeepUnknownSerializer<Field>(Field.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+@OptIn(ExperimentalSerializationApi::class)
+object PasswordChangeSerializer : KeepUnknownSerializer<PasswordChange>(PasswordChange.generatedSerializer(), { it.extra }, { v, x -> v.copy(extra = x) })
+
+object ItemCodec {
+    /** The JSON names of the fields [Item] models. */
+    private val KNOWN: Set<String> = Item.serializer().descriptor.let { d -> (0 until d.elementsCount).map(d::getElementName).toSet() }
+
+    fun decode(json: String): Item {
+        val o = AppJson.parseToJsonElement(json) as? JsonObject ?: return AppJson.decodeFromString(Item.serializer(), json)
+        val item = AppJson.decodeFromJsonElement(Item.serializer(), o)
+        val extra = o.filterKeys { it !in KNOWN }
+        return if (extra.isEmpty()) item else item.copy(extra = JsonObject(extra))
+    }
+
+    /** `format` is left to the core (it stamps the current format on encrypt). Fields in [Item.extra] are kept. */
+    fun encode(item: Item): String {
+        if (item.extra.isEmpty()) return AppJson.encodeToString(Item.serializer(), item)
+        val o = AppJson.encodeToJsonElement(Item.serializer(), item) as JsonObject
+        return JsonObject(o + item.extra.filterKeys { it !in o }).toString()
+    }
 }

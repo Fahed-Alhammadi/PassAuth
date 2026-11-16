@@ -157,6 +157,8 @@ fun ExportScreen(ctx: UiCtx) {
                     if (format == ExportFormat.Csv) {
                         Alert("CSV holds logins and secure notes only. Cards, identities and SSH keys are left out; choose JSON for a full export.")
                     }
+                    val withFiles = remember(vault) { io.passauth.app.data.Attachments.any(vault?.entries.orEmpty().map { it.item }) }
+                    if (withFiles) Muted("Attached files aren't included. Download the ones you need from their items.")
                     PasswordField(master, { master = it }, "Master password", onImeAction = ::export)
                     Muted("Confirm it's you before your vault leaves PassAuth.")
                     ErrorText(error)
