@@ -7,8 +7,8 @@
 use std::net::IpAddr;
 
 use axum::extract::{FromRequestParts, State};
-use axum::http::{HeaderMap, request::Parts};
-use axum::routing::post;
+use axum::http::{HeaderMap, StatusCode, request::Parts};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use passauth_core::item::{b64, unb64};
 use passauth_core::kdf::KdfParams;
@@ -25,18 +25,42 @@ use sha2::{Digest, Sha256};
 
 use crate::config::canonical;
 use crate::db::{now, now_ms};
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, code};
+use crate::events::Event;
 use crate::mail::Email;
 use crate::passkeys;
+use crate::policies;
+use crate::settings::Num;
 use crate::state::{
-    AppState, DeviceInfo, PendingLogin, PendingRegistration, PendingTwoFactor, ct_eq, hash_token,
-    normalize_email, random_token,
+    AppState, Class, DeviceInfo, DeviceLogin, PendingLogin, PendingRegistration, PendingTwoFactor,
+    Sessions, SyncNotice, ct_eq, hash_token, normalize_email, random_token,
 };
 use crate::twofactor;
 
 pub const ACCESS_TTL: i64 = 15 * 60;
-pub const REFRESH_TTL: i64 = 30 * 24 * 3600;
-const REMEMBER_TTL: i64 = 30 * 24 * 3600;
+
+/// An admin setting in days, as seconds. Read at each use: `session_days` (a
+/// session ends this long after sign-in however often it is refreshed),
+/// `refresh_days` (a device may stay away this long), `remember_device_days`.
+fn days(state: &AppState, n: Num) -> i64 {
+    state.num(n) * 86_400
+}
+
+/// `X-PassAuth-Client: <name>/<version>`, sent by every client app.
+pub const CLIENT_HEADER: &str = "x-passauth-client";
+
+/// The client app from [`CLIENT_HEADER`] (e.g. `ios/0.6.0`), if well-formed.
+pub fn client_app(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(CLIENT_HEADER)?.to_str().ok()?.trim();
+    let (name, version) = value.split_once('/')?;
+    let part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 32
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
+    };
+    (part(name) && part(version)).then(|| value.to_owned())
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -54,15 +78,22 @@ pub fn routes() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/verify-email", post(verify_email))
         .route("/verify-email/resend", post(resend_verification))
+        .route("/requests", post(crate::auth_requests::create))
+        .route("/requests/{id}", get(crate::auth_requests::poll))
 }
 
 // ---------------------------------------------------------------- extractor
 
 /// An authenticated request (valid, unexpired access token).
+#[derive(Clone)]
 pub struct AuthUser {
     pub user_id: String,
     pub session_id: String,
     pub email: String,
+    /// The app that sent the request ([`CLIENT_HEADER`]), for the activity log.
+    pub client: Option<String>,
+    /// The visitor's address ([`visitor_ip`]), for the activity log.
+    pub ip: Option<String>,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -71,7 +102,17 @@ impl FromRequestParts<AppState> for AuthUser {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
         // Header only: `?access_token=` is accepted on the WebSocket route alone (`ws::WsUser`).
         let token = bearer(&parts.headers).ok_or(ApiError::Unauthorized)?;
-        authenticate(state, &token).await
+        let mut user = authenticate(state, &token).await?;
+        policies::two_step_gate(
+            state,
+            &user.user_id,
+            &parts.method,
+            policies::request_path(parts),
+        )
+        .await?;
+        user.client = client_app(&parts.headers);
+        user.ip = visitor_ip(state, &parts.headers);
+        Ok(user)
     }
 }
 
@@ -89,6 +130,8 @@ pub async fn authenticate(state: &AppState, token: &str) -> ApiResult<AuthUser> 
         user_id,
         session_id,
         email,
+        client: None,
+        ip: None,
     })
 }
 
@@ -113,6 +156,11 @@ pub const PEER_IP_HEADER: &str = "x-passauth-peer-ip";
 /// are bucketed by /64, since one host usually controls a whole /64.
 pub fn client_ip(state: &AppState, headers: &HeaderMap) -> String {
     client_addr(state, headers).map_or_else(|| "direct".into(), rate_key)
+}
+
+/// The visitor's address as text (IPv4-mapped IPv6 as IPv4), for the activity log.
+pub fn visitor_ip(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    client_addr(state, headers).map(|ip| canonical(ip).to_string())
 }
 
 /// The visitor's address: `IP_HEADER` when the peer is a trusted proxy, else the TCP peer.
@@ -173,13 +221,21 @@ fn rate_key(ip: IpAddr) -> String {
     }
 }
 
+/// A per-address limit ([`Class::Address`]).
 fn limit(state: &AppState, key: String, n: u32, window: i64) -> ApiResult<()> {
-    if state.limiter.check(&key, n, window) {
-        Ok(())
-    } else {
-        Err(ApiError::TooManyRequests)
-    }
+    state.limiter.limit(Class::Address, &key, n, window)
 }
+
+/// A limit of an account a sign-in in progress has proven exists ([`Class::Target`]).
+fn limit_account(state: &AppState, key: String, n: u32, window: i64) -> ApiResult<()> {
+    state.limiter.limit(Class::Target, &key, n, window)
+}
+
+/// Sign-in attempts per email within [`LOGIN_PER_EMAIL_WINDOW`] from every address
+/// together. Counted in a [`crate::state::SlotCounter`]: every email, with an account
+/// or not, the same way, and no flood of other emails resets it.
+pub const LOGIN_PER_EMAIL: u32 = 100;
+pub const LOGIN_PER_EMAIL_WINDOW: i64 = 300;
 
 // ---------------------------------------------------------------- prelogin
 
@@ -200,10 +256,12 @@ async fn prelogin(
     headers: HeaderMap,
     Json(b): Json<EmailBody>,
 ) -> ApiResult<Json<Prelogin>> {
+    // Every sign-in starts here, so twice the sign-in attempts (60 by default).
+    let attempts = state.num(Num::SigninAttemptsPerMinute) as u32;
     limit(
         &state,
         format!("prelogin:{}", client_ip(&state, &headers)),
-        60,
+        attempts * 2,
         60,
     )?;
     let email = normalize_email(&b.email);
@@ -224,7 +282,7 @@ async fn prelogin(
     }))
 }
 
-fn keyed(state: &AppState, label: &str, email: &str) -> [u8; 32] {
+pub(crate) fn keyed(state: &AppState, label: &str, email: &str) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(state.prelogin_secret);
     h.update(label.as_bytes());
@@ -232,20 +290,24 @@ fn keyed(state: &AppState, label: &str, email: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// The answer for an email without an account: stable, and shaped like a new
+/// account's under the server's policies (key derivation, Secret Key), so it
+/// doesn't stand out from real ones.
 fn fake_prelogin(state: &AppState, email: &str) -> Prelogin {
     let id: [u8; 16] = keyed(state, "id", email)[..16]
         .try_into()
         .expect("16 bytes");
     let salt = &keyed(state, "salt", email)[..16];
+    let (memory_kib, iterations) = policies::new_account_kdf(state);
     Prelogin {
         account_id: uuid::Builder::from_random_bytes(id).into_uuid().to_string(),
         kdf: KdfParams {
-            memory_kib: 128 * 1024,
-            iterations: 3,
+            memory_kib,
+            iterations,
             parallelism: 1,
             salt: b64(salt),
         },
-        secret_key_required: false,
+        secret_key_required: state.flag(crate::settings::Flag::RequireSecretKey),
     }
 }
 
@@ -280,8 +342,10 @@ async fn register_init(
         .expect("signup policy lock")
         .permits(&email);
     if !invited && !permitted {
-        return Err(ApiError::Forbidden(
-            "registration is closed on this server".into(),
+        return Err(ApiError::coded(
+            StatusCode::FORBIDDEN,
+            code::SIGNUPS_CLOSED,
+            "registration is closed on this server",
         ));
     }
     let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
@@ -289,8 +353,10 @@ async fn register_init(
         .fetch_one(&state.db)
         .await?;
     if exists > 0 {
-        return Err(ApiError::Conflict(
-            "an account with this email already exists".into(),
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            code::ACCOUNT_EXISTS,
+            "an account with this email already exists",
         ));
     }
     let account_id = uuid::Uuid::new_v4().to_string();
@@ -319,7 +385,7 @@ async fn register_start(
     let (exp, pending) = state
         .registrations
         .take(&b.registration_id)
-        .ok_or(ApiError::bad("registration expired"))?;
+        .ok_or(ApiError::expired("registration expired"))?;
     let req = RegistrationRequest::<Suite>::deserialize(&unb64(&b.message)?)
         .map_err(|_| ApiError::bad("bad message"))?;
     let resp =
@@ -350,16 +416,18 @@ struct RegisterFinish {
 
 async fn register_finish(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(b): Json<RegisterFinish>,
 ) -> ApiResult<Json<Value>> {
     let (_, pending) = state
         .registrations
         .take(&b.registration_id)
-        .ok_or(ApiError::bad("registration expired"))?;
+        .ok_or(ApiError::expired("registration expired"))?;
     if b.bundle.account_id != pending.account_id {
         return Err(ApiError::bad("bundle does not match registration"));
     }
     b.bundle.kdf.validate()?;
+    policies::check_new_keys(&state, &b.bundle)?;
     let name = b.name.trim();
     if name.chars().count() > 100 {
         return Err(ApiError::bad("name too long"));
@@ -385,12 +453,29 @@ async fn register_finish(
     .bind(t)
     .execute(&mut *tx)
     .await
-    .map_err(|e| ApiError::conflict_on_unique(e, "an account with this email already exists"))?;
+    .map_err(|e| {
+        ApiError::conflict_on_unique(
+            e,
+            code::ACCOUNT_EXISTS,
+            "an account with this email already exists",
+        )
+    })?;
     crate::vault::insert_vault(&mut tx, &pending.account_id, &b.vault, "owner", "account").await?;
     sqlx::query("DELETE FROM invites WHERE email = $1")
         .bind(&pending.email)
         .execute(&mut *tx)
         .await?;
+    let (client, ip) = (client_app(&headers), visitor_ip(&state, &headers));
+    for event in [
+        Event::new("account.created"),
+        Event::new("vault.created").vault(&b.vault.id),
+    ] {
+        event
+            .actor(&pending.account_id)
+            .from(client.clone(), ip.clone())
+            .record(&mut tx, &state)
+            .await?;
+    }
     tx.commit().await?;
 
     if !verified {
@@ -444,16 +529,23 @@ async fn verify_email(
     .bind(now())
     .fetch_optional(&state.db)
     .await?;
-    let user_id = user_id.ok_or(ApiError::bad("invalid or expired link"))?;
+    let user_id = user_id.ok_or(ApiError::expired("invalid or expired link"))?;
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE users SET email_verified = 1, updated_at = $1 WHERE id = $2")
         .bind(now())
         .bind(&user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM email_tokens WHERE user_id = $1 AND purpose = 'verify'")
         .bind(&user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    // `/sync` reports `email_verified`: signed-in devices pick the change up.
+    let revision = crate::vault::bump_user(&mut tx, &user_id).await?;
+    tx.commit().await?;
+    if let Some(revision) = revision {
+        state.notify_sync(vec![(user_id, SyncNotice::new(revision, None))]);
+    }
     Ok(Json(json!({ "verified": true })))
 }
 
@@ -497,14 +589,14 @@ async fn login_start(
     limit(
         &state,
         format!("login-ip:{}", client_ip(&state, &headers)),
-        30,
+        state.num(Num::SigninAttemptsPerMinute) as u32,
         60,
     )?;
     // Per (email, address), so nobody can lock an account out from elsewhere;
     // the higher per-email ceiling still slows a distributed guesser.
     let ip = client_ip(&state, &headers);
     limit(&state, format!("login-email:{email}:{ip}"), 10, 300)?;
-    limit(&state, format!("login-email:{email}"), 100, 300)?;
+    state.limiter.login_email.limit(&email)?;
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT id, opaque_record FROM users WHERE email = $1")
             .bind(&email)
@@ -553,17 +645,51 @@ fn default_kind() -> String {
     "web".into()
 }
 
+/// Unicode format characters (general category Cf: bidi embeddings, overrides and
+/// isolates, zero-width characters, the byte order mark, tags…) and the line and
+/// paragraph separators: invisible, or able to make a text read differently from
+/// what it is (`evil\u{202E}moc.elgoog`).
+fn is_format(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// Text someone else's screen or email shows as it was sent (a device name):
+/// without control and format characters, at most `max` characters, trimmed.
+pub(crate) fn display_text(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() && !is_format(*c))
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 impl DeviceBody {
     /// Bounded, printable device details (they appear in emails and the session list).
-    fn validated(self) -> ApiResult<DeviceInfo> {
-        let clean = |s: &str, max: usize| -> String {
-            s.chars()
-                .filter(|c| !c.is_control())
-                .take(max)
-                .collect::<String>()
-                .trim()
-                .to_owned()
-        };
+    pub(crate) fn validated(self) -> ApiResult<DeviceInfo> {
         let id = self.id.trim();
         if id.is_empty()
             || id.len() > 128
@@ -584,7 +710,7 @@ impl DeviceBody {
         }
         Ok(DeviceInfo {
             id: id.to_owned(),
-            name: clean(&self.name, 100),
+            name: display_text(&self.name, 100),
             kind,
         })
     }
@@ -609,20 +735,29 @@ async fn login_finish(
     let (_, pending) = state
         .logins
         .take(&b.login_id)
-        .ok_or(ApiError::bad("login expired, try again"))?;
+        .ok_or(ApiError::expired("login expired, try again"))?;
     let server_login = ServerLogin::<Suite>::deserialize(&pending.state)
         .map_err(|_| anyhow::anyhow!("corrupt login state"))?;
-    let fin = CredentialFinalization::<Suite>::deserialize(&unb64(&b.message)?)
-        .map_err(|_| ApiError::InvalidCredentials)?;
-    let ok = server_login
-        .finish(fin, ServerLoginParameters::default())
-        .is_ok();
+    // A finalization that doesn't even parse is a wrong password too (and counted).
+    let fin = CredentialFinalization::<Suite>::deserialize(&unb64(&b.message)?).ok();
+    let ok = fin.is_some_and(|fin| {
+        server_login
+            .finish(fin, ServerLoginParameters::default())
+            .is_ok()
+    });
+    let reauth = b.purpose.as_deref() == Some("reauth");
     let user_id = match (ok, pending.user_id) {
         (true, Some(id)) => id,
-        _ => return Err(ApiError::InvalidCredentials),
+        (_, known) => {
+            if let Some(id) = known {
+                let reason = if reauth { "reauth" } else { "password" };
+                failed(&state, &headers, &id, reason);
+            }
+            return Err(ApiError::InvalidCredentials);
+        }
     };
 
-    if b.purpose.as_deref() == Some("reauth") {
+    if reauth {
         let current = match bearer(&headers) {
             Some(t) => authenticate(&state, &t).await?,
             None => return Err(ApiError::Unauthorized),
@@ -642,42 +777,95 @@ async fn login_finish(
             .fetch_one(&state.db)
             .await?;
     if disabled != 0 {
-        return Err(ApiError::Forbidden("this account is disabled".into()));
+        failed(&state, &headers, &user_id, "account_disabled");
+        return Err(ApiError::coded(
+            StatusCode::FORBIDDEN,
+            code::ACCOUNT_DISABLED,
+            "this account is disabled",
+        ));
     }
     if verified == 0 && state.signups_verify() {
-        return Err(ApiError::Forbidden("email_not_verified".into()));
+        failed(&state, &headers, &user_id, "email_not_verified");
+        return Err(ApiError::coded(
+            StatusCode::FORBIDDEN,
+            code::EMAIL_NOT_VERIFIED,
+            "email_not_verified",
+        ));
     }
 
     let device = b.device.validated()?;
     let providers = twofactor::enabled_providers(&state.db, &user_id).await?;
     let remembered = match &b.remember_token {
-        Some(t) => device_remembered(&state, &user_id, &device.id, t).await?,
+        Some(t) => remembered_device(&state, &user_id, &device.id, &hash_token(t)).await?,
         None => false,
     };
     if !providers.is_empty() && !remembered {
-        let token = state.two_factor.insert(
-            PendingTwoFactor {
-                user_id,
-                device,
-                attempts: 0,
-                passkey: None,
-            },
-            5 * 60,
-        );
-        let mut all = providers;
-        all.push(twofactor::RECOVERY.into());
-        return Ok(Json(
-            json!({ "two_factor_required": true, "two_factor_token": token, "providers": all }),
-        ));
+        return Ok(Json(two_factor_challenge(
+            &state, user_id, device, providers, None,
+        )));
     }
-    Ok(Json(issue_session(&state, &user_id, &device, None).await?))
+    let two_step = remembered.then_some("remembered_device");
+    Ok(Json(
+        issue_session(
+            &state,
+            &headers,
+            &user_id,
+            &device,
+            None,
+            two_step,
+            SignIn::Password,
+        )
+        .await?,
+    ))
 }
 
-async fn device_remembered(
+/// The answer that asks for two-step login (`two_factor_required`, a five-minute
+/// `two_factor_token`, the account's `providers` plus `recovery`), for a password
+/// sign-in or an approved sign-in request (`device_login`, whose sealed key then
+/// waits with the token for the session).
+pub(crate) fn two_factor_challenge(
+    state: &AppState,
+    user_id: String,
+    device: DeviceInfo,
+    providers: Vec<String>,
+    device_login: Option<DeviceLogin>,
+) -> Value {
+    let token = state.two_factor.insert(
+        PendingTwoFactor {
+            user_id,
+            device,
+            attempts: 0,
+            passkey: None,
+            device_login,
+        },
+        5 * 60,
+    );
+    let mut all = providers;
+    all.push(twofactor::RECOVERY.into());
+    json!({ "two_factor_required": true, "two_factor_token": token, "providers": all })
+}
+
+/// Count a failed sign-in to an existing account in the activity log, after the
+/// answer has gone out (`events::FailureLog`): the answer takes as long as one
+/// for an email without an account, which writes nothing. Best effort: the
+/// sign-in already failed, and the answer stays the same.
+pub(crate) fn failed(state: &AppState, headers: &HeaderMap, user_id: &str, reason: &'static str) {
+    state.failures.record(
+        user_id,
+        reason,
+        client_app(headers),
+        visitor_ip(state, headers),
+        state.numbers.event_ip(),
+    );
+}
+
+/// Whether `device_id` holds an unexpired "remember this device" token for the
+/// account whose SHA-256 is `token_hash` (it then skips two-step login).
+pub(crate) async fn remembered_device(
     state: &AppState,
     user_id: &str,
     device_id: &str,
-    token: &str,
+    token_hash: &str,
 ) -> ApiResult<bool> {
     let hash: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT remember_hash, remember_expires FROM devices WHERE user_id = $1 AND id = $2",
@@ -686,7 +874,7 @@ async fn device_remembered(
     .bind(device_id)
     .fetch_optional(&state.db)
     .await?;
-    Ok(matches!(hash, Some((Some(h), Some(exp))) if exp > now() && ct_eq(&h, &hash_token(token))))
+    Ok(matches!(hash, Some((Some(h), Some(exp))) if exp > now() && ct_eq(&h, token_hash)))
 }
 
 #[derive(Deserialize)]
@@ -700,22 +888,41 @@ struct TwoFactorVerify {
 
 async fn two_factor_verify(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(b): Json<TwoFactorVerify>,
 ) -> ApiResult<Json<Value>> {
     let (exp, pending) = state
         .two_factor
         .take(&b.two_factor_token)
-        .ok_or(ApiError::bad("sign-in expired, start again"))?;
-    if twofactor::locked_out(&state.db, &pending.user_id).await? {
-        return Err(ApiError::TooManyRequests);
+        .ok_or(ApiError::expired("sign-in expired, start again"))?;
+    if pending.device_login.is_some() {
+        // Turned off on the admin page since: don't use up a code for nothing.
+        crate::auth_requests::enabled(&state)?;
+    }
+    if let Some(left) = twofactor::lockout_left(&state.db, &pending.user_id).await? {
+        return Err(ApiError::TooManyRequests(left));
     }
     if !twofactor::verify(&state.db, &pending.user_id, &b.provider, &b.code).await? {
-        return Err(two_factor_failed(&state, b.two_factor_token, pending, exp).await?);
+        return Err(two_factor_failed(&state, &headers, b.two_factor_token, pending, exp).await?);
     }
     twofactor::clear_failures(&state.db, &pending.user_id).await?;
     let remember = b.remember.then(random_token);
+    let method = match b.provider.as_str() {
+        twofactor::TOTP => twofactor::TOTP,
+        twofactor::EMAIL => twofactor::EMAIL,
+        _ => twofactor::RECOVERY,
+    };
     Ok(Json(
-        issue_session(&state, &pending.user_id, &pending.device, remember).await?,
+        issue_session(
+            &state,
+            &headers,
+            &pending.user_id,
+            &pending.device,
+            remember,
+            Some(method),
+            SignIn::after_two_step(&pending),
+        )
+        .await?,
     ))
 }
 
@@ -724,20 +931,34 @@ async fn two_factor_verify(
 /// give the error to answer with.
 async fn two_factor_failed(
     state: &AppState,
+    headers: &HeaderMap,
     token: String,
     mut pending: PendingTwoFactor,
     exp: i64,
 ) -> ApiResult<ApiError> {
-    if twofactor::record_failure(&state.db, &pending.user_id).await? {
+    let max = state.num(Num::TwoStepAttemptsPerHour);
+    failed(state, headers, &pending.user_id, "two_step");
+    let mut tx = state.db.begin().await?;
+    let locked = twofactor::record_failure(&mut tx, &pending.user_id, max).await?;
+    if locked {
+        Event::new("auth.two_step_locked")
+            .target(&pending.user_id)
+            .from(client_app(headers), visitor_ip(state, headers))
+            .data(json!({ "seconds": twofactor::LOCKOUT }))
+            .record(&mut tx, state)
+            .await?;
+    }
+    tx.commit().await?;
+    if locked {
         alert_two_factor_lockout(state, &pending.user_id).await?;
-        return Ok(ApiError::TooManyRequests);
+        return Ok(ApiError::TooManyRequests(twofactor::LOCKOUT as u64));
     }
     pending.attempts += 1;
     pending.passkey = None;
     if pending.attempts < 5 {
         state.two_factor.put_back(token, pending, exp);
     }
-    Ok(ApiError::bad("invalid two-factor code"))
+    Ok(ApiError::invalid_code("invalid two-factor code"))
 }
 
 // ------------------------------------------------- security keys / passkeys
@@ -750,10 +971,13 @@ async fn two_factor_passkey_start(
     let (exp, mut pending) = state
         .two_factor
         .take(&b.two_factor_token)
-        .ok_or(ApiError::bad("sign-in expired, start again"))?;
-    if twofactor::locked_out(&state.db, &pending.user_id).await? {
+        .ok_or(ApiError::expired("sign-in expired, start again"))?;
+    if pending.device_login.is_some() {
+        crate::auth_requests::enabled(&state)?;
+    }
+    if let Some(left) = twofactor::lockout_left(&state.db, &pending.user_id).await? {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
-        return Err(ApiError::TooManyRequests);
+        return Err(ApiError::TooManyRequests(left));
     }
     let webauthn = match passkeys::relying_party(&state) {
         Ok(w) => w,
@@ -762,7 +986,7 @@ async fn two_factor_passkey_start(
             return Err(e);
         }
     };
-    if let Err(e) = limit(&state, format!("2fa-passkey:{}", pending.user_id), 20, 300) {
+    if let Err(e) = limit_account(&state, format!("2fa-passkey:{}", pending.user_id), 20, 300) {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
         return Err(e);
     }
@@ -790,15 +1014,19 @@ struct TwoFactorPasskeyFinish {
 
 async fn two_factor_passkey_finish(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(b): Json<TwoFactorPasskeyFinish>,
 ) -> ApiResult<Json<Value>> {
     let (exp, mut pending) = state
         .two_factor
         .take(&b.two_factor_token)
-        .ok_or(ApiError::bad("sign-in expired, start again"))?;
-    if twofactor::locked_out(&state.db, &pending.user_id).await? {
+        .ok_or(ApiError::expired("sign-in expired, start again"))?;
+    if let Some(left) = twofactor::lockout_left(&state.db, &pending.user_id).await? {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
-        return Err(ApiError::TooManyRequests);
+        return Err(ApiError::TooManyRequests(left));
+    }
+    if pending.device_login.is_some() {
+        crate::auth_requests::enabled(&state)?;
     }
     let Some(auth_state) = pending.passkey.take() else {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
@@ -820,7 +1048,9 @@ async fn two_factor_passkey_finish(
                 }
                 _ => tracing::debug!(error = ?e, "security key assertion rejected"),
             }
-            return Err(two_factor_failed(&state, b.two_factor_token, pending, exp).await?);
+            return Err(
+                two_factor_failed(&state, &headers, b.two_factor_token, pending, exp).await?,
+            );
         }
     };
     let mut keys = passkeys::list(&state.db, &pending.user_id).await?;
@@ -828,7 +1058,16 @@ async fn two_factor_passkey_finish(
     twofactor::clear_failures(&state.db, &pending.user_id).await?;
     let remember = b.remember.then(random_token);
     Ok(Json(
-        issue_session(&state, &pending.user_id, &pending.device, remember).await?,
+        issue_session(
+            &state,
+            &headers,
+            &pending.user_id,
+            &pending.device,
+            remember,
+            Some(twofactor::PASSKEY),
+            SignIn::after_two_step(&pending),
+        )
+        .await?,
     ))
 }
 
@@ -859,17 +1098,25 @@ async fn alert_two_factor_lockout(state: &AppState, user_id: &str) -> ApiResult<
         .fetch_one(&state.db)
         .await?;
     tracing::warn!(user = %user_id, "two-factor sign-in locked after repeated wrong codes");
-    state.mailer.send_later(
-        email,
-        Email {
-            subject: "PassAuth sign-in paused after wrong codes".into(),
-            heading: "Too many wrong two-step codes".into(),
-            body: "Someone entered your master password correctly but then the wrong two-step login code many times. Two-step sign-in is paused for an hour. If this wasn't you, change your master password now.".into(),
-            action: Some(("Review sessions".into(), format!("{}/settings/security", state.config.domain))),
-            code: None,
-        },
-    );
+    state
+        .mailer
+        .send_later(email, two_factor_lockout_alert(&state.config.domain));
     Ok(())
+}
+
+/// The email sent when wrong two-step codes paused sign-in; like the new-device
+/// alert, its button opens the web vault's session list.
+pub(crate) fn two_factor_lockout_alert(domain: &str) -> Email {
+    Email {
+        subject: "PassAuth sign-in paused after wrong codes".into(),
+        heading: "Too many wrong two-step codes".into(),
+        body: "Someone entered your master password correctly but then the wrong two-step login code many times. Two-step sign-in is paused for an hour. If this wasn't you, change your master password now.".into(),
+        action: Some((
+            "Review sessions".into(),
+            format!("{domain}/settings/sessions"),
+        )),
+        code: None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -884,8 +1131,11 @@ async fn two_factor_send_email(
     let (exp, pending) = state
         .two_factor
         .take(&b.two_factor_token)
-        .ok_or(ApiError::bad("sign-in expired, start again"))?;
-    limit(&state, format!("2fa-email:{}", pending.user_id), 5, 600)?;
+        .ok_or(ApiError::expired("sign-in expired, start again"))?;
+    if pending.device_login.is_some() {
+        crate::auth_requests::enabled(&state)?;
+    }
+    limit_account(&state, format!("2fa-email:{}", pending.user_id), 5, 600)?;
     let providers = twofactor::enabled_providers(&state.db, &pending.user_id).await?;
     if providers.iter().any(|p| p == twofactor::EMAIL) {
         let code = twofactor::issue_email_code(&state.db, &pending.user_id, "2fa").await?;
@@ -908,13 +1158,45 @@ async fn two_factor_send_email(
     Ok(Json(json!({ "sent": true })))
 }
 
+/// How an account proved who it is when a session starts.
+pub(crate) enum SignIn<'a> {
+    /// The master password (OPAQUE).
+    Password,
+    /// A sign-in request another device approved (`auth_requests.rs`). The account
+    /// key sealed to the new device goes out with the session, never before it.
+    Device(&'a DeviceLogin),
+}
+
+impl<'a> SignIn<'a> {
+    /// How the sign-in that is finishing its two-step login began.
+    fn after_two_step(pending: &'a PendingTwoFactor) -> Self {
+        match &pending.device_login {
+            Some(login) => Self::Device(login),
+            None => Self::Password,
+        }
+    }
+}
+
 /// Create a session for `device`, alerting the user by email on new devices.
-async fn issue_session(
+/// The app that signed in ([`CLIENT_HEADER`]) is kept with the session; the
+/// sign-in goes into the activity log with the two-step method used, if any
+/// (`remembered_device` when this device may skip it), and for an approved
+/// sign-in request `method: "device"` with the request's id. That sign-in's answer
+/// also carries the sealed account key (`sealed_key`).
+pub(crate) async fn issue_session(
     state: &AppState,
+    headers: &HeaderMap,
     user_id: &str,
     device: &DeviceInfo,
     remember: Option<String>,
+    two_step: Option<&str>,
+    via: SignIn<'_>,
 ) -> ApiResult<Value> {
+    if let SignIn::Device(_) = via {
+        // Turned off while this sign-in was at its two-step login.
+        crate::auth_requests::enabled(state)?;
+    }
+    let client = client_app(headers);
     let t = now();
     let known: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE user_id = $1 AND id = $2")
@@ -926,6 +1208,26 @@ async fn issue_session(
         .bind(user_id)
         .fetch_one(&state.db)
         .await?;
+    // The device, the session and the sign-in event: all or nothing. A write
+    // first (SQLite then never has to upgrade a read transaction), on the account's
+    // row: it waits for an admin disabling the account at the same moment and then
+    // sees it, so an account disabled since this sign-in began gets no session (nor,
+    // for an approved device, the sealed key).
+    let mut tx = state.db.begin().await?;
+    let open =
+        sqlx::query("UPDATE users SET updated_at = updated_at WHERE id = $1 AND disabled = 0")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    if open.rows_affected() == 0 {
+        drop(tx);
+        failed(state, headers, user_id, "account_disabled");
+        return Err(ApiError::coded(
+            StatusCode::FORBIDDEN,
+            code::ACCOUNT_DISABLED,
+            "this account is disabled",
+        ));
+    }
     // Upsert: two sign-ins from one device at once must not hit the primary key.
     sqlx::query(
         "INSERT INTO devices (user_id, id, name, kind, created_at, last_seen) VALUES ($1, $2, $3, $4, $5, $5)
@@ -936,33 +1238,53 @@ async fn issue_session(
     .bind(&device.name)
     .bind(&device.kind)
     .bind(t)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
     if let Some(r) = &remember {
         sqlx::query("UPDATE devices SET remember_hash = $1, remember_expires = $2 WHERE user_id = $3 AND id = $4")
             .bind(hash_token(r))
-            .bind(t + REMEMBER_TTL)
+            .bind(t + days(state, Num::RememberDeviceDays))
             .bind(user_id)
             .bind(&device.id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
     }
 
     let (access, refresh) = (random_token(), random_token());
+    let session_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO sessions (id, user_id, device_id, access_hash, access_expires, refresh_hash, refresh_expires, created_at, last_used)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
+        "INSERT INTO sessions (id, user_id, device_id, access_hash, access_expires, refresh_hash, refresh_expires, created_at, last_used, client)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9)",
     )
-    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(&session_id)
     .bind(user_id)
     .bind(&device.id)
     .bind(hash_token(&access))
     .bind(t + ACCESS_TTL)
     .bind(hash_token(&refresh))
-    .bind(t + REFRESH_TTL)
+    .bind(t + days(state, Num::RefreshDays).min(days(state, Num::SessionDays)))
     .bind(t)
-    .execute(&state.db)
+    .bind(&client)
+    .execute(&mut *tx)
     .await?;
+    let mut data = json!({
+        "two_step": two_step,
+        "device_kind": device.kind,
+        "new_device": known == 0,
+    });
+    if let SignIn::Device(login) = &via {
+        data["method"] = "device".into();
+        data["request"] = login.request_id.clone().into();
+    }
+    Event::new("auth.signed_in")
+        .actor(user_id)
+        .session(&session_id)
+        .from(client.clone(), visitor_ip(state, headers))
+        .data(data)
+        .record(&mut tx, state)
+        .await?;
+    tx.commit().await?;
+    tracing::debug!(user = %user_id, session = %session_id, client = client.as_deref().unwrap_or("-"), "session started");
 
     let (email, bundle): (String, String) =
         sqlx::query_as("SELECT email, bundle FROM users WHERE id = $1")
@@ -972,19 +1294,10 @@ async fn issue_session(
     if known == 0 && has_devices > 0 {
         state.mailer.send_later(
             email.clone(),
-            Email {
-                subject: "New sign-in to your PassAuth account".into(),
-                heading: "New device signed in".into(),
-                body: format!(
-                    "Your account was just accessed from a new device: {} ({}).\nIf this wasn't you, change your master password and review your sessions.",
-                    device.name, device.kind
-                ),
-                action: Some(("Review sessions".into(), format!("{}/settings/security", state.config.domain))),
-                code: None,
-            },
+            new_device_alert(&state.config.domain, device),
         );
     }
-    Ok(json!({
+    let mut out = json!({
         "access_token": access,
         "refresh_token": refresh,
         "expires_in": ACCESS_TTL,
@@ -992,7 +1305,29 @@ async fn issue_session(
         "user_id": user_id,
         "email": email,
         "bundle": serde_json::from_str::<Value>(&bundle).map_err(anyhow::Error::from)?,
-    }))
+    });
+    if let SignIn::Device(login) = via {
+        out["sealed_key"] = login.sealed_key.clone().into();
+    }
+    Ok(out)
+}
+
+/// The email sent when a device signs in for the first time; its button opens
+/// the web vault's session list.
+pub(crate) fn new_device_alert(domain: &str, device: &DeviceInfo) -> Email {
+    Email {
+        subject: "New sign-in to your PassAuth account".into(),
+        heading: "New device signed in".into(),
+        body: format!(
+            "Your account was just accessed from a new device: {} ({}).\nIf this wasn't you, change your master password and review your sessions.",
+            device.name, device.kind
+        ),
+        action: Some((
+            "Review sessions".into(),
+            format!("{domain}/settings/sessions"),
+        )),
+        code: None,
+    }
 }
 
 // ---------------------------------------------------------------- sessions
@@ -1003,9 +1338,11 @@ struct RefreshBody {
 }
 
 /// Rotate the refresh token. Presenting an already-rotated token means it
-/// leaked: the whole session is revoked.
+/// leaked: the whole session is revoked. A session can't be refreshed past
+/// `session_days` (admin page) after sign-in.
 async fn refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(b): Json<RefreshBody>,
 ) -> ApiResult<Json<Value>> {
     let h = hash_token(&b.refresh_token);
@@ -1016,35 +1353,56 @@ async fn refresh(
             .fetch_optional(&state.db)
             .await?;
     if let Some((id, user_id)) = reused {
-        sqlx::query("DELETE FROM sessions WHERE id = $1")
+        let mut tx = state.db.begin().await?;
+        let done = sqlx::query("DELETE FROM sessions WHERE id = $1")
             .bind(&id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
+        if done.rows_affected() > 0 {
+            Event::new("session.revoked")
+                .target(&user_id)
+                .from(client_app(&headers), visitor_ip(&state, &headers))
+                .data(json!({ "session": id, "reason": "refresh_token_reused" }))
+                .record(&mut tx, &state)
+                .await?;
+        }
+        tx.commit().await?;
         tracing::warn!(user = %user_id, "refresh token reuse detected; session revoked");
+        state.notify_logout(&user_id, Sessions::Only(id));
         return Err(ApiError::Unauthorized);
     }
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT s.id, s.user_id FROM sessions s JOIN users u ON u.id = s.user_id
+    let row: Option<(String, i64, String, String)> = sqlx::query_as(
+        "SELECT s.id, s.created_at, s.user_id, s.device_id FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.refresh_hash = $1 AND s.refresh_expires > $2 AND u.disabled = 0",
     )
     .bind(&h)
     .bind(t)
     .fetch_optional(&state.db)
     .await?;
-    let (id, _) = row.ok_or(ApiError::Unauthorized)?;
+    let (id, created, user_id, device_id) = row.ok_or(ApiError::Unauthorized)?;
+    let end = created + days(&state, Num::SessionDays);
+    if t >= end {
+        return Err(ApiError::coded(
+            StatusCode::UNAUTHORIZED,
+            code::SESSION_EXPIRED,
+            "authentication required",
+        ));
+    }
     let (access, refresh) = (random_token(), random_token());
     // Conditional on the token presented: of two concurrent refreshes with the
     // same token only one rotates; the other gets 401 instead of silently
     // replacing the first one's tokens.
     let done = sqlx::query(
         "UPDATE sessions SET access_hash = $1, access_expires = $2, prev_refresh_hash = refresh_hash,
-         refresh_hash = $3, refresh_expires = $4, last_used = $5 WHERE id = $6 AND refresh_hash = $7",
+         refresh_hash = $3, refresh_expires = $4, last_used = $5, client = COALESCE($6, client)
+         WHERE id = $7 AND refresh_hash = $8",
     )
     .bind(hash_token(&access))
-    .bind(t + ACCESS_TTL)
+    .bind((t + ACCESS_TTL).min(end))
     .bind(hash_token(&refresh))
-    .bind(t + REFRESH_TTL)
+    .bind((t + days(&state, Num::RefreshDays)).min(end))
     .bind(t)
+    .bind(client_app(&headers))
     .bind(&id)
     .bind(&h)
     .execute(&state.db)
@@ -1052,24 +1410,85 @@ async fn refresh(
     if done.rows_affected() != 1 {
         return Err(ApiError::Unauthorized);
     }
+    // The device was seen (at most one write an hour): the admin page's "last
+    // seen", and the sweeper forgets devices unseen for 90 days without a session.
+    sqlx::query(
+        "UPDATE devices SET last_seen = $1 WHERE user_id = $2 AND id = $3 AND last_seen < $4",
+    )
+    .bind(t)
+    .bind(&user_id)
+    .bind(&device_id)
+    .bind(t - 3600)
+    .execute(&state.db)
+    .await?;
     Ok(Json(
-        json!({ "access_token": access, "refresh_token": refresh, "expires_in": ACCESS_TTL }),
+        json!({ "access_token": access, "refresh_token": refresh, "expires_in": ACCESS_TTL.min(end - t) }),
     ))
 }
 
 async fn logout(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Value>> {
+    let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM sessions WHERE id = $1")
         .bind(&user.session_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    Event::new("session.signed_out")
+        .by(&user)
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    state.notify_logout(&user.user_id, Sessions::Only(user.session_id));
     Ok(Json(json!({ "ok": true })))
 }
 
 /// Consume a reauth token issued by `login/finish` with `purpose: "reauth"`.
 pub fn require_reauth(state: &AppState, user: &AuthUser, token: Option<&str>) -> ApiResult<()> {
-    let token = token.ok_or(ApiError::Forbidden("reauth_required".into()))?;
+    let token = token.ok_or_else(ApiError::reauth_required)?;
     match state.reauth.take(token) {
         Some((_, uid)) if uid == user.user_id => Ok(()),
-        _ => Err(ApiError::Forbidden("reauth_required".into())),
+        _ => Err(ApiError::reauth_required()),
+    }
+}
+
+/// The message of 403 `reauth_required` on steps older apps took without
+/// confirming the master password (turning on an authenticator app or email
+/// codes), for those apps to show as it is.
+pub const REAUTH_FIRST: &str =
+    "Confirm your master password first. Update the app if it doesn't ask for it.";
+
+fn reauth_required_with(message: &str) -> ApiError {
+    ApiError::coded(StatusCode::FORBIDDEN, code::REAUTH_REQUIRED, message)
+}
+
+/// Check a reauth token of `user` without using it up (403 `reauth_required`
+/// with `message` otherwise); [`require_reauth_or`] uses it once the change goes
+/// through, so a step that fails on a mistyped code can be tried again.
+pub fn check_reauth(
+    state: &AppState,
+    user: &AuthUser,
+    token: Option<&str>,
+    message: &str,
+) -> ApiResult<()> {
+    let theirs = token
+        .and_then(|t| state.reauth.peek(t, |uid| *uid == user.user_id))
+        .unwrap_or(false);
+    if theirs {
+        Ok(())
+    } else {
+        Err(reauth_required_with(message))
+    }
+}
+
+/// [`require_reauth`] answering with `message`.
+pub fn require_reauth_or(
+    state: &AppState,
+    user: &AuthUser,
+    token: Option<&str>,
+    message: &str,
+) -> ApiResult<()> {
+    let token = token.ok_or_else(|| reauth_required_with(message))?;
+    match state.reauth.take(token) {
+        Some((_, uid)) if uid == user.user_id => Ok(()),
+        _ => Err(reauth_required_with(message)),
     }
 }

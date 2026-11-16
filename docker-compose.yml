@@ -7,7 +7,7 @@ services:
       - "8080:8080"                 # behind a reverse proxy on this host: "127.0.0.1:8080:8080"
     env_file: .env
     volumes:
-      - ./data:/data                # PassAuth's database and icon cache
+      - ./data:/data                # PassAuth's database, icon cache and attachments
     read_only: true
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]

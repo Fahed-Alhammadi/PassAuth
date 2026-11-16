@@ -30,6 +30,8 @@ pub struct Config {
     pub domain: String,
     pub bind: SocketAddr,
     pub database_url: String,
+    /// `DATABASE_MAX_CONNECTIONS`: size of the database connection pool (default 10).
+    pub database_max_connections: u32,
     pub signups_allowed: bool,
     pub signups_domains: Vec<String>,
     pub signups_verify: bool,
@@ -57,6 +59,9 @@ pub struct Config {
     /// Disk cache for fetched icons. Defaults to `icons/` next to the SQLite
     /// file; `None` (e.g. PostgreSQL without `ICON_CACHE_DIR`) caches in memory.
     pub icon_cache_dir: Option<String>,
+    /// Folder for attachment files (`ATTACHMENTS_DIR`, see [`attachments_dir_for`]);
+    /// `None`: attachments are unavailable.
+    pub attachments_dir: Option<String>,
 }
 
 fn var(name: &str) -> Result<Option<String>> {
@@ -112,20 +117,56 @@ fn networks(name: &str) -> Result<Option<Vec<IpNet>>> {
 /// Database used when `DATABASE_URL` is not set.
 pub const DEFAULT_DATABASE_URL: &str = "sqlite:///data/passauth.db?mode=rwc";
 
+/// The image's data folder (a volume): attachments go there with PostgreSQL.
+const DATA_DIR: &str = "/data";
+
+/// Where attachment files live: `ATTACHMENTS_DIR` when set; else `attachments/`
+/// beside the SQLite file (like the icon cache); else, with PostgreSQL, `/data/attachments`
+/// when the image's `/data` folder exists (the compose file mounts it). Otherwise
+/// `None`: attachments are unavailable (the server says so at startup) rather than
+/// stored somewhere a container restart would lose them.
+pub fn attachments_dir_for(
+    database_url: &str,
+    env: Option<String>,
+    data_dir_exists: bool,
+) -> Option<String> {
+    if let Some(dir) = env {
+        return Some(dir);
+    }
+    if let Some(dir) = sqlite_dir(database_url) {
+        return Some(format!("{dir}/attachments"));
+    }
+    (crate::db::is_postgres(database_url) && data_dir_exists)
+        .then(|| format!("{DATA_DIR}/attachments"))
+}
+
+fn attachments_dir_from_env(database_url: &str) -> Result<Option<String>> {
+    Ok(attachments_dir_for(
+        database_url,
+        var("ATTACHMENTS_DIR")?,
+        std::path::Path::new(DATA_DIR).is_dir(),
+    ))
+}
+
 /// The admin password `.env.example` ships with; the admin page stays off until it is changed.
 pub const ADMIN_PASSWORD_EXAMPLE: &str = "change-me-to-a-long-password";
 pub const ADMIN_PASSWORD_MIN_CHARS: usize = 12;
 
-/// Folders PassAuth itself writes (the SQLite database folder and the icon
-/// cache), for the startup ownership fix. Only absolute paths below `/`.
+/// Folders PassAuth itself writes (the SQLite database folder, the icon cache and
+/// the attachments), for the startup ownership fix. Only absolute paths below `/`.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn data_dirs() -> Result<Vec<String>> {
     let db = var("DATABASE_URL")?.unwrap_or_else(|| DEFAULT_DATABASE_URL.into());
-    Ok(data_dirs_for(&db, var("ICON_CACHE_DIR")?))
+    let attachments = attachments_dir_from_env(&db)?;
+    Ok(data_dirs_for(&db, var("ICON_CACHE_DIR")?, attachments))
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn data_dirs_for(database_url: &str, icon_cache_dir: Option<String>) -> Vec<String> {
+fn data_dirs_for(
+    database_url: &str,
+    icon_cache_dir: Option<String>,
+    attachments_dir: Option<String>,
+) -> Vec<String> {
     let safe = |d: &String| {
         let path = std::path::Path::new(d);
         path.is_absolute() && path.components().count() > 1
@@ -135,7 +176,8 @@ fn data_dirs_for(database_url: &str, icon_cache_dir: Option<String>) -> Vec<Stri
         Some(dir) => Some(dir).filter(safe),
         None => db_dir.as_ref().map(|d| format!("{d}/icons")),
     };
-    let mut dirs: Vec<String> = db_dir.into_iter().chain(icons).collect();
+    let attachments = attachments_dir.filter(safe);
+    let mut dirs: Vec<String> = db_dir.into_iter().chain(icons).chain(attachments).collect();
     dirs.dedup();
     dirs
 }
@@ -184,6 +226,7 @@ impl Config {
             Some(dir) => Some(dir),
             None => sqlite_dir(&database_url).map(|d| format!("{d}/icons")),
         };
+        let attachments_dir = attachments_dir_from_env(&database_url)?;
         let domain = var("DOMAIN")?
             .unwrap_or_else(|| "http://localhost:8080".into())
             .trim_end_matches('/')
@@ -194,6 +237,14 @@ impl Config {
                 .parse()
                 .context("BIND")?,
             database_url,
+            database_max_connections: match var("DATABASE_MAX_CONNECTIONS")? {
+                None => crate::db::DEFAULT_MAX_CONNECTIONS,
+                Some(v) => v
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=1000).contains(n))
+                    .context("DATABASE_MAX_CONNECTIONS: expected a number from 1 to 1000")?,
+            },
             signups_allowed: flag("SIGNUPS_ALLOWED", true)?,
             signups_domains: var("SIGNUPS_DOMAINS_WHITELIST")?
                 .map(|v| {
@@ -220,6 +271,7 @@ impl Config {
             log_json: var("LOG_FORMAT")?.as_deref() == Some("json"),
             icon_service,
             icon_cache_dir,
+            attachments_dir,
             smtp,
             domain,
         })
@@ -239,6 +291,7 @@ impl Config {
             domain: "http://localhost".into(),
             bind: "127.0.0.1:0".parse().unwrap(),
             database_url: "sqlite::memory:".into(),
+            database_max_connections: crate::db::DEFAULT_MAX_CONNECTIONS,
             signups_allowed: true,
             signups_domains: vec![],
             signups_verify: false,
@@ -253,6 +306,7 @@ impl Config {
             log_json: false,
             icon_service: true,
             icon_cache_dir: None,
+            attachments_dir: None,
         }
     }
 }
@@ -351,17 +405,60 @@ mod tests {
 
     #[test]
     fn data_dirs_follow_the_database_and_skip_unsafe_paths() {
+        let attachments = |db: &str| attachments_dir_for(db, None, true);
         assert_eq!(
-            data_dirs_for(DEFAULT_DATABASE_URL, None),
-            ["/data", "/data/icons"]
+            data_dirs_for(
+                DEFAULT_DATABASE_URL,
+                None,
+                attachments(DEFAULT_DATABASE_URL)
+            ),
+            ["/data", "/data/icons", "/data/attachments"]
         );
         // Never the root folder or a relative path (that would be the working directory).
-        assert!(data_dirs_for("sqlite:///passauth.db", None).is_empty());
-        assert!(data_dirs_for("sqlite:passauth.db", Some("cache".into())).is_empty());
-        assert_eq!(
-            data_dirs_for("postgres://db/passauth", Some("/cache/icons".into())),
-            ["/cache/icons"]
+        assert!(data_dirs_for("sqlite:///passauth.db", None, None).is_empty());
+        assert!(
+            data_dirs_for(
+                "sqlite:passauth.db",
+                Some("cache".into()),
+                attachments("sqlite:passauth.db")
+            )
+            .is_empty()
         );
-        assert!(data_dirs_for("postgres://db/passauth", None).is_empty());
+        assert_eq!(
+            data_dirs_for(
+                "postgres://db/passauth",
+                Some("/cache/icons".into()),
+                Some("/files".into())
+            ),
+            ["/cache/icons", "/files"]
+        );
+        assert!(data_dirs_for("postgres://db/passauth", None, None).is_empty());
+    }
+
+    #[test]
+    fn attachments_live_beside_the_database_or_in_the_data_volume() {
+        assert_eq!(
+            attachments_dir_for(DEFAULT_DATABASE_URL, None, false).as_deref(),
+            Some("/data/attachments")
+        );
+        assert_eq!(
+            attachments_dir_for("sqlite://db/p.db", None, true).as_deref(),
+            Some("db/attachments")
+        );
+        assert_eq!(
+            attachments_dir_for("postgres://db/passauth", Some("/files".into()), false).as_deref(),
+            Some("/files")
+        );
+        // PostgreSQL: the image's /data volume, else nowhere (never a folder a
+        // container restart would lose).
+        assert_eq!(
+            attachments_dir_for("postgres://db/passauth", None, true).as_deref(),
+            Some("/data/attachments")
+        );
+        assert_eq!(
+            attachments_dir_for("postgres://db/passauth", None, false),
+            None
+        );
+        assert_eq!(attachments_dir_for("sqlite::memory:", None, true), None);
     }
 }

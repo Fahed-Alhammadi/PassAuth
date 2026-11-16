@@ -3,7 +3,7 @@
 //! fresh OPAQUE login with `purpose: "reauth"`.
 
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use passauth_core::item::{b64, unb64};
@@ -15,12 +15,14 @@ use passauth_core::opaque::opaque_ke::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::auth::{AuthUser, require_reauth};
+use crate::auth::{AuthUser, REAUTH_FIRST, check_reauth, require_reauth, require_reauth_or};
 use crate::db::now;
-use crate::error::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult, code};
+use crate::events::{self, Event};
 use crate::mail::Email;
 use crate::passkeys;
-use crate::state::{AppState, PendingPasskeyRegistration};
+use crate::policies;
+use crate::state::{AppState, PendingPasskeyRegistration, Sessions, SyncNotice};
 use crate::twofactor::{self, TotpData};
 
 pub fn routes() -> Router<AppState> {
@@ -42,7 +44,12 @@ pub fn routes() -> Router<AppState> {
         .route("/2fa/passkey/{id}", delete(passkey_remove))
         .route("/2fa/{provider}", delete(two_factor_disable))
         .route("/sessions", get(list_sessions))
+        .route("/sessions/revoke-others", post(revoke_other_sessions))
         .route("/sessions/{id}", delete(revoke_session))
+        .route("/devices/{device_id}/forget", post(forget_device))
+        .route("/events", get(events::account_events))
+        .route("/auth-requests", get(crate::auth_requests::list))
+        .route("/auth-requests/{id}", post(crate::auth_requests::answer))
 }
 
 fn reauth_header(headers: &HeaderMap) -> Option<&str> {
@@ -71,7 +78,29 @@ async fn get_account(State(state): State<AppState>, user: AuthUser) -> ApiResult
         .and_then(|k| <[u8; 32]>::try_from(k).ok())
         .map(|k| passauth_core::crypto::fingerprint(&k));
     let passkeys = passkeys::summary(&passkeys::list(&state.db, &user.user_id).await?);
+    let (item_count, storage_bytes, attachment_bytes) = {
+        let mut conn = state.db.acquire().await?;
+        let (items, bytes) = crate::vault::usage(&mut conn, &user.user_id).await?;
+        let files = crate::vault::attachment_usage(&mut conn, &user.user_id).await?;
+        (items, bytes, files)
+    };
+    let (max_items, max_storage_bytes) = crate::vault::quota(&state);
+    let max_attachment_bytes = crate::vault::attachment_quota(&state);
+    let policy_violations = policies::violations(&state, &bundle, providers.len());
     Ok(Json(json!({
+        // Items and bytes in the vaults this account owns (plus its Sends and the
+        // uploads it started), the attachments' part of them, and the admin's
+        // limits for them (0 = no limit).
+        "usage": {
+            "item_count": item_count,
+            "storage_bytes": storage_bytes,
+            "attachment_bytes": attachment_bytes,
+        },
+        "limits": {
+            "max_items": max_items,
+            "max_storage_bytes": max_storage_bytes,
+            "max_attachment_bytes": max_attachment_bytes,
+        },
         "passkeys": passkeys,
         "passkeys_available": state.webauthn.is_some(),
         "user_id": user.user_id,
@@ -84,6 +113,9 @@ async fn get_account(State(state): State<AppState>, user: AuthUser) -> ApiResult
         "two_factor": providers,
         "recovery_codes_left": recovery_left,
         "email_enabled": state.mailer.enabled(),
+        // What the account still has to change for the server's policies:
+        // `two_step`, `secret_key`, `kdf` (see `policies.rs`).
+        "policy_violations": policy_violations,
     })))
 }
 
@@ -101,12 +133,23 @@ async fn update_profile(
     if name.len() > 100 {
         return Err(ApiError::bad("name too long"));
     }
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE users SET name = $1, updated_at = $2 WHERE id = $3")
         .bind(name)
         .bind(now())
         .bind(&user.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    // `/sync` carries the name: the account's other devices pick it up.
+    let revision = crate::vault::bump_user(&mut tx, &user.user_id).await?;
+    tx.commit().await?;
+    if let Some(revision) = revision {
+        let origin = state.origin(&user.session_id);
+        state.notify_sync(vec![(
+            user.user_id,
+            SyncNotice::new(revision, Some(origin)),
+        )]);
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -156,10 +199,14 @@ async fn keys_finish(
         return Err(ApiError::bad("only the password wrapping may change"));
     }
     b.bundle.kdf.validate()?;
+    policies::check_new_keys(&state, &b.bundle)?;
     let upload = RegistrationUpload::<Suite>::deserialize(&unb64(&b.upload)?)
         .map_err(|_| ApiError::bad("bad upload"))?;
     let record = b64(&ServerRegistration::<Suite>::finish(upload).serialize());
     let mut tx = state.db.begin().await?;
+    // The account's row first: a sign-in finishing at this moment (it writes the
+    // same row first) is either done before, and its session is signed out below,
+    // or waits until this is committed.
     sqlx::query("UPDATE users SET opaque_record = $1, bundle = $2, updated_at = $3 WHERE id = $4")
         .bind(&record)
         .bind(serde_json::to_string(&b.bundle).map_err(anyhow::Error::from)?)
@@ -167,19 +214,42 @@ async fn keys_finish(
         .bind(&user.user_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+    let signed_out = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
         .bind(&user.user_id)
         .bind(&user.session_id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
     sqlx::query(
         "UPDATE devices SET remember_hash = NULL, remember_expires = NULL WHERE user_id = $1",
     )
     .bind(&user.user_id)
     .execute(&mut *tx)
     .await?;
+    // Like the other sessions: no sign-in request still waiting becomes one.
+    crate::auth_requests::cancel_open(&mut tx, &user.user_id).await?;
+    // `/sync` carries the bundle.
+    let revision = crate::vault::bump_user(&mut tx, &user.user_id).await?;
+    Event::new("account.password_changed")
+        .by(&user)
+        .data(json!({
+            "secret_key": b.bundle.secret_key_enabled,
+            "sessions_signed_out": signed_out,
+        }))
+        .record(&mut tx, &state)
+        .await?;
     tx.commit().await?;
-    state.notify_logout(&user.user_id);
+    // Every other session is gone, and so is every sign-in waiting for its two-step
+    // login; this device stays signed in.
+    state.forget_pending_sign_ins(&user.user_id);
+    state.notify_logout(&user.user_id, Sessions::AllExcept(user.session_id.clone()));
+    if let Some(revision) = revision {
+        let origin = state.origin(&user.session_id);
+        state.notify_sync(vec![(
+            user.user_id.clone(),
+            SyncNotice::new(revision, Some(origin)),
+        )]);
+    }
     state.mailer.send_later(
         user.email.clone(),
         Email {
@@ -206,11 +276,15 @@ async fn totp_setup(State(state): State<AppState>, user: AuthUser) -> ApiResult<
         .iter()
         .any(|p| p == twofactor::TOTP);
     if enabled {
-        return Err(ApiError::Conflict(
-            "authenticator app already enabled; disable it first".into(),
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            code::ALREADY_ENABLED,
+            "authenticator app already enabled; disable it first",
         ));
     }
-    twofactor::upsert(&state.db, &user.user_id, twofactor::TOTP, &data, false).await?;
+    let mut conn = state.db.acquire().await?;
+    twofactor::upsert(&mut conn, &user.user_id, twofactor::TOTP, &data, false).await?;
+    drop(conn);
     let label = urlencode(&format!("PassAuth:{}", user.email));
     Ok(Json(json!({
         "secret": secret,
@@ -234,29 +308,104 @@ struct Code {
     code: String,
 }
 
+/// `POST /account/2fa/totp/enable {code}` with a reauth token (`x-reauth-token`;
+/// without one 403 `reauth_required`): a stolen session alone can't put its own
+/// authenticator on the account. The token is used up only when the method is
+/// turned on, so a mistyped code can be tried again with it.
 async fn totp_enable(
     State(state): State<AppState>,
+    headers: HeaderMap,
     user: AuthUser,
     Json(b): Json<Code>,
 ) -> ApiResult<Json<Value>> {
+    let reauth = reauth_header(&headers);
+    check_reauth(&state, &user, reauth, REAUTH_FIRST)?;
     let data: Option<String> = sqlx::query_scalar(
         "SELECT data FROM two_factor WHERE user_id = $1 AND provider = 'totp' AND enabled = 0",
     )
     .bind(&user.user_id)
     .fetch_optional(&state.db)
     .await?;
-    let data: TotpData = serde_json::from_str(&data.ok_or(ApiError::bad("start setup first"))?)
-        .map_err(anyhow::Error::from)?;
+    let data: TotpData =
+        serde_json::from_str(&data.ok_or_else(|| ApiError::expired("start setup first"))?)
+            .map_err(anyhow::Error::from)?;
     let step = twofactor::check_totp(&data.secret, b.code.trim(), 0)
-        .ok_or(ApiError::bad("invalid code"))?;
+        .ok_or_else(|| ApiError::invalid_code("invalid code"))?;
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE two_factor SET enabled = 1, last_used = $1 WHERE user_id = $2 AND provider = 'totp'")
         .bind(step)
         .bind(&user.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    Ok(Json(
-        json!({ "recovery_codes": first_recovery_codes(&state, &user).await? }),
-    ))
+    let codes = first_recovery_codes(&mut tx, &user).await?;
+    two_step_enabled(&mut tx, &state, &user, twofactor::TOTP, codes.is_some()).await?;
+    require_reauth_or(&state, &user, reauth, REAUTH_FIRST)?;
+    tx.commit().await?;
+    two_step_changed(&state, &user, TwoStepChange::Enabled(twofactor::TOTP));
+    Ok(Json(json!({ "recovery_codes": codes })))
+}
+
+/// A change of the account's two-step login, for the email that tells its owner.
+enum TwoStepChange<'a> {
+    Enabled(&'a str),
+    Disabled(&'a str),
+    RecoveryCodes,
+    SecurityKeyAdded,
+    SecurityKeyRemoved,
+}
+
+/// Email the account about a change of its two-step login (when email is set
+/// up), so someone who got hold of a session and the master password can't
+/// quietly add a second factor of their own or take one away.
+fn two_step_changed(state: &AppState, user: &AuthUser, change: TwoStepChange) {
+    let method = |m: &str| match m {
+        twofactor::TOTP => "an authenticator app",
+        twofactor::EMAIL => "email codes",
+        _ => "another method",
+    };
+    let what = match change {
+        TwoStepChange::Enabled(m) => format!("Two-step login with {} was turned on.", method(m)),
+        TwoStepChange::Disabled(m) => {
+            format!("Two-step login with {} was turned off.", method(m))
+        }
+        TwoStepChange::RecoveryCodes => {
+            "New recovery codes were created; the old ones no longer work.".into()
+        }
+        TwoStepChange::SecurityKeyAdded => "A security key was added for two-step login.".into(),
+        TwoStepChange::SecurityKeyRemoved => {
+            "A security key was removed from two-step login.".into()
+        }
+    };
+    state.mailer.send_later(
+        user.email.clone(),
+        Email {
+            subject: "Two-step login changed on your PassAuth account".into(),
+            heading: "Two-step login changed".into(),
+            body: format!(
+                "{what}\nIf this wasn't you, change your master password now, sign out your other sessions and check your two-step login settings."
+            ),
+            action: Some((
+                "Review two-step login".into(),
+                format!("{}/settings/two-step", state.config.domain),
+            )),
+            code: None,
+        },
+    );
+}
+
+/// `account.two_step_enabled`, with whether recovery codes were made with it.
+async fn two_step_enabled(
+    conn: &mut sqlx::AnyConnection,
+    state: &AppState,
+    user: &AuthUser,
+    method: &str,
+    recovery_codes: bool,
+) -> ApiResult<()> {
+    Event::new("account.two_step_enabled")
+        .by(user)
+        .data(json!({ "method": method, "recovery_codes": recovery_codes }))
+        .record(conn, state)
+        .await
 }
 
 async fn email_setup(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Value>> {
@@ -277,33 +426,46 @@ async fn email_setup(State(state): State<AppState>, user: AuthUser) -> ApiResult
     Ok(Json(json!({ "sent": true })))
 }
 
+/// `POST /account/2fa/email/enable {code}` with a reauth token, like
+/// [`totp_enable`].
 async fn email_enable(
     State(state): State<AppState>,
+    headers: HeaderMap,
     user: AuthUser,
     Json(b): Json<Code>,
 ) -> ApiResult<Json<Value>> {
+    let reauth = reauth_header(&headers);
+    check_reauth(&state, &user, reauth, REAUTH_FIRST)?;
     if !twofactor::verify_email_code(&state.db, &user.user_id, "2fa-setup", b.code.trim()).await? {
-        return Err(ApiError::bad("invalid code"));
+        return Err(ApiError::invalid_code("invalid code"));
     }
-    twofactor::upsert(&state.db, &user.user_id, twofactor::EMAIL, "{}", true).await?;
-    Ok(Json(
-        json!({ "recovery_codes": first_recovery_codes(&state, &user).await? }),
-    ))
+    let mut tx = state.db.begin().await?;
+    twofactor::upsert(&mut tx, &user.user_id, twofactor::EMAIL, "{}", true).await?;
+    let codes = first_recovery_codes(&mut tx, &user).await?;
+    two_step_enabled(&mut tx, &state, &user, twofactor::EMAIL, codes.is_some()).await?;
+    require_reauth_or(&state, &user, reauth, REAUTH_FIRST)?;
+    tx.commit().await?;
+    two_step_changed(&state, &user, TwoStepChange::Enabled(twofactor::EMAIL));
+    Ok(Json(json!({ "recovery_codes": codes })))
 }
 
-/// Recovery codes are generated with the first provider and shown once.
-async fn first_recovery_codes(state: &AppState, user: &AuthUser) -> ApiResult<Option<Vec<String>>> {
+/// Recovery codes are generated with the first provider and shown once (inside
+/// the caller's transaction, after its first write).
+async fn first_recovery_codes(
+    conn: &mut sqlx::AnyConnection,
+    user: &AuthUser,
+) -> ApiResult<Option<Vec<String>>> {
     let has: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM two_factor WHERE user_id = $1 AND provider = 'recovery'",
     )
     .bind(&user.user_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *conn)
     .await?;
     if has > 0 {
         return Ok(None);
     }
     Ok(Some(
-        twofactor::regenerate_recovery_codes(&state.db, &user.user_id).await?,
+        twofactor::regenerate_recovery_codes(conn, &user.user_id).await?,
     ))
 }
 
@@ -319,9 +481,15 @@ async fn recovery_regenerate(
     {
         return Err(ApiError::bad("enable two-step login first"));
     }
-    Ok(Json(
-        json!({ "recovery_codes": twofactor::regenerate_recovery_codes(&state.db, &user.user_id).await? }),
-    ))
+    let mut tx = state.db.begin().await?;
+    let codes = twofactor::regenerate_recovery_codes(&mut tx, &user.user_id).await?;
+    Event::new("account.recovery_codes_created")
+        .by(&user)
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    two_step_changed(&state, &user, TwoStepChange::RecoveryCodes);
+    Ok(Json(json!({ "recovery_codes": codes })))
 }
 
 async fn two_factor_disable(
@@ -334,19 +502,32 @@ async fn two_factor_disable(
     if provider != twofactor::TOTP && provider != twofactor::EMAIL {
         return Err(ApiError::bad("unknown provider"));
     }
-    sqlx::query("DELETE FROM two_factor WHERE user_id = $1 AND provider = $2")
+    let mut tx = state.db.begin().await?;
+    let done = sqlx::query("DELETE FROM two_factor WHERE user_id = $1 AND provider = $2")
         .bind(&user.user_id)
         .bind(&provider)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    if twofactor::enabled_providers(&state.db, &user.user_id)
+    if twofactor::enabled_providers(&mut *tx, &user.user_id)
         .await?
         .is_empty()
     {
         sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
             .bind(&user.user_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
+    }
+    if done.rows_affected() > 0 {
+        policies::keep_last_method(&mut tx, &state, &user.user_id).await?;
+        Event::new("account.two_step_disabled")
+            .by(&user)
+            .data(json!({ "method": provider }))
+            .record(&mut tx, &state)
+            .await?;
+    }
+    tx.commit().await?;
+    if done.rows_affected() > 0 {
+        two_step_changed(&state, &user, TwoStepChange::Disabled(&provider));
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -412,9 +593,9 @@ async fn passkey_register_finish(
     let (_, pending) = state
         .passkey_registrations
         .take(&b.registration_id)
-        .ok_or(ApiError::bad("security key setup expired, start again"))?;
+        .ok_or_else(|| ApiError::expired("security key setup expired, start again"))?;
     if pending.user_id != user.user_id {
-        return Err(ApiError::Forbidden("reauth_required".into()));
+        return Err(ApiError::reauth_required());
     }
     let key = webauthn
         .finish_securitykey_registration(&b.credential, &pending.state)
@@ -422,11 +603,17 @@ async fn passkey_register_finish(
             tracing::debug!(error = ?e, "security key registration rejected");
             ApiError::bad("the security key's response couldn't be verified; try again")
         })?;
-    let id = passkeys::insert(&state.db, &user.user_id, &name, &key).await?;
-    Ok(Json(json!({
-        "id": id,
-        "recovery_codes": first_recovery_codes(&state, &user).await?,
-    })))
+    let mut tx = state.db.begin().await?;
+    let id = passkeys::insert(&mut tx, &user.user_id, &name, &key).await?;
+    let codes = first_recovery_codes(&mut tx, &user).await?;
+    Event::new("account.security_key_added")
+        .by(&user)
+        .data(json!({ "key_id": id, "recovery_codes": codes.is_some() }))
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    two_step_changed(&state, &user, TwoStepChange::SecurityKeyAdded);
+    Ok(Json(json!({ "id": id, "recovery_codes": codes })))
 }
 
 async fn passkey_remove(
@@ -436,9 +623,18 @@ async fn passkey_remove(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     require_reauth(&state, &user, reauth_header(&headers))?;
-    if !passkeys::remove(&state.db, &user.user_id, &id).await? {
+    let mut tx = state.db.begin().await?;
+    if !passkeys::remove(&mut tx, &user.user_id, &id).await? {
         return Err(ApiError::NotFound);
     }
+    policies::keep_last_method(&mut tx, &state, &user.user_id).await?;
+    Event::new("account.security_key_removed")
+        .by(&user)
+        .data(json!({ "key_id": id }))
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    two_step_changed(&state, &user, TwoStepChange::SecurityKeyRemoved);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -450,13 +646,15 @@ struct SessionRow {
     device_id: String,
     device_name: String,
     device_kind: String,
+    /// The app that signed in (`X-PassAuth-Client`, e.g. `ios/0.6.0`), when it said.
+    client: Option<String>,
     created_at: i64,
     last_used: i64,
 }
 
 async fn list_sessions(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Value>> {
     let rows: Vec<SessionRow> = sqlx::query_as(
-        "SELECT s.id, s.device_id, d.name AS device_name, d.kind AS device_kind, s.created_at, s.last_used
+        "SELECT s.id, s.device_id, d.name AS device_name, d.kind AS device_kind, s.client, s.created_at, s.last_used
          FROM sessions s JOIN devices d ON d.user_id = s.user_id AND d.id = s.device_id
          WHERE s.user_id = $1 AND s.refresh_expires > $2 ORDER BY s.last_used DESC",
     )
@@ -474,12 +672,91 @@ async fn revoke_session(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2")
+    let mut tx = state.db.begin().await?;
+    let done = sqlx::query("DELETE FROM sessions WHERE id = $1 AND user_id = $2")
         .bind(&id)
         .bind(&user.user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    if done.rows_affected() > 0 {
+        Event::new("session.revoked")
+            .by(&user)
+            .data(json!({ "session": id }))
+            .record(&mut tx, &state)
+            .await?;
+    }
+    tx.commit().await?;
+    if done.rows_affected() > 0 {
+        state.notify_logout(&user.user_id, Sessions::Only(id));
+    }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Sign out every other session of the account; this one stays.
+async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> ApiResult<Json<Value>> {
+    let mut tx = state.db.begin().await?;
+    let done = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+        .bind(&user.user_id)
+        .bind(&user.session_id)
+        .execute(&mut *tx)
+        .await?;
+    // Nor does a sign-in still on its way (an approved device, a two-step login).
+    crate::auth_requests::cancel_open(&mut tx, &user.user_id).await?;
+    Event::new("session.revoked_others")
+        .by(&user)
+        .data(json!({ "count": done.rows_affected() }))
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    state.forget_pending_sign_ins(&user.user_id);
+    state.notify_logout(&user.user_id, Sessions::AllExcept(user.session_id));
+    tracing::info!(user = %user.user_id, revoked = done.rows_affected(), "other sessions signed out");
+    Ok(Json(json!({ "ok": true, "revoked": done.rows_affected() })))
+}
+
+/// Sign a device out and forget it: every session it holds ends at once (its
+/// sockets are told), and its record goes with its "remember this device" token,
+/// so its next sign-in asks for two-step login again and counts as a new device
+/// (alert email). The caller's own device may be forgotten too.
+async fn forget_device(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(device_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let mut tx = state.db.begin().await?;
+    let sessions: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM sessions WHERE user_id = $1 AND device_id = $2 RETURNING id",
+    )
+    .bind(&user.user_id)
+    .bind(&device_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let device = sqlx::query("DELETE FROM devices WHERE user_id = $1 AND id = $2")
+        .bind(&user.user_id)
+        .bind(&device_id)
+        .execute(&mut *tx)
+        .await?;
+    if sessions.is_empty() && device.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Event::new("session.device_forgotten")
+        .by(&user)
+        .data(json!({ "device": device_id, "count": sessions.len() }))
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
+    for id in &sessions {
+        state.notify_logout(&user.user_id, Sessions::Only(id.clone()));
+    }
+    tracing::info!(user = %user.user_id, sessions = sessions.len(), "device forgotten");
+    Ok(Json(json!({
+        "ok": true,
+        "signed_out": sessions.len(),
+        "current": sessions.contains(&user.session_id),
+    })))
 }
 
 // ---------------------------------------------------------------- deletion
@@ -490,35 +767,65 @@ async fn delete_account(
     user: AuthUser,
 ) -> ApiResult<Json<Value>> {
     require_reauth(&state, &user, reauth_header(&headers))?;
-    delete_user(&state, &user.user_id).await?;
-    state.notify_logout(&user.user_id);
+    // Like the account's other events, kept without its address.
+    let event = Event::new("account.deleted")
+        .by(&user)
+        .from(user.client.clone(), None);
+    delete_user(&state, &user.user_id, event).await?;
+    state.notify_logout(&user.user_id, Sessions::All);
     Ok(Json(json!({ "deleted": true })))
 }
 
-/// Remove a user. Vaults they own are deleted with their items unless another
-/// owner remains (then only the membership goes); everyone who shared a vault
-/// with them is told to re-sync.
-pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
+/// Remove a user, writing `event` in the same transaction (only when they
+/// existed). Vaults they own are deleted with their items (and versions)
+/// unless another owner remains (then only the membership goes); everyone who
+/// shared a vault with them is told to re-sync, and so is everyone invited to a
+/// vault deleted with them. Vaults they were a member of, or invited to, are
+/// marked for a key replacement. Their Sends go with them, the attachment files of
+/// the vaults deleted with them, their emergency access both ways and their sign-in
+/// requests.
+pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiResult<()> {
+    let vaults: Vec<String> = sqlx::query_scalar(
+        "SELECT vault_id FROM vault_members WHERE user_id = $1 ORDER BY vault_id",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut tx = state.db.begin().await?;
+    // A write first (SQLite then never has to upgrade a read transaction).
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    // Like every vault write: lock the vaults (in id order) before changing them.
+    for v in &vaults {
+        crate::vault::lock_vault(&mut tx, v).await?;
+    }
     let owned: Vec<String> = sqlx::query_scalar(
         "SELECT m.vault_id FROM vault_members m WHERE m.user_id = $1 AND m.role = 'owner'
          AND NOT EXISTS (SELECT 1 FROM vault_members o WHERE o.vault_id = m.vault_id
                          AND o.role = 'owner' AND o.user_id <> $1)",
     )
     .bind(user_id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
-    let mut affected: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT o.user_id FROM vault_members m JOIN vault_members o ON o.vault_id = m.vault_id
-         WHERE m.user_id = $1 AND o.user_id <> $1",
-    )
-    .bind(user_id)
-    .fetch_all(&state.db)
-    .await?;
-    affected.sort_unstable();
-    let mut tx = state.db.begin().await?;
+    // Everyone who shared a vault with them re-syncs, and the invitees of the
+    // vaults that go with them lose their invitation.
+    let postgres = crate::db::is_postgres(&state.config.database_url);
+    let notices: Vec<(String, SyncNotice)> =
+        crate::vault::bump_members(&mut tx, postgres, &vaults, &owned)
+            .await?
+            .into_iter()
+            .filter(|(u, _)| u != user_id)
+            .map(|(u, revision)| (u, SyncNotice::new(revision, None)))
+            .collect();
+    let mut files = Vec::new();
     for v in &owned {
+        files.extend(crate::vault::detach_vault(&mut tx, v).await?);
         for stmt in [
             "DELETE FROM items WHERE vault_id = $1",
+            "DELETE FROM item_versions WHERE vault_id = $1",
+            "DELETE FROM item_tombstones WHERE vault_id = $1",
             "DELETE FROM vault_members WHERE vault_id = $1",
             "DELETE FROM vaults WHERE id = $1",
         ] {
@@ -529,18 +836,39 @@ pub async fn delete_user(state: &AppState, user_id: &str) -> ApiResult<()> {
         // Shared vaults that stay: the deleted user knew their keys.
         "UPDATE vaults SET rotation_pending = 1 WHERE id IN (SELECT vault_id FROM vault_members WHERE user_id = $1)",
         "DELETE FROM vault_members WHERE user_id = $1",
-        "DELETE FROM sessions WHERE user_id = $1",
         "DELETE FROM devices WHERE user_id = $1",
         "DELETE FROM two_factor WHERE user_id = $1",
         "DELETE FROM passkey_credentials WHERE user_id = $1",
         "DELETE FROM two_factor_failures WHERE user_id = $1",
         "DELETE FROM email_tokens WHERE user_id = $1",
-        "DELETE FROM users WHERE id = $1",
+        "DELETE FROM sends WHERE user_id = $1",
+        "DELETE FROM emergency_access WHERE grantor_id = $1 OR grantee_id = $1",
+        "DELETE FROM auth_requests WHERE user_id = $1",
     ] {
         sqlx::query(stmt).bind(user_id).execute(&mut *tx).await?;
     }
+    // The account's own events stay in the log until `event_days` (vault members
+    // and the admin page still see them), but without its addresses: those it acted
+    // from, and those of attempts on it by nobody signed in (failed sign-ins). The
+    // addresses of others who acted on it (a vault admin, the admin page) stay.
+    sqlx::query(
+        "UPDATE events SET ip = NULL WHERE ip IS NOT NULL
+         AND (actor_id = $1 OR (target_user_id = $1 AND actor_id IS NULL AND type NOT LIKE 'admin.%'))",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let gone = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    if gone.rows_affected() > 0 {
+        event.record(&mut tx, state).await?;
+    }
     tx.commit().await?;
-    crate::vault::touch_users(state, &affected, user_id).await?;
+    state.forget_pending_sign_ins(user_id);
+    crate::vault::remove_files(state, &files).await;
+    state.notify_sync(notices);
     tracing::info!(user = %user_id, "account deleted");
     Ok(())
 }

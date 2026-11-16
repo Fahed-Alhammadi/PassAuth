@@ -88,7 +88,19 @@ const SCHEMA_V1: &[&str] = &[
         expires_at BIGINT NOT NULL)",
 ];
 
-pub async fn connect(url: &str) -> Result<Db> {
+/// Connections a pool opens when `DATABASE_MAX_CONNECTIONS` is not set.
+pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
+
+/// Open the database with up to `max_connections` (`DATABASE_MAX_CONNECTIONS`)
+/// and bring its schema up to date.
+pub async fn connect(url: &str, max_connections: u32) -> Result<Db> {
+    let pool = open(url, max_connections).await?;
+    migrate(&pool).await?;
+    Ok(pool)
+}
+
+/// Open the database without touching its schema (`backup`).
+pub async fn open(url: &str, max_connections: u32) -> Result<Db> {
     install_default_drivers();
     if let Some(dir) = url
         .strip_prefix("sqlite://")
@@ -108,7 +120,7 @@ pub async fn connect(url: &str) -> Result<Db> {
     let max = if url.starts_with("sqlite::memory:") {
         1
     } else {
-        10
+        max_connections.max(1)
     };
     let pool = AnyPoolOptions::new()
         .max_connections(max)
@@ -124,7 +136,6 @@ pub async fn connect(url: &str) -> Result<Db> {
             sqlx::query(pragma).execute(&pool).await.ok();
         }
     }
-    migrate(&pool).await?;
     Ok(pool)
 }
 
@@ -135,6 +146,13 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (3, SCHEMA_V3),
     (4, SCHEMA_V4),
     (5, SCHEMA_V5),
+    (6, SCHEMA_V6),
+    (7, SCHEMA_V7),
+    (8, SCHEMA_V8),
+    (9, SCHEMA_V9),
+    (10, SCHEMA_V10),
+    (11, SCHEMA_V11),
+    (12, SCHEMA_V12),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -171,6 +189,201 @@ const SCHEMA_V4: &[&str] = &[
 const SCHEMA_V5: &[&str] =
     &["ALTER TABLE vaults ADD COLUMN rotation_pending BIGINT NOT NULL DEFAULT 0"];
 
+/// Vault key epochs (writes made with a replaced vault key are refused), the
+/// client app of each session (`X-PassAuth-Client`), and indexes for email links
+/// and the trash sweeper.
+const SCHEMA_V6: &[&str] = &[
+    "ALTER TABLE vaults ADD COLUMN key_epoch BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN client TEXT",
+    "CREATE INDEX IF NOT EXISTS email_tokens_hash ON email_tokens (token_hash)",
+    "CREATE INDEX IF NOT EXISTS items_deleted ON items (deleted_at) WHERE deleted_at IS NOT NULL",
+];
+
+/// Delta sync. Every write into a vault takes the vault's next `seq` and stamps
+/// the item rows it writes with it; items purged or moved out leave a tombstone
+/// with that `seq`, kept `tombstone_days` (admin page). A cursor older than a
+/// vault's `horizon` (its newest forgotten tombstone) gets the whole vault again.
+const SCHEMA_V7: &[&str] = &[
+    "ALTER TABLE vaults ADD COLUMN seq BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE vaults ADD COLUMN horizon BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE items ADD COLUMN seq BIGINT NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS items_vault_seq ON items (vault_id, seq)",
+    "CREATE TABLE IF NOT EXISTS item_tombstones (
+        vault_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        seq BIGINT NOT NULL,
+        deleted_at BIGINT NOT NULL,
+        PRIMARY KEY (vault_id, item_id))",
+    "CREATE INDEX IF NOT EXISTS item_tombstones_seq ON item_tombstones (vault_id, seq)",
+    "CREATE INDEX IF NOT EXISTS item_tombstones_deleted ON item_tombstones (deleted_at)",
+];
+
+/// Vault invitations: a share is `invited` (no access, nothing synced) until the
+/// invitee accepts it; rows from before are `active`. The activity log (`events`,
+/// ids only, kept `event_days`). Item version history: the previous row of every
+/// edit and trash (`item_versions`, newest `item_versions_kept` per item), with who
+/// saved each item row (`items.updated_by`).
+const SCHEMA_V8: &[&str] = &[
+    "ALTER TABLE vault_members ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE vault_members ADD COLUMN invited_by TEXT",
+    "ALTER TABLE vault_members ADD COLUMN invited_at BIGINT",
+    "ALTER TABLE items ADD COLUMN updated_by TEXT",
+    "CREATE TABLE IF NOT EXISTS events (
+        id TEXT PRIMARY KEY,
+        at BIGINT NOT NULL,
+        type TEXT NOT NULL,
+        actor_id TEXT,
+        session_id TEXT,
+        client TEXT,
+        ip TEXT,
+        vault_id TEXT,
+        item_id TEXT,
+        target_user_id TEXT,
+        data TEXT)",
+    "CREATE INDEX IF NOT EXISTS events_actor ON events (actor_id, at)",
+    "CREATE INDEX IF NOT EXISTS events_vault ON events (vault_id, at)",
+    "CREATE INDEX IF NOT EXISTS events_target ON events (target_user_id, at)",
+    "CREATE INDEX IF NOT EXISTS events_at ON events (at)",
+    "CREATE TABLE IF NOT EXISTS item_versions (
+        item_id TEXT NOT NULL,
+        vault_id TEXT NOT NULL,
+        seq BIGINT NOT NULL,
+        item_key TEXT NOT NULL,
+        data TEXT NOT NULL,
+        saved_at BIGINT NOT NULL,
+        saved_by TEXT,
+        PRIMARY KEY (item_id, seq))",
+    "CREATE INDEX IF NOT EXISTS item_versions_vault ON item_versions (vault_id)",
+];
+
+/// Send: text shared through a link whose key only the link holds (`sends.rs`).
+/// `name` and `data` are encrypted with that key, `owner_key` is it wrapped by the
+/// owner's account key, `access_verifier` the SHA-256 of an optional password's
+/// verifier. `kind` is `text`; a `file` kind can add its columns later. Plus the
+/// sessions of one device, for signing a device out (`/account/devices/{id}/forget`)
+/// and the sweeper's forgotten devices.
+const SCHEMA_V9: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS sends (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        owner_key TEXT NOT NULL,
+        access_salt TEXT,
+        access_verifier TEXT,
+        max_views BIGINT,
+        views BIGINT NOT NULL DEFAULT 0,
+        expires_at BIGINT,
+        delete_at BIGINT NOT NULL,
+        disabled BIGINT NOT NULL DEFAULT 0,
+        hide_email BIGINT NOT NULL DEFAULT 0,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS sends_user ON sends (user_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS sends_delete_at ON sends (delete_at)",
+    "CREATE INDEX IF NOT EXISTS sessions_device ON sessions (user_id, device_id)",
+];
+
+/// Attachments (`vault/attachments.rs`): one row per encrypted file of an item,
+/// which lives in the attachments folder under its id (`files.rs`). `state` is
+/// `pending` until the upload of exactly `size` bytes finishes, then `ready`; the
+/// file's name, key and real size are only inside the encrypted item. Emergency
+/// access (`emergency.rs`): a trusted contact (`grantee`) who may ask to view the
+/// `grantor`'s own vaults after `wait_days`; `sealed_key` is the grantor's account
+/// key sealed by their app to the grantee's public key, handed out only once access
+/// is approved.
+const SCHEMA_V10: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL,
+        vault_id TEXT NOT NULL,
+        size BIGINT NOT NULL,
+        state TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        created_by TEXT NOT NULL,
+        updated_at BIGINT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS attachments_item ON attachments (item_id)",
+    "CREATE INDEX IF NOT EXISTS attachments_vault ON attachments (vault_id)",
+    "CREATE INDEX IF NOT EXISTS attachments_state ON attachments (state, updated_at)",
+    "CREATE TABLE IF NOT EXISTS emergency_access (
+        id TEXT PRIMARY KEY,
+        grantor_id TEXT NOT NULL,
+        grantee_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        wait_days BIGINT NOT NULL,
+        sealed_key TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL,
+        requested_at BIGINT,
+        approved_at BIGINT)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS emergency_access_pair ON emergency_access (grantor_id, grantee_id)",
+    "CREATE INDEX IF NOT EXISTS emergency_access_grantee ON emergency_access (grantee_id)",
+    "CREATE INDEX IF NOT EXISTS emergency_access_requested ON emergency_access (status, requested_at)",
+];
+
+/// Sign-in requests a signed-in device approves (`auth_requests.rs`). `user_id` is
+/// set when the email belongs to an account that may sign in, else NULL (nobody sees
+/// the request; it expires). `email_hash` is a keyed hash of the email (per-email
+/// limit), `access_code_hash` and `remember_hash` SHA-256 of the new device's poll
+/// code and "remember this device" token; `sealed_key` is the account key sealed by
+/// the approving app to `requester_public_key`, kept only until the new device takes
+/// it. Status: `pending` → `approved` | `denied` | `expired`; `approved` → `used`
+/// (exchanged once) | `expired`. Rows go a day after they expire.
+const SCHEMA_V11: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS auth_requests (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        email_hash TEXT NOT NULL,
+        requester_public_key TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        device_name TEXT NOT NULL,
+        device_kind TEXT NOT NULL,
+        client TEXT,
+        ip TEXT,
+        access_code_hash TEXT NOT NULL,
+        remember_hash TEXT,
+        status TEXT NOT NULL,
+        sealed_key TEXT,
+        approved_by_session TEXT,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        answered_at BIGINT)",
+    "CREATE INDEX IF NOT EXISTS auth_requests_user ON auth_requests (user_id, status)",
+    "CREATE INDEX IF NOT EXISTS auth_requests_email ON auth_requests (email_hash, created_at)",
+    "CREATE INDEX IF NOT EXISTS auth_requests_expires ON auth_requests (expires_at)",
+];
+
+/// Security fixes. `vault_ids`: every vault id this server has ever used, never
+/// deleted, so a deleted vault's id can't be created again (409 `vault_exists`)
+/// and nobody who knows it inherits its activity log; filled with the vaults that
+/// exist and the ids that still appear anywhere (vaults deleted before). The Send
+/// wrong-password count moves into the Send's row (`wrong_passwords` since
+/// `wrong_since`), so neither a restart nor a flood of other requests resets it.
+/// Unfinished attachment uploads count against whoever started them (index for
+/// that).
+const SCHEMA_V12: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS vault_ids (id TEXT PRIMARY KEY, created_at BIGINT NOT NULL)",
+    "INSERT INTO vault_ids (id, created_at) SELECT id, created_at FROM vaults",
+    RETIRE_KNOWN_VAULT_IDS,
+    "ALTER TABLE sends ADD COLUMN wrong_passwords BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE sends ADD COLUMN wrong_since BIGINT NOT NULL DEFAULT 0",
+    "CREATE INDEX IF NOT EXISTS attachments_creator ON attachments (created_by, state)",
+];
+
+/// Migration 12: the ids of vaults deleted before it, as far as the database still
+/// names them (their activity log above all), go into `vault_ids` too.
+pub(crate) const RETIRE_KNOWN_VAULT_IDS: &str = "INSERT INTO vault_ids (id, created_at)
+     SELECT DISTINCT x.vault_id, 0 FROM (
+         SELECT vault_id FROM events WHERE vault_id IS NOT NULL
+         UNION SELECT vault_id FROM vault_members
+         UNION SELECT vault_id FROM items
+         UNION SELECT vault_id FROM item_versions
+         UNION SELECT vault_id FROM item_tombstones
+         UNION SELECT vault_id FROM attachments
+     ) x
+     WHERE NOT EXISTS (SELECT 1 FROM vault_ids v WHERE v.id = x.vault_id)";
+
 async fn migrate(db: &Db) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS schema_version (version BIGINT NOT NULL)")
         .execute(db)
@@ -178,6 +391,17 @@ async fn migrate(db: &Db) -> Result<()> {
     let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
         .fetch_one(db)
         .await?;
+    let latest = MIGRATIONS.last().map_or(0, |(v, _)| *v);
+    if let Some(current) = current
+        && current > latest
+    {
+        anyhow::bail!(
+            "this database was last used by a newer PassAuth server (schema version {current}; \
+             version {} knows up to {latest}). Start that newer version again, or restore the \
+             backup you made before upgrading",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     for (version, stmts) in MIGRATIONS {
         if current.unwrap_or(0) >= *version {
             continue;
@@ -240,6 +464,15 @@ pub async fn server_secret(db: &Db, name: &str, init: impl FnOnce() -> String) -
     )
 }
 
+/// Remove a server secret (it is made again on first use).
+pub async fn delete_secret(db: &Db, name: &str) -> Result<()> {
+    sqlx::query("DELETE FROM server_secrets WHERE name = $1")
+        .bind(name)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Read an admin-changed server setting (None = use the env default).
 pub async fn setting(db: &Db, name: &str) -> Result<Option<String>> {
     Ok(
@@ -250,7 +483,11 @@ pub async fn setting(db: &Db, name: &str) -> Result<Option<String>> {
     )
 }
 
-pub async fn set_setting(db: &Db, name: &str, value: &str) -> Result<()> {
+/// Save a setting (on the pool, or inside a caller's transaction).
+pub async fn set_setting<'e, E>(db: E, name: &str, value: &str) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
     sqlx::query(
         "INSERT INTO server_settings (name, value) VALUES ($1, $2)
          ON CONFLICT (name) DO UPDATE SET value = excluded.value",
@@ -263,7 +500,10 @@ pub async fn set_setting(db: &Db, name: &str, value: &str) -> Result<()> {
 }
 
 /// Remove a setting; true when it existed.
-pub async fn delete_setting(db: &Db, name: &str) -> Result<bool> {
+pub async fn delete_setting<'e, E>(db: E, name: &str) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
     let done = sqlx::query("DELETE FROM server_settings WHERE name = $1")
         .bind(name)
         .execute(db)
@@ -272,7 +512,10 @@ pub async fn delete_setting(db: &Db, name: &str) -> Result<bool> {
 }
 
 /// Replace a setting only if it still holds `old` (two requests can't both use one code).
-pub async fn swap_setting(db: &Db, name: &str, old: &str, new: &str) -> Result<bool> {
+pub async fn swap_setting<'e, E>(db: E, name: &str, old: &str, new: &str) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
     let done = sqlx::query("UPDATE server_settings SET value = $1 WHERE name = $2 AND value = $3")
         .bind(new)
         .bind(name)
@@ -285,4 +528,196 @@ pub async fn swap_setting(db: &Db, name: &str, old: &str, new: &str) -> Result<b
 /// Whether the database is PostgreSQL (else SQLite).
 pub fn is_postgres(url: &str) -> bool {
     url.starts_with("postgres")
+}
+
+/// What [`backup`] wrote.
+#[derive(Debug)]
+pub struct Backup {
+    /// Bytes of the database copy.
+    pub size: u64,
+    /// The attachment files, when the copy has any.
+    pub attachments: Option<AttachmentsCopy>,
+}
+
+/// The folder of attachment files written beside a backup copy.
+#[derive(Debug)]
+pub struct AttachmentsCopy {
+    /// `<backup file>.attachments`, laid out like the attachments folder.
+    pub dir: std::path::PathBuf,
+    /// Files in it (one per attachment in the copy).
+    pub files: u64,
+    /// Attachments whose file was deleted after the copy was taken: left out of
+    /// the copy, rows included.
+    pub missing: u64,
+}
+
+/// The folder beside backup file `target` that holds its attachment files.
+pub fn attachments_backup_dir(target: &std::path::Path) -> std::path::PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(".attachments");
+    name.into()
+}
+
+/// Write a consistent copy of the SQLite database to `target` (a new file, mode
+/// 0600: it holds the server's OPAQUE key) while the server keeps running, and
+/// the files of the attachments that are ready in that copy to the new folder
+/// `<target>.attachments` (see [`copy_attachments`]). PostgreSQL is backed up with
+/// `pg_dump` instead.
+pub async fn backup(
+    url: &str,
+    attachments: Option<&std::path::Path>,
+    target: &std::path::Path,
+) -> Result<Backup> {
+    if is_postgres(url) {
+        anyhow::bail!(
+            "the database is PostgreSQL: back it up with pg_dump (for example `pg_dump -Fc -f passauth.dump <database>`)"
+        );
+    }
+    if url.contains(":memory:") {
+        anyhow::bail!("the database is in memory; there is nothing to back up");
+    }
+    // Never create an empty database (`mode=rwc`) just to copy it.
+    let source = url.strip_prefix("sqlite:").unwrap_or(url);
+    let source = source.strip_prefix("//").unwrap_or(source);
+    let source = source.split('?').next().unwrap_or_default();
+    if !std::path::Path::new(source).is_file() {
+        anyhow::bail!("there is no database at {source:?} (check DATABASE_URL)");
+    }
+    // `VACUUM INTO` needs a missing or empty file; creating it first (never
+    // following an existing file or link) sets its permissions.
+    let mut file = std::fs::OpenOptions::new();
+    file.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+    file.open(target)
+        .with_context(|| format!("creating {} (it must not exist yet)", target.display()))?;
+    let path = target
+        .to_str()
+        .context("the backup path must be valid UTF-8")?
+        .to_owned();
+    let db = open(url, 1).await?;
+    let done = sqlx::query("VACUUM INTO $1")
+        .bind(&path)
+        .execute(&db)
+        .await
+        .map_err(|e| anyhow::Error::from(e).context("copying the database"));
+    db.close().await;
+    let done = match done {
+        Ok(_) => forget_sync_generation(&path).await,
+        Err(e) => Err(e),
+    };
+    let copied = match done {
+        Ok(()) => copy_attachments(&path, attachments, target).await,
+        Err(e) => Err(e),
+    };
+    match copied {
+        Ok(attachments) => Ok(Backup {
+            size: std::fs::metadata(target)?.len(),
+            attachments,
+        }),
+        Err(e) => {
+            std::fs::remove_file(target).ok();
+            Err(e)
+        }
+    }
+}
+
+/// Put the attachment files of the backup copy at `copy` beside it, so the copy
+/// and its files match: the files of the rows that are `ready` in the copy go to
+/// the new folder `<target>.attachments` (hard links where the file system allows,
+/// as files never change in place). Pending uploads have no file yet and a file
+/// deleted after the copy was taken can't be copied: their rows are left out of the
+/// copy. `None` when the copy has no attachments (no folder is made).
+async fn copy_attachments(
+    copy: &str,
+    from: Option<&std::path::Path>,
+    target: &std::path::Path,
+) -> Result<Option<AttachmentsCopy>> {
+    use sqlx::{ConnectOptions, Connection};
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(copy)
+        .connect()
+        .await
+        .context("opening the backup copy")?;
+    // A database the server hasn't migrated yet has no attachments.
+    let table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'attachments'",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    if table == 0 {
+        conn.close().await?;
+        return Ok(None);
+    }
+    sqlx::query("DELETE FROM attachments WHERE state <> 'ready'")
+        .execute(&mut conn)
+        .await
+        .context("updating the backup copy")?;
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM attachments ORDER BY id")
+        .fetch_all(&mut conn)
+        .await?;
+    if ids.is_empty() {
+        conn.close().await?;
+        return Ok(None);
+    }
+    let Some(from) = from else {
+        anyhow::bail!(
+            "the database has attachments but no attachments folder is set (ATTACHMENTS_DIR)"
+        );
+    };
+    let dir = attachments_backup_dir(target);
+    crate::files::new_folder(&dir).with_context(|| {
+        format!(
+            "creating {} for the attachment files (it must not exist yet)",
+            dir.display()
+        )
+    })?;
+    let copied = async {
+        let missing = tokio::task::spawn_blocking({
+            let (from, dir, ids) = (from.to_owned(), dir.clone(), ids.clone());
+            move || crate::files::copy_into(&from, &ids, &dir)
+        })
+        .await?
+        .context("copying the attachment files")?;
+        if !missing.is_empty() {
+            sqlx::query("DELETE FROM attachments WHERE id IN (SELECT value FROM json_each($1))")
+                .bind(serde_json::to_string(&missing)?)
+                .execute(&mut conn)
+                .await
+                .context("updating the backup copy")?;
+        }
+        conn.close().await?;
+        anyhow::Ok(missing.len() as u64)
+    }
+    .await;
+    match copied {
+        Ok(missing) => Ok(Some(AttachmentsCopy {
+            dir,
+            files: ids.len() as u64 - missing,
+            missing,
+        })),
+        Err(e) => {
+            std::fs::remove_dir_all(&dir).ok();
+            Err(e)
+        }
+    }
+}
+
+/// Leave the sync generation out of a backup copy: a server started from it
+/// makes a new one, so apps that synced after the backup was made fetch their
+/// vaults in full once instead of trusting cursors from a newer database.
+async fn forget_sync_generation(copy: &str) -> Result<()> {
+    use sqlx::{ConnectOptions, Connection};
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(copy)
+        .connect()
+        .await
+        .context("opening the backup copy")?;
+    sqlx::query("DELETE FROM server_secrets WHERE name = $1")
+        .bind(crate::state::SYNC_GENERATION)
+        .execute(&mut conn)
+        .await
+        .context("updating the backup copy")?;
+    conn.close().await?;
+    Ok(())
 }

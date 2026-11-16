@@ -20,7 +20,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
 use axum::response::Response;
 use axum::routing::get;
 use dashmap::DashMap;
@@ -35,7 +35,7 @@ use url::Url;
 use crate::auth::client_ip;
 use crate::config::Config;
 use crate::db::now;
-use crate::state::AppState;
+use crate::state::{AppState, Class};
 
 const USER_AGENT: &str = "PassAuth-Icons/1.0";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -77,8 +77,11 @@ async fn icon(
         Some(hit) => hit,
         None => {
             let key = format!("icons:{}", client_ip(&state, &headers));
-            if !state.limiter.check(&key, RATE_LIMIT, 60) {
-                return reply(StatusCode::TOO_MANY_REQUESTS, "no-store", None);
+            if let Err(retry) = state.limiter.hit(Class::Address, &key, RATE_LIMIT, 60) {
+                let mut resp = reply(StatusCode::TOO_MANY_REQUESTS, "no-store", None);
+                resp.headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from(retry));
+                return resp;
             }
             icons.fetch_coalesced(&host).await
         }

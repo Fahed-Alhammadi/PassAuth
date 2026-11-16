@@ -16,6 +16,9 @@ pub struct Mailer {
     /// Current SMTP setup; replaced from the admin page without a restart.
     smtp: std::sync::RwLock<Option<Arc<Smtp>>>,
     domain: String,
+    /// Every email `send_later` was asked for, sent or not: (to, subject, body).
+    #[cfg(test)]
+    pub outbox: std::sync::Mutex<Vec<(String, String, String)>>,
 }
 
 struct Smtp {
@@ -39,6 +42,8 @@ impl Mailer {
         let mailer = Self {
             smtp: std::sync::RwLock::new(None),
             domain: domain.to_owned(),
+            #[cfg(test)]
+            outbox: std::sync::Mutex::new(Vec::new()),
         };
         mailer.configure(smtp)?;
         Ok(mailer)
@@ -116,6 +121,12 @@ impl Mailer {
 
     /// Send in the background; failures are logged, never surfaced to the requester.
     pub fn send_later(self: &Arc<Self>, to: String, email: Email) {
+        #[cfg(test)]
+        self.outbox.lock().expect("outbox lock").push((
+            to.clone(),
+            email.subject.clone(),
+            email.body.clone(),
+        ));
         let mailer = self.clone();
         tokio::spawn(async move {
             if let Err(e) = mailer.send(&to, email).await {

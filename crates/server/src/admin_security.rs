@@ -8,7 +8,7 @@
 use std::net::IpAddr;
 
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,9 @@ use crate::admin::Admin;
 use crate::auth::{client_addr, client_ip};
 use crate::config::IpNet;
 use crate::db::{self, Db, now};
-use crate::error::{ApiError, ApiResult};
-use crate::state::{AppState, ct_eq, hash_token};
+use crate::error::{ApiError, ApiResult, code};
+use crate::events::Event;
+use crate::state::{AppState, Class, ct_eq, hash_token};
 use crate::twofactor::{check_totp, new_recovery_codes, new_totp_secret};
 
 pub const SETTING: &str = "admin_2fa";
@@ -112,14 +113,12 @@ pub async fn check_code(db: &Db, code: &str) -> ApiResult<bool> {
 
 /// Wrong codes on these endpoints are limited per address like the sign-in.
 fn limit(state: &AppState, headers: &HeaderMap) -> ApiResult<()> {
-    if state
-        .limiter
-        .check(&format!("admin2fa:{}", client_ip(state, headers)), 10, 60)
-    {
-        Ok(())
-    } else {
-        Err(ApiError::TooManyRequests)
-    }
+    state.limiter.limit(
+        Class::Address,
+        &format!("admin2fa:{}", client_ip(state, headers)),
+        10,
+        60,
+    )
 }
 
 const WRONG_CODE: &str =
@@ -136,7 +135,11 @@ async fn status(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Value
 /// Start setup: a new secret, kept in memory until the first code confirms it.
 async fn setup(State(state): State<AppState>, _: Admin) -> ApiResult<Json<Value>> {
     if enabled(&state.db).await? {
-        return Err(ApiError::Conflict("two-step login is already on".into()));
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            code::ALREADY_ENABLED,
+            "two-step login is already on",
+        ));
     }
     let secret = new_totp_secret();
     *state.admin_2fa_setup.lock().expect("admin 2fa setup lock") =
@@ -161,7 +164,7 @@ struct CodeBody {
 /// Confirm setup with the first code; returns the recovery codes (shown once).
 async fn enable(
     State(state): State<AppState>,
-    _: Admin,
+    admin: Admin,
     headers: HeaderMap,
     Json(b): Json<CodeBody>,
 ) -> ApiResult<Json<Value>> {
@@ -173,16 +176,20 @@ async fn enable(
         .clone()
         .filter(|(_, expires)| *expires > now());
     let Some((secret, _)) = pending else {
-        return Err(ApiError::bad("the setup has expired. Start it again"));
+        return Err(ApiError::expired("the setup has expired. Start it again"));
     };
     let code = b.code.trim().replace(' ', "");
     let Some(step) = check_totp(&secret, &code, -1) else {
-        return Err(ApiError::bad(
+        return Err(ApiError::invalid_code(
             "that code isn't right. Check that the time on your phone is correct and enter the newest code",
         ));
     };
     if enabled(&state.db).await? {
-        return Err(ApiError::Conflict("two-step login is already on".into()));
+        return Err(ApiError::coded(
+            StatusCode::CONFLICT,
+            code::ALREADY_ENABLED,
+            "two-step login is already on",
+        ));
     }
     let (codes, hashes) = new_recovery_codes();
     let data = Admin2fa {
@@ -191,7 +198,13 @@ async fn enable(
         recovery: hashes,
     };
     let json = serde_json::to_string(&data).map_err(anyhow::Error::from)?;
-    db::set_setting(&state.db, SETTING, &json).await?;
+    let mut tx = state.db.begin().await?;
+    db::set_setting(&mut *tx, SETTING, &json).await?;
+    Event::new("admin.two_step_enabled")
+        .by_admin(&admin)
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
     *state.admin_2fa_setup.lock().expect("admin 2fa setup lock") = None;
     tracing::warn!(ip = %client_ip(&state, &headers), "admin two-step login turned on");
     Ok(Json(json!({ "recovery_codes": codes })))
@@ -199,15 +212,22 @@ async fn enable(
 
 async fn disable(
     State(state): State<AppState>,
-    _: Admin,
+    admin: Admin,
     headers: HeaderMap,
     Json(b): Json<CodeBody>,
 ) -> ApiResult<Json<Value>> {
     limit(&state, &headers)?;
     if !check_code(&state.db, &b.code).await? {
-        return Err(ApiError::bad(WRONG_CODE));
+        return Err(ApiError::invalid_code(WRONG_CODE));
     }
-    db::delete_setting(&state.db, SETTING).await?;
+    let mut tx = state.db.begin().await?;
+    if db::delete_setting(&mut *tx, SETTING).await? {
+        Event::new("admin.two_step_disabled")
+            .by_admin(&admin)
+            .record(&mut tx, &state)
+            .await?;
+    }
+    tx.commit().await?;
     tracing::warn!(ip = %client_ip(&state, &headers), "admin two-step login turned off");
     Ok(Json(json!({ "enabled": false })))
 }
@@ -215,13 +235,13 @@ async fn disable(
 /// Replace the recovery codes (the old ones stop working).
 async fn new_codes(
     State(state): State<AppState>,
-    _: Admin,
+    admin: Admin,
     headers: HeaderMap,
     Json(b): Json<CodeBody>,
 ) -> ApiResult<Json<Value>> {
     limit(&state, &headers)?;
     if !check_code(&state.db, &b.code).await? {
-        return Err(ApiError::bad(WRONG_CODE));
+        return Err(ApiError::invalid_code(WRONG_CODE));
     }
     let Some((raw, mut data)) = load(&state.db).await? else {
         return Err(ApiError::Conflict("two-step login is off".into()));
@@ -229,9 +249,15 @@ async fn new_codes(
     let (codes, hashes) = new_recovery_codes();
     data.recovery = hashes;
     let new = serde_json::to_string(&data).map_err(anyhow::Error::from)?;
-    if !db::swap_setting(&state.db, SETTING, &raw, &new).await? {
+    let mut tx = state.db.begin().await?;
+    if !db::swap_setting(&mut *tx, SETTING, &raw, &new).await? {
         return Err(ApiError::Conflict("try again".into()));
     }
+    Event::new("admin.recovery_codes_created")
+        .by_admin(&admin)
+        .record(&mut tx, &state)
+        .await?;
+    tx.commit().await?;
     tracing::info!("admin recovery codes replaced");
     Ok(Json(json!({ "recovery_codes": codes })))
 }

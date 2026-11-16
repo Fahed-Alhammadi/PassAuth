@@ -10,7 +10,6 @@ rand_core06 = { package = "rand_core", version = "0.6", features = ["getrandom"]
 anyhow = "1.0.104"
 argon2 = { version = "0.5", features = ["std"] }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
-base64 = "0.23.1"
 dashmap = "6.2.1"
 futures-util = "0.3.34"
 http-body-util = "0.1.5"
@@ -20,23 +19,26 @@ lettre = { version = "0.11.23", default-features = false, features = ["tokio1", 
 passauth-core = { path = "../core" }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "any", "migrate", "macros"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "any", "derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
-tower-http = { version = "0.7.1", features = ["trace", "cors", "set-header", "limit", "fs"] }
+tower-http = { version = "0.7.1", features = ["trace", "set-header", "fs", "catch-panic", "compression-gzip", "compression-br"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.8"
-uuid = { version = "1.29.0", features = ["v4"] }
+uuid = { version = "1.29.0", features = ["v4", "v7"] }
 webpki-roots = "1.0.11"
 webauthn-rs = "0.6.2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# statvfs for the free-disk reserve (`disk.rs`); setresuid & co. on Linux (`privileges.rs`).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 
 [dev-dependencies]
 passauth-core = { path = "../core", features = ["insecure-test-kdf"] }
 tower = { version = "0.5", features = ["util"] }
+tokio-tungstenite = "0.29.0"
+flate2 = "1.1"

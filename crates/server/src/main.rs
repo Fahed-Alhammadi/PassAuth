@@ -2,14 +2,22 @@ mod account;
 mod admin;
 mod admin_security;
 mod auth;
+mod auth_requests;
 mod config;
 mod db;
+mod disk;
+mod emergency;
 mod error;
+mod events;
+mod files;
 mod icons;
 mod logging;
 mod mail;
 mod passkeys;
+mod policies;
 mod privileges;
+mod sends;
+mod settings;
 mod state;
 mod twofactor;
 mod vault;
@@ -29,6 +37,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -48,12 +57,31 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(serve())
         }
+        Some("reset-sync") => {
+            privileges::drop_root(false)?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(reset_sync())
+        }
         Some("reset-admin-2fa") => {
             privileges::drop_root(false)?;
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
                 .block_on(reset_admin_2fa())
+        }
+        Some("backup") => {
+            let Some(target) = args.next() else {
+                anyhow::bail!(
+                    "usage: passauth-server backup <file>, e.g. /data/passauth-backup.db"
+                );
+            };
+            privileges::drop_root(false)?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(backup(target))
         }
         Some("hash-admin-token") => {
             privileges::drop_root(false)?;
@@ -71,7 +99,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(other) => anyhow::bail!(
-            "unknown command {other:?} (expected serve, reset-admin-2fa, hash-admin-token, healthcheck)"
+            "unknown command {other:?} (expected serve, backup, reset-sync, reset-admin-2fa, hash-admin-token, healthcheck)"
         ),
     }
 }
@@ -102,24 +130,7 @@ async fn serve() -> Result<()> {
         );
     }
 
-    let sweeper = state.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tick.tick().await;
-            sweeper.sweep();
-            sweeper.icons.sweep().await;
-            let cutoff = db::now();
-            let _ = sqlx::query("DELETE FROM sessions WHERE refresh_expires < $1")
-                .bind(cutoff)
-                .execute(&sweeper.db)
-                .await;
-            let _ = sqlx::query("DELETE FROM email_tokens WHERE expires_at < $1")
-                .bind(cutoff)
-                .execute(&sweeper.db)
-                .await;
-        }
-    });
+    tokio::spawn(sweeper(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, version = env!("CARGO_PKG_VERSION"), "PassAuth server listening");
@@ -130,6 +141,121 @@ async fn serve() -> Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
     tracing::info!("PassAuth server stopped");
+    Ok(())
+}
+
+/// Housekeeping every minute: expired in-memory state, icon cache, sessions and
+/// email codes, emergency access requests whose waiting period ended, and sign-in
+/// requests (expired, deleted a day later); every ten
+/// minutes the trash (admin setting `trash_days`), old tombstones
+/// (`tombstone_days`), old activity-log entries (`event_days`), Sends past their
+/// deletion date, attachment uploads left pending, expired "remember this device"
+/// tokens and devices without a session that haven't been seen for
+/// [`FORGET_DEVICES_DAYS`]; every hour attachment files without an attachment.
+/// Each step runs on its own ([`sweep_step`]): one that fails or panics doesn't
+/// keep the others from running.
+async fn sweeper(state: AppState) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    let mut round = 0u64;
+    loop {
+        tick.tick().await;
+        round = round.wrapping_add(1);
+        sweep_step("dropping expired sign-ins and rate limits", async {
+            state.sweep();
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .await;
+        sweep_step("cleaning the icon cache", async {
+            state.icons.sweep().await;
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .await;
+        let cutoff = db::now();
+        for (what, sql) in [
+            (
+                "removing expired sessions",
+                "DELETE FROM sessions WHERE refresh_expires < $1",
+            ),
+            (
+                "removing expired email codes",
+                "DELETE FROM email_tokens WHERE expires_at < $1",
+            ),
+        ] {
+            sweep_step(what, sqlx::query(sql).bind(cutoff).execute(&state.db)).await;
+        }
+        sweep_step(
+            "approving waited emergency access requests",
+            emergency::approve_waited(&state),
+        )
+        .await;
+        sweep_step("expiring sign-in requests", auth_requests::sweep(&state)).await;
+        if round % 10 == 1 {
+            sweep_step("emptying the trash", vault::purge_trash(&state)).await;
+            sweep_step("forgetting old deletions", vault::purge_tombstones(&state)).await;
+            sweep_step("deleting old activity-log entries", events::purge(&state)).await;
+            sweep_step("deleting old Sends", sends::purge(&state)).await;
+            sweep_step(
+                "deleting abandoned attachments",
+                vault::sweep_attachments(&state, round % 60 == 1),
+            )
+            .await;
+            sweep_step("forgetting old devices", forget_old_devices(&state.db)).await;
+        }
+    }
+}
+
+/// Run one housekeeping step: an error is logged, and so is a panic, which ends
+/// only this step (until the next round), never the sweeper.
+async fn sweep_step<T, E: std::fmt::Display>(
+    what: &str,
+    work: impl std::future::Future<Output = Result<T, E>>,
+) {
+    use futures_util::FutureExt;
+    match std::panic::AssertUnwindSafe(work).catch_unwind().await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "{what} failed"),
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!(
+                panic = why,
+                "{what} panicked; the other housekeeping goes on"
+            );
+        }
+    }
+}
+
+/// Devices without a session that haven't signed in or refreshed a session for
+/// this long are forgotten (their next sign-in counts as a new device).
+const FORGET_DEVICES_DAYS: i64 = 90;
+
+/// Clear expired "remember this device" tokens and forget devices that have had
+/// no session for [`FORGET_DEVICES_DAYS`].
+async fn forget_old_devices(db: &db::Db) -> Result<()> {
+    let t = db::now();
+    sqlx::query(
+        "UPDATE devices SET remember_hash = NULL, remember_expires = NULL
+         WHERE remember_expires IS NOT NULL AND remember_expires < $1",
+    )
+    .bind(t)
+    .execute(db)
+    .await?;
+    let gone = sqlx::query(
+        "DELETE FROM devices WHERE last_seen < $1 AND NOT EXISTS
+           (SELECT 1 FROM sessions s WHERE s.user_id = devices.user_id AND s.device_id = devices.id)",
+    )
+    .bind(t - FORGET_DEVICES_DAYS * 86_400)
+    .execute(db)
+    .await?;
+    if gone.rows_affected() > 0 {
+        tracing::info!(
+            devices = gone.rows_affected(),
+            "forgot devices unused for {FORGET_DEVICES_DAYS} days"
+        );
+    }
     Ok(())
 }
 
@@ -165,7 +291,10 @@ pub fn router(state: AppState) -> Router {
         .nest("/auth", auth::routes())
         .nest("/account", account::routes())
         .nest("/admin", admin::routes())
+        .nest("/emergency-access", emergency::routes())
+        .nest("/public", sends::public_routes())
         .merge(vault::routes())
+        .merge(sends::routes())
         .layer(SetResponseHeaderLayer::overriding(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
@@ -201,18 +330,136 @@ pub fn router(state: AppState) -> Router {
     };
     // Small by default; item and bulk routes raise it (see `vault::routes`).
     app.layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(CatchPanicLayer::custom(panic_response))
         .layer(middleware::from_fn(static_cache))
+        // Inside the default `referrer-policy` below, which keeps what this sets.
+        .layer(middleware::from_fn(send_page))
         .layer(h("x-content-type-options", "nosniff"))
         .layer(h("x-frame-options", "DENY"))
         .layer(h("referrer-policy", "same-origin"))
-        .layer(h("permissions-policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()"))
         .layer(h(
-            "content-security-policy",
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'",
+            "permissions-policy",
+            "camera=(), microphone=(), geolocation=(), interest-cohort=()",
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            content_security_policy,
+        ))
+        .layer(TraceLayer::new_for_http().make_span_with(request_span))
+        .layer(middleware::from_fn(request_id))
         .layer(middleware::from_fn(peer_ip))
         .with_state(state)
+}
+
+/// The Content-Security-Policy of every response that doesn't set its own (the
+/// web vault's pages above all). With the admin's `breach_check` on, the web
+/// vault may also connect to Have I Been Pwned's range API, which it asks with
+/// the first five characters of a password's SHA-1 (k-anonymity; the server
+/// never sees any of it).
+const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+const CSP_BREACH_CHECK: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+
+/// [`CSP`] or [`CSP_BREACH_CHECK`], from the live setting (no restart needed).
+async fn content_security_policy(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut resp = next.run(req).await;
+    let policy = if state.breach_check() {
+        CSP_BREACH_CHECK
+    } else {
+        CSP
+    };
+    resp.headers_mut()
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(policy));
+    resp
+}
+
+/// The web vault's public Send page (`/send/<id>#<key>`): its key is in the
+/// fragment, which browsers never send. `no-referrer` keeps even the Send's id
+/// out of every request the page makes, and search engines are asked to stay away.
+async fn send_page(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let send = path == "/send" || path.starts_with("/send/");
+    let mut resp = next.run(req).await;
+    if send {
+        let headers = resp.headers_mut();
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-robots-tag"),
+            HeaderValue::from_static("noindex, nofollow"),
+        );
+    }
+    resp
+}
+
+const REQUEST_ID: &str = "x-request-id";
+
+/// Request ids: a well-formed `x-request-id` from a proxy is kept, anything
+/// else replaced by a new one. It goes back in the response header, into the
+/// request's log span and into JSON error bodies (`request_id`).
+async fn request_id(mut req: Request, next: Next) -> Response {
+    let given = req
+        .headers()
+        .get(REQUEST_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        })
+        .map(str::to_owned);
+    let id = given.unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+    let value = HeaderValue::from_str(&id).expect("request ids are visible ASCII");
+    req.headers_mut().insert(REQUEST_ID, value.clone());
+    let mut resp = error::REQUEST_ID.scope(id, next.run(req)).await;
+    resp.headers_mut().insert(REQUEST_ID, value);
+    resp
+}
+
+/// The request's log span (debug level): method, path, request id and client
+/// app. Never the query string: `/api/ws?access_token=…` and
+/// `/verify-email?token=…` carry secrets there.
+fn request_span(req: &Request) -> tracing::Span {
+    let id = req
+        .headers()
+        .get(REQUEST_ID)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let client = auth::client_app(req.headers());
+    tracing::debug_span!(
+        "request",
+        method = %req.method(),
+        path = %req.uri().path(),
+        request_id = %id,
+        client = client.as_deref().unwrap_or("-"),
+    )
+}
+
+/// A handler panicked: log it and answer 500 like any internal error; the
+/// server keeps running.
+fn panic_response(panic: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    let what = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic");
+    tracing::error!(
+        panic = what,
+        request_id = error::request_id().unwrap_or_default(),
+        "request handler panicked"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(error::body("internal", "internal error")),
+    )
+        .into_response()
 }
 
 /// Records the TCP peer address for rate limiting when no `IP_HEADER` is set.
@@ -265,11 +512,17 @@ async fn static_cache(req: Request, next: Next) -> Response {
     resp
 }
 
-/// Every API error is JSON (`{"error","message"}`), including axum's own
-/// rejections (bad JSON, body too large…), so clients can always parse it.
+/// Every API error is JSON (`{"error","message","request_id"}`), including
+/// axum's own rejections (bad JSON, body too large…), so clients can always
+/// parse it, and every 429 says when to retry (`Retry-After`, seconds).
 async fn json_errors(req: Request, next: Next) -> Response {
-    let resp = next.run(req).await;
+    let mut resp = next.run(req).await;
     let status = resp.status();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        resp.headers_mut()
+            .entry(header::RETRY_AFTER)
+            .or_insert(HeaderValue::from_static("60"));
+    }
     let is_json = resp
         .headers()
         .get(header::CONTENT_TYPE)
@@ -288,6 +541,8 @@ async fn json_errors(req: Request, next: Next) -> Response {
         StatusCode::PAYLOAD_TOO_LARGE => "too_large",
         StatusCode::UNSUPPORTED_MEDIA_TYPE | StatusCode::UNPROCESSABLE_ENTITY => "bad_request",
         StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+        StatusCode::NOT_FOUND => "not_found",
         s if s.is_server_error() => "internal",
         _ => "bad_request",
     };
@@ -301,17 +556,90 @@ async fn json_errors(req: Request, next: Next) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let body = json!({ "error": code, "message": message }).to_string();
+    let body = error::body(code, &message).to_string();
     Response::from_parts(parts, axum::body::Body::from(body))
 }
 
+/// API version of this server: clients feature-detect from [`FEATURES`], never
+/// from version numbers.
+const API_VERSION: u32 = 2;
+
+/// What this server supports beyond API 1 (see docs/ARCHITECTURE.md), plus
+/// `breach_check` while the admin allows it, `item_history` while the admin
+/// keeps item versions (`item_versions_kept` above 0), `sends` while Send is on,
+/// `attachments` while attachments are on and have a folder, `emergency_access`
+/// and `login_with_device` while they are on, and `icons` while the website-icon
+/// service is on (`/api/icons/{host}` answers 404 otherwise, so apps don't ask).
+const FEATURES: &[&str] = &[
+    "key_epoch",
+    "idempotent_create",
+    "error_codes",
+    "revoke_others",
+    "trash_retention",
+    "delta_sync",
+    "vault_invitations",
+    "activity_log",
+    "policies",
+    "forget_device",
+];
+
 async fn public_config(State(state): State<AppState>) -> Json<Value> {
+    let mut features = FEATURES.to_vec();
+    if state.breach_check() {
+        features.push("breach_check");
+    }
+    if state.num(settings::Num::ItemVersionsKept) > 0 {
+        features.push("item_history");
+    }
+    if state.flag(settings::Flag::Sends) {
+        features.push("sends");
+    }
+    if state.flag(settings::Flag::Attachments) && state.files.is_some() {
+        features.push("attachments");
+    }
+    if state.flag(settings::Flag::EmergencyAccess) {
+        features.push("emergency_access");
+    }
+    if state.flag(settings::Flag::LoginWithDevice) {
+        features.push("login_with_device");
+    }
+    if state.icons.enabled() {
+        features.push("icons");
+    }
     Json(json!({
         "name": "PassAuth",
         "version": env!("CARGO_PKG_VERSION"),
+        "api": API_VERSION,
+        "features": features,
         "signups_allowed": state.signups.read().expect("signup policy lock").allowed,
         "email_enabled": state.mailer.enabled(),
+        "trash_days": state.trash_days(),
+        // What clients split their requests by.
+        "limits": {
+            "max_import_items": state.num(settings::Num::MaxImportItems),
+            "max_item_kib": state.num(settings::Num::MaxItemKib),
+            "item_versions_kept": state.num(settings::Num::ItemVersionsKept),
+            "send_max_days": state.num(settings::Num::SendMaxDays),
+            "send_max_bytes": sends::MAX_DATA,
+            "max_attachment_mb": state.num(settings::Num::MaxAttachmentMb),
+        },
+        // Account policies (`policies.rs`), for apps to apply before sign-in too.
+        "policies": policies::config_json(&state),
     }))
+}
+
+/// `docker compose run --rm passauth reset-sync`, after restoring a database
+/// backup made some other way than `backup` (pg_dump, a file copy):
+/// every app's sync cursor names a newer database, so make them all fetch their
+/// vaults in full once. The server picks the new generation up when it starts.
+async fn reset_sync() -> Result<()> {
+    let config = Config::from_env()?;
+    let db = db::connect(&config.database_url, 1).await?;
+    db::delete_secret(&db, state::SYNC_GENERATION).await?;
+    println!(
+        "Done. When the server starts, every app fetches its vaults in full at its next sync."
+    );
+    Ok(())
 }
 
 /// `docker compose exec passauth passauth-server reset-admin-2fa`: turn off two-step
@@ -319,7 +647,7 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
 /// on a running server (the setting is read on every sign-in).
 async fn reset_admin_2fa() -> Result<()> {
     let config = Config::from_env()?;
-    let db = db::connect(&config.database_url).await?;
+    let db = db::connect(&config.database_url, 1).await?;
     if db::delete_setting(&db, admin_security::SETTING).await? {
         println!(
             "Two-step login for the admin page is off. Sign in at /admin with the user name and password, then set it up again."
@@ -327,6 +655,37 @@ async fn reset_admin_2fa() -> Result<()> {
     } else {
         println!("Two-step login for the admin page was not on.");
     }
+    Ok(())
+}
+
+/// `docker compose exec passauth passauth-server backup /data/passauth-backup.db`:
+/// a consistent copy of the SQLite database, made while the server runs, and the
+/// files of its attachments in `<file>.attachments`.
+async fn backup(target: String) -> Result<()> {
+    let config = Config::from_env()?;
+    let done = db::backup(
+        &config.database_url,
+        config.attachments_dir.as_deref().map(std::path::Path::new),
+        std::path::Path::new(&target),
+    )
+    .await?;
+    println!("Backup written to {target} ({} bytes).", done.size);
+    if let Some(files) = &done.attachments {
+        println!(
+            "Attachment files: {} in {} (restore it as the attachments folder together with the database).",
+            files.files,
+            files.dir.display()
+        );
+        if files.missing > 0 {
+            println!(
+                "{} attachments were deleted while the backup was made and are left out of it.",
+                files.missing
+            );
+        }
+    }
+    println!(
+        "Keep it as safe as the server: it holds the server's sign-in key and every account's encrypted vault."
+    );
     Ok(())
 }
 

@@ -12,6 +12,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use webauthn_rs::prelude::*;
 
+use sqlx::AnyConnection;
+
 use crate::db::{Db, now};
 use crate::error::{ApiError, ApiResult};
 use crate::twofactor;
@@ -101,12 +103,17 @@ pub fn credential_id(key: &SecurityKey) -> String {
     b64(key.cred_id())
 }
 
-/// Store a new credential and mark the method enabled (`two_factor` row).
-/// Fails with 409 when the same authenticator is already registered.
-pub async fn insert(db: &Db, user_id: &str, name: &str, key: &SecurityKey) -> ApiResult<String> {
+/// Store a new credential and mark the method enabled (`two_factor` row),
+/// inside the caller's transaction. Fails with 409 when the same authenticator
+/// is already registered.
+pub async fn insert(
+    conn: &mut AnyConnection,
+    user_id: &str,
+    name: &str,
+    key: &SecurityKey,
+) -> ApiResult<String> {
     let id = credential_id(key);
     let credential = serde_json::to_string(key).map_err(anyhow::Error::from)?;
-    let mut tx = db.begin().await?;
     sqlx::query(
         "INSERT INTO passkey_credentials (id, user_id, name, credential, created_at, last_used_at) VALUES ($1, $2, $3, $4, $5, NULL)",
     )
@@ -115,28 +122,28 @@ pub async fn insert(db: &Db, user_id: &str, name: &str, key: &SecurityKey) -> Ap
     .bind(name)
     .bind(&credential)
     .bind(now())
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
-    .map_err(|e| ApiError::conflict_on_unique(e, "this security key is already registered"))?;
+    .map_err(|e| ApiError::conflict_on_unique(e, "conflict", "this security key is already registered"))?;
     sqlx::query(
         "INSERT INTO two_factor (user_id, provider, data, enabled, last_used) VALUES ($1, $2, '{}', 1, 0)
          ON CONFLICT (user_id, provider) DO UPDATE SET enabled = 1",
     )
     .bind(user_id)
     .bind(twofactor::PASSKEY)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
-    tx.commit().await?;
     Ok(id)
 }
 
-/// Remove one credential. When it was the last, the method is turned off, and
-/// when no other method remains the recovery codes go too (as `DELETE /2fa/{provider}`).
-pub async fn remove(db: &Db, user_id: &str, id: &str) -> ApiResult<bool> {
+/// Remove one credential, inside the caller's transaction. When it was the last,
+/// the method is turned off, and when no other method remains the recovery codes
+/// go too (as `DELETE /2fa/{provider}`).
+pub async fn remove(conn: &mut AnyConnection, user_id: &str, id: &str) -> ApiResult<bool> {
     let done = sqlx::query("DELETE FROM passkey_credentials WHERE user_id = $1 AND id = $2")
         .bind(user_id)
         .bind(id)
-        .execute(db)
+        .execute(&mut *conn)
         .await?;
     if done.rows_affected() == 0 {
         return Ok(false);
@@ -144,18 +151,21 @@ pub async fn remove(db: &Db, user_id: &str, id: &str) -> ApiResult<bool> {
     let left: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM passkey_credentials WHERE user_id = $1")
             .bind(user_id)
-            .fetch_one(db)
+            .fetch_one(&mut *conn)
             .await?;
     if left == 0 {
         sqlx::query("DELETE FROM two_factor WHERE user_id = $1 AND provider = $2")
             .bind(user_id)
             .bind(twofactor::PASSKEY)
-            .execute(db)
+            .execute(&mut *conn)
             .await?;
-        if twofactor::enabled_providers(db, user_id).await?.is_empty() {
+        if twofactor::enabled_providers(&mut *conn, user_id)
+            .await?
+            .is_empty()
+        {
             sqlx::query("DELETE FROM two_factor WHERE user_id = $1")
                 .bind(user_id)
-                .execute(db)
+                .execute(&mut *conn)
                 .await?;
         }
     }

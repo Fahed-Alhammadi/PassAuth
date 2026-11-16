@@ -4,6 +4,8 @@ use passauth_core::crypto::random_bytes;
 use passauth_core::totp::Totp;
 use serde::{Deserialize, Serialize};
 
+use sqlx::AnyConnection;
+
 use crate::db::{Db, now};
 use crate::error::{ApiError, ApiResult};
 use crate::state::{ct_eq, hash_token};
@@ -15,12 +17,12 @@ pub const RECOVERY: &str = "recovery";
 pub const PASSKEY: &str = "passkey";
 const EMAIL_CODE_TTL: i64 = 10 * 60;
 const EMAIL_CODE_ATTEMPTS: i64 = 5;
-/// Wrong codes allowed per account within [`FAILURE_WINDOW`] before two-step
-/// sign-in is paused for [`LOCKOUT`]. Each password login issues a fresh
-/// two-factor token, so the per-token limit alone doesn't bound guessing.
-const MAX_FAILURES: i64 = 10;
+/// Wrong codes are counted per account within this window; after the admin's
+/// `two_step_attempts_per_hour` (10 by default) two-step sign-in is paused for
+/// [`LOCKOUT`]. Each password login issues a fresh two-factor token, so the
+/// per-token limit alone doesn't bound guessing.
 const FAILURE_WINDOW: i64 = 3600;
-const LOCKOUT: i64 = 3600;
+pub const LOCKOUT: i64 = 3600;
 
 #[derive(Serialize, Deserialize)]
 pub struct TotpData {
@@ -33,7 +35,11 @@ pub struct RecoveryData {
 }
 
 /// Enabled interactive providers (recovery codes are implied when any exist).
-pub async fn enabled_providers(db: &Db, user_id: &str) -> ApiResult<Vec<String>> {
+/// On the pool or inside a caller's transaction.
+pub async fn enabled_providers<'e, E>(db: E, user_id: &str) -> ApiResult<Vec<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Any>,
+{
     Ok(sqlx::query_scalar(
         "SELECT provider FROM two_factor WHERE user_id = $1 AND enabled = 1 AND provider <> 'recovery' ORDER BY provider",
     )
@@ -221,11 +227,14 @@ pub fn new_recovery_codes() -> (Vec<String>, Vec<String>) {
     (codes, hashes)
 }
 
-pub async fn regenerate_recovery_codes(db: &Db, user_id: &str) -> ApiResult<Vec<String>> {
+pub async fn regenerate_recovery_codes(
+    conn: &mut AnyConnection,
+    user_id: &str,
+) -> ApiResult<Vec<String>> {
     let (codes, hashes) = new_recovery_codes();
     let data = RecoveryData { hashes };
     upsert(
-        db,
+        conn,
         user_id,
         RECOVERY,
         &serde_json::to_string(&data).map_err(anyhow::Error::from)?,
@@ -236,7 +245,7 @@ pub async fn regenerate_recovery_codes(db: &Db, user_id: &str) -> ApiResult<Vec<
 }
 
 pub async fn upsert(
-    db: &Db,
+    conn: &mut AnyConnection,
     user_id: &str,
     provider: &str,
     data: &str,
@@ -251,23 +260,29 @@ pub async fn upsert(
     .bind(provider)
     .bind(data)
     .bind(enabled as i64)
-    .execute(db)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
 
-/// Whether two-step sign-in is paused for this account after wrong codes.
-pub async fn locked_out(db: &Db, user_id: &str) -> ApiResult<bool> {
+/// Seconds left while two-step sign-in is paused for this account after wrong codes.
+pub async fn lockout_left(db: &Db, user_id: &str) -> ApiResult<Option<u64>> {
     let until: Option<i64> =
         sqlx::query_scalar("SELECT locked_until FROM two_factor_failures WHERE user_id = $1")
             .bind(user_id)
             .fetch_optional(db)
             .await?;
-    Ok(until.is_some_and(|u| u > now()))
+    let t = now();
+    Ok(until.filter(|u| *u > t).map(|u| (u - t) as u64))
 }
 
-/// Count a wrong code. Returns true when this failure starts a lockout.
-pub async fn record_failure(db: &Db, user_id: &str) -> ApiResult<bool> {
+/// Count a wrong code; `max_failures` per [`FAILURE_WINDOW`] start a lockout.
+/// Returns true when this failure starts one.
+pub async fn record_failure(
+    conn: &mut AnyConnection,
+    user_id: &str,
+    max_failures: i64,
+) -> ApiResult<bool> {
     let t = now();
     sqlx::query(
         "INSERT INTO two_factor_failures (user_id, failures, window_start, locked_until) VALUES ($1, 1, $2, 0)
@@ -278,7 +293,7 @@ pub async fn record_failure(db: &Db, user_id: &str) -> ApiResult<bool> {
     .bind(user_id)
     .bind(t)
     .bind(t - FAILURE_WINDOW)
-    .execute(db)
+    .execute(&mut *conn)
     .await?;
     let locked = sqlx::query(
         "UPDATE two_factor_failures SET locked_until = $1, failures = 0, window_start = $2
@@ -287,8 +302,8 @@ pub async fn record_failure(db: &Db, user_id: &str) -> ApiResult<bool> {
     .bind(t + LOCKOUT)
     .bind(t)
     .bind(user_id)
-    .bind(MAX_FAILURES)
-    .execute(db)
+    .bind(max_failures)
+    .execute(&mut *conn)
     .await?;
     Ok(locked.rows_affected() == 1)
 }
