@@ -1,4 +1,6 @@
-• No more duplicate logins: if PassAuth already has a login for the app or site (even one with only a user name or only a password), it is updated instead. Android's save prompt says which will happen, and PassAuth asks first when it isn't sure which login you mean.
-• Passkey, unlock and save prompts open as a tidy sheet over the app you are in.
-• Cleaner vault list and clearer confirmations; Log out now asks first.
-• Shared-vault logins are never picked for you.
+• Sign in with another device, and approve new devices from your phone: pick the words they show, then enter the 6-digit code there.
+• Faster sync: only changes are downloaded.
+• In Settings: Vault invitations, Password health (the exposed-password check runs only when you ask) and, under Account security, Signed-in devices.
+• Better website matching for domains like .co.uk.
+• Clearer errors; your server's policies are followed.
+Most new features need server 0.10.0.
