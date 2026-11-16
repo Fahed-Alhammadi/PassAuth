@@ -1631,10 +1631,17 @@ pub struct EpochPin {
     pub roster_hash: Option<String>,
     /// Set when accepting the vault cleared a tombstone (the account had left it): the
     /// roster version accepted then. In [`KeyPins::merge`] a pin beats a tombstone only
-    /// when this is above the tombstone's roster version (review round 4 M2); a pin
-    /// without it (a stale copy from before the leave) is folded into the tombstone.
+    /// when this is above the tombstone's roster version (review round 4 M2) and the
+    /// tombstone is not a later leave than the one the re-join cleared
+    /// ([`rejoined_over`](Self::rejoined_over)); a pin without it (a stale copy from
+    /// before the leave) is folded into the tombstone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejoined_at: Option<u64>,
+    /// With `rejoined_at`: the `left_at` of the tombstone that re-join cleared (review
+    /// round 5 L). A tombstone left later than this (another device left the vault
+    /// without having seen the re-join) beats the re-joined pin in a merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejoined_over: Option<i64>,
     /// The account holds (or held) the vault with its own `account` key wrap. A `sealed`
     /// row with a new key for it while the vault has no signed history needs consent
     /// with a warning ([`Admission::Consent`] `own`): a personal vault never silently
@@ -1654,10 +1661,15 @@ impl EpochPin {
             roster_version_max: None,
             roster_hash: None,
             rejoined_at: None,
+            rejoined_over: None,
             own: false,
         })
     }
 
+    /// Well formed: key ids, at most [`MAX_RETIRED_KEY_IDS`] retired ids, and the roster
+    /// anchors together (review round 5 H): a highest trusted roster version always with
+    /// its hash (so a chain re-signed from version 1 can always be compared with it), and
+    /// `signed_since` only with a highest version at or above it.
     fn check(&self) -> Result<()> {
         key32(&self.key_id, "key id length")?;
         if self.retired.len() > MAX_RETIRED_KEY_IDS {
@@ -1666,11 +1678,25 @@ impl EpochPin {
         if self.retired.iter().any(|r| short_id(r).is_none()) {
             return Err(Error::Malformed("retired key id length"));
         }
-        if let Some(h) = &self.roster_hash {
-            key32(h, "roster hash length")?;
-            if self.roster_version_max.is_none() {
-                return Err(Error::Malformed("a roster hash without its version"));
+        match (self.roster_version_max, &self.roster_hash) {
+            (Some(_), Some(h)) => {
+                key32(h, "roster hash length")?;
             }
+            (None, None) => {}
+            (Some(_), None) => return Err(Error::Malformed("a roster version without its hash")),
+            (None, Some(_)) => return Err(Error::Malformed("a roster hash without its version")),
+        }
+        if let Some(since) = self.signed_since
+            && self.roster_version_max.is_none_or(|m| m < since)
+        {
+            return Err(Error::Malformed(
+                "signed_since without a highest roster version at or above it",
+            ));
+        }
+        if self.rejoined_at.is_some() != self.rejoined_over.is_some() {
+            return Err(Error::Malformed(
+                "rejoined_at and rejoined_over come together",
+            ));
         }
         Ok(())
     }
@@ -1681,21 +1707,13 @@ impl EpochPin {
         self.signed_since.max(self.roster_version_max)
     }
 
-    /// Raise the highest trusted roster to `version` (with `hash`, if known); at the
-    /// same version only fills a missing hash.
-    fn raise_roster(&mut self, version: Option<u64>, hash: Option<&str>) {
-        let Some(v) = version else { return };
-        match self.roster_version_max {
-            Some(m) if m > v => {}
-            Some(m) if m == v => {
-                if self.roster_hash.is_none() {
-                    self.roster_hash = hash.map(str::to_owned);
-                }
-            }
-            _ => {
-                self.roster_version_max = Some(v);
-                self.roster_hash = hash.map(str::to_owned);
-            }
+    /// Raise the highest trusted roster to `roster` (version and hash, always together:
+    /// review round 5 H); a lower or equal version changes nothing.
+    fn raise_roster(&mut self, roster: Option<(u64, &str)>) {
+        let Some((v, h)) = roster else { return };
+        if self.roster_version_max.is_none_or(|m| v > m) {
+            self.roster_version_max = Some(v);
+            self.roster_hash = Some(h.to_owned());
         }
     }
 }
@@ -1829,10 +1847,12 @@ pub struct KeyPins {
     /// `identity_mismatch`.
     #[serde(default)]
     pub own_identity: Option<String>,
-    /// The shared vault ids the account had at its first signed sync (written once):
-    /// these stay usable without a consent even unsigned ("Not yet signed").
+    /// The shared vaults the account had at its first signed sync (written once), as
+    /// `{vault id: key id}`: these stay usable without a consent while unsigned ("Not yet
+    /// signed"), and only with that key (review round 5: a grandfathered id with another
+    /// key needs consent).
     #[serde(default)]
-    pub grandfathered: Option<BTreeSet<String>>,
+    pub grandfathered: Option<BTreeMap<String, String>>,
     /// Vaults this account left or deleted.
     #[serde(default)]
     pub left: BTreeMap<String, Tombstone>,
@@ -1871,9 +1891,20 @@ pub enum OwnIdentityStatus {
     Mismatch,
 }
 
-/// A vault row as [`KeyPins::admit`] sees it, after the app opened its key and checked
-/// its signatures and roster chain.
+/// A shared vault the account has at its first signed sync, for
+/// [`KeyPins::grandfather`]: its id and the [`key_id`] of the key it has now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrandfatherCandidate {
+    pub vault_id: String,
+    pub key_id: String,
+}
+
+/// A vault row (or an invitation: `invitation`) as [`KeyPins::admit`] sees it, after the
+/// app opened its key and checked its signatures and roster chain. Unknown fields are
+/// refused (review round 5 Info: a misspelled `chain_hashes` must not be ignored).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultObservation {
     pub vault_id: String,
     /// `account` or `sealed` (the row's `key_kind`).
@@ -1889,7 +1920,8 @@ pub struct VaultObservation {
     pub roster_version: Option<u64>,
     /// [`SignedRoster::hash`] of that roster (`rosterHash`): remembered with the highest
     /// version, so another roster with that version is refused (`roster_forked`).
-    /// Optional; without it only the version is compared.
+    /// Required whenever `roster_version` is given, and only then (review round 5 H: a
+    /// version pinned without its hash would turn off the `chain_hashes` check).
     #[serde(default)]
     pub roster_hash: Option<String>,
     /// The rosters this device verified for the vault in this check, as `{"<version>":
@@ -1910,6 +1942,13 @@ pub struct VaultObservation {
     /// Sharing is paused on this device (`identity_mismatch`).
     /// Required (no default).
     pub paused: bool,
+    /// The observation is an invitation (`/sync` `invitations`), not a vault row (review
+    /// round 5): never grandfathered, never the account's own vault (`own_vault`), and
+    /// for a vault the account holds (an epoch pin) only a newer key on a vault with
+    /// signed history (`consent` with `held`); anything else there is refused (`held`).
+    /// Must be `sealed`.
+    #[serde(default)]
+    pub invitation: bool,
 }
 
 /// [`KeyPins::admit`]'s verdict.
@@ -1917,9 +1956,8 @@ pub struct VaultObservation {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Admission {
     /// Use the vault. `pin`: the key pins learn something (a new or newer key, the
-    /// first or a higher trusted roster, a roster hash): pin it
-    /// ([`KeyPins::set_epoch`] with the roster version, or [`KeyPins::observe`], which
-    /// does it) and write the key pins.
+    /// first or a higher trusted roster): pin it ([`KeyPins::observe`] does it, or
+    /// [`KeyPins::accept`]) and write the key pins.
     Ok {
         epoch: EpochStatus,
         trust: Trust,
@@ -1931,12 +1969,22 @@ pub enum Admission {
     /// time, possibly by an account the server made up: `replaced`): don't open it;
     /// show it as an invitation needing the user's consent. `own`: the account held this
     /// vault with its own key wrap before (show "This was your own vault…": a personal
-    /// vault turned into one whose key someone else sealed). Accepting =
-    /// [`KeyPins::accept`].
+    /// vault turned into one whose key someone else sealed). `first_signed`: a signed
+    /// row of a vault the account holds that has no signed history (the same key signed
+    /// for the first time, or with `replaced` a new key): its signer becomes the vault's
+    /// first trusted signer only with the user's OK (review round 5 M). `held`: an
+    /// invitation for a vault the account holds, with a newer key on a vault with signed
+    /// history. `declinable`: Decline may be offered (a plain invitation, or a plain
+    /// signed consent row; never for `rejoin`, `replaced`, `own`, `first_signed` or
+    /// `held`, nor for unsigned rows); declining = [`KeyPins::decline`]. Accepting =
+    /// [`KeyPins::accept`] with the same observation.
     Consent {
         rejoin: bool,
         replaced: bool,
         own: bool,
+        first_signed: bool,
+        held: bool,
+        declinable: bool,
     },
     /// Never use it; show why.
     Refused { reason: RefuseReason },
@@ -1969,6 +2017,13 @@ pub enum RefuseReason {
     Downgraded,
     /// Another roster with the highest version this account trusted for the vault.
     RosterForked,
+    /// An invitation for a vault the account held with its own key wrap (an owner's own
+    /// row is never re-sealed to them).
+    OwnVault,
+    /// An invitation for a vault the account holds that isn't a newer key on a vault
+    /// with signed history (the same key again, or a new key nobody it trusts vouches
+    /// for).
+    Held,
 }
 
 /// [`KeyPins::observe`]'s answer.
@@ -1981,15 +2036,18 @@ pub struct Observed {
     pub changed: bool,
 }
 
-/// Characters that change how an email looks without being seen (review round 4 M3): the
-/// general categories Cf (format: zero-width spaces and joiners, bidi controls, the byte
-/// order mark U+FEFF, tags), Cc (controls), Zl and Zp (line and paragraph separators), and
-/// the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0. The same set the web vault strips
-/// from names it shows (`web/src/lib/text.ts`).
+/// Characters that change how an email looks without being seen (review round 4 M3, round
+/// 5 M): the general categories Cf (format: zero-width spaces and joiners, bidi controls,
+/// the byte order mark U+FEFF, tags), Cc (controls), Zl and Zp (line and paragraph
+/// separators), and every Default_Ignorable_Code_Point (also the combining grapheme joiner
+/// U+034F, the variation selectors U+FE00–FE0F and U+E0100–E01EF, the Mongolian free
+/// variation selectors U+180B–180D, U+17B4/17B5 and the Hangul fillers U+115F, U+1160,
+/// U+3164, U+FFA0). The same set the web vault strips from names it shows
+/// (`web/src/lib/text.ts`) and `testdata/generate-vectors.mjs` checks.
 fn invisible(c: char) -> bool {
-    use icu_properties::CodePointMapData;
-    use icu_properties::props::GeneralCategory as Gc;
-    matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
+    use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory as Gc};
+    use icu_properties::{CodePointMapData, CodePointSetData};
+    CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
         || matches!(
             CodePointMapData::<Gc>::new().get(c),
             Gc::Format | Gc::Control | Gc::LineSeparator | Gc::ParagraphSeparator
@@ -2014,14 +2072,16 @@ fn escape_non_ascii(s: &str) -> String {
 }
 
 /// An email as pins compare it (and as apps show it): invisible characters removed
-/// ([`invisible`]: format, control and separator characters, Hangul fillers), NFKC, lower
-/// case, NFKC again, invisible characters removed again, trimmed; then the domain (after
-/// the last `@`) without trailing dots, in IDNA ASCII (punycode) form (UTS #46 as the URL
-/// Standard's "domain to ASCII", forbidden domain code points refused). When there is no
-/// domain or IDNA refuses it, the whole address with every non-ASCII character (and `\`)
-/// written as `\u{hex}`: it can't pass for an ASCII address. Local parts are compared
-/// as they are after this (no confusable skeleton: a look-alike local part is a new
-/// identity, shown with its fingerprint).
+/// ([`invisible`]: format, control, separator and default-ignorable characters), NFKC,
+/// lower case, NFKC again, invisible characters removed again, trimmed; then the domain
+/// (after the last `@`) without trailing dots, in IDNA ASCII (punycode) form (UTS #46 as
+/// the URL Standard's "domain to ASCII", forbidden domain code points refused), again
+/// without trailing dots (IDNA maps U+3002 and U+FF61 to "."). When there is no domain or
+/// IDNA refuses it, the whole address with every non-ASCII character (and `\`) written as
+/// `\u{hex}` — unless it is ASCII already (then as it is), so the result normalizes to
+/// itself (review round 5: apps may normalize twice). Local parts are compared as they are
+/// after this (no confusable skeleton: a look-alike local part is a new identity, shown
+/// with its fingerprint).
 pub fn normalize_email(email: &str) -> String {
     let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
     let folded = nfkc.normalize(&strip_invisible(email)).to_lowercase();
@@ -2031,10 +2091,15 @@ pub fn normalize_email(email: &str) -> String {
         if !domain.is_empty()
             && let Ok(ascii) =
                 idna::domain_to_ascii_cow(domain.as_bytes(), idna::AsciiDenyList::URL)
-            && !ascii.is_empty()
         {
-            return format!("{local}@{ascii}");
+            let ascii = ascii.trim_end_matches('.');
+            if !ascii.is_empty() {
+                return format!("{local}@{ascii}");
+            }
         }
+    }
+    if lower.is_ascii() {
+        return lower;
     }
     escape_non_ascii(&lower)
 }
@@ -2059,9 +2124,9 @@ fn retires(pin: &EpochPin, key_id: &str) -> bool {
 /// it was superseded (a lower epoch, or retired by either side), never at a same-epoch
 /// conflict. If both keys are retired (only a server mixing histories gets there), the
 /// higher epoch's stays pinned *and* retired, so neither is accepted until a newer key
-/// comes. Also: the earlier `signed_since`, the higher trusted roster (at the same
-/// version `base`'s hash, else the one known), the higher `rejoined_at`, `own` from
-/// either.
+/// comes. Also: the earlier `signed_since`, the higher trusted roster with its hash (at
+/// the same version `base`'s), the later re-join (`rejoined_at` with its `rejoined_over`),
+/// `own` from either.
 fn merge_epoch(base: &EpochPin, other: &EpochPin) -> EpochPin {
     let dead = |p: &EpochPin| retires(base, &p.key_id) || retires(other, &p.key_id);
     let (base_dead, other_dead) = (dead(base), dead(other));
@@ -2092,20 +2157,20 @@ fn merge_epoch(base: &EpochPin, other: &EpochPin) -> EpochPin {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
+    // Version and hash always together (EpochPin::check).
     let (max, hash) = match (base.roster_version_max, other.roster_version_max) {
         (Some(a), Some(b)) if b > a => (Some(b), other.roster_hash.clone()),
-        (Some(a), Some(b)) if a == b => (
-            Some(a),
-            base.roster_hash
-                .clone()
-                .or_else(|| other.roster_hash.clone()),
-        ),
         (Some(a), _) => (Some(a), base.roster_hash.clone()),
         (None, b) => (b, other.roster_hash.clone()),
     };
     out.roster_version_max = max;
     out.roster_hash = hash;
-    out.rejoined_at = base.rejoined_at.max(other.rejoined_at);
+    // The later re-join, with the leave it cleared (the later one at the same version).
+    let rejoin = |p: &EpochPin| p.rejoined_at.zip(p.rejoined_over);
+    (out.rejoined_at, out.rejoined_over) = match rejoin(base).max(rejoin(other)) {
+        Some((at, over)) => (Some(at), Some(over)),
+        None => (None, None),
+    };
     out.own = base.own || other.own;
     out
 }
@@ -2149,6 +2214,7 @@ impl Tombstone {
                 .saturating_sub(MAX_TOMBSTONE_RETIRED_KEY_IDS);
             p.retired.drain(..extra);
             p.rejoined_at = None;
+            p.rejoined_over = None;
         }
     }
 }
@@ -2188,8 +2254,9 @@ impl KeyPins {
         if let Some(own) = &self.own_identity {
             key32(own, "identity hash length")?;
         }
-        for vault in self.grandfathered.iter().flatten() {
+        for (vault, key_id) in self.grandfathered.iter().flatten() {
             check_id(vault)?;
+            key32(key_id, "key id length")?;
         }
         Ok(())
     }
@@ -2215,31 +2282,51 @@ impl KeyPins {
         status
     }
 
-    /// Pin `current` for `vault_id` (accepting it; with the trusted roster version, if
-    /// any) when it is new or newer: the previous key's id is retired (at most
-    /// [`MAX_RETIRED_KEY_IDS`] kept). At the same key, only marks it signed since
-    /// `roster_version` if not yet. Either way the highest trusted roster version is
-    /// raised to `roster_version`. Older or conflicting keys are never pinned. Clears
-    /// the vault's tombstone when the re-share qualifies ([`Error::Rollback`] when it
-    /// doesn't: see [`admit`](Self::admit)), marking the pin re-joined. Prefer
-    /// [`accept`](Self::accept) (consents, invitations), which also checks the row and
-    /// remembers the roster's hash.
-    pub fn set_epoch(
+    /// Record a key this device itself just gave a vault (review round 5: replaces
+    /// `set_epoch`, which pinned a roster version without its hash): after its own key
+    /// replacement (`/rotate`, `/members/{user}/remove`, emergency and `rotation_pending`
+    /// flows) or its own re-signing (`/resign`), with the row as it now is for this
+    /// account (`key_kind`: `account` for its own wrap, `sealed` when it sealed the key to
+    /// itself) and the roster it signed (`roster_version` and `roster_hash`, both or
+    /// neither: [`Error::Malformed`] otherwise). It is [`accept`](Self::accept) of that
+    /// row as a signed one (a sealed row with a roster counts as signed): what admission
+    /// would refuse is still refused (an older or conflicting key, a roster below the
+    /// highest trusted one or forking it, a vault left), so a client can't use it to
+    /// undo what the pins know. Never call it for keys another device or the server
+    /// gave (those go through [`observe`](Self::observe) or `accept`).
+    pub fn record_rotation(
         &self,
         vault_id: &str,
-        current: &EpochPin,
+        key_kind: &str,
+        key: &EpochPin,
         roster_version: Option<u64>,
+        roster_hash: Option<&str>,
     ) -> Result<KeyPins> {
-        self.accept_key(vault_id, current, roster_version, None, false)
+        self.accept(&VaultObservation {
+            vault_id: vault_id.to_owned(),
+            key_kind: key_kind.to_owned(),
+            key: Some(key.clone()),
+            roster_version,
+            roster_hash: roster_hash.map(str::to_owned),
+            chain_hashes: None,
+            signed_share: key_kind == "sealed" && roster_version.is_some(),
+            paused: false,
+            invitation: false,
+        })
     }
 
     /// Accept a vault row the user agreed to (an invitation, a consent prompt) or that
     /// [`admit`](Self::admit) said to pin (review round 4 I1): `admit` must not refuse it
-    /// (refusals become errors: `left`, `older`, `conflict` and `downgraded`
-    /// [`Error::Rollback`], `roster_forked` [`Error::RosterForked`], `paused`
-    /// [`Error::IdentityMismatch`], `missing_epoch` malformed); then its key is pinned as
-    /// [`set_epoch`](Self::set_epoch) does, with the observation's roster version *and*
-    /// hash, and an `account` row marks the pin `own`.
+    /// (refusals become errors: `left`, `older`, `conflict`, `downgraded` and `held`
+    /// [`Error::Rollback`], `own_vault` [`Error::Rollback`] too, `roster_forked`
+    /// [`Error::RosterForked`], `paused` [`Error::IdentityMismatch`], `missing_epoch`
+    /// malformed); then its key is pinned when it is new or newer (the previous key id
+    /// retired, at most [`MAX_RETIRED_KEY_IDS`] kept; at the same key only `signed_since`
+    /// is set if not yet), the highest trusted roster raised to the observation's version
+    /// and hash, an `account` row marks the pin `own`, and a tombstone the re-share
+    /// qualifies for is cleared (the pin marked re-joined: `rejoined_at`,
+    /// `rejoined_over`). Send exactly the observation the user was shown (with
+    /// `invitation` for an invitation).
     pub fn accept(&self, o: &VaultObservation) -> Result<KeyPins> {
         if let Admission::Refused { reason } = self.admit(o)? {
             return Err(match reason {
@@ -2249,37 +2336,34 @@ impl KeyPins {
                 RefuseReason::Left
                 | RefuseReason::Older
                 | RefuseReason::Conflict
-                | RefuseReason::Downgraded => Error::Rollback,
+                | RefuseReason::Downgraded
+                | RefuseReason::OwnVault
+                | RefuseReason::Held => Error::Rollback,
             });
         }
         let key = o
             .key
             .as_ref()
             .ok_or(Error::Malformed("the vault row has no key epoch"))?;
-        self.accept_key(
-            &o.vault_id,
-            key,
-            o.roster_version,
-            o.roster_hash.as_deref(),
-            o.key_kind == "account",
-        )
+        let roster = o.roster_version.zip(o.roster_hash.as_deref());
+        self.accept_key(&o.vault_id, key, roster, o.key_kind == "account")
     }
 
-    /// [`set_epoch`](Self::set_epoch), also remembering the trusted roster's hash and
-    /// (`own`) that the row was the account's own wrap.
+    /// Pin `current` for `vault_id` with the trusted `roster` (version and hash) and
+    /// (`own`) whether the row was the account's own wrap. Only after `admit` passed.
     fn accept_key(
         &self,
         vault_id: &str,
         current: &EpochPin,
-        roster_version: Option<u64>,
-        roster_hash: Option<&str>,
+        roster: Option<(u64, &str)>,
         own: bool,
     ) -> Result<KeyPins> {
         check_id(vault_id)?;
         current.check()?;
-        if let Some(h) = roster_hash {
+        if let Some((_, h)) = roster {
             key32(h, "roster hash length")?;
         }
+        let roster_version = roster.map(|(v, _)| v);
         let mut out = self.clone();
         let tomb = out.left.get(vault_id).cloned();
         if let Some(t) = &tomb
@@ -2307,6 +2391,7 @@ impl KeyPins {
                     roster_version_max: old.as_ref().and_then(|o| o.roster_version_max),
                     roster_hash: old.as_ref().and_then(|o| o.roster_hash.clone()),
                     rejoined_at: old.as_ref().and_then(|o| o.rejoined_at),
+                    rejoined_over: old.as_ref().and_then(|o| o.rejoined_over),
                     own: old.as_ref().is_some_and(|o| o.own),
                 }
             }
@@ -2319,11 +2404,12 @@ impl KeyPins {
             }
             _ => return Ok(out),
         };
-        pin.raise_roster(roster_version, roster_hash);
+        pin.raise_roster(roster);
         pin.own |= own;
-        if tomb.is_some() {
+        if let Some(t) = &tomb {
             // rejoin_ok: a roster version above the tombstone's.
             pin.rejoined_at = roster_version;
+            pin.rejoined_over = Some(t.left_at);
         }
         out.epochs.insert(vault_id.to_owned(), pin);
         out.left.remove(vault_id);
@@ -2403,25 +2489,53 @@ impl KeyPins {
         Ok(out)
     }
 
-    /// Write the grandfathered vault ids, once (at the account's first signed sync).
-    /// Unchanged when already written. `created_identity`: this unlock created the
-    /// account's signing identity (`/sync` `user.identity` was null and `PUT
-    /// /account/identity` answered `created: true`). Only then are `vault_ids` (the
-    /// shared vaults it has now) written; otherwise (the account has an identity but no
-    /// key pins: the server withheld them, or the device that created the identity never
-    /// wrote them) an empty list is written: "trust memory missing", every sealed vault
-    /// then needs the user's consent. Grandfathering applies to unsigned rows only
-    /// ([`admit`](Self::admit)).
-    pub fn grandfather(&self, vault_ids: &[String], created_identity: bool) -> Result<KeyPins> {
+    /// Declining an invitation or a consent prompt (review round 5 M2): a tombstone at
+    /// roster version 0 ([`leave`](Self::leave), which raises it to what a pin knew) —
+    /// but only for a vault the account doesn't hold. Unchanged when the account holds or
+    /// held it: an epoch pin for it, a tombstone already (a re-join prompt declined stays
+    /// as it was), or `current_row` (the vault is one of this sync's vault rows, whatever
+    /// its verdict). Never pass a server-chosen roster version: a server could otherwise
+    /// make a decline refuse a later real re-share. Offer Decline only where the verdict
+    /// says `declinable`; the invitation itself is still declined on the server.
+    pub fn decline(&self, vault_id: &str, current_row: bool, now: i64) -> Result<KeyPins> {
+        check_id(vault_id)?;
+        if current_row || self.epochs.contains_key(vault_id) || self.left.contains_key(vault_id) {
+            return Ok(self.clone());
+        }
+        self.leave(vault_id, 0, now)
+    }
+
+    /// Write the grandfathered vaults, once (at the account's first signed sync), each
+    /// with the key id it has now. Unchanged when already written. `created_identity`:
+    /// this unlock created the account's signing identity (`/sync` `user.identity` was
+    /// null and `PUT /account/identity` answered `created: true`). Only then are
+    /// `vaults` (the shared vaults it has now) written; otherwise (the account has an
+    /// identity but no key pins: the server withheld them, or the device that created the
+    /// identity never wrote them) an empty list is written: "trust memory missing", every
+    /// sealed vault then needs the user's consent. Grandfathering applies to unsigned rows
+    /// with exactly that key only ([`admit`](Self::admit)). A vault listed twice with
+    /// different keys is malformed.
+    pub fn grandfather(
+        &self,
+        vaults: &[GrandfatherCandidate],
+        created_identity: bool,
+    ) -> Result<KeyPins> {
         let mut out = self.clone();
         if out.grandfathered.is_none() {
-            for id in vault_ids {
-                check_id(id)?;
+            let mut map = BTreeMap::new();
+            for c in vaults {
+                check_id(&c.vault_id)?;
+                key32(&c.key_id, "key id length")?;
+                if let Some(other) = map.insert(c.vault_id.clone(), c.key_id.clone())
+                    && !same(&other, &c.key_id)
+                {
+                    return Err(Error::Malformed("a vault grandfathered with two keys"));
+                }
             }
             out.grandfathered = Some(if created_identity {
-                vault_ids.iter().cloned().collect()
+                map
             } else {
-                BTreeSet::new()
+                BTreeMap::new()
             });
         }
         Ok(out)
@@ -2453,19 +2567,25 @@ impl KeyPins {
         }
     }
 
-    /// What to do with a vault row (see [`VaultObservation`]), in this order: no key
-    /// epoch → refused (`missing_epoch`); a sealed row while paused → refused; a vault
-    /// the account left → `consent` (rejoin) only for a sealed row with a verified
-    /// share, a trusted roster newer than the one at leaving and a key not older than
-    /// the one then, else refused (`left`); the epoch pin (`older`, `conflict`,
-    /// `downgraded` refuse; a roster below the highest trusted one is `downgraded`, the
-    /// same version with another hash `roster_forked`); a sealed row with a share but no
-    /// roster, or without a share where a roster is trusted or the pin says signed →
-    /// `downgraded`; an `account` row → ok (own); a sealed row → ok when pinned, or
-    /// grandfathered and unsigned, else `consent`; a pinned sealed row with a new key while
-    /// the pin has no signed history (no `signed_since`, no trusted roster), signed or
-    /// not → `consent` (`replaced`; `own` when the account held it with its own wrap).
-    /// `ok` says whether to `pin` (also an `account` row whose pin isn't marked `own`).
+    /// What to do with a vault row or invitation (see [`VaultObservation`]), in this
+    /// order: `roster_version` and `roster_hash` not together, or an `account` invitation
+    /// → malformed; no key epoch → refused (`missing_epoch`); a sealed row while paused →
+    /// refused; `chain_hashes` forking the remembered roster → `roster_forked`; a vault
+    /// the account left → `consent` (rejoin) only for a sealed row with a verified share,
+    /// a trusted roster newer than the one at leaving and a key not older than the one
+    /// then, else refused (`left`); an invitation for a vault pinned `own` → refused
+    /// (`own_vault`); the epoch pin (`older`, `conflict`, `downgraded` refuse; a roster
+    /// below the highest trusted one is `downgraded`, the same version with another hash
+    /// `roster_forked`); a sealed row with a share but no roster, or without a share where
+    /// a roster is trusted or the pin says signed → `downgraded`; an invitation for a
+    /// pinned vault → `consent` (`held`) for a signed newer key on a vault with signed
+    /// history, else refused (`held`); an `account` row → ok (own); a sealed row → ok
+    /// when pinned, or grandfathered (vault id *and* key id) and unsigned and not an
+    /// invitation, else `consent`; a pinned sealed row while the pin has no signed history
+    /// (no `signed_since`, no trusted roster): a new key, signed or not → `consent`
+    /// (`replaced`; `own` when the account held it with its own wrap), the same key
+    /// signed for the first time → `consent` (`first_signed`, review round 5 M). `ok`
+    /// says whether to `pin` (also an `account` row whose pin isn't marked `own`).
     pub fn admit(&self, o: &VaultObservation) -> Result<Admission> {
         check_id(&o.vault_id)?;
         let sealed = match o.key_kind.as_str() {
@@ -2473,10 +2593,33 @@ impl KeyPins {
             "account" => false,
             _ => return Err(Error::Malformed("key_kind must be account or sealed")),
         };
-        if let Some(h) = &o.roster_hash {
-            key32(h, "roster hash length")?;
+        if o.invitation && !sealed {
+            return Err(Error::Malformed("an invitation is sealed"));
+        }
+        match (o.roster_version, &o.roster_hash) {
+            (Some(_), Some(h)) => {
+                key32(h, "roster hash length")?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(Error::Malformed(
+                    "roster_version and roster_hash come together",
+                ));
+            }
         }
         let refuse = |reason| Ok(Admission::Refused { reason });
+        let consent = |rejoin, replaced, own, first_signed, held| {
+            let declinable = !(rejoin || replaced || own || first_signed || held)
+                && (o.signed_share || o.invitation);
+            Ok(Admission::Consent {
+                rejoin,
+                replaced,
+                own,
+                first_signed,
+                held,
+                declinable,
+            })
+        };
         let Some(key) = &o.key else {
             return refuse(RefuseReason::MissingEpoch);
         };
@@ -2493,14 +2636,14 @@ impl KeyPins {
         }
         if let Some(t) = self.left.get(&o.vault_id) {
             return if sealed && o.signed_share && rejoin_ok(t, key, o.roster_version) {
-                Ok(Admission::Consent {
-                    rejoin: true,
-                    replaced: false,
-                    own: false,
-                })
+                consent(true, false, false, false, false)
             } else {
                 refuse(RefuseReason::Left)
             };
+        }
+        let pinned = self.epochs.get(&o.vault_id);
+        if o.invitation && pinned.is_some_and(|p| p.own) {
+            return refuse(RefuseReason::OwnVault);
         }
         let status = self.check_epoch(&o.vault_id, key, o.roster_version);
         match status {
@@ -2509,7 +2652,6 @@ impl KeyPins {
             EpochStatus::Downgraded => return refuse(RefuseReason::Downgraded),
             _ => {}
         }
-        let pinned = self.epochs.get(&o.vault_id);
         if let (Some(p), Some(v), Some(h)) = (pinned, o.roster_version, &o.roster_hash)
             && p.roster_version_max == Some(v)
             && p.roster_hash
@@ -2522,11 +2664,7 @@ impl KeyPins {
             || (!sealed && pinned.is_some_and(|p| !p.own))
             || o.roster_version.is_some_and(|v| {
                 pinned.is_some_and(|p| {
-                    p.signed_since.is_none()
-                        || p.roster_version_max.is_none_or(|m| v > m)
-                        || (p.roster_version_max == Some(v)
-                            && p.roster_hash.is_none()
-                            && o.roster_hash.is_some())
+                    p.signed_since.is_none() || p.roster_version_max.is_none_or(|m| v > m)
                 })
             });
         if !sealed {
@@ -2544,32 +2682,46 @@ impl KeyPins {
         }
         // From here a row is either signed (share and roster) or unsigned (neither).
         let unsigned = !o.signed_share;
+        if o.invitation && pinned.is_some() {
+            // An invitation for a vault the account holds: the server hid its row and
+            // offers it again. Only a newer key that the vault's signed history vouches
+            // for can be taken this way (review round 5, Android M).
+            return if status == EpochStatus::Newer && !unsigned && seen_signed {
+                consent(false, false, false, false, true)
+            } else {
+                refuse(RefuseReason::Held)
+            };
+        }
         let grandfathered = unsigned
+            && !o.invitation
             && self
                 .grandfathered
                 .as_ref()
-                .is_some_and(|g| g.contains(&o.vault_id));
+                .and_then(|g| g.get(&o.vault_id))
+                .is_some_and(|k| same(k, &key.key_id));
         if status == EpochStatus::New && !grandfathered {
-            return Ok(Admission::Consent {
-                rejoin: false,
-                replaced: false,
-                own: false,
-            });
+            return consent(false, false, false, false, false);
         }
-        if status == EpochStatus::Newer
-            && (unsigned || pinned.is_some_and(|p| p.roster_floor().is_none()))
+        if let Some(p) = pinned
+            && !seen_signed
         {
-            // A new key on a vault never seen signed: nobody this account trusts vouches
-            // for it. Unsigned, it is a server-chosen key unless the user expected it (an
-            // app from before replaced it); signed, the roster chain may start at a
-            // version 1 signed by an account the server made up (review round 4,
-            // puppet signer). The first signed key replacement of an old vault therefore
-            // needs one confirmation.
-            return Ok(Admission::Consent {
-                rejoin: false,
-                replaced: true,
-                own: pinned.is_some_and(|p| p.own),
-            });
+            match status {
+                // A new key on a vault never seen signed: nobody this account trusts
+                // vouches for it. Unsigned, it is a server-chosen key unless the user
+                // expected it (an app from before replaced it); signed, the roster chain
+                // may start at a version 1 signed by an account the server made up
+                // (review round 4, puppet signer). The first signed key replacement of an
+                // old vault therefore needs one confirmation.
+                EpochStatus::Newer => return consent(false, true, p.own, !unsigned, false),
+                // The same key signed for the first time (review round 5 M): whoever holds
+                // the key (a member who left, an emergency contact) can sign a version-1
+                // roster that commits to it; its signer becomes this vault's first trusted
+                // signer only with the user's OK.
+                EpochStatus::Same if !unsigned => {
+                    return consent(false, false, p.own, true, false);
+                }
+                _ => {}
+            }
         }
         Ok(Admission::Ok {
             epoch: status,
@@ -2583,7 +2735,7 @@ impl KeyPins {
     }
 
     /// [`admit`](Self::admit), and the key pins with what it says to pin applied (for
-    /// `ok` with `pin`: [`set_epoch`](Self::set_epoch) with the observation's roster
+    /// `ok` with `pin`: as [`accept`](Self::accept) pins, with the observation's roster
     /// version and hash). Chain it over a sync's rows and write the pins once if any
     /// answer was `changed`.
     pub fn observe(&self, o: &VaultObservation) -> Result<Observed> {
@@ -2592,8 +2744,7 @@ impl KeyPins {
             (Admission::Ok { pin: true, .. }, Some(key)) => self.accept_key(
                 &o.vault_id,
                 key,
-                o.roster_version,
-                o.roster_hash.as_deref(),
+                o.roster_version.zip(o.roster_hash.as_deref()),
                 o.key_kind == "account",
             )?,
             _ => self.clone(),
@@ -2675,22 +2826,48 @@ impl KeyPins {
         Ok(out)
     }
 
-    /// Merge this device's pins (`ours`: its own last-known pins) into `self` (the
-    /// server's newest): pins only one has are kept; for the same identity, verified if
-    /// either is and first seen at the earlier time; for different identities, `ours`
-    /// wins (this device's newer decision). Epoch pins: [`merge_epoch`] per vault
-    /// (retired ids only grow; a retired key never comes back). Tombstones: both, merged
-    /// per vault (higher roster version, merged pins, later time). A vault with both a
-    /// tombstone and an epoch pin keeps the pin only if it was re-joined after that
-    /// tombstone (`rejoined_at` above the tombstone's roster version; a stale pin from
-    /// before the leave isn't); else the pin is folded into the tombstone (its keys and
-    /// its highest roster). Own identity: `self`'s, else `ours`. Grandfathered ids: the
-    /// union when both wrote a list (only the unlock that created the identity writes a
-    /// non-empty one), else the one written. The version is the higher one. Apps merge
-    /// whenever they read a newer server copy, not only with unsent changes.
+    /// Merge this device's **unsent** changes (`ours`: pins it changed and couldn't write
+    /// yet, e.g. after a 409 `key_pins_changed`) into `self` (the server's newest): pins
+    /// only one has are kept; for the same identity, verified if either is and first seen
+    /// at the earlier time; for different identities, `ours` wins (this device's newer,
+    /// unsent decision). Everything else as [`merge_last_known`](Self::merge_last_known).
+    /// Only for unsent changes: merging a device's whole last-known copy this way would
+    /// overwrite another device's newer trust decision and make two devices rewrite the
+    /// pins in a loop (review round 5 M1).
     pub fn merge(&self, ours: &KeyPins) -> Result<KeyPins> {
+        self.merge_with(ours, true)
+    }
+
+    /// Merge a device's last-known pins (`last_known`: the copy it opened or wrote last)
+    /// into a newer server copy (`self`), whenever one arrives (review round 5 M1): only
+    /// what never goes back is taken from the device copy — epoch pins ([`merge_epoch`]:
+    /// retired ids only grow, the higher key, the earlier `signed_since`, the higher
+    /// trusted roster with its hash, `own`), tombstones (merged per vault; against an
+    /// epoch pin as in [`merge`](Self::merge)), the grandfathered list (the union; a
+    /// vault listed with two keys keeps the server copy's), the own identity, person pins
+    /// the server copy lacks, and for a person pinned with the **same** identity on both
+    /// `verified` (either) and `first_seen` (the earlier). For a person pinned with **another** identity the
+    /// server copy wins (another device decided later). The version is the higher one.
+    /// When the result equals `self`, nothing needs writing (two devices that differ only
+    /// in person pins don't rewrite each other's).
+    ///
+    /// Both: when both copies remember an own identity and they differ,
+    /// [`Error::IdentityMismatch`] (review round 5: a device that was given a fake
+    /// identity by the server must not carry its grandfathered vaults or epoch pins into
+    /// the account's real pins): the app then merges nothing, writes nothing and pauses
+    /// sharing (`identity_mismatch`).
+    pub fn merge_last_known(&self, last_known: &KeyPins) -> Result<KeyPins> {
+        self.merge_with(last_known, false)
+    }
+
+    fn merge_with(&self, ours: &KeyPins, ours_wins_people: bool) -> Result<KeyPins> {
         self.check()?;
         ours.check()?;
+        if let (Some(a), Some(b)) = (&self.own_identity, &ours.own_identity)
+            && !same(a, b)
+        {
+            return Err(Error::IdentityMismatch);
+        }
         let mut out = self.clone();
         for p in &ours.pins {
             match out.pins.iter_mut().find(|o| o.user_id == p.user_id) {
@@ -2698,7 +2875,8 @@ impl KeyPins {
                     o.verified |= p.verified;
                     o.first_seen = o.first_seen.min(p.first_seen);
                 }
-                Some(o) => *o = p.clone(),
+                Some(o) if ours_wins_people => *o = p.clone(),
+                Some(_) => {}
                 None => out.pins.push(p.clone()),
             }
         }
@@ -2725,8 +2903,13 @@ impl KeyPins {
         for vault in both {
             let tomb = out.left.remove(&vault).expect("listed above");
             let pin = out.epochs.remove(&vault).expect("listed above");
-            if pin.rejoined_at.is_some_and(|r| r > tomb.roster_version) {
-                // Re-joined after this tombstone: keep what the tombstone knew too.
+            // A pin beats a tombstone only when it was re-joined after it: above its roster
+            // version, and over a leave at least as late as this one (review round 5 L: a
+            // later leave from a device that never saw the re-join wins).
+            let rejoined_after = pin.rejoined_at.is_some_and(|r| r > tomb.roster_version)
+                && pin.rejoined_over.is_some_and(|over| tomb.left_at <= over);
+            if rejoined_after {
+                // Keep what the tombstone knew too.
                 let pin = match &tomb.pin {
                     Some(t) => merge_epoch(&pin, t),
                     None => pin,
@@ -2743,7 +2926,11 @@ impl KeyPins {
         }
         out.grandfathered = match (out.grandfathered.take(), &ours.grandfathered) {
             (Some(mut a), Some(b)) => {
-                a.extend(b.iter().cloned());
+                // The union; a vault both list with different keys keeps the server
+                // copy's (written first; so merges converge).
+                for (vault, key) in b {
+                    a.entry(vault.clone()).or_insert_with(|| key.clone());
+                }
                 Some(a)
             }
             (a, b) => a.or_else(|| b.clone()),
@@ -3665,6 +3852,50 @@ mod tests {
         ));
     }
 
+    /// A made-up roster hash for roster version `v` (tests pin rosters by version).
+    fn rh(v: u64) -> String {
+        b64(&sha256(format!("test roster {v}").as_bytes()))
+    }
+
+    /// The removed `set_epoch` for tests: accept `current` with roster version `rv` and
+    /// its made-up hash ([`rh`]).
+    trait SetEpoch {
+        fn set_epoch(&self, vault: &str, current: &EpochPin, rv: Option<u64>) -> Result<KeyPins>;
+    }
+
+    impl SetEpoch for KeyPins {
+        fn set_epoch(&self, vault: &str, current: &EpochPin, rv: Option<u64>) -> Result<KeyPins> {
+            let hash = rv.map(rh);
+            self.accept_key(vault, current, rv.zip(hash.as_deref()), false)
+        }
+    }
+
+    /// A grandfathering candidate: vault `v` with key `k`.
+    fn cand(v: &str, k: &SymmetricKey) -> GrandfatherCandidate {
+        GrandfatherCandidate {
+            vault_id: v.into(),
+            key_id: key_id(k, v).unwrap(),
+        }
+    }
+
+    fn consent(
+        rejoin: bool,
+        replaced: bool,
+        own: bool,
+        first_signed: bool,
+        held: bool,
+        declinable: bool,
+    ) -> Admission {
+        Admission::Consent {
+            rejoin,
+            replaced,
+            own,
+            first_signed,
+            held,
+            declinable,
+        }
+    }
+
     fn pin(k: &SymmetricKey, e: u64) -> EpochPin {
         EpochPin::of(k, "v", e).unwrap()
     }
@@ -3828,7 +4059,8 @@ mod tests {
             chain_hashes: None,
             signed_share: signed,
             paused: false,
-            roster_hash: None,
+            roster_hash: roster.map(rh),
+            invitation: false,
         }
     }
 
@@ -3853,23 +4085,15 @@ mod tests {
         assert_eq!(
             none.admit(&obs("sealed", Some(pin(&k1, 0)), Some(1), true))
                 .unwrap(),
-            Admission::Consent {
-                rejoin: false,
-                replaced: false,
-                own: false
-            }
+            consent(false, false, false, false, false, true)
         );
         assert_eq!(
             none.admit(&obs("sealed", Some(pin(&k1, 0)), None, false))
                 .unwrap(),
-            Admission::Consent {
-                rejoin: false,
-                replaced: false,
-                own: false
-            }
+            consent(false, false, false, false, false, false)
         );
         // …unless it was there at the first signed sync.
-        let old = none.grandfather(&["v".into()], true).unwrap();
+        let old = none.grandfather(&[cand("v", &k1)], true).unwrap();
         assert_eq!(old.grandfather(&[], true).unwrap(), old, "written once");
         assert_eq!(
             old.admit(&obs("sealed", Some(pin(&k1, 0)), None, false))
@@ -3962,20 +4186,12 @@ mod tests {
         assert_eq!(
             left.admit(&obs("sealed", Some(pin(&k3, 2)), Some(3), true))
                 .unwrap(),
-            Admission::Consent {
-                rejoin: true,
-                replaced: false,
-                own: false
-            }
+            consent(true, false, false, false, false, false)
         );
         assert_eq!(
             left.admit(&obs("sealed", Some(pin(&k2, 1)), Some(3), true))
                 .unwrap(),
-            Admission::Consent {
-                rejoin: true,
-                replaced: false,
-                own: false
-            }
+            consent(true, false, false, false, false, false)
         );
         let back = left.set_epoch("v", &pin(&k3, 2), Some(3)).unwrap();
         assert!(back.left.is_empty());
@@ -4180,24 +4396,38 @@ mod tests {
         let k1 = SymmetricKey::from_bytes([1; 32]);
         let k2 = SymmetricKey::from_bytes([2; 32]);
         // Grandfathered and pinned unsigned (created the identity at this unlock).
-        let pins = KeyPins::default().grandfather(&["v".into()], true).unwrap();
+        let pins = KeyPins::default()
+            .grandfather(&[cand("v", &k1)], true)
+            .unwrap();
         let first = pins
             .observe(&obs("sealed", Some(pin(&k1, 0)), None, false))
             .unwrap();
         assert!(first.changed);
         assert_eq!(first.pins.epochs["v"].signed_since, None);
-        // Re-signed: the same key at the same epoch, now with a roster and a share.
+        // Re-signed: the same key at the same epoch, now with a roster and a share. Its
+        // signer becomes the vault's first trusted signer only with the user's OK (round
+        // 5 M: anyone holding the key could have signed that version 1).
         let resigned = obs("sealed", Some(pin(&k1, 0)), Some(1), true);
         assert_eq!(
             first.pins.admit(&resigned).unwrap(),
+            consent(false, false, false, true, false, false)
+        );
+        assert!(!first.pins.observe(&resigned).unwrap().changed);
+        let accepted = first.pins.accept(&resigned).unwrap();
+        // Accepted: the vault is signed from now on; observing learns nothing more.
+        assert_eq!(
+            accepted.admit(&resigned).unwrap(),
             Admission::Ok {
                 epoch: EpochStatus::Same,
                 trust: Trust::Signed,
-                pin: true
+                pin: false
             }
         );
-        let after = first.pins.observe(&resigned).unwrap();
-        assert!(after.changed);
+        let after = Observed {
+            changed: true,
+            admission: accepted.admit(&resigned).unwrap(),
+            pins: accepted,
+        };
         assert_eq!(after.pins.epochs["v"].signed_since, Some(1));
         assert_eq!(after.pins.epochs["v"].roster_version_max, Some(1));
         // Nothing more to learn the next time.
@@ -4245,16 +4475,13 @@ mod tests {
         let k1 = SymmetricKey::from_bytes([1; 32]);
         let k2 = SymmetricKey::from_bytes([2; 32]);
         let pins = KeyPins::default()
-            .grandfather(&["v".into()], true)
+            .grandfather(&[cand("v", &k1)], true)
             .unwrap()
             .set_epoch("v", &pin(&k1, 0), None)
             .unwrap();
         let replaced = obs("sealed", Some(pin(&k2, 1)), None, false);
-        let consent = Admission::Consent {
-            rejoin: false,
-            replaced: true,
-            own: false,
-        };
+        let consent_of = consent;
+        let consent = consent_of(false, true, false, false, false, false);
         assert_eq!(pins.admit(&replaced).unwrap(), consent);
         let o = pins.observe(&replaced).unwrap();
         assert!(!o.changed, "consent pins nothing");
@@ -4274,7 +4501,7 @@ mod tests {
         assert_eq!(
             pins.admit(&obs("sealed", Some(pin(&k2, 1)), Some(1), true))
                 .unwrap(),
-            consent
+            consent_of(false, true, false, true, false, false)
         );
         let signed = pins.set_epoch("v", &pin(&k1, 0), Some(1)).unwrap();
         assert!(matches!(
@@ -4304,32 +4531,30 @@ mod tests {
     #[test]
     fn grandfathering_needs_the_identity_created_now() {
         let k1 = SymmetricKey::from_bytes([1; 32]);
-        let consent = Admission::Consent {
-            rejoin: false,
-            replaced: false,
-            own: false,
-        };
+        let unsigned_consent = consent(false, false, false, false, false, false);
         // Key pins withheld on a fresh device (the identity existed): nothing grandfathered.
         let missing = KeyPins::default()
-            .grandfather(&["v".into()], false)
+            .grandfather(&[cand("v", &k1)], false)
             .unwrap();
-        assert_eq!(missing.grandfathered, Some(BTreeSet::new()));
+        assert_eq!(missing.grandfathered, Some(BTreeMap::new()));
         assert_eq!(
             missing
-                .grandfather(&["v".into()], true)
+                .grandfather(&[cand("v", &k1)], true)
                 .unwrap()
                 .grandfathered,
-            Some(BTreeSet::new()),
+            Some(BTreeMap::new()),
             "written once"
         );
         assert_eq!(
             missing
                 .admit(&obs("sealed", Some(pin(&k1, 0)), None, false))
                 .unwrap(),
-            consent
+            unsigned_consent
         );
         // Created now: unsigned rows are grandfathered, signed ones need consent.
-        let created = KeyPins::default().grandfather(&["v".into()], true).unwrap();
+        let created = KeyPins::default()
+            .grandfather(&[cand("v", &k1)], true)
+            .unwrap();
         assert!(matches!(
             created
                 .admit(&obs("sealed", Some(pin(&k1, 0)), None, false))
@@ -4343,7 +4568,16 @@ mod tests {
             created
                 .admit(&obs("sealed", Some(pin(&k1, 0)), Some(1), true))
                 .unwrap(),
-            consent
+            consent(false, false, false, false, false, true)
+        );
+        // Grandfathered with its key only (round 5): another key under that id needs
+        // consent.
+        let k2 = SymmetricKey::from_bytes([2; 32]);
+        assert_eq!(
+            created
+                .admit(&obs("sealed", Some(pin(&k2, 0)), None, false))
+                .unwrap(),
+            unsigned_consent
         );
         // Merged: the union (only a creating unlock writes a non-empty list).
         assert_eq!(
@@ -4560,6 +4794,7 @@ mod tests {
             roster_version_max: None,
             roster_hash: None,
             rejoined_at: None,
+            rejoined_over: None,
             own: false,
         }
     }
@@ -4630,14 +4865,16 @@ mod tests {
             key_kind: "sealed".into(),
             key: Some(key),
             roster_version: Some(roster),
-            roster_hash: None,
+            roster_hash: Some(rh(roster)),
             chain_hashes: None,
             signed_share: true,
             paused: false,
+            invitation: false,
         };
         let signed = |mut p: EpochPin, v: u64| {
             p.signed_since = Some(v);
             p.roster_version_max = Some(v);
+            p.roster_hash = Some(rh(v));
             p
         };
         // Probe 2: the server's copy has a pin with a higher signed_since than the one
@@ -4850,20 +5087,23 @@ mod tests {
             chain_hashes: None,
             signed_share: true,
             paused: false,
+            invitation: false,
         };
         // A grandfathered share pinned unsigned.
         let grand = KeyPins::default()
-            .grandfather(&[VAULT.into()], true)
+            .grandfather(
+                &[GrandfatherCandidate {
+                    vault_id: VAULT.into(),
+                    key_id: key(&old, 0).key_id,
+                }],
+                true,
+            )
             .unwrap()
             .set_epoch(VAULT, &key(&old, 0), None)
             .unwrap();
         assert_eq!(
             grand.admit(&row).unwrap(),
-            Admission::Consent {
-                rejoin: false,
-                replaced: true,
-                own: false
-            }
+            consent(false, true, false, true, false, false)
         );
         assert!(!grand.observe(&row).unwrap().changed);
         // The account's own vault, then served as sealed with the server's key.
@@ -4880,11 +5120,7 @@ mod tests {
         assert!(mine.epochs[VAULT].own);
         assert_eq!(
             mine.admit(&row).unwrap(),
-            Admission::Consent {
-                rejoin: false,
-                replaced: true,
-                own: true
-            }
+            consent(false, true, true, true, false, false)
         );
         // Pins from before (no `own` mark) learn it from the next account row.
         let legacy = KeyPins::default()
@@ -4956,7 +5192,9 @@ mod tests {
         // A domain IDNA refuses: no non-ASCII character left that could look like one.
         let refused = normalize_email("al\u{0456}ce@b\u{00FC} cher.example");
         assert_eq!(refused, "al\\u{456}ce@b\\u{fc} cher.example");
-        assert_eq!(normalize_email("a\\b@"), "a\\u{5c}b@");
+        // An address that is ASCII already stays as it is (round 5: normalizing twice
+        // gives the same).
+        assert_eq!(normalize_email("a\\b@"), "a\\b@");
     }
 
     /// Round 4 follow-up: a chain verified from an older (or no) remembered roster must
@@ -5038,5 +5276,472 @@ mod tests {
         // Merged tombstones and pins keep the hash.
         let merged = left.merge(&pins).unwrap();
         assert_eq!(merged.admit(&puppet).unwrap(), forked);
+    }
+
+    // ------------------------------------------------------------- round 5
+
+    const V5: &str = "vault-1";
+
+    /// The review's made-up roster hash: `[n; 32]`.
+    fn h5(n: u8) -> String {
+        b64(&[n; 32])
+    }
+
+    fn k5(n: u8, epoch: u64) -> EpochPin {
+        EpochPin::of(&SymmetricKey::from_bytes([n; 32]), V5, epoch).unwrap()
+    }
+
+    fn row5(
+        key: EpochPin,
+        roster: Option<(u64, String)>,
+        chain: Option<&[(u64, u8)]>,
+        signed: bool,
+    ) -> VaultObservation {
+        VaultObservation {
+            vault_id: V5.into(),
+            key_kind: "sealed".into(),
+            key: Some(key),
+            roster_version: roster.as_ref().map(|r| r.0),
+            roster_hash: roster.map(|r| r.1),
+            chain_hashes: chain.map(|c| c.iter().map(|(v, n)| (v.to_string(), h5(*n))).collect()),
+            signed_share: signed,
+            paused: false,
+            invitation: false,
+        }
+    }
+
+    /// Review round 5 H (PoC case 1): a roster version is never pinned without its hash,
+    /// so a chain re-signed from version 1 is always compared with the pinned one.
+    #[test]
+    fn roster_versions_are_never_pinned_without_their_hash() {
+        let accepted = KeyPins::default()
+            .accept(&row5(k5(1, 1), Some((1, h5(1))), Some(&[(1, 1)]), true))
+            .unwrap();
+        assert_eq!(accepted.epochs[V5].roster_version_max, Some(1));
+        assert_eq!(accepted.epochs[V5].roster_hash, Some(h5(1)));
+        // The device's own key replacement must name the roster's hash with its version.
+        assert!(matches!(
+            accepted.record_rotation(V5, "account", &k5(2, 2), Some(2), None),
+            Err(Error::Malformed(_))
+        ));
+        assert!(matches!(
+            accepted.record_rotation(V5, "account", &k5(2, 2), None, Some(&h5(2))),
+            Err(Error::Malformed(_))
+        ));
+        let rotated = accepted
+            .record_rotation(V5, "account", &k5(2, 2), Some(2), Some(&h5(2)))
+            .unwrap();
+        assert_eq!(rotated.epochs[V5].roster_version_max, Some(2));
+        assert_eq!(rotated.epochs[V5].roster_hash, Some(h5(2)));
+        assert_eq!(rotated.epochs[V5].key_epoch, 2);
+        // A fresh device given either copy: a puppet chain re-signed from version 1 with
+        // a server key K9@3 is refused.
+        let puppet = row5(
+            k5(9, 3),
+            Some((3, h5(93))),
+            Some(&[(1, 91), (2, 92), (3, 93)]),
+            true,
+        );
+        let forked = Admission::Refused {
+            reason: RefuseReason::RosterForked,
+        };
+        assert_eq!(rotated.admit(&puppet).unwrap(), forked);
+        assert_eq!(accepted.admit(&puppet).unwrap(), forked);
+        // Observations and pins can't carry a version without its hash either.
+        let mut half = row5(k5(1, 1), Some((1, h5(1))), None, true);
+        half.roster_hash = None;
+        assert!(matches!(accepted.admit(&half), Err(Error::Malformed(_))));
+        let mut hashless = accepted.clone();
+        hashless.epochs.get_mut(V5).unwrap().roster_hash = None;
+        assert!(hashless.check().is_err());
+        assert!(accepted.merge(&hashless).is_err());
+        let mut since_only = accepted.clone();
+        let p = since_only.epochs.get_mut(V5).unwrap();
+        p.roster_version_max = None;
+        p.roster_hash = None;
+        assert!(
+            since_only.check().is_err(),
+            "signed_since without its anchor"
+        );
+        // A rotation can't undo what the pins know: an older key, a lower roster.
+        assert!(matches!(
+            rotated.record_rotation(V5, "account", &k5(1, 1), None, None),
+            Err(Error::Rollback)
+        ));
+        assert!(matches!(
+            rotated.record_rotation(V5, "sealed", &k5(3, 3), Some(1), Some(&h5(1))),
+            Err(Error::Rollback)
+        ));
+    }
+
+    /// Review round 5 M (PoC cases 2 and 3): the first signature at the same key needs
+    /// consent (no silent signer pin), and so do the new keys after it until accepted.
+    #[test]
+    fn a_first_signature_at_the_same_key_needs_consent() {
+        let unsigned = |key| row5(key, None, None, false);
+        let g = KeyPins::default()
+            .grandfather(
+                &[GrandfatherCandidate {
+                    vault_id: V5.into(),
+                    key_id: k5(1, 1).key_id,
+                }],
+                true,
+            )
+            .unwrap()
+            .observe(&unsigned(k5(1, 1)))
+            .unwrap()
+            .pins;
+        let o1 = row5(k5(1, 1), Some((1, h5(51))), Some(&[(1, 51)]), true);
+        let s1 = g.observe(&o1).unwrap();
+        assert_eq!(
+            s1.admission,
+            consent(false, false, false, true, false, false)
+        );
+        assert!(!s1.changed, "a first signer is never pinned silently");
+        let o2 = row5(k5(8, 2), Some((2, h5(52))), Some(&[(1, 51), (2, 52)]), true);
+        assert_eq!(
+            s1.pins.admit(&o2).unwrap(),
+            consent(false, true, false, true, false, false)
+        );
+        // Accepted once: the vault has signed history; its later signed keys are automatic.
+        let ok = s1.pins.accept(&o1).unwrap();
+        assert!(matches!(
+            ok.admit(&o2).unwrap(),
+            Admission::Ok {
+                epoch: EpochStatus::Newer,
+                trust: Trust::Signed,
+                ..
+            }
+        ));
+        // The account's own (account-wrapped) vault, then sealed at the same key, signed.
+        let own = KeyPins::default()
+            .observe(&VaultObservation {
+                key_kind: "account".into(),
+                ..unsigned(k5(1, 1))
+            })
+            .unwrap()
+            .pins;
+        let s = own.observe(&o1).unwrap();
+        assert_eq!(s.admission, consent(false, false, true, true, false, false));
+        assert!(!s.changed);
+        assert_eq!(
+            s.pins.admit(&o2).unwrap(),
+            consent(false, true, true, true, false, false)
+        );
+    }
+
+    /// Review round 5 L (PoC case 4): a later leave from a device that never saw the
+    /// re-join wins; a stale copy of the old tombstone doesn't undo the re-join.
+    #[test]
+    fn a_later_leave_beats_an_unseen_rejoin() {
+        let base = KeyPins::default()
+            .accept(&row5(k5(1, 1), Some((4, h5(4))), None, true))
+            .unwrap();
+        let left = base.leave(V5, 5, 100).unwrap();
+        let rejoined = left
+            .accept(&row5(k5(2, 2), Some((7, h5(7))), None, true))
+            .unwrap();
+        assert_eq!(rejoined.epochs[V5].rejoined_at, Some(7));
+        assert_eq!(rejoined.epochs[V5].rejoined_over, Some(100));
+        // A later leave from a device frozen at the old copy.
+        let stale_leave = base.leave(V5, 4, 200).unwrap();
+        for m in [
+            rejoined.merge(&stale_leave).unwrap(),
+            stale_leave.merge(&rejoined).unwrap(),
+            rejoined.merge_last_known(&stale_leave).unwrap(),
+        ] {
+            assert!(!m.epochs.contains_key(V5));
+            let t = &m.left[V5];
+            assert_eq!(
+                t.roster_version, 7,
+                "the tombstone knows the re-joined roster"
+            );
+            assert_eq!(t.left_at, 200);
+            // Coming back needs a roster above the re-joined one.
+            assert_eq!(
+                m.admit(&row5(k5(2, 2), Some((7, h5(7))), None, true))
+                    .unwrap(),
+                Admission::Refused {
+                    reason: RefuseReason::Left
+                }
+            );
+        }
+        // The old tombstone (synced before the re-join) on a stale device: the re-join wins.
+        for m in [
+            rejoined.merge(&left).unwrap(),
+            left.merge(&rejoined).unwrap(),
+            rejoined.merge_last_known(&left).unwrap(),
+        ] {
+            assert!(!m.left.contains_key(V5));
+            assert_eq!(m.epochs[V5].key_epoch, 2);
+        }
+    }
+
+    /// Review round 5 M (PoC case 5): default-ignorable characters and an ideographic full
+    /// stop after the domain; normalizing twice gives the same.
+    #[test]
+    fn emails_lose_default_ignorables_and_normalize_once() {
+        let alice = normalize_email("alice@example.com");
+        for email in [
+            "alice\u{34F}@example.com",
+            "ali\u{FE0F}ce@example.com",
+            "alice\u{E0100}@example.com",
+            "ali\u{180B}ce@example.com",
+            "ali\u{17B4}ce@example.com",
+            "alice@example.com\u{3002}",
+            "alice@example.com\u{FF61}",
+            "alice@example\u{3002}com\u{3002}\u{3002}",
+        ] {
+            assert_eq!(normalize_email(email), alice, "{email:?}");
+        }
+        for email in [
+            "alice@example.com",
+            " Bob@Example.COM ",
+            "erin@B\u{FC}cher.example",
+            "al\u{0456}ce@b\u{00FC} cher.example",
+            "a\\b@",
+            "a\\u{5c}b@",
+            "no-at-sign",
+            "\u{E9}l\u{E8}ve",
+            "x@",
+            "x@.",
+            "\u{130}nci@example.com",
+            "\u{FB01}ona@EXAMPLE.org",
+            "user@\u{3002}",
+        ] {
+            let once = normalize_email(email);
+            assert_eq!(normalize_email(&once), once, "{email:?}");
+            assert!(!once.ends_with('.') || email == "x@.", "{email:?} → {once}");
+        }
+    }
+
+    /// Review round 5 M1: a device's last-known copy merged into a newer server copy takes
+    /// only what never goes back; person pins with another identity stay the server's, so
+    /// two devices don't rewrite each other's pins.
+    #[test]
+    fn last_known_pins_merge_without_a_loop() {
+        let me = account("user-me", 1);
+        let bob = account("user-bob", 2);
+        let legacy = bob.legacy_identity();
+        let signing = bob.new_signing_identity().unwrap().identity.public();
+        let base = KeyPins::default()
+            .accept(&row5(k5(1, 1), Some((1, h5(1))), None, true))
+            .unwrap()
+            .set_own_identity(
+                &me.new_signing_identity()
+                    .unwrap()
+                    .identity
+                    .public()
+                    .verify()
+                    .unwrap()
+                    .hash_b64(),
+            )
+            .unwrap();
+        // Device 1 pinned Bob's legacy identity; device 2 (later, on the server) his
+        // signing one.
+        let d1 = base.set(&legacy, "bob@example.com", true, 10).unwrap();
+        let mut server = base.set(&signing, "bob@example.com", false, 20).unwrap();
+        server.version = 5;
+        let merged = server.merge_last_known(&d1).unwrap();
+        assert_eq!(merged, server, "nothing to write: no loop");
+        // `merge` (unsent changes) still lets this device's decision win.
+        assert_eq!(
+            server.merge(&d1).unwrap().pins[0].identity,
+            d1.pins[0].identity
+        );
+        // The same identity: verified and first seen are monotone.
+        let d1_same = base.set(&signing, "bob@example.com", true, 15).unwrap();
+        let m = server.merge_last_known(&d1_same).unwrap();
+        assert!(m.pins[0].verified);
+        assert_eq!(m.pins[0].first_seen, 15);
+        // Monotone vault knowledge from the device copy is kept: a newer key, a tombstone.
+        let d1_vaults = d1
+            .record_rotation(V5, "account", &k5(2, 2), Some(2), Some(&h5(2)))
+            .unwrap()
+            .leave("vault-2", 0, 30)
+            .unwrap();
+        let m = server.merge_last_known(&d1_vaults).unwrap();
+        assert_eq!(m.epochs[V5].key_epoch, 2);
+        assert!(m.left.contains_key("vault-2"));
+        assert_eq!(m.pins, server.pins, "the server's person pins");
+        assert_eq!(m.version, 5);
+        // Writing the result back and merging again changes nothing.
+        assert_eq!(m.merge_last_known(&d1_vaults).unwrap(), m);
+    }
+
+    /// Lead (round 5, extension High): pins remembering another own identity are never
+    /// merged (a browser the server gave a fake identity must not spread its grandfathered
+    /// vaults or epoch pins into the account's real pins).
+    #[test]
+    fn pins_of_another_own_identity_never_merge() {
+        let me = account("user-me", 1);
+        let real = me
+            .new_signing_identity()
+            .unwrap()
+            .identity
+            .public()
+            .verify()
+            .unwrap()
+            .hash_b64();
+        let fake = me
+            .new_signing_identity()
+            .unwrap()
+            .identity
+            .public()
+            .verify()
+            .unwrap()
+            .hash_b64();
+        let account_pins = KeyPins::default().set_own_identity(&real).unwrap();
+        let planted = KeyPins::default()
+            .set_own_identity(&fake)
+            .unwrap()
+            .grandfather(
+                &[GrandfatherCandidate {
+                    vault_id: V5.into(),
+                    key_id: k5(9, 0).key_id,
+                }],
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            account_pins.merge(&planted),
+            Err(Error::IdentityMismatch)
+        ));
+        assert!(matches!(
+            account_pins.merge_last_known(&planted),
+            Err(Error::IdentityMismatch)
+        ));
+        assert!(matches!(
+            planted.merge(&account_pins),
+            Err(Error::IdentityMismatch)
+        ));
+        // Without an own identity on one side they merge as before.
+        assert!(account_pins.merge(&KeyPins::default()).is_ok());
+    }
+
+    /// Review round 5 (Android M, web M2): invitations keep their consent flags, an own
+    /// vault is never taken back as an invitation, and one for a held vault is only a
+    /// signed newer key on a vault with signed history.
+    #[test]
+    fn invitations_for_held_vaults() {
+        let inv = |key, roster: Option<(u64, String)>, signed| VaultObservation {
+            invitation: true,
+            ..row5(key, roster, None, signed)
+        };
+        let none = KeyPins::default();
+        // A fresh signed invitation: consent, declinable.
+        assert_eq!(
+            none.admit(&inv(k5(1, 1), Some((1, h5(1))), true)).unwrap(),
+            consent(false, false, false, false, false, true)
+        );
+        // Unsigned: Decline only (never accepted on a signing server); never grandfathered.
+        let g = none
+            .grandfather(
+                &[GrandfatherCandidate {
+                    vault_id: V5.into(),
+                    key_id: k5(1, 1).key_id,
+                }],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            g.admit(&inv(k5(1, 1), None, false)).unwrap(),
+            consent(false, false, false, false, false, true)
+        );
+        // An account invitation is malformed.
+        let mut account = inv(k5(1, 1), None, false);
+        account.key_kind = "account".into();
+        assert!(matches!(none.admit(&account), Err(Error::Malformed(_))));
+        // The account's own vault: refused outright, also with a newer signed key.
+        let own = none
+            .record_rotation(V5, "account", &k5(1, 1), Some(1), Some(&h5(1)))
+            .unwrap();
+        assert!(own.epochs[V5].own);
+        let refused = |reason| Admission::Refused { reason };
+        assert_eq!(
+            own.admit(&inv(k5(2, 2), Some((2, h5(2))), true)).unwrap(),
+            refused(RefuseReason::OwnVault)
+        );
+        assert!(matches!(
+            own.accept(&inv(k5(2, 2), Some((2, h5(2))), true)),
+            Err(Error::Rollback)
+        ));
+        // A held shared vault with signed history: the same key again → held; a newer
+        // signed key → consent (held, not declinable), accepted like a key replacement.
+        let held = none
+            .accept(&row5(k5(1, 1), Some((1, h5(1))), None, true))
+            .unwrap();
+        assert_eq!(
+            held.admit(&inv(k5(1, 1), Some((1, h5(1))), true)).unwrap(),
+            refused(RefuseReason::Held)
+        );
+        let newer = inv(k5(2, 2), Some((2, h5(2))), true);
+        assert_eq!(
+            held.admit(&newer).unwrap(),
+            consent(false, false, false, false, true, false)
+        );
+        assert_eq!(held.accept(&newer).unwrap().epochs[V5].key_epoch, 2);
+        // A held vault without signed history: any key as an invitation → held (as a row
+        // it would be a `replaced` consent).
+        let unsigned = none.accept(&row5(k5(1, 1), None, None, false)).unwrap();
+        assert_eq!(
+            unsigned
+                .admit(&inv(k5(2, 2), Some((1, h5(1))), true))
+                .unwrap(),
+            refused(RefuseReason::Held)
+        );
+        assert!(matches!(
+            unsigned.accept(&inv(k5(2, 2), Some((1, h5(1))), true)),
+            Err(Error::Rollback)
+        ));
+        // A re-join keeps its flag (not declinable).
+        let left = held.leave(V5, 1, 10).unwrap();
+        assert_eq!(
+            left.admit(&inv(k5(2, 2), Some((2, h5(2))), true)).unwrap(),
+            consent(true, false, false, false, false, false)
+        );
+    }
+
+    /// Review round 5 M2: declining never gives up a vault the account holds, and a
+    /// planted vault's tombstone is at version 0.
+    #[test]
+    fn declines_never_tombstone_held_vaults() {
+        let held = KeyPins::default()
+            .accept(&row5(k5(1, 1), Some((3, h5(3))), None, true))
+            .unwrap();
+        assert_eq!(held.decline(V5, false, 10).unwrap(), held);
+        let none = KeyPins::default();
+        assert_eq!(none.decline(V5, true, 10).unwrap(), none, "a current row");
+        let left = held.leave(V5, 3, 5).unwrap();
+        assert_eq!(left.decline(V5, false, 10).unwrap(), left, "already left");
+        let declined = none.decline(V5, false, 10).unwrap();
+        assert_eq!(declined.left[V5].roster_version, 0);
+        assert_eq!(declined.left[V5].left_at, 10);
+        // A real signed share later can still come back (through a re-join consent).
+        assert_eq!(
+            declined
+                .admit(&row5(k5(1, 1), Some((1, h5(1))), None, true))
+                .unwrap(),
+            consent(true, false, false, false, false, false)
+        );
+        // Decline is offered only for plain prompts.
+        let signed_new = none
+            .admit(&row5(k5(1, 1), Some((1, h5(1))), None, true))
+            .unwrap();
+        assert_eq!(signed_new, consent(false, false, false, false, false, true));
+        let unsigned_new = none.admit(&row5(k5(1, 1), None, None, false)).unwrap();
+        assert_eq!(
+            unsigned_new,
+            consent(false, false, false, false, false, false)
+        );
+    }
+
+    /// Review round 5 Info: unknown observation fields are refused.
+    #[test]
+    fn observations_refuse_unknown_fields() {
+        let good = r#"{"vault_id":"v","key_kind":"sealed","key":null,"roster_version":null,"signed_share":false,"paused":false}"#;
+        assert!(serde_json::from_str::<VaultObservation>(good).is_ok());
+        let typo = r#"{"vault_id":"v","key_kind":"sealed","key":null,"roster_version":null,"chain_hash":{},"signed_share":false,"paused":false}"#;
+        assert!(serde_json::from_str::<VaultObservation>(typo).is_err());
     }
 }

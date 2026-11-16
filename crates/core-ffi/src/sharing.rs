@@ -9,8 +9,8 @@ use std::sync::Arc;
 use passauth_core::item::b64;
 use passauth_core::keys;
 use passauth_core::sharing::{
-    self as core, EpochPin, IdentityRecord, KeyPins, PublicIdentity, RosterMemberInput,
-    SignedRoster, VaultObservation, VerifiedIdentity,
+    self as core, EpochPin, GrandfatherCandidate, IdentityRecord, KeyPins, PublicIdentity,
+    RosterMemberInput, SignedRoster, VaultObservation, VerifiedIdentity,
 };
 
 use super::{Account, CoreError, R, VaultKey, json_in, json_out};
@@ -380,12 +380,26 @@ pub fn pin_set(
     json_out(&pins_or_empty(pins_json)?.set(&identity, &email, verified, now)?)
 }
 
-/// Merge this device's pins (`ours_json`) into the server's newest (`base_json`).
+/// Merge this device's **unsent** changes (`ours_json`) into the server's newest
+/// (`base_json`): this device's decision wins for a person pinned with another identity.
+/// `IdentityMismatch` when both remember another own identity (merge nothing, write
+/// nothing, pause sharing).
 #[uniffi::export]
 pub fn merge_pins(base_json: String, ours_json: String) -> R<String> {
     let base: KeyPins = json_in(&base_json)?;
     let ours: KeyPins = json_in(&ours_json)?;
     json_out(&base.merge(&ours)?)
+}
+
+/// Merge this device's last-known pins (`last_known_json`) into a newer server copy
+/// (`server_json`), whenever one arrives: only what never goes back comes from the device
+/// copy; a person pinned with another identity keeps the server's. Write the result back
+/// only if it differs from the server copy. `IdentityMismatch` like `merge_pins`.
+#[uniffi::export]
+pub fn pins_merge_last_known(server_json: String, last_known_json: String) -> R<String> {
+    let server: KeyPins = json_in(&server_json)?;
+    let last_known: KeyPins = json_in(&last_known_json)?;
+    json_out(&server.merge_last_known(&last_known)?)
 }
 
 /// A vault's current key (`{key_epoch, key_id}`) against the account's epoch pin for it,
@@ -402,18 +416,43 @@ pub fn pins_epoch_check(
     name(&pins_or_empty(pins_json)?.check_epoch(&vault_id, &current, roster_version))
 }
 
-/// The key pins (JSON) with `current_json` pinned (accepted) for the vault when new or
-/// newer (`roster_version`: the trusted roster's). `Rollback` for a vault the account
-/// left that doesn't qualify to come back.
+/// The key pins (JSON) with a key this device itself just gave the vault (its own key
+/// replacement or re-signing): `key_kind` = its own row's (`account`, or `sealed` when it
+/// sealed the key to itself), `current_json` = the new key's epoch pin, and the roster it
+/// signed: `roster_version` *and* `roster_hash`, both or neither (`Invalid` otherwise).
+/// Errors like `pins_accept` (`Rollback`: an older or conflicting key, a lower roster, a
+/// vault left; `RosterForked`).
 #[uniffi::export]
-pub fn pins_set_epoch(
+pub fn pins_record_rotation(
     pins_json: Option<String>,
     vault_id: String,
+    key_kind: String,
     current_json: String,
     roster_version: Option<u64>,
+    roster_hash: Option<String>,
 ) -> R<String> {
     let current: EpochPin = json_in(&current_json)?;
-    json_out(&pins_or_empty(pins_json)?.set_epoch(&vault_id, &current, roster_version)?)
+    json_out(&pins_or_empty(pins_json)?.record_rotation(
+        &vault_id,
+        &key_kind,
+        &current,
+        roster_version,
+        roster_hash.as_deref(),
+    )?)
+}
+
+/// The key pins (JSON) after the user declined an invitation or a consent prompt (offer
+/// Decline only where the verdict says `declinable`): a tombstone at roster version 0,
+/// unless the account holds the vault (an epoch pin), left it already, or `current_row`
+/// (it is one of this sync's vault rows, whatever its verdict) — then unchanged.
+#[uniffi::export]
+pub fn pins_decline(
+    pins_json: Option<String>,
+    vault_id: String,
+    current_row: bool,
+    now: i64,
+) -> R<String> {
+    json_out(&pins_or_empty(pins_json)?.decline(&vault_id, current_row, now)?)
 }
 
 /// The key pins (JSON) with the vault left or deleted by this account (a tombstone with
@@ -428,24 +467,29 @@ pub fn pins_leave(
     json_out(&pins_or_empty(pins_json)?.leave(&vault_id, roster_version, now)?)
 }
 
-/// The key pins (JSON) with the grandfathered vault ids written (once).
-/// `created_identity`: this unlock created the account's signing identity (`user.identity`
-/// was null, `PUT /account/identity` answered `created: true`); false (identity without
-/// key pins: "trust memory missing") writes an empty list.
+/// The key pins (JSON) with the grandfathered vaults written (once): `vaults_json` =
+/// `[{"vault_id", "key_id"}]`, each with the key id of the key it has now (only that key
+/// is grandfathered). `created_identity`: this unlock created the account's signing
+/// identity (`user.identity` was null, `PUT /account/identity` answered `created: true`);
+/// false (identity without key pins: "trust memory missing") writes an empty list.
 #[uniffi::export]
 pub fn pins_grandfather(
     pins_json: Option<String>,
-    vault_ids: Vec<String>,
+    vaults_json: String,
     created_identity: bool,
 ) -> R<String> {
-    json_out(&pins_or_empty(pins_json)?.grandfather(&vault_ids, created_identity)?)
+    let vaults: Vec<GrandfatherCandidate> = json_in(&vaults_json)?;
+    json_out(&pins_or_empty(pins_json)?.grandfather(&vaults, created_identity)?)
 }
 
-/// What to do with a vault row (`observation_json`: `{vault_id, key_kind, key,
-/// roster_version, roster_hash?, chain_hashes?, signed_share, paused}`; `signed_share` and
-/// `paused` required; `chain_hashes` = `{"<version>": "<roster_hash>"}` of the trusted
-/// roster and every newer one verified now, sent whenever a chain was fetched): JSON `{"status": "ok", "epoch", "trust", "pin"}` | `{"status": "consent",
-/// "rejoin", "replaced", "own"}` | `{"status": "refused", "reason"}`.
+/// What to do with a vault row or invitation (`observation_json`: `{vault_id, key_kind,
+/// key, roster_version, roster_hash?, chain_hashes?, signed_share, paused, invitation?}`;
+/// `signed_share` and `paused` required; `roster_hash` with `roster_version` and only
+/// with it; unknown fields refused; `chain_hashes` = `{"<version>": "<roster_hash>"}` of
+/// the trusted roster and every newer one verified now, sent whenever a chain was
+/// fetched; `invitation: true` for an invitation): JSON `{"status": "ok", "epoch",
+/// "trust", "pin"}` | `{"status": "consent", "rejoin", "replaced", "own", "first_signed",
+/// "held", "declinable"}` | `{"status": "refused", "reason"}`.
 #[uniffi::export]
 pub fn pins_admit(pins_json: Option<String>, observation_json: String) -> R<String> {
     let observation: VaultObservation = json_in(&observation_json)?;
@@ -460,10 +504,12 @@ pub fn pins_observe(pins_json: Option<String>, observation_json: String) -> R<St
     json_out(&pins_or_empty(pins_json)?.observe(&observation)?)
 }
 
-/// Accept a vault row the user agreed to (an invitation or a consent prompt): the key
-/// pins (JSON) with its key pinned, its roster version and hash remembered, a tombstone
-/// cleared (marked re-joined) and an `account` row marked `own`. Errors for what
-/// `pins_admit` would refuse (`Rollback`, `RosterForked`, `IdentityMismatch`).
+/// Accept a vault row the user agreed to (an invitation or a consent prompt; the same
+/// observation that was shown, `invitation: true` for an invitation): the key pins (JSON)
+/// with its key pinned, its roster version and hash remembered, a tombstone cleared
+/// (marked re-joined) and an `account` row marked `own`. Errors for what `pins_admit`
+/// would refuse (`Rollback`, also for `own_vault` and `held`; `RosterForked`;
+/// `IdentityMismatch`).
 #[uniffi::export]
 pub fn pins_accept(pins_json: Option<String>, observation_json: String) -> R<String> {
     let observation: VaultObservation = json_in(&observation_json)?;
@@ -476,9 +522,10 @@ pub fn roster_hash(roster_json: String) -> R<String> {
     Ok(roster(&roster_json)?.hash()?)
 }
 
-/// An email as key pins compare it (invisible characters removed, NFKC, lower case,
-/// trimmed, the domain without trailing dots in IDNA ASCII; non-ASCII escaped as
-/// `\u{hex}` when IDNA refuses the domain); show pinned emails in this form.
+/// An email as key pins compare it (invisible and default-ignorable characters removed,
+/// NFKC, lower case, trimmed, the domain without trailing dots in IDNA ASCII; when IDNA
+/// refuses the domain, the address as it is if ASCII, else non-ASCII escaped as
+/// `\u{hex}`; normalizing twice gives the same); show pinned emails in this form.
 #[uniffi::export]
 pub fn normalize_email(email: String) -> String {
     core::normalize_email(&email)
@@ -749,7 +796,28 @@ mod tests {
             pins_epoch_check(None, vault.clone(), pin.clone(), None).unwrap(),
             "new"
         );
-        let with_epoch = pins_set_epoch(None, vault.clone(), pin.clone(), Some(1)).unwrap();
+        let roster_hash_1 = roster_hash(roster_json.clone()).unwrap();
+        // A version without its hash is refused.
+        assert!(
+            pins_record_rotation(
+                None,
+                vault.clone(),
+                "sealed".into(),
+                pin.clone(),
+                Some(1),
+                None
+            )
+            .is_err()
+        );
+        let with_epoch = pins_record_rotation(
+            None,
+            vault.clone(),
+            "sealed".into(),
+            pin.clone(),
+            Some(1),
+            Some(roster_hash_1.clone()),
+        )
+        .unwrap();
         assert_eq!(
             pins_epoch_check(
                 Some(with_epoch.clone()),
@@ -768,8 +836,15 @@ mod tests {
         assert!(pins_legacy_wrap_allowed(Some(with_epoch.clone()), vault.clone()).unwrap());
         let other = owner.new_vault_key(vault.clone()).unwrap().key;
         let newer = other.epoch_pin_json(vault.clone(), 2).unwrap();
-        let raised =
-            pins_set_epoch(Some(with_epoch.clone()), vault.clone(), newer, Some(2)).unwrap();
+        let raised = pins_record_rotation(
+            Some(with_epoch.clone()),
+            vault.clone(),
+            "sealed".into(),
+            newer,
+            Some(2),
+            Some(b64(&[2; 32])),
+        )
+        .unwrap();
         let relabelled = key.epoch_pin_json(vault.clone(), 3).unwrap();
         assert_eq!(
             pins_epoch_check(Some(raised.clone()), vault.clone(), relabelled, Some(2)).unwrap(),
@@ -787,6 +862,7 @@ mod tests {
                 "vault_id": vault, "key_kind": "sealed",
                 "key": json(&key.epoch_pin_json(vault.clone(), 1).unwrap()),
                 "roster_version": if signed { Some(1) } else { None },
+                "roster_hash": if signed { Some(roster_hash_1.clone()) } else { None },
                 "signed_share": signed, "paused": false,
             })
             .to_string()
@@ -801,11 +877,35 @@ mod tests {
         );
         let left = pins_leave(Some(with_epoch.clone()), vault.clone(), 1, 10).unwrap();
         assert_eq!(observe(Some(left.clone()), true)["reason"], "left");
-        let grand = pins_grandfather(None, vec![vault.clone()], true).unwrap();
+        let candidates = serde_json::json!([{
+            "vault_id": vault,
+            "key_id": key.key_id(vault.clone()).unwrap(),
+        }])
+        .to_string();
+        let grand = pins_grandfather(None, candidates.clone(), true).unwrap();
         assert_eq!(observe(Some(grand.clone()), false)["status"], "ok");
         assert_eq!(observe(Some(grand.clone()), true)["status"], "consent");
-        let withheld = pins_grandfather(None, vec![vault.clone()], false).unwrap();
+        let withheld = pins_grandfather(None, candidates, false).unwrap();
         assert_eq!(observe(Some(withheld), false)["status"], "consent");
+        // Declining: never for a held vault; a tombstone at version 0 otherwise.
+        assert_eq!(
+            pins_decline(Some(with_epoch.clone()), vault.clone(), false, 5).unwrap(),
+            with_epoch
+        );
+        let declined = json(&pins_decline(None, vault.clone(), false, 5).unwrap());
+        assert_eq!(declined["left"][&vault]["roster_version"], 0);
+        // Invitations for a held vault with the same key are refused.
+        let mut invitation = json(&row(true));
+        invitation["invitation"] = true.into();
+        assert_eq!(
+            json(&pins_admit(Some(with_epoch.clone()), invitation.to_string()).unwrap())["reason"],
+            "held"
+        );
+        // Last-known pins merge into a newer server copy without overwriting it.
+        assert_eq!(
+            json(&pins_merge_last_known(raised.clone(), with_epoch.clone()).unwrap())["epochs"],
+            json(&raised)["epochs"]
+        );
         let observed = json(&pins_observe(Some(grand), row(false)).unwrap());
         assert_eq!(observed["changed"], true);
         assert_eq!(observed["admission"]["pin"], true);

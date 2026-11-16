@@ -1515,6 +1515,15 @@ async fn key_replacements_per_vault_are_limited() {
         "keys": [{ "user_id": me, "wrapped_key": "a2V5", "key_kind": "account" }],
         "items": [],
     });
+    // Review round 5 L: refused requests (here: no key for the only member) don't count.
+    let incomplete = json!({ "keys": [], "items": [] });
+    for _ in 0..crate::vault::KEY_REPLACEMENTS_PER_HOUR {
+        let (s, v) = call(&app, Method::POST, &rotate, Some(&ta), incomplete.clone()).await;
+        assert!(
+            s.is_client_error() && s != StatusCode::TOO_MANY_REQUESTS,
+            "{s} {v}"
+        );
+    }
     for _ in 0..crate::vault::KEY_REPLACEMENTS_PER_HOUR {
         let (s, v) = call(&app, Method::POST, &rotate, Some(&ta), body.clone()).await;
         assert_eq!(s, StatusCode::OK, "{v}");

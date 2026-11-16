@@ -7,8 +7,8 @@
 //! docs).
 
 use passauth_core::sharing::{
-    self as core, EpochPin, IdentityRecord, KeyPins, PublicIdentity, RosterMemberInput,
-    SignedRoster, VaultObservation,
+    self as core, EpochPin, GrandfatherCandidate, IdentityRecord, KeyPins, PublicIdentity,
+    RosterMemberInput, SignedRoster, VaultObservation,
 };
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -41,17 +41,19 @@ export interface RosterReview { vault_id: string; version: number; first: boolea
 export interface KeyPin { user_id: string; email: string; public_key: string; signing_key?: string | null; identity: string; verified: boolean; first_seen: number; [extra: string]: unknown }
 /** A vault the account left or deleted. */
 export interface Tombstone { pin: EpochPin | null; roster_version: number; left_at: number }
-/** An account's key pins. `epochs` keys = the vaults it accepted. */
-export interface KeyPins { version: number; pins: KeyPin[]; epochs?: Record<string, EpochPin>; own_identity?: string | null; grandfathered?: string[] | null; left?: Record<string, Tombstone>; [extra: string]: unknown }
-/** A vault's key: `{key_epoch, key_id}` as `VaultKey.epochPin` gives it; as a pin also the retired key ids (12-byte prefixes), since which roster version the vault is signed, the highest trusted roster version with its hash, the roster version a re-join (after leaving) accepted, and whether the account held it with its own wrap. */
-export interface EpochPin { key_epoch: number; key_id: string; retired?: string[]; signed_since?: number | null; roster_version_max?: number | null; roster_hash?: string | null; rejoined_at?: number | null; own?: boolean }
-/** A vault row for `pinsAdmit` / `pinsObserve` / `pinsAccept`, after its key opened and its share and roster chain were checked (`roster_hash`: `rosterHash` of the trusted roster). `signed_share` and `paused` are required. `chain_hashes` (`{"<version>": rosterHash}` of the trusted roster the chain started from and every newer roster verified now): send it whenever a chain was fetched (also an invitation's from version 1); the pinned highest roster must be in it with its hash, else `roster_forked`. */
-export interface VaultObservation { vault_id: string; key_kind: "account" | "sealed"; key: EpochPin | null; roster_version: number | null; roster_hash?: string | null; chain_hashes?: Record<string, string> | null; signed_share: boolean; paused: boolean }
-/** `pinsAdmit`'s verdict (`ok.pin`: write what it says to pin; `consent.replaced`: a new key on a vault never seen signed, unsigned or signed by anyone; `consent.own`: the account held this vault with its own key wrap: warn that a personal vault now comes as one someone else sealed). Accepting a consent = `pinsAccept`. */
+/** An account's key pins. `epochs` keys = the vaults it accepted; `grandfathered` = `{vault id: key id}` written once at the first signed sync. */
+export interface KeyPins { version: number; pins: KeyPin[]; epochs?: Record<string, EpochPin>; own_identity?: string | null; grandfathered?: Record<string, string> | null; left?: Record<string, Tombstone>; [extra: string]: unknown }
+/** A shared vault for `pinsGrandfather`: its id and the key id (`VaultKey.keyId`) of the key it has now. */
+export interface GrandfatherCandidate { vault_id: string; key_id: string }
+/** A vault's key: `{key_epoch, key_id}` as `VaultKey.epochPin` gives it; as a pin also the retired key ids (12-byte prefixes), since which roster version the vault is signed, the highest trusted roster version with its hash (always together), the roster version a re-join (after leaving) accepted with the `left_at` of the tombstone it cleared, and whether the account held it with its own wrap. */
+export interface EpochPin { key_epoch: number; key_id: string; retired?: string[]; signed_since?: number | null; roster_version_max?: number | null; roster_hash?: string | null; rejoined_at?: number | null; rejoined_over?: number | null; own?: boolean }
+/** A vault row (or, with `invitation: true`, an invitation) for `pinsAdmit` / `pinsObserve` / `pinsAccept`, after its key opened and its share and roster chain were checked (`roster_hash`: `rosterHash` of the trusted roster, required with `roster_version` and only with it). `signed_share` and `paused` are required; unknown fields throw. `chain_hashes` (`{"<version>": rosterHash}` of the trusted roster the chain started from and every newer roster verified now): send it whenever a chain was fetched (also an invitation's from version 1); the pinned highest roster must be in it with its hash, else `roster_forked`. */
+export interface VaultObservation { vault_id: string; key_kind: "account" | "sealed"; key: EpochPin | null; roster_version: number | null; roster_hash?: string | null; chain_hashes?: Record<string, string> | null; signed_share: boolean; paused: boolean; invitation?: boolean }
+/** `pinsAdmit`'s verdict (`ok.pin`: write what it says to pin; `consent.replaced`: a new key on a vault never seen signed, unsigned or signed by anyone; `consent.own`: the account held this vault with its own key wrap: warn that a personal vault now comes as one someone else sealed; `consent.first_signed`: signed for the first time (the signer becomes the vault's first trusted signer only with the user's OK); `consent.held`: an invitation with a newer signed key for a vault the account holds; `consent.declinable`: Decline may be offered (`pinsDecline`), else "Not now"). Accepting a consent = `pinsAccept` with the same observation. */
 export type Admission =
   | { status: "ok"; epoch: "new" | "same" | "newer"; trust: "own" | "signed" | "unsigned"; pin: boolean }
-  | { status: "consent"; rejoin: boolean; replaced: boolean; own: boolean }
-  | { status: "refused"; reason: "missing_epoch" | "paused" | "left" | "older" | "conflict" | "downgraded" | "roster_forked" };
+  | { status: "consent"; rejoin: boolean; replaced: boolean; own: boolean; first_signed: boolean; held: boolean; declinable: boolean }
+  | { status: "refused"; reason: "missing_epoch" | "paused" | "left" | "older" | "conflict" | "downgraded" | "roster_forked" | "own_vault" | "held" };
 /** `pinsObserve`'s answer: the verdict and the key pins with it applied (`changed`: write them). */
 export interface Observed { admission: Admission; pins: KeyPins; changed: boolean }
 /** "new" | "match" | "changed" | "upgraded" | "email_conflict" */
@@ -524,6 +526,14 @@ pub fn epoch_check(
     enum_name(&core::epoch_check(pinned.as_ref(), &current))
 }
 
+/// A value whose type refuses unknown fields (`VaultObservation`, `GrandfatherCandidate`):
+/// serde-wasm-bindgen reads only the fields a struct names, so it goes through a JSON value
+/// first, where every field is seen (review round 5 Info).
+fn strict<T: serde::de::DeserializeOwned>(v: JsValue) -> R<T> {
+    let value: serde_json::Value = from_js(v)?;
+    serde_json::from_value(value).map_err(|e| JsError::new(&format!("invalid input: {e}")))
+}
+
 fn pins_or_empty(pins: JsValue) -> R<KeyPins> {
     if pins.is_null() || pins.is_undefined() {
         Ok(KeyPins::default())
@@ -567,7 +577,10 @@ pub fn pin_set(
     )
 }
 
-/// Merge this device's pins (`ours`) into the server's newest (`base`).
+/// Merge this device's **unsent** changes (`ours`) into the server's newest (`base`):
+/// this device's decision wins for a person pinned with another identity. Throws
+/// `identity_mismatch` when both remember another own identity (merge nothing, write
+/// nothing, pause sharing).
 #[wasm_bindgen(js_name = mergePins, unchecked_return_type = "KeyPins")]
 pub fn merge_pins(
     #[wasm_bindgen(unchecked_param_type = "KeyPins")] base: JsValue,
@@ -576,6 +589,22 @@ pub fn merge_pins(
     let base: KeyPins = from_js(base)?;
     let ours: KeyPins = from_js(ours)?;
     to_js(&base.merge(&ours).map_err(js_err)?)
+}
+
+/// Merge this device's last-known pins (`lastKnown`) into a newer server copy (`server`),
+/// whenever one arrives: only what never goes back comes from the device copy (keys,
+/// retired ids, rosters, tombstones, grandfathered vaults, the own identity, person pins
+/// the server lacks, `verified`/`first_seen` for the same identity); a person pinned with
+/// another identity keeps the server's. Write the result back only if it differs from
+/// `server`. Throws `identity_mismatch` like `mergePins`.
+#[wasm_bindgen(js_name = pinsMergeLastKnown, unchecked_return_type = "KeyPins")]
+pub fn pins_merge_last_known(
+    #[wasm_bindgen(unchecked_param_type = "KeyPins")] server: JsValue,
+    #[wasm_bindgen(js_name = "lastKnown", unchecked_param_type = "KeyPins")] last_known: JsValue,
+) -> R<JsValue> {
+    let server: KeyPins = from_js(server)?;
+    let last_known: KeyPins = from_js(last_known)?;
+    to_js(&server.merge_last_known(&last_known).map_err(js_err)?)
 }
 
 /// A vault's current key (`{key_epoch, key_id}`) against the account's epoch pin for it
@@ -594,23 +623,63 @@ pub fn pins_epoch_check(
     enum_name(&pins_or_empty(pins)?.check_epoch(&vault_id, &current, roster_version))
 }
 
-/// The key pins with `current` pinned (accepted) for `vaultId` when it is new or newer
-/// (the previous key id retired; `rosterVersion`: the trusted roster's, marks the vault
-/// signed since then). Throws `rollback` for a vault the account left that doesn't
-/// qualify to come back.
-#[wasm_bindgen(js_name = pinsSetEpoch, unchecked_return_type = "KeyPins")]
-pub fn pins_set_epoch(
+/// The key pins with a key this device itself just gave `vaultId` (its own key
+/// replacement or re-signing): `keyKind` = its own row's (`account`, or `sealed` when it
+/// sealed the key to itself), `current` = `VaultKey.epochPin` of the new key, and the
+/// roster it signed: `rosterVersion` *and* `rosterHash` (`rosterHash(roster)`), both or
+/// neither. Throws what `pinsAccept` would (`rollback`: an older or conflicting key, a
+/// lower roster, a vault left; `roster_forked`), and when only one of the two is given.
+#[wasm_bindgen(js_name = pinsRecordRotation, unchecked_return_type = "KeyPins")]
+pub fn pins_record_rotation(
     #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
     #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+    #[wasm_bindgen(js_name = "keyKind", unchecked_param_type = "string")] key_kind: JsValue,
     #[wasm_bindgen(unchecked_param_type = "EpochPin")] current: JsValue,
     #[wasm_bindgen(js_name = "rosterVersion")] roster_version: Option<f64>,
+    #[wasm_bindgen(
+        js_name = "rosterHash",
+        unchecked_param_type = "string | null | undefined"
+    )]
+    roster_hash: JsValue,
 ) -> R<JsValue> {
     let vault_id = string(vault_id)?;
+    let key_kind = string(key_kind)?;
+    let roster_hash = opt_string(roster_hash)?;
     let current: EpochPin = from_js(current)?;
     let roster_version = opt_number(roster_version, "roster version")?;
     to_js(
         &pins_or_empty(pins)?
-            .set_epoch(&vault_id, &current, roster_version)
+            .record_rotation(
+                &vault_id,
+                &key_kind,
+                &current,
+                roster_version,
+                roster_hash.as_deref(),
+            )
+            .map_err(js_err)?,
+    )
+}
+
+/// The key pins after the user declined an invitation or a consent prompt for `vaultId`
+/// (offer Decline only where the verdict says `declinable`): a tombstone at roster
+/// version 0, unless the account holds the vault (an epoch pin), left it already, or
+/// `currentRow` (it is one of this sync's vault rows, whatever its verdict) — then
+/// unchanged. Never pass a server-chosen roster version (there is none to pass).
+#[wasm_bindgen(js_name = pinsDecline, unchecked_return_type = "KeyPins")]
+pub fn pins_decline(
+    #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
+    #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+    #[wasm_bindgen(js_name = "currentRow", unchecked_param_type = "boolean")] current_row: JsValue,
+    now: f64,
+) -> R<JsValue> {
+    let vault_id = string(vault_id)?;
+    let current_row = current_row
+        .as_bool()
+        .ok_or_else(|| JsError::new("currentRow must be true or false"))?;
+    let now = number(now, "time")? as i64;
+    to_js(
+        &pins_or_empty(pins)?
+            .decline(&vault_id, current_row, now)
             .map_err(js_err)?,
     )
 }
@@ -634,39 +703,41 @@ pub fn pins_leave(
     )
 }
 
-/// The key pins with the grandfathered vault ids written (once: unchanged when already
-/// written), at the account's first signed sync. `createdIdentity`: this unlock created
-/// the account's signing identity (`user.identity` was null and `PUT /account/identity`
-/// answered `created: true`); when false (identity without key pins: "trust memory
-/// missing") an empty list is written. Throws unless it is a boolean.
+/// The key pins with the grandfathered vaults written (once: unchanged when already
+/// written), at the account's first signed sync: `vaults` = `[{vault_id, key_id}]`, each
+/// with the key id of the key it has now (only that key is grandfathered).
+/// `createdIdentity`: this unlock created the account's signing identity (`user.identity`
+/// was null and `PUT /account/identity` answered `created: true`); when false (identity
+/// without key pins: "trust memory missing") an empty list is written. Throws unless it
+/// is a boolean.
 #[wasm_bindgen(js_name = pinsGrandfather, unchecked_return_type = "KeyPins")]
 pub fn pins_grandfather(
     #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
-    #[wasm_bindgen(js_name = "vaultIds", unchecked_param_type = "string[]")] vault_ids: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "GrandfatherCandidate[]")] vaults: JsValue,
     #[wasm_bindgen(js_name = "createdIdentity", unchecked_param_type = "boolean")]
     created_identity: JsValue,
 ) -> R<JsValue> {
     let created_identity = created_identity
         .as_bool()
         .ok_or_else(|| JsError::new("createdIdentity must be true or false"))?;
-    let vault_ids: Vec<String> = from_js(vault_ids)?;
+    let vaults: Vec<GrandfatherCandidate> = strict(vaults)?;
     to_js(
         &pins_or_empty(pins)?
-            .grandfather(&vault_ids, created_identity)
+            .grandfather(&vaults, created_identity)
             .map_err(js_err)?,
     )
 }
 
-/// What to do with a vault row: `{status: "ok", epoch, trust, pin}` | `{status:
-/// "consent", rejoin, replaced, own}` | `{status: "refused", reason}` (see
-/// docs/ARCHITECTURE.md "Signed sharing").
+/// What to do with a vault row or invitation: `{status: "ok", epoch, trust, pin}` |
+/// `{status: "consent", rejoin, replaced, own, first_signed, held, declinable}` |
+/// `{status: "refused", reason}` (see docs/ARCHITECTURE.md "Signed sharing").
 #[wasm_bindgen(js_name = pinsAdmit, unchecked_return_type = "Admission")]
 pub fn pins_admit(
     #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
     #[wasm_bindgen(unchecked_param_type = "VaultObservation")] observation: JsValue,
 ) -> R<JsValue> {
     let pins = pins_or_empty(pins)?;
-    let observation: VaultObservation = from_js(observation)?;
+    let observation: VaultObservation = strict(observation)?;
     to_js(&pins.admit(&observation).map_err(js_err)?)
 }
 
@@ -678,22 +749,23 @@ pub fn pins_observe(
     #[wasm_bindgen(unchecked_param_type = "VaultObservation")] observation: JsValue,
 ) -> R<JsValue> {
     let pins = pins_or_empty(pins)?;
-    let observation: VaultObservation = from_js(observation)?;
+    let observation: VaultObservation = strict(observation)?;
     to_js(&pins.observe(&observation).map_err(js_err)?)
 }
 
-/// Accept a vault row the user agreed to (an invitation or a consent prompt): the key
-/// pins with its key pinned, its roster version *and hash* remembered, a tombstone
-/// cleared (marked re-joined) and an `account` row marked `own`. Throws what
-/// `pinsAdmit` would refuse (`rollback`: left, older, conflict, downgraded;
-/// `roster_forked`; `identity_mismatch`: paused).
+/// Accept a vault row the user agreed to (an invitation or a consent prompt; the same
+/// observation that was shown, `invitation: true` for an invitation): the key pins with
+/// its key pinned, its roster version *and hash* remembered, a tombstone cleared (marked
+/// re-joined) and an `account` row marked `own`. Throws what `pinsAdmit` would refuse
+/// (`rollback`: left, older, conflict, downgraded, own_vault, held; `roster_forked`;
+/// `identity_mismatch`: paused).
 #[wasm_bindgen(js_name = pinsAccept, unchecked_return_type = "KeyPins")]
 pub fn pins_accept(
     #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
     #[wasm_bindgen(unchecked_param_type = "VaultObservation")] observation: JsValue,
 ) -> R<JsValue> {
     let pins = pins_or_empty(pins)?;
-    let observation: VaultObservation = from_js(observation)?;
+    let observation: VaultObservation = strict(observation)?;
     to_js(&pins.accept(&observation).map_err(js_err)?)
 }
 
@@ -706,10 +778,11 @@ pub fn roster_hash(
     roster(&roster_json)?.hash().map_err(js_err)
 }
 
-/// An email as key pins compare it: invisible characters removed (Cf, Cc, Zl, Zp, Hangul
-/// fillers), NFKC, lower case, trimmed, the domain without trailing dots in IDNA ASCII
-/// (punycode); when IDNA refuses it, non-ASCII characters written as `\u{hex}`. Show
-/// emails of pinned identities in this form.
+/// An email as key pins compare it: invisible characters removed (Cf, Cc, Zl, Zp,
+/// Default_Ignorable_Code_Point), NFKC, lower case, trimmed, the domain without trailing
+/// dots in IDNA ASCII (punycode); when IDNA refuses it, the address as it is if ASCII,
+/// else with non-ASCII characters written as `\u{hex}`. Normalizing twice gives the
+/// same. Show emails of pinned identities in this form.
 #[wasm_bindgen(js_name = normalizeEmail)]
 pub fn normalize_email(
     #[wasm_bindgen(unchecked_param_type = "string")] email: JsValue,

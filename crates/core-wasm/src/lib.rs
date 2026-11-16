@@ -141,6 +141,18 @@ impl Account {
         out
     }
 
+    /// Whether `bundle` (the server's account bundle object) is this account's own: its `account_id` is this
+    /// account's and its private-key blob opens under this Account Key (associated data
+    /// bound to that id) to this account's private key. Only the Account Key's holder can
+    /// make that, so `true` authenticates the bundle's account id. After
+    /// `accountFromSessionBytes(storedBundle.account_id, bytes)` refuse the session (ask
+    /// for the master password) unless this is true; never store a `/sync` bundle for
+    /// which it is false. Malformed bundles are false.
+    #[wasm_bindgen(js_name = matchesBundle)]
+    pub fn matches_bundle(&self, bundle: JsValue) -> bool {
+        from_js::<AccountBundle>(bundle).is_ok_and(|b| self.0.matches_bundle(&b))
+    }
+
     /// New password and/or Secret Key setting. Re-register OPAQUE with the
     /// returned master keys, then upload the new bundle.
     /// Pass the current Secret Key to keep it; omit it to generate a new one.

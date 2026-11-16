@@ -11,8 +11,8 @@ use passauth_core::device_login;
 use passauth_core::item::{b64, unb64};
 use passauth_core::keys::UnlockedAccount;
 use passauth_core::sharing::{
-    self, EpochPin, IdentityRecord, KeyPins, PublicIdentity, RosterMemberInput, SignedRoster,
-    SigningIdentity, VaultObservation,
+    self, EpochPin, GrandfatherCandidate, IdentityRecord, KeyPins, PublicIdentity,
+    RosterMemberInput, SignedRoster, SigningIdentity, VaultObservation,
 };
 use passauth_core::site::{self, PasskeyLogin, SaveCandidate, SavePlan, UrlMatch};
 use serde_json::{Value, json};
@@ -338,38 +338,6 @@ fn signed_sharing_vectors() {
         );
     }
     let ep = |k: &SymmetricKey, e: u64| EpochPin::of(k, vault_id, e).unwrap();
-    let with_epoch = pins
-        .set_epoch(vault_id, &ep(&vault_key, 1), Some(2))
-        .unwrap();
-    assert_eq!(json!(with_epoch), s["keyPinsWithEpoch"]);
-    for c in s["pinsEpochChecks"].as_array().unwrap() {
-        let current: EpochPin = serde_json::from_value(c["current"].clone()).unwrap();
-        assert_eq!(
-            json!(with_epoch.check_epoch(vault_id, &current, c["rosterVersion"].as_u64())),
-            c["expected"]
-        );
-    }
-    let raised = with_epoch
-        .set_epoch(vault_id, &ep(&second_key, 2), Some(3))
-        .unwrap();
-    assert_eq!(json!(raised), s["keyPinsRaised"]);
-    let other_device = KeyPins::default()
-        .set_epoch(vault_id, &ep(&second_key, 2), None)
-        .unwrap();
-    assert_eq!(
-        json!(with_epoch.merge(&other_device).unwrap().epochs),
-        s["mergedEpochs"]
-    );
-    let left = raised.leave(vault_id, 3, 2000).unwrap();
-    assert_eq!(json!(left), s["keyPinsLeft"]);
-    let grandfathered = pins.grandfather(&[vault_id.to_owned()], true).unwrap();
-    assert_eq!(json!(grandfathered), s["keyPinsGrandfathered"]);
-    let withheld = pins.grandfather(&[vault_id.to_owned()], false).unwrap();
-    assert_eq!(json!(withheld), s["keyPinsWithheld"]);
-    let unsigned = grandfathered
-        .set_epoch(vault_id, &ep(&vault_key, 1), None)
-        .unwrap();
-    assert_eq!(json!(unsigned), s["keyPinsUnsigned"]);
     let roster_hash = |name: &str| {
         s["rosters"]
             .as_array()
@@ -381,6 +349,45 @@ fn signed_sharing_vectors() {
             .unwrap()
             .to_owned()
     };
+    // Keys this device gave the vault itself, recorded as its sealed row.
+    let record = |p: &KeyPins, current: &EpochPin, roster: Option<(u64, &str)>| {
+        let hash = roster.map(|(_, name)| roster_hash(name));
+        p.record_rotation(
+            vault_id,
+            "sealed",
+            current,
+            roster.map(|(v, _)| v),
+            hash.as_deref(),
+        )
+    };
+    let with_epoch = record(&pins, &ep(&vault_key, 1), Some((2, "v2"))).unwrap();
+    assert_eq!(json!(with_epoch), s["keyPinsWithEpoch"]);
+    for c in s["pinsEpochChecks"].as_array().unwrap() {
+        let current: EpochPin = serde_json::from_value(c["current"].clone()).unwrap();
+        assert_eq!(
+            json!(with_epoch.check_epoch(vault_id, &current, c["rosterVersion"].as_u64())),
+            c["expected"]
+        );
+    }
+    let raised = record(&with_epoch, &ep(&second_key, 2), Some((3, "v3"))).unwrap();
+    assert_eq!(json!(raised), s["keyPinsRaised"]);
+    let other_device = record(&KeyPins::default(), &ep(&second_key, 2), None).unwrap();
+    assert_eq!(
+        json!(with_epoch.merge(&other_device).unwrap().epochs),
+        s["mergedEpochs"]
+    );
+    let left = raised.leave(vault_id, 3, 2000).unwrap();
+    assert_eq!(json!(left), s["keyPinsLeft"]);
+    let candidates = [GrandfatherCandidate {
+        vault_id: vault_id.to_owned(),
+        key_id: ep(&vault_key, 0).key_id,
+    }];
+    let grandfathered = pins.grandfather(&candidates, true).unwrap();
+    assert_eq!(json!(grandfathered), s["keyPinsGrandfathered"]);
+    let withheld = pins.grandfather(&candidates, false).unwrap();
+    assert_eq!(json!(withheld), s["keyPinsWithheld"]);
+    let unsigned = record(&grandfathered, &ep(&vault_key, 1), None).unwrap();
+    assert_eq!(json!(unsigned), s["keyPinsUnsigned"]);
     let roster_max = with_epoch
         .observe(&VaultObservation {
             vault_id: vault_id.to_owned(),
@@ -391,6 +398,7 @@ fn signed_sharing_vectors() {
             chain_hashes: None,
             signed_share: true,
             paused: false,
+            invitation: false,
         })
         .unwrap()
         .pins;
@@ -405,6 +413,7 @@ fn signed_sharing_vectors() {
             chain_hashes: None,
             signed_share: false,
             paused: false,
+            invitation: false,
         })
         .unwrap()
         .pins;
@@ -443,10 +452,35 @@ fn signed_sharing_vectors() {
         let base: KeyPins = serde_json::from_value(c["base"].clone()).unwrap();
         let ours: KeyPins = serde_json::from_value(c["ours"].clone()).unwrap();
         assert_eq!(
-            json!(base.merge(&ours).unwrap()),
-            c["expected"],
+            outcome(base.merge(&ours)),
+            only_result(c),
             "merge {}",
             c["name"]
+        );
+    }
+    for c in s["mergesLastKnown"].as_array().unwrap() {
+        let base: KeyPins = serde_json::from_value(c["base"].clone()).unwrap();
+        let last: KeyPins = serde_json::from_value(c["lastKnown"].clone()).unwrap();
+        assert_eq!(
+            outcome(base.merge_last_known(&last)),
+            only_result(c),
+            "last-known merge {}",
+            c["name"]
+        );
+    }
+    for c in s["declines"].as_array().unwrap() {
+        let p = &sets[c["pins"].as_str().unwrap()];
+        assert_eq!(
+            json!(
+                p.decline(
+                    c["vaultId"].as_str().unwrap(),
+                    c["currentRow"].as_bool().unwrap(),
+                    3000
+                )
+                .unwrap()
+            ),
+            c["expected"],
+            "decline {c}"
         );
     }
     let mut step = sets["grandfathered"].clone();
@@ -454,7 +488,13 @@ fn signed_sharing_vectors() {
         let o: VaultObservation = serde_json::from_value(c["observation"].clone()).unwrap();
         let observed = step.observe(&o).unwrap();
         assert_eq!(json!(observed), c["expected"], "observation {c}");
-        step = observed.pins;
+        step = if c["accept"] == true {
+            let accepted = step.accept(&o).unwrap();
+            assert_eq!(json!(accepted), c["accepted"], "accepted {c}");
+            accepted
+        } else {
+            observed.pins
+        };
     }
     for c in s["legacyWraps"].as_array().unwrap() {
         assert_eq!(

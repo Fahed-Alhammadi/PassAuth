@@ -269,6 +269,35 @@ fn vault_key_aad_v2(vault_id: &str, key_epoch: u64) -> Vec<u8> {
 }
 
 impl UnlockedAccount {
+    /// Whether `bundle` is this account's own (review round 5, session restore): its
+    /// `account_id` is this account's id, its private-key blob opens under this Account
+    /// Key with associated data `passauth/private-key/v1/<bundle's account id>` to this
+    /// account's X25519 private key, and its `public_key` is this account's. Only the
+    /// holder of the Account Key can make such a blob, so a `true` here authenticates the
+    /// bundle's account id: restore a session with the stored bundle's id, then refuse it
+    /// (ask for the master password) unless this is `true`; check every bundle `/sync`
+    /// sends the same way before storing it. Malformed bundles are `false`.
+    pub fn matches_bundle(&self, bundle: &AccountBundle) -> bool {
+        use subtle::ConstantTimeEq;
+        if bundle.account_id != self.account_id
+            || bundle.public_key != b64(&self.keypair.public_bytes())
+        {
+            return false;
+        }
+        let Ok(blob) = unb64(&bundle.wrapped_private_key) else {
+            return false;
+        };
+        let Ok(secret) = self
+            .account_key
+            .decrypt(&blob, &aad("private-key", &bundle.account_id))
+        else {
+            return false;
+        };
+        let secret = zeroize::Zeroizing::new(secret);
+        let own = zeroize::Zeroizing::new(self.keypair.secret_bytes());
+        secret.len() == own.len() && bool::from(secret.as_slice().ct_eq(own.as_slice()))
+    }
+
     /// A new vault key and its `account` wrap ([`wrap_vault_key`](Self::wrap_vault_key)).
     pub fn new_vault_key(&self, vault_id: &str) -> Result<(SymmetricKey, String)> {
         let key = SymmetricKey::generate()?;
@@ -571,6 +600,41 @@ mod tests {
         acct.bundle.account_id = "user-2".into();
         let m = master(&acct.bundle, "correct horse", None).unwrap();
         assert!(acct.bundle.unlock(&m.auk).is_err());
+    }
+
+    /// Review round 5 (iOS H): a restored session authenticates the stored bundle's
+    /// account id; a bundle the server swapped in (another account's, a renamed one, one
+    /// with another private key) doesn't match.
+    #[test]
+    fn a_session_matches_only_its_own_bundle() {
+        let acct = new(false);
+        let u = &acct.unlocked;
+        assert!(u.matches_bundle(&acct.bundle));
+        // A password change keeps the private-key blob: still the account's.
+        let next = acct.bundle.rewrap(u, "new pw", false, None).unwrap();
+        assert!(u.matches_bundle(&next.bundle));
+        // Session bytes restored under another id (a server-chosen bundle account id).
+        let wrong_id = UnlockedAccount {
+            account_id: "user-2".into(),
+            account_key: SymmetricKey::from_slice(u.account_key.as_bytes()).unwrap(),
+            keypair: KeyPair::from_secret_bytes(u.keypair.secret_bytes()),
+        };
+        assert!(!wrong_id.matches_bundle(&acct.bundle));
+        let mut renamed = acct.bundle.clone();
+        renamed.account_id = "user-2".into();
+        assert!(!wrong_id.matches_bundle(&renamed));
+        assert!(!u.matches_bundle(&renamed));
+        // Another account's bundle with the same id, a swapped public key, garbage.
+        let other = AccountBundle::create_with_kdf("user-1", "pw", false, test_params()).unwrap();
+        assert!(!u.matches_bundle(&other.bundle));
+        let mut swapped = acct.bundle.clone();
+        swapped.public_key = other.bundle.public_key.clone();
+        assert!(!u.matches_bundle(&swapped));
+        let mut mixed = acct.bundle.clone();
+        mixed.wrapped_private_key = other.bundle.wrapped_private_key.clone();
+        assert!(!u.matches_bundle(&mixed));
+        mixed.wrapped_private_key = "not base64!".into();
+        assert!(!u.matches_bundle(&mixed));
     }
 
     #[test]

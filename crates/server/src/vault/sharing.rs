@@ -701,11 +701,13 @@ pub(super) async fn rotate_vault(
     check_rotation(&b, &id, &user.user_id)?;
     let need = Need::new(&id, Role::Admin, b.key_epoch);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
-    limit_key_replacements(&state, &id)?;
     // Invitations carry the sealed key and the encrypted name: both change.
     w.tell_invitees(&id);
     let seq = w.seq(&id);
     let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
+    // Counted only once every check passed (review round 5 L), before the commit: a
+    // refused request costs nothing, an over-limit one rolls back.
+    limit_key_replacements(&state, &id)?;
     let revision = w.commit(&state).await?;
     Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
 }
@@ -734,7 +736,6 @@ pub(super) async fn remove_member_and_rotate(
     if target == Role::Owner {
         return Err(ApiError::Forbidden("the owner cannot be removed".into()));
     }
-    limit_key_replacements(&state, &id)?;
     if target >= mine {
         return Err(ApiError::Forbidden(
             "you can't remove a member at or above your own role".into(),
@@ -760,13 +761,17 @@ pub(super) async fn remove_member_and_rotate(
     .await?;
     let seq = w.seq(&id);
     let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
+    limit_key_replacements(&state, &id)?;
     let revision = w.commit(&state).await?;
     Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
 }
 
 /// Count a key replacement of vault `id` ([`KEY_REPLACEMENTS_PER_HOUR`]). Called only
-/// after the caller's admin role in the vault was checked, so the key names a vault the
-/// request has proven exists (a [`Class::Target`] key).
+/// after the replacement was applied inside its transaction (the caller's admin role and
+/// every check of the body passed: review round 5 L, so a member's refused requests can't
+/// use up the vault's budget), before the commit: over the limit, the error rolls the
+/// replacement back. The key names a vault the request has proven exists (a
+/// [`Class::Target`] key).
 fn limit_key_replacements(state: &AppState, id: &str) -> ApiResult<()> {
     state.limiter.limit(
         Class::Target,

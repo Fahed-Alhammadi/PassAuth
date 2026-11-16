@@ -186,6 +186,17 @@ impl Account {
         out
     }
 
+    /// Whether `bundle_json` (the server's account bundle) is this account's own: its
+    /// `account_id` is this account's and its private-key blob opens under this Account
+    /// Key (associated data bound to that id) to this account's private key. Only the
+    /// Account Key's holder can make that, so `true` authenticates the bundle's account id.
+    /// After `account_from_session_bytes(stored bundle's account_id, bytes)` refuse the
+    /// session (ask for the master password) unless this is true; never store a `/sync`
+    /// or background-refresh bundle for which it is false. Malformed bundles are false.
+    pub fn matches_bundle(&self, bundle_json: String) -> bool {
+        json_in::<AccountBundle>(&bundle_json).is_ok_and(|b| self.0.matches_bundle(&b))
+    }
+
     /// New master password and/or Secret Key setting (see the web vault).
     pub fn rewrap(
         &self,
@@ -1385,6 +1396,13 @@ mod tests {
             account_from_session_bytes(account.0.account_id.clone(), account.to_session_bytes())
                 .unwrap();
         assert_eq!(restored.public_key(), account.public_key());
+        // Restored under the stored bundle's id: it must match that bundle; under another
+        // id (a bundle the server swapped in) it doesn't.
+        assert!(restored.matches_bundle(n.bundle_json.clone()));
+        let other_id =
+            account_from_session_bytes(new_id().unwrap(), account.to_session_bytes()).unwrap();
+        assert!(!other_id.matches_bundle(n.bundle_json.clone()));
+        assert!(!restored.matches_bundle("{}".into()));
     }
 
     #[test]

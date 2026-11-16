@@ -6,9 +6,11 @@
 /**
  * Characters that change how text around them looks without being seen themselves: format characters (Unicode Cf:
  * bidi embeddings, overrides and isolates U+202A–E and U+2066–9, the marks U+200E/F, zero-width spaces and joiners, the
- * byte order mark U+FEFF), and the Hangul fillers that render as blanks.
+ * byte order mark U+FEFF) and every Default_Ignorable_Code_Point (the Hangul fillers that render as blanks, the
+ * combining grapheme joiner U+034F, variation selectors, U+180B–D, U+17B4/5). With CONTROL below, the same set the core
+ * strips from emails (`normalize_email` in crates/core/src/sharing.rs).
  */
-const FORMAT = /[\p{Cf}\u115F\u1160\u3164\uFFA0]/gu;
+const FORMAT = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
 /** Control characters (Unicode Cc: C0, DEL, C1) and the line and paragraph separators. */
 const CONTROL = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
 
