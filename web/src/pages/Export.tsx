@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { ErrorText, Icon, PasswordField, toast } from "../components/ui";
-import { friendlyError } from "../lib/api";
+import { friendlyError, usePolicies } from "../lib/api";
+import { anyAttachments, stripAttachments } from "../lib/attachments";
 import { downloadFile } from "../lib/kit";
+import { exportAllowed } from "../lib/policies";
 import { exportVaultCsv, exportVaultEncrypted, exportVaultJson, reauth, useVault } from "../lib/vault";
 import "../styles/tools.css";
 
@@ -15,8 +17,28 @@ const FORMATS: { value: Format; title: string; text: string }[] = [
 
 const save = (name: string, text: string, type: string) => downloadFile(name, text, type);
 
-/** Export the vault to a file. Runs in the browser; nothing new is sent to the server. */
+/** Export the vault to a file, unless the server's admin turned export off (policy `disable_export`). */
 export function ExportPage() {
+  return exportAllowed(usePolicies()) ? <ExportForm /> : <ExportTurnedOff />;
+}
+
+function ExportTurnedOff() {
+  return (
+    <div className="page">
+      <div className="page-inner">
+        <header className="page-head">
+          <h1>Export</h1>
+        </header>
+        <div className="alert alert-info" role="note">
+          Your server's admin turned off export. Ask them if you need a copy of your vault.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Runs in the browser; nothing new is sent to the server. */
+function ExportForm() {
   const { items } = useVault();
   const [format, setFormat] = useState<Format>("encrypted");
   const [exportPassword, setExportPassword] = useState("");
@@ -24,7 +46,10 @@ export function ExportPage() {
   const [master, setMaster] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const live = items.filter((e) => !e.deletedAt).map((e) => e.item);
+  const kept = items.filter((e) => !e.deletedAt).map((e) => e.item);
+  // Files aren't exported: their list (with each file's key) is left out of every format.
+  const withFiles = anyAttachments(kept);
+  const live = kept.map(stripAttachments);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -96,6 +121,11 @@ export function ExportPage() {
             hint={<span className="field-hint">Confirms that it's you exporting the vault.</span>}
           />
 
+          {withFiles && (
+            <p className="small muted" role="note">
+              Files attached to items aren't exported. Download the ones you need from each item.
+            </p>
+          )}
           <ErrorText error={error} />
           <div className="card-actions">
             <button className="btn btn-primary" disabled={busy || !master || live.length === 0}>

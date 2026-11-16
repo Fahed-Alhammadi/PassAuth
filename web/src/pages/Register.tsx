@@ -4,13 +4,19 @@ import { LogoMark } from "../components/Logo";
 import { KitActions } from "../components/KitActions";
 import { CopyButton, ErrorText, Icon, PasswordField, SheetActions, StrengthMeter, WEAK_BITS } from "../components/ui";
 import { friendlyError, usePublicConfig } from "../lib/api";
+import { MIN_MASTER_PASSWORD, minPasswordLength, readPolicies } from "../lib/policies";
 import { estimateBits, login, register } from "../lib/vault";
 
 export function RegisterPage() {
   const nav = useNavigate();
   const [params] = useSearchParams();
+  const config = usePublicConfig();
   // Invitation links carry ?email=; the server accepts invited addresses even when sign-ups are closed.
-  const closed = usePublicConfig()?.signups_allowed === false && !params.get("email");
+  const closed = config?.signups_allowed === false && !params.get("email");
+  // The server's policies: a longer master password, a Secret Key for every account.
+  const policies = readPolicies(config);
+  const minLength = minPasswordLength(policies);
+  const skRequired = policies.requireSecretKey;
   const [email, setEmail] = useState(params.get("email") ?? "");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -26,7 +32,7 @@ export function RegisterPage() {
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    if (password.length < 10) return setError("Use at least 10 characters for your master password.");
+    if (password.length < minLength) return setError(`Use at least ${minLength} characters for your master password.`);
     if (password !== confirm) return setError("The two passwords don't match.");
     if (estimateBits(password) < WEAK_BITS && !hint) {
       setHint(true);
@@ -34,7 +40,7 @@ export function RegisterPage() {
     }
     setBusy(true);
     try {
-      const r = await register(email, name, password, withSecretKey);
+      const r = await register(email, name, password, withSecretKey || skRequired);
       setDone({ secretKey: r.secretKey, verify: r.emailVerificationRequired });
     } catch (err) {
       setError(friendlyError(err));
@@ -144,7 +150,10 @@ export function RegisterPage() {
             hint={
               <>
                 <StrengthMeter password={password} />
-                <span className="field-hint">At least 10 characters. Four or more unrelated words are easy to remember and hard to guess.</span>
+                <span className="field-hint">
+                  At least {minLength} characters{minLength > MIN_MASTER_PASSWORD ? ", as this server requires" : ""}. Four or more unrelated words are easy to
+                  remember and hard to guess.
+                </span>
               </>
             }
           />
@@ -153,12 +162,12 @@ export function RegisterPage() {
             Your master password can't be reset. If you forget it, nobody can recover the data in your vault, not even the server administrator.
           </div>
           <label className="check">
-            <input type="checkbox" checked={withSecretKey} onChange={(e) => setWithSecretKey(e.target.checked)} />
+            <input type="checkbox" checked={withSecretKey || skRequired} disabled={skRequired} onChange={(e) => setWithSecretKey(e.target.checked)} />
             <span>
               Add a Secret Key
               <span className="field-hint block">
                 A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password.
-                You'll enter it once on each new device.
+                You'll enter it once on each new device.{skRequired && " This server requires one for every account."}
               </span>
             </span>
           </label>

@@ -1,0 +1,21 @@
+/* Activity log (Settings → Activity, a vault's activity, the admin page). Tokens come from app.css. */
+
+.activity { display: flex; flex-direction: column; gap: var(--space-4); }
+.activity-day { display: flex; flex-direction: column; gap: var(--space-2); }
+.activity-day > h3 { font-size: var(--text-caption); font-weight: 500; color: var(--ink-2); }
+
+.activity-list { margin: 0; padding: 0; list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); }
+.activity-list > li { position: relative; display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-4); }
+/* Dividers start at the text column, as in grouped lists. */
+.activity-list > li + li::before { content: ""; position: absolute; top: 0; right: 0; left: 64px; border-top: 1px solid var(--line); }
+.activity-list .tile { flex: none; }
+.activity-list .grow { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.activity-meta { font-variant-numeric: tabular-nums; }
+.activity-meta .mono { font-size: inherit; }
+.activity-tags { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); margin-top: 2px; }
+.activity-tags .link { font-size: var(--text-caption); }
+.activity-foot { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+
+/* Admin page filters: type, person, vault. */
+.activity-filters { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3) var(--space-4); align-items: end; }
+.activity-filters .field { min-width: 0; }

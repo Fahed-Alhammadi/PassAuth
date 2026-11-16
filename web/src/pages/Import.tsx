@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type DragEvent, type FormEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type RefObject } from "react";
 import { clientName } from "../lib/platform";
 import { Link } from "react-router";
 import { ErrorText, Icon, PasswordField } from "../components/ui";
-import { errorMessage } from "../lib/api";
+import { errorMessage, isOutOfStorage, isQuotaExceeded, usePublicConfig } from "../lib/api";
+import { formatBytes } from "../lib/sizes";
 import { kindOf, type Item, type ItemKind } from "../lib/types";
-import { importFile, importItems, useVault, writableVaults } from "../lib/vault";
+import { importFile, importItems, oversizedForImport, useVault, writableVaults } from "../lib/vault";
 import { filterPath } from "./Shell";
 import "../styles/tools.css";
 
@@ -14,7 +15,7 @@ type Step =
   | { kind: "password" }
   | { kind: "preview"; format: string; items: Item[]; warnings: string[] }
   | { kind: "importing"; total: number; done: number }
-  | { kind: "done"; count: number; vaultId: string; vaultName: string };
+  | { kind: "done"; count: number; skipped: number; vaultId: string; vaultName: string };
 
 const FORMAT_LABEL: Record<string, string> = {
   pass_auth_json: "PassAuth export",
@@ -70,9 +71,13 @@ function readError(e: unknown): string {
   return `PassAuth could not read this file: ${sentence(msg)} Check that it is an unmodified export from Bitwarden, Vaultwarden, 1Password, Passbolt, KeePass, LastPass or a browser, then try again.`;
 }
 
+/** How many item names a notice lists before "and N more". */
+const NAMES_SHOWN = 5;
+
 export function ImportPage() {
   useVault(); // re-render when vaults change
   const vaults = writableVaults();
+  const config = usePublicConfig();
   const [step, setStep] = useState<Step>({ kind: "choose" });
   const [fileName, setFileName] = useState("");
   const [password, setPassword] = useState("");
@@ -92,6 +97,15 @@ export function ImportPage() {
   useEffect(() => clearBytes, []);
 
   const vaultId = vaults.some((v) => v.id === chosenVault) ? chosenVault : (vaults[0]?.id ?? "");
+
+  // Items larger than the server takes (`max_item_kib`) can't be imported: they are left out and listed.
+  const maxItemKib = config?.limits?.max_item_kib;
+  const previewItems = step.kind === "preview" ? step.items : null;
+  const tooLarge = useMemo(
+    () => (previewItems && vaultId && typeof maxItemKib === "number" && maxItemKib > 0 ? oversizedForImport(vaultId, previewItems, maxItemKib) : []),
+    [previewItems, vaultId, maxItemKib],
+  );
+  const sizeLimit = typeof maxItemKib === "number" && maxItemKib > 0 ? formatBytes(maxItemKib * 1024) : "";
 
   // Move focus to the new step's heading for keyboard and screen reader users.
   const firstStep = useRef(true);
@@ -171,33 +185,40 @@ export function ImportPage() {
     const target = vaults.find((v) => v.id === vaultId);
     if (!target) return setError("Choose a vault to import into.");
     const { items, format, warnings } = step;
-    const total = items.length;
+    const skip = new Set(tooLarge);
+    const fitting = skip.size ? items.filter((_, i) => !skip.has(i)) : items;
+    const skipped = items.length - fitting.length;
+    const total = fitting.length;
+    if (total === 0) return;
     let done = 0;
     setError(null);
     setStep({ kind: "importing", total, done: 0 });
     try {
-      await importItems(target.id, items, (n) => {
+      await importItems(target.id, fitting, (n) => {
         done = n;
         setStep({ kind: "importing", total, done: n });
-      });
-      setStep({ kind: "done", count: total, vaultId: target.id, vaultName: target.name });
+      }, config?.limits);
+      setStep({ kind: "done", count: total, skipped, vaultId: target.id, vaultName: target.name });
       setFileName("");
     } catch (e) {
       if (done >= total) {
         // Every item was saved; only the follow-up vault refresh failed.
-        setStep({ kind: "done", count: total, vaultId: target.id, vaultName: target.name });
+        setStep({ kind: "done", count: total, skipped, vaultId: target.id, vaultName: target.name });
         setFileName("");
         return;
       }
       const why = sentence(errorMessage(e));
+      // Trying again doesn't help when the server's storage limit is reached.
+      const full = isQuotaExceeded(e) || isOutOfStorage(e);
       if (done > 0) {
-        setStep({ kind: "done", count: done, vaultId: target.id, vaultName: target.name });
+        setStep({ kind: "done", count: done, skipped, vaultId: target.id, vaultName: target.name });
         setError(
-          `The import stopped after ${fmt(done)} of ${fmt(total)} items. ${why} The ${fmt(done)} items already saved are in "${target.name}". To finish, import the file again; items already saved will appear twice, so delete the duplicates afterwards.`,
+          `The import stopped after ${fmt(done)} of ${fmt(total)} items. ${why} The ${fmt(done)} items already saved are in "${target.name}".` +
+            (full ? "" : " To finish, import the file again; items already saved will appear twice, so delete the duplicates afterwards."),
         );
       } else {
         setStep({ kind: "preview", format, items, warnings });
-        setError(`Nothing was imported. ${why} Check your connection and try again.`);
+        setError(`Nothing was imported. ${why}${full ? "" : " Check your connection and try again."}`);
       }
     }
   }
@@ -297,6 +318,8 @@ export function ImportPage() {
               vaults={vaults}
               vaultId={vaultId}
               setVaultId={setVaultId}
+              tooLarge={tooLarge}
+              sizeLimit={sizeLimit}
               error={error}
               onImport={runImport}
               onCancel={reset}
@@ -332,6 +355,13 @@ export function ImportPage() {
                 <div className="alert alert-ok" role="status">
                   {fmt(step.count)} {step.count === 1 ? "item was" : "items were"} encrypted and saved to "{step.vaultName}". The export file is no longer held in this page.
                 </div>
+              )}
+              {step.skipped > 0 && (
+                <p className="small muted">
+                  {step.skipped === 1 ? "1 item was" : `${fmt(step.skipped)} items were`} left out because {step.skipped === 1 ? "it is" : "they are"} larger than this
+                  server allows. To keep {step.skipped === 1 ? "it" : "them"}, add {step.skipped === 1 ? "it" : "them"} by hand with less content (a shorter note,
+                  for example), or ask the server's admin to raise the limit.
+                </p>
               )}
               <p className="small muted">You can now delete the export file from your computer; it holds your passwords unencrypted.</p>
               <div className="row">
@@ -372,6 +402,8 @@ function Preview({
   vaults,
   vaultId,
   setVaultId,
+  tooLarge,
+  sizeLimit,
   error,
   onImport,
   onCancel,
@@ -382,6 +414,10 @@ function Preview({
   vaults: { id: string; name: string }[];
   vaultId: string;
   setVaultId: (id: string) => void;
+  /** Indexes of the items larger than the server takes. */
+  tooLarge: number[];
+  /** The server's largest item in plain words ("2 MB"). */
+  sizeLimit: string;
   error: string | null;
   onImport: () => void;
   onCancel: () => void;
@@ -389,6 +425,8 @@ function Preview({
 }) {
   const { counts, folders } = summarize(step.items);
   const total = step.items.length;
+  const fitting = total - tooLarge.length;
+  const largeNames = tooLarge.slice(0, NAMES_SHOWN).map((i) => step.items[i].name || "Untitled");
   const shownFolders = folders.slice(0, 24);
   return (
     <>
@@ -447,11 +485,31 @@ function Preview({
         </div>
       )}
 
+      {tooLarge.length > 0 && (
+        <div className="alert alert-warn" role="note">
+          <strong>
+            {tooLarge.length === 1 ? "1 item is" : `${fmt(tooLarge.length)} items are`} larger than this server allows ({sizeLimit} per item, once
+            encrypted) and won't be imported:
+          </strong>{" "}
+          {largeNames.join(", ")}
+          {tooLarge.length > largeNames.length ? ` and ${fmt(tooLarge.length - largeNames.length)} more.` : "."}
+        </div>
+      )}
+
       {total === 0 ? (
         <>
           <p>There is nothing to import from this file. Check that you exported the right account or vault, then choose the file again.</p>
           <div className="row">
             <button type="button" className="btn btn-primary" onClick={onCancel}>
+              Choose a different file
+            </button>
+          </div>
+        </>
+      ) : fitting === 0 ? (
+        <>
+          <ErrorText error="None of the items in this file fit this server's size limit. Ask the server's admin to raise it, or choose a different file." />
+          <div className="row">
+            <button type="button" className="btn btn-text" onClick={onCancel}>
               Choose a different file
             </button>
           </div>
@@ -480,7 +538,7 @@ function Preview({
           <ErrorText error={error} />
           <div className="row">
             <button type="button" className="btn btn-accent" onClick={onImport}>
-              Import {fmt(total)} {total === 1 ? "item" : "items"}
+              Import {fmt(fitting)} {fitting === 1 ? "item" : "items"}
             </button>
             <button type="button" className="btn btn-text" onClick={onCancel}>
               Choose a different file

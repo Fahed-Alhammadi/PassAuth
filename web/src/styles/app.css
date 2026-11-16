@@ -289,6 +289,32 @@ kbd { font-family: var(--sans); font-size: var(--text-caption); padding: 1px 6px
 
 .secret-box { display: flex; align-items: center; gap: var(--space-1); }
 
+/* Sign-in from another device: the five words both screens show, to compare at a glance. */
+.login-phrase {
+  list-style: none; margin: 0; padding: var(--space-4); display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-2) var(--space-4);
+  border-radius: var(--radius-m); background: var(--surface-2); text-align: center;
+}
+.login-phrase li { font-family: var(--mono); font-variant-ligatures: none; font-size: 22px; font-weight: 500; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }
+/* The approving side: the words to choose from, in the same type as the new device shows them. */
+.phrase-choice { justify-content: center; padding-block: var(--space-3); }
+.phrase-choice-words { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-1) var(--space-3); }
+.phrase-choice-words > span { font-family: var(--mono); font-variant-ligatures: none; font-size: 19px; font-weight: 500; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }
+/* The code to type on the new device after approving it: large, in two groups of three digits. */
+.approval-code {
+  margin: 0; padding: var(--space-4); border-radius: var(--radius-m); background: var(--surface-2); text-align: center;
+  font-family: var(--mono); font-variant-ligatures: none; font-variant-numeric: tabular-nums; font-size: 36px; font-weight: 500;
+  letter-spacing: 0.08em; color: var(--ink); user-select: all;
+}
+/* What a requesting device says about itself, each line labelled as its own claim. */
+.claims { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) var(--space-3); font-size: var(--text-caption); }
+.claims > div { display: contents; }
+.claims dt { color: var(--ink-3); }
+.claims dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.countdown { font-variant-numeric: tabular-nums; }
+/* The account a device sign-in reached, shown before the vault opens. */
+.signed-in-as { display: flex; flex-direction: column; align-items: center; gap: var(--space-1); padding: var(--space-4); border-radius: var(--radius-m); background: var(--surface-2); text-align: center; }
+.signed-in-as strong { font-size: var(--text-title); overflow-wrap: anywhere; }
+
 /* ------------------------------------------ decision sheet (dialogs, prompts) */
 /*
  * One anatomy for every dialog: brand bar, context row (icon, title, what it is about), choices,
@@ -429,6 +455,15 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: 6px; }
 .editor-row > .field-fixed { flex: none; width: 220px; }
 .editor-add { align-self: flex-start; margin-left: calc(-1 * var(--space-3)); }
 .custom-field .select { flex: none; width: 120px; }
+
+/* Password health notes under a login's fields: quiet caption, a toned icon per note. */
+.health-notes {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-4);
+  margin: calc(-1 * var(--space-3)) 0 0; padding: 0; list-style: none; font-size: var(--text-caption); color: var(--ink-2);
+}
+.health-notes li { display: inline-flex; align-items: center; gap: 6px; }
+.health-notes li > svg { flex: none; color: var(--warn); }
+.health-notes li[data-tone="danger"] > svg { color: var(--danger); }
 
 .disclosure > summary { cursor: pointer; width: fit-content; padding: var(--space-1) 0; border-radius: 4px; }
 .disclosure[open] > summary { margin-bottom: var(--space-2); }

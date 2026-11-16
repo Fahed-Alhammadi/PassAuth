@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
+import { SignInRequestSheet } from "../components/DeviceSignIn";
 import { Wordmark } from "../components/Logo";
 import { Icon, toast, type IconName } from "../components/ui";
-import { api, friendlyError } from "../lib/api";
+import { api, friendlyError, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { keepDraftFor } from "../lib/drafts";
+import { invitationNotice, invitationsKey } from "../lib/invitations";
 import { getDesktop } from "../lib/platform";
+import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
 import { dismissWarnings, lock, logout, useVault } from "../lib/vault";
 import { kindOf, type ItemKind } from "../lib/types";
 
@@ -34,9 +37,11 @@ function useCounts() {
 }
 
 export function Shell() {
-  const { vaults } = useVault();
+  const { vaults, invitations } = useVault();
   const { counts, folders } = useCounts();
   const lockShortcut = getDesktop()?.lockShortcut;
+  const canExport = exportAllowed(usePolicies());
+  const sends = hasFeature(usePublicConfig(), "sends");
   // A prepared edit (desktop) lives only while its item's route is open.
   const { pathname } = useLocation();
   useEffect(() => keepDraftFor(pathname), [pathname]);
@@ -83,19 +88,35 @@ export function Shell() {
           <NavLink to="/generator">
             <Icon name="dice" /> Generator
           </NavLink>
+          <NavLink to="/health">
+            <Icon name="shield" /> Password health
+          </NavLink>
+          {sends && (
+            <NavLink to="/sends">
+              <Icon name="send" /> Send
+            </NavLink>
+          )}
           <NavLink to="/import">
             <Icon name="upload" /> Import
           </NavLink>
-          <NavLink to="/export">
-            <Icon name="download" /> Export
-          </NavLink>
+          {canExport && (
+            <NavLink to="/export">
+              <Icon name="download" /> Export
+            </NavLink>
+          )}
           <NavLink to={filterPath("trash")}>
             <Icon name="trash" /> Trash
           </NavLink>
         </nav>
         <nav className="nav sidebar-foot" aria-label="Account">
           <NavLink to="/settings">
-            <Icon name="settings" /> Settings
+            <Icon name="settings" /> <span className="label">Settings</span>
+            {invitations.length > 0 && (
+              <span className="count" title={invitations.length === 1 ? "1 vault invitation" : `${invitations.length} vault invitations`}>
+                {invitations.length}
+                <span className="sr-only"> {invitations.length === 1 ? "invitation" : "invitations"}</span>
+              </span>
+            )}
           </NavLink>
           <button type="button" onClick={() => lock()}>
             <Icon name="lock" /> Lock
@@ -107,6 +128,8 @@ export function Shell() {
         </nav>
       </aside>
       <Outlet />
+      {/* A device asking to sign in to this account: the approval sheet, on every page of the vault. */}
+      <SignInRequestSheet />
       <nav className="tabbar" aria-label="Main">
         <NavLink to="/vault">
           <Icon name="vault" size={22} /> Vault
@@ -130,6 +153,8 @@ export function FilterSelect({ filter }: { filter: string }) {
   const nav = useNavigate();
   const { vaults } = useVault();
   const { counts, folders } = useCounts();
+  const canExport = exportAllowed(usePolicies());
+  const sends = hasFeature(usePublicConfig(), "sends");
   return (
     <label className="field list-filter">
       <span className="sr-only">Show</span>
@@ -138,7 +163,9 @@ export function FilterSelect({ filter }: { filter: string }) {
         value={filter}
         onChange={(e) => {
           const v = e.target.value;
-          if (v === "#import") nav("/import");
+          if (v === "#health") nav("/health");
+          else if (v === "#sends") nav("/sends");
+          else if (v === "#import") nav("/import");
           else if (v === "#export") nav("/export");
           else if (v === "#signout") logout();
           else nav(filterPath(v));
@@ -173,8 +200,10 @@ export function FilterSelect({ filter }: { filter: string }) {
         )}
         <optgroup label="More">
           <option value="trash">Trash</option>
+          <option value="#health">Password health…</option>
+          {sends && <option value="#sends">Send…</option>}
           <option value="#import">Import…</option>
-          <option value="#export">Export…</option>
+          {canExport && <option value="#export">Export…</option>}
           <option value="#signout">Sign out</option>
         </optgroup>
       </select>
@@ -183,19 +212,42 @@ export function FilterSelect({ filter }: { filter: string }) {
 }
 
 const VERIFY_DISMISSED = "pa.verify-dismissed";
+/** The invitations whose notice was dismissed in this tab (a new invitation shows it again). */
+const INVITATIONS_DISMISSED = "pa.invitations-dismissed";
+/** The policy violations whose notice was dismissed in this tab (another set shows it again). */
+const POLICY_DISMISSED = "pa.policy-dismissed";
+
+function readSession(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(key: string, value: string) {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    /* ignore */
+  }
+}
 
 /** Account and vault notices shown above the item list, in the page flow (never over the toolbar). */
 export function Notices() {
-  const { email, emailVerified, warnings, pendingRotations, vaults } = useVault();
-  const [hideVerify, setHideVerify] = useState(() => {
-    try {
-      return sessionStorage.getItem(VERIFY_DISMISSED) === "1";
-    } catch {
-      return false;
-    }
-  });
+  const { email, emailVerified, warnings, pendingRotations, vaults, invitations, policyViolations } = useVault();
+  const policies = usePolicies();
+  const [hideVerify, setHideVerify] = useState(() => readSession(VERIFY_DISMISSED) === "1");
+  const [invitesDismissed, setInvitesDismissed] = useState(() => readSession(INVITATIONS_DISMISSED));
+  const [policyDismissed, setPolicyDismissed] = useState(() => readSession(POLICY_DISMISSED));
   const [sending, setSending] = useState(false);
   const rotating = vaults.filter((v) => pendingRotations.includes(v.id));
+  const invitesKey = invitationsKey(invitations);
+  const invitesText = invitesDismissed === invitesKey ? null : invitationNotice(invitations);
+  const policyKey = `${email}|${violationsKey(policyViolations)}`;
+  const policyLines = policyDismissed === policyKey ? [] : policyNotices(policyViolations, policies);
+  // One link per destination (a Secret Key change also re-creates the keys), the first one's wording.
+  const policyActions = policyLines.flatMap((n) => (n.action ? [n.action] : [])).filter((a, i, all) => all.findIndex((b) => b.to === a.to) === i);
 
   async function resend() {
     setSending(true);
@@ -211,6 +263,41 @@ export function Notices() {
 
   return (
     <>
+      {policyLines.length > 0 && (
+        <div className="alert alert-warn small notice" role="note">
+          <div className="grow">
+            {policyLines.length === 1 ? (
+              <span>{policyLines[0].text}</span>
+            ) : (
+              <ul>
+                {policyLines.map((n) => (
+                  <li key={n.violation}>{n.text}</li>
+                ))}
+              </ul>
+            )}
+            {policyActions.length > 0 && (
+              <div className="row">
+                {policyActions.map((a) => (
+                  <Link key={a.to} to={a.to}>
+                    {a.label}
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-icon"
+            aria-label="Dismiss"
+            onClick={() => {
+              setPolicyDismissed(policyKey);
+              writeSession(POLICY_DISMISSED, policyKey);
+            }}
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
       {!emailVerified && !hideVerify && (
         <div className="alert alert-info small notice" role="note">
           <div className="grow">
@@ -227,11 +314,30 @@ export function Notices() {
             aria-label="Dismiss"
             onClick={() => {
               setHideVerify(true);
-              try {
-                sessionStorage.setItem(VERIFY_DISMISSED, "1");
-              } catch {
-                /* ignore */
-              }
+              writeSession(VERIFY_DISMISSED, "1");
+            }}
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+      {invitesText && (
+        <div className="alert alert-info small notice" role="note">
+          <div className="grow">
+            <span>
+              {invitesText} Nothing from {invitations.length === 1 ? "it" : "them"} reaches your apps until you accept.
+            </span>
+            <div className="row">
+              <Link to="/settings/vaults">{invitations.length === 1 ? "See the invitation" : "See the invitations"}</Link>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-icon"
+            aria-label="Dismiss"
+            onClick={() => {
+              setInvitesDismissed(invitesKey);
+              writeSession(INVITATIONS_DISMISSED, invitesKey);
             }}
           >
             <Icon name="close" size={16} />

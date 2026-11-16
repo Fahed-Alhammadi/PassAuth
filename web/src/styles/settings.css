@@ -17,6 +17,8 @@
 .settings-tabs a:focus-visible { outline-offset: -2px; }
 /* Current section: ink, weight and the underline. */
 .settings-tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+/* Invitations waiting under Vaults & sharing: a count in the accent tone. */
+.settings-tabs .tab-badge { margin-left: var(--space-2); background: var(--accent-soft); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 
 .settings-section { display: flex; flex-direction: column; gap: var(--space-5); }
 .settings-intro { margin-bottom: calc(-1 * var(--space-2)); }
@@ -48,3 +50,13 @@
 
 .recovery-codes { padding: var(--space-3) var(--space-4); border-radius: var(--radius-s); background: var(--surface-2); }
 .settings-section .field > label, .modal .field > label { font-size: var(--text-caption); font-weight: 500; color: var(--ink-2); }
+
+/* Storage against the server's limits (Settings → Account). */
+.usage { display: flex; flex-direction: column; gap: var(--space-2); }
+.usage-bar { height: 6px; border-radius: 3px; }
+.usage-bar > i { background: var(--accent); border-radius: 3px; }
+.usage-bar.is-near > i { background: var(--warn); }
+.usage-bar.is-full > i { background: var(--danger); }
+
+/* "Your server requires two-step login": the Settings cards on the sign-in background, wide enough for the QR code. */
+.auth-card.auth-card-wide { max-width: 640px; }

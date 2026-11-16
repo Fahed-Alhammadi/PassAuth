@@ -58,12 +58,20 @@
 /* Digits and symbols are told apart from letters by tone. */
 .gen-output .d { color: var(--accent-ink); }
 .gen-output .s { color: var(--ink-3); }
+/* Option rows (.range-row, .check-grid): generator.css, loaded by components/GeneratorOptions.tsx. */
 
-.range-row { display: flex; align-items: center; gap: var(--space-4); }
-.range-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
-.range-row .input { flex: none; width: 84px; text-align: center; font-variant-numeric: tabular-nums; }
-
-.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3) var(--space-5); }
+/* ---------------------------------------------------------- password health */
+.health-summary { margin: 0; padding: 0; list-style: none; }
+/* A count that needs attention: tone and the number itself (never colour alone). */
+.health-summary .num.is-bad { color: var(--danger); }
+.health-summary .num.is-warn { color: var(--warn); }
+.health-group { font-size: var(--text-caption); font-weight: 500; color: var(--ink-2); }
+.health-vault { display: flex; align-items: center; gap: var(--space-1); }
+.health-vault > svg { flex: none; }
+/* Long reports: skip layout and paint for rows outside the viewport. */
+.health-rows .choice { content-visibility: auto; contain-intrinsic-size: auto 72px; }
+.health-clear { display: flex; align-items: center; gap: var(--space-3); }
+.card h2[tabindex="-1"]:focus:not(:focus-visible) { outline: none; }
 
 /* ------------------------------------------------------------------- admin */
 .admin { min-height: 100%; display: flex; flex-direction: column; background: var(--paper); }
@@ -85,6 +93,15 @@
 .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-3) var(--space-5); margin: 0; }
 .facts dt { font-size: var(--text-caption); color: var(--ink-3); }
 .facts dd { margin: 2px 0 0; }
+/* Limits: one group per fieldset, fields in a grid, the unit after each number. */
+.limit-group { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.limit-group > legend { padding: 0; margin-bottom: var(--space-3); }
+.limit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--space-4) var(--space-5); align-items: start; }
+.limit-input { max-width: 220px; }
+.limit-input .input { min-width: 0; font-variant-numeric: tabular-nums; }
+.input-trail { display: flex; align-items: center; padding: 0 var(--space-3); color: var(--ink-3); font-size: var(--text-caption); white-space: nowrap; }
+.field-error, .field > span.field-error { font-size: var(--text-caption); font-weight: 400; color: var(--danger); }
+.limit-input:has(.input[aria-invalid="true"]) { border-color: var(--danger); }
 
 @media (max-width: 820px) {
   .admin-header { padding: var(--space-2) var(--space-4); }

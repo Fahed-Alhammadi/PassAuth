@@ -23,9 +23,51 @@ let problem: string | null = null;
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((fn) => fn());
 
-function handleLinks(urls: string[]) {
-  const link = urls.filter((u) => SCHEMES.some((s) => u.toLowerCase().startsWith(s))).pop();
-  if (!link) return;
+/**
+ * Links this WebView session has handled, so a reload doesn't offer one again: `getCurrent()` keeps returning the last
+ * link, and the page reloads when the user switches servers (./csp.ts). sessionStorage survives that reload and ends
+ * with the app. Only a short hash of each link is kept (an otpauth link carries its TOTP secret), the last few.
+ */
+const HANDLED_KEY = "desktop.handledLinks";
+const HANDLED_MAX = 8;
+
+/** Hex of the first 16 bytes of the link's SHA-256; null without WebCrypto (then nothing is remembered). */
+async function linkHash(link: string): Promise<string | null> {
+  try {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle) return null;
+    const digest = new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(link)));
+    return Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
+}
+
+function handledHashes(): string[] {
+  try {
+    const list: unknown = JSON.parse(sessionStorage.getItem(HANDLED_KEY) ?? "[]");
+    return Array.isArray(list) ? list.filter((h): h is string => typeof h === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+async function rememberHandled(link: string) {
+  const hash = await linkHash(link);
+  if (!hash) return;
+  try {
+    const list = [...handledHashes().filter((h) => h !== hash), hash].slice(-HANDLED_MAX);
+    sessionStorage.setItem(HANDLED_KEY, JSON.stringify(list));
+  } catch {
+    /* storage unavailable: a reload may offer the link again */
+  }
+}
+
+/** The link of `urls` this app handles: the last otpauth one. */
+const otpLink = (urls: string[]) => urls.filter((u) => SCHEMES.some((s) => u.toLowerCase().startsWith(s))).pop();
+
+function handleLink(link: string) {
+  void rememberHandled(link);
   const parsed = parseOtpLink(link);
   if ("problem" in parsed) {
     problem = parsed.problem;
@@ -40,11 +82,15 @@ export async function installOtpLinks() {
   let received = false;
   await onOpenUrl((urls) => {
     received = true;
-    handleLinks(urls);
+    const link = otpLink(urls);
+    if (link) handleLink(link);
   });
-  // Started by a link: unless the event above already delivered it.
-  const current = await getCurrent().catch(() => null);
-  if (!received && current) handleLinks(current);
+  // Started by a link: unless the event above already delivered it, or this session handled it before a reload.
+  const link = otpLink((await getCurrent().catch(() => null)) ?? []);
+  if (!link || received) return;
+  const hash = await linkHash(link);
+  if (received || (hash && handledHashes().includes(hash))) return;
+  handleLink(link);
 }
 
 function usePending() {
@@ -89,6 +135,9 @@ export function AddCodeHost() {
     if (status === "locked" || status === "logged-out" || status === "unreachable") {
       toldLocked.current = current.seq;
       toast("Unlock PassAuth to save the verification code.");
+    } else if (status === "two-step") {
+      toldLocked.current = current.seq;
+      toast("Set up two-step login for PassAuth first, then save the verification code.");
     }
   }, [current, status]);
 

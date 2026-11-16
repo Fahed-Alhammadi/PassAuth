@@ -11,6 +11,7 @@ import init from "./wasm/passauth_core";
 import { App } from "./App";
 import { boot } from "./lib/vault";
 import { applyTheme } from "./lib/prefs";
+import { isSendPage } from "./lib/sends";
 
 applyTheme();
 
@@ -35,8 +36,9 @@ function showStartupError(e: unknown) {
 
 try {
   await init();
-  // boot() never throws: an unreachable server shows a retry screen inside the app.
-  await boot();
+  // boot() never throws: an unreachable server shows a retry screen inside the app. The public Send page is for anyone
+  // with the link: it never touches this browser's session (nothing of the vault is loaded there).
+  if (!isSendPage(location.pathname)) await boot();
   createRoot(root).render(
     <StrictMode>
       <App />

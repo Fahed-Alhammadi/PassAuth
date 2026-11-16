@@ -1,5 +1,6 @@
 import { isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { friendlyError } from "../lib/api";
+import { WEAK_BITS } from "../lib/health";
 import { getDesktop } from "../lib/platform";
 import { server as serverConfig } from "../lib/server";
 import { estimateBits, generatePassword, totpCode } from "../lib/vault";
@@ -50,6 +51,10 @@ const paths = {
   desktop: "M3 4h18v12H3zM8 20h8M12 16v4",
   phone: "M7 2h10v20H7zM11 18h2",
   puzzle: "M10 4a2 2 0 1 1 4 0v2h5v5h-2a2 2 0 1 0 0 4h2v5H5v-5h2a2 2 0 1 0 0-4H5V6h5z",
+  paperclip: "M20.5 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.6-8.6a3.4 3.4 0 0 1 4.8 4.8l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9",
+  send: "M21 3L10 14M21 3l-6.5 18-4.5-7-7-4.5z",
+  file: "M6 3h9l4 4v14H6zM14 3v5h5",
+  lifebuoy: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5.6 5.6l3.6 3.6M14.8 14.8l3.6 3.6M18.4 5.6l-3.6 3.6M9.2 14.8l-3.6 3.6",
 } as const;
 
 export type IconName = keyof typeof paths;
@@ -106,6 +111,28 @@ function legacyCopy(value: string): boolean {
   ta.remove();
   active?.focus?.();
   return ok;
+}
+
+/**
+ * Copy for someone who isn't signed in (the public Send page): no clipboard clearing, which would ask a visitor for
+ * permission to read their clipboard. Never throws.
+ */
+export async function copyText(value: string, label = "Copied"): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast(label);
+      return true;
+    } catch {
+      /* fall back below */
+    }
+  }
+  if (legacyCopy(value)) {
+    toast(label);
+    return true;
+  }
+  toast("Copying isn't available here. Select the text and copy it yourself.");
+  return false;
 }
 
 /** Copy and clear the clipboard after 30 s if it still holds the secret. Never throws. */
@@ -223,8 +250,11 @@ export function PasswordInput({
   );
 }
 
-/** Bits below which sign-up and password changes warn that a master password is easy to guess. */
-export const WEAK_BITS = 50;
+/**
+ * Bits below which sign-up and password changes warn that a master password is easy to guess and the meter says
+ * "Weak". The one threshold, defined in `lib/health.ts` (also used by the generator and password health).
+ */
+export { WEAK_BITS };
 
 /** Strength label shared by the meter and the sign-up check, so they never disagree. */
 export function strength(bits: number): { label: string; color: string; pct: number } {
@@ -457,6 +487,7 @@ export function ConfirmDialog({
   danger = true,
   confirmText,
   matchCase = true,
+  disabled = false,
   onConfirm,
   onClose,
 }: {
@@ -474,6 +505,8 @@ export function ConfirmDialog({
   confirmText?: string;
   /** false accepts any letter case for `confirmText` (email addresses). */
   matchCase?: boolean;
+  /** true: the action can't be taken (the dialog says why); only Cancel works. */
+  disabled?: boolean;
   onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }) {
@@ -482,7 +515,7 @@ export function ConfirmDialog({
   const [typed, setTyped] = useState("");
   const typedId = useId();
   const fold = (v: string) => (matchCase ? v.trim() : v.trim().toLowerCase());
-  const ready = !confirmText || fold(typed) === fold(confirmText);
+  const ready = !disabled && (!confirmText || fold(typed) === fold(confirmText));
   const close = useCallback(() => {
     if (!busy) onClose();
   }, [busy, onClose]);
@@ -518,12 +551,12 @@ export function ConfirmDialog({
         <SheetActions
           quiet={
             // Cancel gets the initial focus: a stray Enter must never confirm a destructive action.
-            <button type="button" className="btn btn-text" onClick={close} disabled={busy} data-autofocus={danger && !confirmText ? "" : undefined}>
+            <button type="button" className="btn btn-text" onClick={close} disabled={busy} data-autofocus={(danger || disabled) && !confirmText ? "" : undefined}>
               {cancel}
             </button>
           }
         >
-          <button type="submit" className={`btn btn-block ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy || !ready} data-autofocus={danger ? undefined : ""}>
+          <button type="submit" className={`btn btn-block ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy || !ready} data-autofocus={danger || disabled ? undefined : ""}>
             {busy ? busyAction : action}
           </button>
         </SheetActions>

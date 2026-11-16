@@ -12,6 +12,7 @@ import { clearPersistedKeys, vaultTimeoutHook } from "./timeout";
 import { checkForUpdates, installUpdate } from "./updater";
 import { appHook } from "./app";
 import { clearAutofillHandoff } from "./handoff";
+import { saveBytes } from "./transfers";
 
 const isMac = navigator.platform.startsWith("Mac");
 
@@ -44,6 +45,16 @@ export async function hooks(): Promise<DesktopHooks> {
     async saveFile(filename, content) {
       try {
         const saved = await invoke<boolean>("save_file", { filename, content });
+        if (saved) toast("Saved");
+        return saved;
+      } catch {
+        toast("Couldn't save the file. Choose another folder.");
+        return false;
+      }
+    },
+    async saveBytes(filename, blob) {
+      try {
+        const saved = await saveBytes(filename, blob);
         if (saved) toast("Saved");
         return saved;
       } catch {

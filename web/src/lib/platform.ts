@@ -15,6 +15,11 @@ export interface DesktopHooks {
   installUpdate(): Promise<void>;
   /** Save a file through the system save dialog. Resolves false when the user cancels. */
   saveFile(filename: string, content: string): Promise<boolean>;
+  /**
+   * Save a file's bytes (a downloaded attachment, decrypted) through the system save dialog; the app reads `blob` piece
+   * by piece. Resolves false when the user cancels; tells the user "Saved" or what went wrong itself.
+   */
+  saveBytes(filename: string, blob: Blob): Promise<boolean>;
   /** Copy a secret and clear the clipboard after 30 s if it still holds it. */
   copySecret(value: string): Promise<void>;
   /** Open a web address in the user's browser. */
@@ -59,16 +64,33 @@ export interface TimeoutSettings {
 export interface VaultTimeoutHook {
   /** The options this platform supports, in display order, with their labels. */
   options: [VaultTimeout, string][];
-  /** Plain-language note for each option. */
+  /** Plain-language note for each option; `minutes` for a number of minutes that isn't an option (the server's limit). */
   help: Partial<Record<string, string>>;
   /** Why an option can't be chosen right now (e.g. "Never" without a keychain), or null when it can. */
   disabledReason(value: VaultTimeout): string | null;
+  /**
+   * The server's longest vault timeout in minutes (policy `max_vault_timeout_minutes`; 0 = no limit) as the app last
+   * learned it, also while offline. `subscribe` tells when it changes. Settings uses /api/config without it.
+   */
+  maxMinutes?(): number;
   get(): TimeoutSettings;
   set(patch: Partial<TimeoutSettings>): void;
   subscribe(fn: () => void): () => void;
 }
 
 let desktop: DesktopHooks | null = null;
+
+/** The web vault's version, set by `define` in web/vite.config.ts (other builds that bundle this file don't set it). */
+declare const __PASSAUTH_WEB_VERSION__: string | undefined;
+
+/**
+ * `X-PassAuth-Client` value sent with every API request, so the server can name each session's app:
+ * `desktop/<app version>` in the desktop app, `web/<web vault version>` in the browser.
+ */
+export function clientId(): string {
+  if (desktop) return `desktop/${desktop.version}`;
+  return `web/${typeof __PASSAUTH_WEB_VERSION__ === "string" ? __PASSAUTH_WEB_VERSION__ : "unknown"}`;
+}
 
 export const isDesktop = () => desktop !== null;
 /** Where saved data lives, for user-facing copy: "this browser" or "this app". */

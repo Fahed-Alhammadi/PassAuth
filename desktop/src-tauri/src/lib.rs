@@ -1,5 +1,9 @@
 //! Native shell around the web vault: window, menus, tray, and what a WebView can't do safely on its own:
-//! requests to the user's server, the OS keychain, a self-clearing clipboard and file saving.
+//! requests to the user's server (text in `api_fetch`, attachment files in `transfer`), the OS keychain, a
+//! self-clearing clipboard and file saving (`files`: safe names, the downloaded-from-the-internet mark).
+
+mod files;
+mod transfer;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -60,7 +64,9 @@ const SYSTEM_WAKE: &str = "system-wake";
 const HIDDEN_ARG: &str = "--hidden";
 const SHELL_SETTINGS_FILE: &str = "shell.json";
 
-/// The connected server and the client for it. Only `api_fetch` reaches the network, so the webview can't call other hosts.
+/// The connected server and the client for it. Only `api_fetch` (and, for attachment files, the `transfer` commands)
+/// send API requests. The webview itself opens the server's live-sync WebSocket, loads its site icons and makes the
+/// breach check's requests; once a server is chosen, its CSP allows no other host (`desktop/src/csp.ts`).
 struct Server {
     base: Mutex<Option<Url>>,
     client: reqwest::Client,
@@ -163,15 +169,36 @@ fn apply_dock(app: &AppHandle, window_visible: bool) {
 #[cfg(not(target_os = "macos"))]
 fn apply_dock(_app: &AppHandle, _window_visible: bool) {}
 
+/// Response headers `api_fetch` hands to the webview: the body's type, `Retry-After` (how long a 429 waits) and the
+/// server's `x-request-id` (names the request in the server log). Nothing else (no cookies, no proxy details).
+const RESPONSE_HEADERS: [&str; 3] = ["content-type", "retry-after", "x-request-id"];
+
 #[derive(Serialize)]
 struct ApiResponse {
     status: u16,
+    /// The headers of `RESPONSE_HEADERS` the response has, by lower-case name.
+    headers: HashMap<String, String>,
     body: String,
+}
+
+/// The headers of `RESPONSE_HEADERS` that `headers` has with a readable (visible ASCII) value; the first of repeats.
+fn kept_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
+    RESPONSE_HEADERS
+        .iter()
+        .filter_map(|name| {
+            let value = headers.get(*name)?.to_str().ok()?;
+            Some(((*name).to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 /// Remember the server the webview is connected to. Origin only: PassAuth is never served under a sub-path.
 #[tauri::command]
-fn set_server(server: State<Server>, base: String) -> Result<(), String> {
+fn set_server(
+    server: State<Server>,
+    transfers: State<transfer::Transfers>,
+    base: String,
+) -> Result<(), String> {
     let url = Url::parse(&base).map_err(|_| "invalid server address")?;
     let origin_only = url.path() == "/"
         && url.query().is_none()
@@ -180,11 +207,103 @@ fn set_server(server: State<Server>, base: String) -> Result<(), String> {
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !origin_only {
         return Err("invalid server address".into());
     }
+    // File transfers belong to the connection (and the page) they started with.
+    transfers.clear();
     *server.base.lock().unwrap() = Some(url);
     Ok(())
 }
 
-/// `GET /api{path}` etc. on the connected server. No redirects: a token must never follow one elsewhere.
+/// Request headers the webview may set through `api_fetch`: the ones the web vault sends (`web/src/lib/api.ts` and its
+/// callers: session, app name, body type, a sign-in request's access code, a re-authentication token) and `accept`.
+/// Host, cookies, lengths, encodings, forwarding headers and the rest are the native client's business. A header the
+/// web vault starts sending must be added here, or its requests fail.
+const API_REQUEST_HEADERS: [&str; 6] = [
+    "accept",
+    "authorization",
+    "content-type",
+    "x-passauth-access-code",
+    "x-passauth-client",
+    "x-reauth-token",
+];
+/// Methods the web vault uses, compared upper-cased.
+const API_METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+/// Largest answer `api_fetch` reads. The full `/sync` is the largest legitimate one: everything the account can read,
+/// unpaginated. A typical item is 1 to 2 KiB there, so this holds tens of thousands (but only 64 items of the default
+/// 2 MiB maximum). The client's 30 s total timeout bounds the time.
+const API_BODY_MAX: usize = 128 * 1024 * 1024;
+
+/// `{base}api{path}`: on the connected server's origin and under `/api/`, also once the URL is normalised (`..` and
+/// `%2e%2e` segments resolved).
+fn api_url(base: &Url, path: &str) -> Result<Url, String> {
+    if !path.starts_with('/') || path.contains("://") {
+        return Err("invalid path".into());
+    }
+    let url = Url::parse(&format!("{base}api{path}")).map_err(|_| "invalid path")?;
+    if url.origin() != base.origin() || !url.path().starts_with("/api/") {
+        return Err("invalid path".into());
+    }
+    Ok(url)
+}
+
+fn api_method(method: &str) -> Result<reqwest::Method, String> {
+    let method = method.to_ascii_uppercase();
+    if !API_METHODS.contains(&method.as_str()) {
+        return Err("invalid method".into());
+    }
+    reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "invalid method".into())
+}
+
+/// The webview's request headers, refused when it names one that isn't in `allowed` (lower-case names) or a value with
+/// a control character (no CR/LF to start another header).
+fn request_headers(
+    headers: &HashMap<String, String>,
+    allowed: &[&str],
+) -> Result<reqwest::header::HeaderMap, String> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        // Normalised to lower case.
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| "invalid header")?;
+        if !allowed.contains(&name.as_str()) {
+            return Err(format!("the header {name} isn't allowed here"));
+        }
+        let value = HeaderValue::from_str(value).map_err(|_| "invalid header")?;
+        map.insert(name, value);
+    }
+    Ok(map)
+}
+
+fn too_large_answer(host: &str, max: usize) -> String {
+    format!(
+        "The answer from {host} is larger than {} MB, more than PassAuth can read.",
+        max / (1024 * 1024)
+    )
+}
+
+/// The text of an `api_fetch` answer, refused once it runs past `max` bytes: before reading when the server announces
+/// a larger `Content-Length`, else as soon as the bytes read pass it. Not UTF-8: replacement characters, as reqwest's
+/// `text()` does.
+async fn api_body(
+    mut response: reqwest::Response,
+    host: &str,
+    max: usize,
+) -> Result<String, String> {
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Err(too_large_answer(host, max));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| describe(&e, host))? {
+        if body.len() + chunk.len() > max {
+            return Err(too_large_answer(host, max));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8(body)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
+}
+
+/// `GET /api{path}` etc. on the connected server: only under `/api/`, only the web vault's methods and request headers
+/// (`API_REQUEST_HEADERS`), an answer of at most `API_BODY_MAX`. No redirects: a token must never follow one elsewhere.
 #[tauri::command]
 async fn api_fetch(
     server: State<'_, Server>,
@@ -193,23 +312,24 @@ async fn api_fetch(
     headers: HashMap<String, String>,
     body: Option<String>,
 ) -> Result<ApiResponse, String> {
-    if !path.starts_with('/') || path.contains("://") {
-        return Err("invalid path".into());
-    }
     let base = server.base.lock().unwrap().clone().ok_or("no server")?;
     let host = base.host_str().unwrap_or_default().to_string();
-    let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| "invalid method")?;
-    let mut request = server.client.request(method, format!("{base}api{path}"));
-    for (name, value) in headers {
-        request = request.header(name, value);
-    }
+    let url = api_url(&base, &path)?;
+    let method = api_method(&method)?;
+    let headers = request_headers(&headers, &API_REQUEST_HEADERS)?;
+    let mut request = server.client.request(method, url).headers(headers);
     if let Some(body) = body {
         request = request.body(body);
     }
     let response = request.send().await.map_err(|e| describe(&e, &host))?;
     let status = response.status().as_u16();
-    let body = response.text().await.map_err(|e| describe(&e, &host))?;
-    Ok(ApiResponse { status, body })
+    let headers = kept_headers(response.headers());
+    let body = api_body(response, &host, API_BODY_MAX).await?;
+    Ok(ApiResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// What the user can act on, instead of reqwest's wording.
@@ -449,10 +569,14 @@ fn write_clipboard(value: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Save text through the system save dialog. `false` when the user cancels.
+/// Save text through the system save dialog, suggesting a cleaned `filename` (`files::safe_file_name`). `false` when
+/// the user cancels.
 #[tauri::command]
 async fn save_file(app: AppHandle, filename: String, content: String) -> Result<bool, String> {
-    let dialog = app.dialog().file().set_file_name(&filename);
+    let dialog = app
+        .dialog()
+        .file()
+        .set_file_name(files::safe_file_name(&filename));
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file())
         .await
         .map_err(|e| e.to_string())?;
@@ -667,12 +791,19 @@ pub fn run() {
         .timeout(API_TIMEOUT)
         .build()
         .expect("http client");
+    // Attachment files: the same client without the total timeout a large file would outlast (see `transfer`).
+    let transfer_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(API_TIMEOUT)
+        .build()
+        .expect("http client");
 
     tauri::Builder::default()
         .manage(Server {
             base: Mutex::new(None),
             client,
         })
+        .manage(transfer::Transfers::new(transfer_client))
         // First, so a second launch is caught before anything else starts. Its `deep-link` feature hands a link
         // that launched the second instance (Windows, Linux) to the deep-link plugin before calling this.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -713,7 +844,16 @@ pub fn run() {
             shell_settings_set,
             prepare_relaunch,
             autofill_handoff,
-            autofill_handoff_clear
+            autofill_handoff_clear,
+            transfer::upload_start,
+            transfer::upload_chunk,
+            transfer::upload_finish,
+            transfer::download_start,
+            transfer::download_read,
+            transfer::save_start,
+            transfer::save_chunk,
+            transfer::save_finish,
+            transfer::transfer_cancel
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -770,4 +910,225 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);
         });
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use std::io::{Read, Write};
+
+    /// A one-request HTTP/1.1 server on loopback: returns the request's head and body (by its Content-Length) and
+    /// answers with `reply`.
+    pub(crate) fn one_request_server(
+        reply: Vec<u8>,
+    ) -> (Url, std::thread::JoinHandle<(String, Vec<u8>)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 64 * 1024];
+            let head_end = loop {
+                let n = stream.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+                if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&seen[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            while seen.len() < head_end + length {
+                let n = stream.read(&mut buf).unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            // The client may hang up first (an answer it refused to read): that's fine.
+            let _ = stream.write_all(&reply);
+            (head, seen[head_end..].to_vec())
+        });
+        (base, server)
+    }
+
+    pub(crate) fn test_client() -> reqwest::Client {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn api_fetch_sends_only_the_headers_the_web_vault_sets() {
+        let sent = HashMap::from([
+            ("Accept".to_string(), "application/json".to_string()),
+            ("authorization".to_string(), "Bearer abc".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("x-passauth-access-code".to_string(), "c0de".to_string()),
+            ("X-PassAuth-Client".to_string(), "desktop/0.7.0".to_string()),
+            ("x-reauth-token".to_string(), "r1".to_string()),
+        ]);
+        let map = request_headers(&sent, &API_REQUEST_HEADERS).unwrap();
+        assert_eq!(map.len(), 6);
+        assert_eq!(map["x-passauth-client"], "desktop/0.7.0");
+        assert_eq!(map["x-reauth-token"], "r1");
+        for name in [
+            "host",
+            "Host",
+            "cookie",
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "upgrade",
+            "te",
+            "expect",
+            "origin",
+            "referer",
+            "user-agent",
+            "proxy-authorization",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "forwarded",
+            "x-real-ip",
+            "x-passauth-peer-ip",
+            "x-http-method-override",
+            "bad header",
+        ] {
+            let headers = HashMap::from([(name.to_string(), "1".to_string())]);
+            assert!(
+                request_headers(&headers, &API_REQUEST_HEADERS).is_err(),
+                "{name}"
+            );
+        }
+        for value in ["a\r\nhost: evil.example", "a\nb", "a\u{0}b", "a\u{7f}"] {
+            let headers = HashMap::from([("authorization".to_string(), value.to_string())]);
+            assert!(
+                request_headers(&headers, &API_REQUEST_HEADERS).is_err(),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_fetch_uses_the_web_vaults_methods() {
+        for (sent, method) in [
+            ("GET", "GET"),
+            ("post", "POST"),
+            ("PUT", "PUT"),
+            ("patch", "PATCH"),
+            ("DELETE", "DELETE"),
+        ] {
+            assert_eq!(api_method(sent).unwrap().as_str(), method);
+        }
+        for bad in [
+            "CONNECT", "TRACE", "OPTIONS", "HEAD", "PROPFIND", "", "GET ",
+        ] {
+            assert!(api_method(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn api_fetch_stays_under_api_on_the_connected_server() {
+        let base = Url::parse("https://vault.example.com/").unwrap();
+        for (path, url) in [
+            (
+                "/sync?since=abc",
+                "https://vault.example.com/api/sync?since=abc",
+            ),
+            (
+                "/auth/requests/a%2Fb",
+                "https://vault.example.com/api/auth/requests/a%2Fb",
+            ),
+            ("/", "https://vault.example.com/api/"),
+        ] {
+            assert_eq!(api_url(&base, path).unwrap().as_str(), url);
+        }
+        for bad in [
+            "",
+            "sync",
+            "/../admin",
+            "/..",
+            "/%2e%2e/",
+            "/x/../../index.html",
+            r"/..\..\x",
+            "/x?next=https://evil.example",
+            "@evil.example/x",
+        ] {
+            assert!(api_url(&base, bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `api_body` with `max` on an answer sent as `reply`.
+    fn body_of(reply: &[u8], max: usize) -> Result<String, String> {
+        let (base, server) = one_request_server(reply.to_vec());
+        let body = tauri::async_runtime::block_on(async {
+            let response = test_client()
+                .get(api_url(&base, "/sync").unwrap())
+                .send()
+                .await
+                .unwrap();
+            api_body(response, "vault.example.com", max).await
+        });
+        server.join().unwrap();
+        body
+    }
+
+    #[test]
+    fn an_api_answer_is_read_up_to_its_cap() {
+        let fits = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: 10\r\nconnection: close\r\n\r\n{}",
+            "a".repeat(10)
+        );
+        assert_eq!(body_of(fits.as_bytes(), 10).unwrap(), "a".repeat(10));
+        // Announced as larger: refused before reading.
+        let announced =
+            b"HTTP/1.1 200 OK\r\ncontent-length: 11\r\nconnection: close\r\n\r\naaaaaaaaaaa";
+        assert_eq!(
+            body_of(announced, 10).unwrap_err(),
+            too_large_answer("vault.example.com", 10)
+        );
+        // Not announced (chunked): refused once the bytes run past the cap.
+        let chunked = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n6\r\naaaaaa\r\n5\r\naaaaa\r\n0\r\n\r\n";
+        assert!(body_of(chunked, 10).is_err());
+        assert_eq!(body_of(chunked, 11).unwrap(), "a".repeat(11));
+        // Not UTF-8: replacement characters, as `text()` gives.
+        let latin1 = b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\ncaf\xe9";
+        assert_eq!(body_of(latin1, 10).unwrap(), "caf\u{FFFD}");
+        assert_eq!(
+            too_large_answer("vault.example.com", API_BODY_MAX),
+            "The answer from vault.example.com is larger than 128 MB, more than PassAuth can read."
+        );
+    }
+
+    #[test]
+    fn api_fetch_hands_over_only_the_headers_the_webview_reads() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("content-type", "application/json"),
+            ("Retry-After", "42"),
+            ("x-request-id", "01JD2Q4V8M"),
+            ("set-cookie", "a=b"),
+            ("server", "proxy"),
+        ] {
+            headers.append(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_static(value),
+            );
+        }
+        // A repeated header: the first value counts.
+        headers.append("retry-after", HeaderValue::from_static("7"));
+        let kept = kept_headers(&headers);
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert_eq!(kept["content-type"], "application/json");
+        assert_eq!(kept["retry-after"], "42");
+        assert_eq!(kept["x-request-id"], "01JD2Q4V8M");
+
+        // A value that isn't visible ASCII is left out rather than mangled.
+        let mut odd = HeaderMap::new();
+        odd.insert("x-request-id", HeaderValue::from_bytes(b"caf\xe9").unwrap());
+        assert!(kept_headers(&odd).is_empty());
+        assert!(kept_headers(&HeaderMap::new()).is_empty());
+    }
 }

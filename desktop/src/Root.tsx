@@ -5,9 +5,10 @@ import { LogoMark } from "@web/components/Logo";
 import { Modal, SheetActions } from "@web/components/ui";
 import { SESSION_KEY } from "@web/lib/api";
 import { loadSecrets, secretStore } from "@web/lib/platform";
-import { EMAIL_KEY, boot, rememberKey, secretKeyKey, useVault } from "@web/lib/vault";
+import { EMAIL_KEY, boot, holdsKeys, rememberKey, secretKeyKey, useVault } from "@web/lib/vault";
 import { AddCodeHost } from "./AddCode";
 import { Connect } from "./Connect";
+import { pinServerPolicy } from "./csp";
 import { setSecretsHost } from "./secrets";
 import { connectServer, rememberServer, savedServer } from "./server";
 import { KEYS_KEY, applyTimeoutAtStart } from "./timeout";
@@ -58,6 +59,12 @@ export function Root() {
   useEffect(() => {
     if (stage.kind !== "booting") return;
     const { base } = stage;
+    // From here the WebView reaches only this server (./csp.ts). A page pinned to another one (the user changed server)
+    // can't be loosened: boot on a fresh page, which reads the new server from storage. Dev builds have no policy.
+    if (import.meta.env.PROD && !pinServerPolicy(base)) {
+      location.replace("/");
+      return;
+    }
     let cancelled = false;
     (async () => {
       await preloadSecrets(new URL(base).host).catch(() => {});
@@ -127,13 +134,14 @@ function Splash({ host }: { host: string }) {
   );
 }
 
-/** The tray's "Lock Vault" is enabled only while the vault is unlocked. */
+/** The tray's "Lock Vault" is enabled only while the keys are open: the vault, or the two-step screen in front of it. */
 function VaultStateForTray() {
   const { status } = useVault();
+  const open = status === "unlocked" || (status === "two-step" && holdsKeys());
   useEffect(() => {
-    void emit("vault-state", status === "unlocked");
+    void emit("vault-state", open);
     return () => void emit("vault-state", false);
-  }, [status]);
+  }, [open]);
   return null;
 }
 

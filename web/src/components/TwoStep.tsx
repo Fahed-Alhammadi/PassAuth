@@ -2,8 +2,32 @@
 import { useCallback, useState } from "react";
 import { downloadFile } from "../lib/kit";
 import { server } from "../lib/server";
-import { ActionRow, Modal, SheetActions, copySecret } from "./ui";
+import { ActionRow, Modal, PasswordInput, SheetActions, copySecret } from "./ui";
 import "../styles/settings.css";
+
+/**
+ * The master password, asked for in the same form as the change it confirms (turning on a two-step method, adding a
+ * security key): the app trades it for a fresh reauth token (`reauth`), which the server wants with the request.
+ */
+export function MasterPasswordField({
+  id,
+  value,
+  onChange,
+  hint = "Confirms that it's you making this change.",
+}: {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  hint?: string;
+}) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>Master password</label>
+      <PasswordInput id={id} value={value} onChange={onChange} />
+      <span className="field-hint">{hint}</span>
+    </div>
+  );
+}
 
 export function CodeField({
   id,

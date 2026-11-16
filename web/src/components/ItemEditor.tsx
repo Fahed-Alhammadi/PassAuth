@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { errorMessage } from "../lib/api";
+import type { PatternNote } from "../lib/patterns";
 import { KIND_LABEL, kindOf, type Field, type Item, type LoginUrl, type Passkey } from "../lib/types";
 import { ErrorText, Icon, PasswordField } from "./ui";
 
@@ -19,6 +20,9 @@ export function ItemEditor({
   onCancel,
   generate,
   onDirtyChange,
+  onChange,
+  extra,
+  websiteNote,
 }: {
   initial: Item;
   isNew: boolean;
@@ -33,12 +37,29 @@ export function ItemEditor({
   generate?: () => Promise<string>;
   /** Told when the form first differs from `initial`, and `false` when it goes away. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Called with the whole draft after every edit (not for `initial`), e.g. to keep it while a popup closes; debounce it yourself. */
+  onChange?: (item: Item) => void;
+  /** More of the form, shown above the Save button (the web vault: files to attach to a new item). */
+  extra?: ReactNode;
+  /**
+   * What to show under a website entry: for one that runs as a regular expression with this app's default match, why
+   * the core refuses it or that it could match other sites (`patternNote` in lib/patterns.ts, with this app's core and
+   * default). Left out: nothing is shown. Saving is never blocked.
+   */
+  websiteNote?: (url: string, match: LoginUrl["match"]) => PatternNote | null;
 }) {
   const [item, setItem] = useState<Item>(initial);
   const dirtyRef = useRef(onDirtyChange);
   dirtyRef.current = onDirtyChange;
+  const changeRef = useRef(onChange);
+  changeRef.current = onChange;
   useEffect(() => dirtyRef.current?.(item !== initial), [item, initial]);
   useEffect(() => () => dirtyRef.current?.(false), []);
+  // Every edit makes a new draft object; the first render's is `initial` itself. Only edits run this (not a new
+  // `initial` from the caller), so a caller that stores the draft and re-renders can't loop.
+  useEffect(() => {
+    if (item !== initial) changeRef.current?.(item);
+  }, [item]);
   // No vault list = editing an existing item without a vault picker: it stays in its own vault.
   const [vaultId, setVaultId] = useState(vaults.length === 0 || vaults.some((v) => v.id === defaultVault) ? defaultVault : "");
   const [busy, setBusy] = useState(false);
@@ -105,50 +126,62 @@ export function ItemEditor({
             <span>Authenticator key (TOTP)</span>
             <input className="input mono" value={item.login.totp ?? ""} onChange={(e) => sub("login", { totp: e.target.value || null })} spellCheck={false} autoComplete="off" />
           </label>
-          {item.login.urls.map((u, n) => (
-            <div key={n} className="row editor-row">
-              <label className="field grow">
-                <span>{n === 0 ? "Website" : `Website ${n + 1}`}</span>
-                <input
-                  className="input"
-                  type="text"
-                  inputMode={u.match === "regex" ? undefined : "url"}
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={u.url}
-                  placeholder="https://example.com"
-                  onChange={(e) => {
-                    const url = e.target.value;
-                    setUrls((urls) => urls.map((x, j) => (j === n ? { ...x, url } : x)));
-                  }}
-                />
-              </label>
-              <label className="field field-fixed">
-                <span>Match</span>
-                <select
-                  className="select"
-                  value={u.match}
-                  onChange={(e) => {
-                    const match = e.target.value as LoginUrl["match"];
-                    setUrls((urls) => urls.map((x, j) => (j === n ? { ...x, match } : x)));
-                  }}
-                >
-                  <option value="default">Default (extension setting)</option>
-                  <option value="domain">Base domain</option>
-                  <option value="host">Host</option>
-                  <option value="starts_with">Starts with</option>
-                  <option value="regex">Regular expression</option>
-                  <option value="exact">Exact</option>
-                  <option value="never">Never</option>
-                </select>
-              </label>
-              {item.login!.urls.length > 1 && (
-                <button type="button" className="btn btn-icon" aria-label={`Remove website ${n + 1}`} onClick={() => setUrls((urls) => urls.filter((_, j) => j !== n))}>
-                  <Icon name="trash" />
-                </button>
-              )}
-            </div>
-          ))}
+          {item.login.urls.map((u, n) => {
+            const note = websiteNote?.(u.url, u.match) ?? null;
+            const noteId = `website-note-${n}`;
+            return (
+              <Fragment key={n}>
+                <div className="row editor-row">
+                  <label className="field grow">
+                    <span>{n === 0 ? "Website" : `Website ${n + 1}`}</span>
+                    <input
+                      className="input"
+                      type="text"
+                      inputMode={u.match === "regex" ? undefined : "url"}
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={u.url}
+                      placeholder="https://example.com"
+                      aria-describedby={note ? noteId : undefined}
+                      onChange={(e) => {
+                        const url = e.target.value;
+                        setUrls((urls) => urls.map((x, j) => (j === n ? { ...x, url } : x)));
+                      }}
+                    />
+                  </label>
+                  <label className="field field-fixed">
+                    <span>Match</span>
+                    <select
+                      className="select"
+                      value={u.match}
+                      onChange={(e) => {
+                        const match = e.target.value as LoginUrl["match"];
+                        setUrls((urls) => urls.map((x, j) => (j === n ? { ...x, match } : x)));
+                      }}
+                    >
+                      <option value="default">Default (extension setting)</option>
+                      <option value="domain">Base domain</option>
+                      <option value="host">Host</option>
+                      <option value="starts_with">Starts with</option>
+                      <option value="regex">Regular expression</option>
+                      <option value="exact">Exact</option>
+                      <option value="never">Never</option>
+                    </select>
+                  </label>
+                  {item.login!.urls.length > 1 && (
+                    <button type="button" className="btn btn-icon" aria-label={`Remove website ${n + 1}`} onClick={() => setUrls((urls) => urls.filter((_, j) => j !== n))}>
+                      <Icon name="trash" />
+                    </button>
+                  )}
+                </div>
+                {note && (
+                  <div id={noteId} className={`alert small ${note.kind === "error" ? "alert-error" : "alert-warn"}`} role="note">
+                    {note.text}
+                  </div>
+                )}
+              </Fragment>
+            );
+          })}
           <button type="button" className="btn btn-text editor-add" onClick={() => setUrls((urls) => [...urls, { url: "", match: "default" }])}>
             <Icon name="plus" /> Add website
           </button>
@@ -258,6 +291,8 @@ export function ItemEditor({
           </label>
         )}
       </div>
+
+      {extra}
 
       <ErrorText error={error} />
       <div className="toolbar">

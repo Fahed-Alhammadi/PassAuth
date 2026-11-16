@@ -25,6 +25,7 @@ on:
     tags: ["v[0-9]*.*.*"]
     paths:
       - "desktop/**"
+      - "testdata/**"
       - "web/**"
       - "crates/**"
       - "Cargo.toml"
@@ -39,6 +40,7 @@ on:
   pull_request:
     paths:
       - "desktop/**"
+      - "testdata/**"
       - "web/**"
       - "crates/**"
       - "Cargo.toml"

@@ -2,23 +2,32 @@ import { useCallback, useEffect, useState, useSyncExternalStore, type FormEvent,
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
+import { SignInRequestsCard } from "../components/DeviceSignIn";
 import { KitActions } from "../components/KitActions";
-import { CodeField, RecoveryCodesModal } from "../components/TwoStep";
+import { CodeField, MasterPasswordField, RecoveryCodesModal } from "../components/TwoStep";
 import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast, type IconName } from "../components/ui";
-import { ApiError, api, friendlyError, usePublicConfig } from "../lib/api";
+import { ATTACHMENT_QUOTA_EXCEEDED, ApiError, api, friendlyError, hasErrorCode, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
+import { clientInfo, deviceKindInfo } from "../lib/clients";
+import { sharerName, sharerShortName, type Invitation } from "../lib/invitations";
 import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
+import { MIN_MASTER_PASSWORD, clampTimeout, minPasswordLength, minutesLabel, newKeysMeetKdf, timeoutOptions } from "../lib/policies";
 import { server } from "../lib/server";
-import type { Role } from "../lib/types";
+import { UNEXPECTED_RESPONSE, readMembers, readRecoveryCodes, type MemberRow, type Role } from "../lib/types";
+import { formatBytes } from "../lib/sizes";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
+  acceptInvitation,
   changeKeys,
   createVault,
+  declineInvitation,
   deleteVault,
   fingerprint,
+  forgetDevice,
   getAccount,
   getBundle,
   logout,
   lookupUser,
+  notePolicyViolations,
   reauth,
   rememberedSecretKey,
   removeMember,
@@ -29,11 +38,13 @@ import {
   useVault,
   type Vault,
 } from "../lib/vault";
+import { ActivityTab, VaultActivity } from "./Activity";
+import { EmergencyTab } from "./Emergency";
 import "../styles/settings.css";
 
 // ------------------------------------------------------------------ types
 
-interface AccountInfo {
+export interface AccountInfo {
   user_id: string;
   email: string;
   name: string;
@@ -47,22 +58,23 @@ interface AccountInfo {
   passkeys: PasskeyInfo[];
   /** False when the server's DOMAIN isn't a full address (no WebAuthn relying party). */
   passkeys_available: boolean;
+  /** Items and encrypted bytes in the vaults this account owns, trash included (servers with quotas); attachments' bytes on newer servers. */
+  usage?: { item_count: number; storage_bytes: number; attachment_bytes?: number };
+  /** The admin's limits for them; 0 = no limit. */
+  limits?: { max_items: number; max_storage_bytes: number; max_attachment_bytes?: number };
+  /** What the account still has to change for the server's policies (servers with `policies`). */
+  policy_violations?: unknown;
 }
 
-interface PasskeyInfo {
+export interface PasskeyInfo {
   id: string;
   name: string;
   created_at: number;
   last_used_at: number | null;
 }
 
-interface Member {
-  user_id: string;
-  email: string;
-  name: string;
-  role: Role;
-  public_key: string;
-}
+/** A vault member, or someone invited who hasn't accepted yet (`status` "invited"). */
+type Member = MemberRow;
 
 interface Session {
   id: string;
@@ -71,6 +83,8 @@ interface Session {
   device_kind: string;
   created_at: number;
   last_used: number;
+  /** The app's `X-PassAuth-Client`, e.g. "desktop/0.7.0" (older servers and sessions don't have it). */
+  client?: string | null;
 }
 
 const TABS = [
@@ -78,12 +92,15 @@ const TABS = [
   { key: "security", label: "Security" },
   { key: "two-step", label: "Two-step login" },
   { key: "vaults", label: "Vaults & sharing" },
+  // Listed only when the server has emergency access (`emergency_access`); its emails link here either way.
+  { key: "emergency", label: "Emergency access" },
   { key: "sessions", label: "Sessions" },
+  // Listed only when the server keeps an activity log (`activity_log`).
+  { key: "activity", label: "Activity" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Owner", admin: "Admin", write: "Can edit", read: "Can view" };
-const MIN_PASSWORD = 10;
 
 // ---------------------------------------------------------------- helpers
 
@@ -109,14 +126,9 @@ function ago(ts: number) {
   return new Date(ts * 1000).toLocaleDateString(undefined, { dateStyle: "medium" });
 }
 
-const KIND_ICON: Record<string, IconName> = { web: "globe", extension: "puzzle", cli: "terminal", desktop: "desktop", mobile: "phone" };
-
-function kindLabel(kind: string) {
-  const known: Record<string, string> = { web: "Web vault", extension: "Browser extension", cli: "Command line", desktop: "Desktop app", mobile: "Mobile app" };
-  return known[kind] ?? kind.charAt(0).toUpperCase() + kind.slice(1);
-}
-
-function safeFingerprint(publicKey: string): string {
+function safeFingerprint(publicKey: unknown): string {
+  // Only a string reaches the core (anything else from the server would trap it or make its memory grow).
+  if (typeof publicKey !== "string" || !publicKey) return "Unavailable";
   try {
     return fingerprint(publicKey);
   } catch {
@@ -130,10 +142,16 @@ export function SettingsPage() {
   const { tab = "account" } = useParams();
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const config = usePublicConfig();
+  const activityLog = hasFeature(config, "activity_log");
+  const emergency = hasFeature(config, "emergency_access");
+  const waiting = useVault().invitations.length;
 
   const reload = useCallback(async () => {
     try {
-      setAccount(await api<AccountInfo>("/account"));
+      const a = await api<AccountInfo>("/account");
+      setAccount(a);
+      notePolicyViolations(a.policy_violations);
       setLoadError(null);
     } catch (e) {
       setLoadError(`Couldn't load your account settings. ${friendly(e)} Reload the page to try again.`);
@@ -149,7 +167,15 @@ export function SettingsPage() {
 
   let body: ReactNode = <p className="muted">Loading…</p>;
   if (current === "vaults") body = <VaultsTab />;
-  else if (current === "sessions") body = <SessionsTab />;
+  else if (current === "sessions")
+    body = (
+      <>
+        <SignInRequestsCard />
+        <SessionsTab />
+      </>
+    );
+  else if (current === "activity") body = <ActivityTab />;
+  else if (current === "emergency") body = <EmergencyTab />;
   else if (current === "security") body = <SecurityTab />;
   else if (account) body = current === "account" ? <AccountTab account={account} reload={reload} /> : <TwoStepTab account={account} reload={reload} />;
   else if (loadError) body = <ErrorText error={loadError} />;
@@ -165,9 +191,17 @@ export function SettingsPage() {
             </button>
           </div>
           <nav className="settings-tabs" aria-label="Settings sections">
-            {TABS.map((t) => (
+            {TABS.filter((t) => (t.key !== "activity" || activityLog || current === t.key) && (t.key !== "emergency" || emergency || current === t.key)).map((t) => (
               <Link key={t.key} to={`/settings/${t.key}`} aria-current={t.key === current ? "page" : undefined}>
                 {t.label}
+                {t.key === "vaults" && waiting > 0 && (
+                  <>
+                    <span className="badge tab-badge" aria-hidden="true">
+                      {waiting}
+                    </span>
+                    <span className="sr-only">, {waiting === 1 ? "1 invitation" : `${waiting} invitations`}</span>
+                  </>
+                )}
               </Link>
             ))}
           </nav>
@@ -270,7 +304,8 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const fp = account.fingerprint ?? getAccount()?.fingerprint() ?? null;
+  // Worked out from this app's own key, never taken from the server: it is what others compare a key the server gave them with.
+  const fp = getAccount()?.fingerprint() ?? (typeof account.fingerprint === "string" ? account.fingerprint : null);
   const showIcons = useShowIcons();
   const theme = useTheme();
   const desktop = getDesktop();
@@ -323,6 +358,8 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           )}
         </div>
       </section>
+
+      <UsageCard account={account} />
 
       <section className="card" aria-labelledby="appearance-title">
         <h2 id="appearance-title">Appearance</h2>
@@ -394,13 +431,79 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   );
 }
 
-/** Desktop app only: when the vault locks by itself, and whether it locks or signs out (the extension's options). */
+/** What this account stores against the server's limits; shown only when the admin set a limit. */
+/** A count the server sent, or 0 for anything that isn't one (nothing it sends may break this page). */
+const count = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+
+function UsageCard({ account }: { account: AccountInfo }) {
+  const { usage, limits } = account;
+  if (!usage || !limits) return null;
+  const [items, maxItems] = [count(usage.item_count), count(limits.max_items)];
+  const [stored, maxStored] = [count(usage.storage_bytes), count(limits.max_storage_bytes)];
+  const [files, maxFiles] = [count(usage.attachment_bytes), count(limits.max_attachment_bytes)];
+  const meters = [
+    maxItems > 0 && { label: "Items", used: items, max: maxItems, text: `${items.toLocaleString()} of ${maxItems.toLocaleString()} items` },
+    maxStored > 0 && { label: "Storage", used: stored, max: maxStored, text: `${formatBytes(stored)} of ${formatBytes(maxStored)}` },
+    maxFiles > 0 && { label: "Attachments", used: files, max: maxFiles, text: `${formatBytes(files)} of ${formatBytes(maxFiles)}` },
+  ].filter((m): m is { label: string; used: number; max: number; text: string } => !!m);
+  if (meters.length === 0) return null;
+  const full = meters.some((m) => m.label !== "Attachments" && m.used >= m.max);
+  const filesFull = maxFiles > 0 && files >= maxFiles;
+  return (
+    <section className="card" aria-labelledby="usage-title">
+      <h2 id="usage-title">Storage</h2>
+      <p className="card-text">
+        This server limits what each account can store. Everything in the vaults you own counts, the trash included; vaults others share with you
+        count toward their owner's limit.
+      </p>
+      {meters.map((m) => {
+        const pct = Math.min(100, (m.used / m.max) * 100);
+        return (
+          <div className="usage" key={m.label}>
+            <div className="row-between">
+              <span className="setting-title">{m.label}</span>
+              <span className="small muted">{m.text}</span>
+            </div>
+            <div
+              className={`meter usage-bar${m.used >= m.max ? " is-full" : pct >= 90 ? " is-near" : ""}`}
+              role="progressbar"
+              aria-label={m.label}
+              aria-valuemin={0}
+              aria-valuemax={m.max}
+              aria-valuenow={Math.min(m.used, m.max)}
+              aria-valuetext={m.text}
+            >
+              <i style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })}
+      {full && <p className="field-hint">You've reached this server's storage limit. Delete items or ask the server's admin.</p>}
+      {filesFull && <p className="field-hint">{ATTACHMENT_QUOTA_EXCEEDED}</p>}
+    </section>
+  );
+}
+
+/**
+ * Desktop app only: when the vault locks by itself, and whether it locks or signs out (the extension's options). Under
+ * the server's longest vault timeout (policy) only the choices within it are offered, and a saved choice above it
+ * gives way to the limit.
+ */
 function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
   const settings = useSyncExternalStore(hook.subscribe, hook.get);
+  // The app's own record of the limit (it applies it offline too), else the server's current answer.
+  const known = useSyncExternalStore(hook.subscribe, () => hook.maxMinutes?.() ?? null);
+  const policyMax = usePolicies().maxVaultTimeoutMinutes;
+  const max = known ?? policyMax;
   const lockShortcut = getDesktop()?.lockShortcut;
-  const current = String(settings.vaultTimeout);
-  const unavailable = hook.options.map(([v, label]) => [label, hook.disabledReason(v)] as const).filter(([, reason]) => reason);
-  const neverActive = settings.vaultTimeout === "never" && !hook.disabledReason("never");
+  const options = timeoutOptions(hook.options, max);
+  const effective = clampTimeout(settings.vaultTimeout, max);
+  const clamped = effective !== settings.vaultTimeout;
+  const savedLabel = hook.options.find(([v]) => v === settings.vaultTimeout)?.[1] ?? (typeof settings.vaultTimeout === "number" ? minutesLabel(settings.vaultTimeout) : "");
+  const current = String(effective);
+  const help = hook.help[current] ?? (typeof effective === "number" ? hook.help.minutes : undefined);
+  const unavailable = options.map(([v, label]) => [label, hook.disabledReason(v)] as const).filter(([, reason]) => reason);
+  const neverActive = effective === "never" && !hook.disabledReason("never");
   return (
     <section className="card" aria-labelledby="timeout-title">
       <h2 id="timeout-title">Vault timeout</h2>
@@ -410,13 +513,13 @@ function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
         control={
           <select
             className="select"
-            value={String(settings.vaultTimeout)}
+            value={current}
             onChange={(e) => {
-              const picked = hook.options.find(([v]) => String(v) === e.target.value);
+              const picked = options.find(([v]) => String(v) === e.target.value);
               if (picked) hook.set({ vaultTimeout: picked[0] });
             }}
           >
-            {hook.options.map(([v, label]) => (
+            {options.map(([v, label]) => (
               <option key={String(v)} value={String(v)} disabled={hook.disabledReason(v) !== null}>
                 {label}
               </option>
@@ -424,8 +527,16 @@ function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
           </select>
         }
       >
-        {!neverActive && hook.help[current]}
+        {!neverActive && help}
       </Setting>
+      {max > 0 &&
+        (clamped ? (
+          <div className="alert alert-info small" role="note">
+            Your server's admin allows a vault timeout of at most {minutesLabel(max)}, so the vault locks after {minutesLabel(max)} instead of "{savedLabel}".
+          </div>
+        ) : (
+          <p className="small muted">Your server's admin allows a vault timeout of at most {minutesLabel(max)}.</p>
+        ))}
       {unavailable.map(([label, reason]) => (
         <p key={label} className="small muted">
           {label}: {reason}
@@ -559,8 +670,13 @@ function AboutDesktop({ desktop }: { desktop: DesktopHooks }) {
 // --------------------------------------------------------------- security
 
 function SecurityTab() {
-  const { email } = useVault();
+  const { email, policyViolations } = useVault();
+  const policies = usePolicies();
+  const minLength = minPasswordLength(policies);
   const [skOn, setSkOn] = useState<boolean>(() => !!getBundle()?.secret_key_enabled);
+  // The server requires a Secret Key (policy): new keys get one, and it can't be turned off.
+  const skRequired = policies.requireSecretKey;
+  const kdfAsked = policyViolations.includes("kdf");
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -574,11 +690,12 @@ function SecurityTab() {
     e.preventDefault();
     setError(null);
     if (!current) return setError("Enter your current master password.");
-    if (next.length < MIN_PASSWORD) return setError(`Use at least ${MIN_PASSWORD} characters for your new master password.`);
+    if (next.length < minLength) return setError(`Use at least ${minLength} characters for your new master password.`);
     if (next !== confirm) return setError("The new passwords don't match. Type the same password in both fields.");
     setBusy(true);
     try {
-      const sk = await changeKeys(current, next, skOn);
+      const sk = await changeKeys(current, next, skOn || skRequired);
+      setSkOn(!!getBundle()?.secret_key_enabled);
       setCurrent("");
       setNext("");
       setConfirm("");
@@ -610,7 +727,15 @@ function SecurityTab() {
             (savedKey
               ? " Your Secret Key stays the same."
               : ` Changing it also creates a new Secret Key, shown once, because ${clientName()} doesn't have the current one saved.`)}
+          {!skOn && skRequired && " Your server requires a Secret Key, so changing it also turns one on. It's shown once, to save in your Emergency Kit."}
         </p>
+        {kdfAsked && (
+          <div className="alert alert-info small" role="note">
+            {newKeysMeetKdf(policies)
+              ? "Your server asks for stronger encryption settings for your account. Changing your master password creates your keys again with them: you can enter your current password as the new one."
+              : "Your server asks for stronger encryption settings for your account than PassAuth supports. Ask the server's admin to check the minimum key settings."}
+          </div>
+        )}
         <form className="stack" onSubmit={changePassword}>
           <div className="field">
             <label htmlFor="pw-current">
@@ -624,7 +749,9 @@ function SecurityTab() {
             </label>
             <PasswordInput id="pw-new" value={next} onChange={setNext} autoComplete="new-password" />
             <StrengthMeter password={next} />
-            <span className="field-hint">At least {MIN_PASSWORD} characters. A few unrelated words are easy to remember and hard to guess.</span>
+            <span className="field-hint">
+              At least {minLength} characters{minLength > MIN_MASTER_PASSWORD ? ", as your server requires" : ""}. A few unrelated words are easy to remember and hard to guess.
+            </span>
           </div>
           <div className="field">
             <label htmlFor="pw-confirm">
@@ -648,14 +775,19 @@ function SecurityTab() {
             <h2 id="sk-title">Secret Key</h2>
             <OnOff on={skOn} />
           </div>
-          <button type="button" className={skOn ? "btn btn-danger" : "btn"} onClick={() => setToggling(true)}>
-            {skOn ? "Turn off…" : "Turn on…"}
-          </button>
+          {!(skOn && skRequired) && (
+            <button type="button" className={skOn ? "btn btn-danger" : "btn"} onClick={() => setToggling(true)}>
+              {skOn ? "Turn off…" : "Turn on…"}
+            </button>
+          )}
         </div>
         <p className="card-text">
           A Secret Key is a long random code that's combined with your master password when you sign in on a new device. Even if someone learns
           your master password, they can't open your vault without it.
         </p>
+        {skRequired && (
+          <p className="small muted">{skOn ? "Your server requires a Secret Key, so it can't be turned off." : "Your server asks you to turn on a Secret Key."}</p>
+        )}
         <p className="small muted">
           {!skOn
             ? "When you turn it on, you get a Secret Key to save in an Emergency Kit."
@@ -729,6 +861,13 @@ function SecretKeyModal({ secretKey, email, onClose }: { secretKey: string; emai
 
 // ---------------------------------------------------------- two-step login
 
+/** The server refused to turn off the account's last two-step method because it requires two-step login (policy). */
+function keptLast(e: unknown): never {
+  if (hasErrorCode(e, "two_step_required"))
+    throw new Error("Your server requires two-step login, so your only method can't be turned off. Turn on another one first.");
+  throw e;
+}
+
 function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => Promise<void> }) {
   const [codes, setCodes] = useState<string[] | null>(null);
   const [disabling, setDisabling] = useState<"totp" | "email" | null>(null);
@@ -738,6 +877,10 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
   const totpOn = account.two_factor.includes("totp");
   const emailOn = account.two_factor.includes("email");
   const anyOn = account.two_factor.length > 0;
+  const lastOne = account.two_factor.length === 1;
+  const lastKey = account.passkeys.length === 1 && lastOne;
+  // The server requires two-step login (policy): it refuses to turn off the only method.
+  const keepLast = usePolicies().requireTwoStep && lastOne;
 
   async function enabled(recovery: string[] | null) {
     await reload();
@@ -746,7 +889,7 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
 
   async function disable(password: string) {
     const token = await reauth(password);
-    await api(`/account/2fa/${disabling}`, { method: "DELETE", headers: { "x-reauth-token": token } });
+    await api(`/account/2fa/${disabling}`, { method: "DELETE", headers: { "x-reauth-token": token }, twoStepGate: false }).catch(keptLast);
     toast(disabling === "totp" ? "Authenticator app turned off" : "Email codes turned off");
     setDisabling(null);
     await reload();
@@ -754,23 +897,26 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
 
   async function regenerate(password: string) {
     const token = await reauth(password);
-    const r = await api<{ recovery_codes: string[] }>("/account/2fa/recovery", { method: "POST", headers: { "x-reauth-token": token } });
+    const r = await api("/account/2fa/recovery", { method: "POST", headers: { "x-reauth-token": token } });
+    const fresh = readRecoveryCodes(r);
+    if (!fresh) throw new Error(UNEXPECTED_RESPONSE);
     setRegenerating(false);
-    setCodes(r.recovery_codes);
+    setCodes(fresh);
     await reload();
   }
 
   async function removeKey(password: string) {
     if (!removingKey) return;
     const token = await reauth(password);
-    await api(`/account/2fa/passkey/${encodeURIComponent(removingKey.id)}`, { method: "DELETE", headers: { "x-reauth-token": token } });
+    await api(`/account/2fa/passkey/${encodeURIComponent(removingKey.id)}`, {
+      method: "DELETE",
+      headers: { "x-reauth-token": token },
+      twoStepGate: false,
+    }).catch(keptLast);
     toast("Security key removed");
     setRemovingKey(null);
     await reload();
   }
-
-  const lastOne = account.two_factor.length === 1;
-  const lastKey = account.passkeys.length === 1 && lastOne;
 
   return (
     <>
@@ -778,9 +924,20 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
         Two-step login asks for a code after your master password when you sign in on a new device, so a stolen password isn't enough.
       </p>
 
-      <TotpCard on={totpOn} onEnabled={enabled} onDisable={() => setDisabling("totp")} />
-      <EmailCard on={emailOn} available={account.email_enabled} email={account.email} onEnabled={enabled} onDisable={() => setDisabling("email")} />
-      <PasskeysCard account={account} onAdd={() => setAddingKey(true)} onRemove={setRemovingKey} />
+      {keepLast && (
+        <div className="alert alert-info small" role="note">
+          Your server requires two-step login, so your only method can't be turned off. Turn on another one first if you want to replace it.
+        </div>
+      )}
+      <TotpCard on={totpOn} onEnabled={enabled} onDisable={keepLast ? undefined : () => setDisabling("totp")} />
+      <EmailCard
+        on={emailOn}
+        available={account.email_enabled}
+        email={account.email}
+        onEnabled={enabled}
+        onDisable={keepLast ? undefined : () => setDisabling("email")}
+      />
+      <PasskeysCard account={account} onAdd={() => setAddingKey(true)} onRemove={keepLast ? undefined : setRemovingKey} />
 
       <section className="card" aria-labelledby="rc-title">
         <div className="card-head">
@@ -859,7 +1016,8 @@ function TwoStepTab({ account, reload }: { account: AccountInfo; reload: () => P
 
 // ------------------------------------------------- security keys / passkeys
 
-function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAdd: () => void; onRemove: (key: PasskeyInfo) => void }) {
+/** `onRemove` left out: the keys can't be removed (the last two-step method while the server requires one). */
+export function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAdd: () => void; onRemove?: (key: PasskeyInfo) => void }) {
   const on = account.passkeys.length > 0;
   const desktop = isDesktop();
   const supported = !desktop && webauthnSupported();
@@ -893,9 +1051,11 @@ function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAd
                   Added {formatDate(k.created_at)}. {k.last_used_at ? `Last used ${ago(k.last_used_at).toLowerCase()}.` : "Not used yet."}
                 </span>
               </span>
-              <button type="button" className="btn btn-text btn-danger btn-sm" aria-label={`Remove ${k.name}`} onClick={() => onRemove(k)}>
-                Remove
-              </button>
+              {onRemove && (
+                <button type="button" className="btn btn-text btn-danger btn-sm" aria-label={`Remove ${k.name}`} onClick={() => onRemove(k)}>
+                  Remove
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -917,7 +1077,7 @@ function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInfo; onAd
 }
 
 /** Name the key, confirm the master password, then register it with the browser's WebAuthn prompt. */
-function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | null) => Promise<void>; onClose: () => void }) {
+export function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | null) => Promise<void>; onClose: () => void }) {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [step, setStep] = useState<"form" | "confirming" | "waiting" | "saving">("form");
@@ -943,11 +1103,11 @@ function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | 
       setStep("waiting");
       const credential = await createCredential(start.options);
       setStep("saving");
-      const r = await api<{ id: string; recovery_codes: string[] | null }>("/account/2fa/passkey/register/finish", {
+      const r = await api("/account/2fa/passkey/register/finish", {
         body: { registration_id: start.registration_id, name: trimmed, credential },
       });
       toast("Security key added");
-      await onAdded(r.recovery_codes);
+      await onAdded(readRecoveryCodes(r));
     } catch (err) {
       setError(friendly(err));
       setStep("form");
@@ -1000,9 +1160,21 @@ function AddPasskeyModal({ onAdded, onClose }: { onAdded: (recovery: string[] | 
 }
 
 
-function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes: string[] | null) => Promise<void>; onDisable: () => void }) {
+/**
+ * Turn on a two-step method with the code that proves it works. The master password comes first, traded for a fresh
+ * reauth token, which servers that require it check (as for removing a security key); older servers ignore it. The
+ * answer's recovery codes, if this is the account's first method.
+ */
+async function enableTwoStep(method: "totp" | "email", code: string, password: string): Promise<string[] | null> {
+  const token = await reauth(password);
+  return readRecoveryCodes(await api(`/account/2fa/${method}/enable`, { body: { code }, headers: { "x-reauth-token": token } }));
+}
+
+/** `onDisable` left out: no "Turn off" (the last two-step method while the server requires one, or nothing to turn off). */
+export function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes: string[] | null) => Promise<void>; onDisable?: () => void }) {
   const [setup, setSetup] = useState<{ secret: string; qr: string } | null>(null);
   const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1011,9 +1183,11 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
     setError(null);
     try {
       const r = await api<{ secret: string; uri: string }>("/account/2fa/totp/setup", { method: "POST" });
+      if (typeof r?.secret !== "string" || typeof r.uri !== "string") throw new Error(UNEXPECTED_RESPONSE);
       const qr = await QRCode.toDataURL(r.uri, { margin: 1, width: 200 });
       setSetup({ secret: r.secret, qr });
       setCode("");
+      setPassword("");
     } catch (e) {
       setError(friendly(e));
     } finally {
@@ -1024,13 +1198,15 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
   async function enable(e: FormEvent) {
     e.preventDefault();
     if (!code.trim()) return setError("Enter the 6-digit code from your authenticator app.");
+    if (!password) return setError("Enter your master password to continue.");
     setBusy(true);
     setError(null);
     try {
-      const r = await api<{ recovery_codes: string[] | null }>("/account/2fa/totp/enable", { body: { code: code.replace(/\s/g, "") } });
+      const recovery = await enableTwoStep("totp", code.replace(/\s/g, ""), password);
       setSetup(null);
+      setPassword("");
       toast("Authenticator app turned on");
-      await onEnabled(r.recovery_codes);
+      await onEnabled(recovery);
     } catch (err) {
       setError(friendly(err));
     } finally {
@@ -1048,9 +1224,11 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
           <OnOff on={on} />
         </div>
         {on ? (
-          <button type="button" className="btn btn-danger" onClick={onDisable}>
-            Turn off…
-          </button>
+          onDisable && (
+            <button type="button" className="btn btn-danger" onClick={onDisable}>
+              Turn off…
+            </button>
+          )
         ) : (
           !setup && (
             <button type="button" className="btn" onClick={start} disabled={busy}>
@@ -1082,12 +1260,21 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
               </li>
             </ol>
           </div>
+          <MasterPasswordField id="totp-password" value={password} onChange={setPassword} hint="Confirms that it's you turning on two-step login." />
           <ErrorText error={error} />
           <div className="card-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
               {busy ? "Checking code…" : "Turn on authenticator app"}
             </button>
-            <button type="button" className="btn btn-text" onClick={() => setSetup(null)} disabled={busy}>
+            <button
+              type="button"
+              className="btn btn-text"
+              onClick={() => {
+                setSetup(null);
+                setPassword("");
+              }}
+              disabled={busy}
+            >
               Cancel
             </button>
           </div>
@@ -1098,7 +1285,7 @@ function TotpCard({ on, onEnabled, onDisable }: { on: boolean; onEnabled: (codes
   );
 }
 
-function EmailCard({
+export function EmailCard({
   on,
   available,
   email,
@@ -1109,10 +1296,12 @@ function EmailCard({
   available: boolean;
   email: string;
   onEnabled: (codes: string[] | null) => Promise<void>;
-  onDisable: () => void;
+  /** Left out: no "Turn off" (see `TotpCard`). */
+  onDisable?: () => void;
 }) {
   const [sent, setSent] = useState(false);
   const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1134,13 +1323,15 @@ function EmailCard({
   async function enable(e: FormEvent) {
     e.preventDefault();
     if (!code.trim()) return setError("Enter the code from the email we sent you.");
+    if (!password) return setError("Enter your master password to continue.");
     setBusy(true);
     setError(null);
     try {
-      const r = await api<{ recovery_codes: string[] | null }>("/account/2fa/email/enable", { body: { code: code.trim() } });
+      const recovery = await enableTwoStep("email", code.trim(), password);
       setSent(false);
+      setPassword("");
       toast("Email codes turned on");
-      await onEnabled(r.recovery_codes);
+      await onEnabled(recovery);
     } catch (err) {
       setError(friendly(err));
     } finally {
@@ -1156,9 +1347,11 @@ function EmailCard({
           <OnOff on={on} />
         </div>
         {on ? (
-          <button type="button" className="btn btn-danger" onClick={onDisable}>
-            Turn off…
-          </button>
+          onDisable && (
+            <button type="button" className="btn btn-danger" onClick={onDisable}>
+              Turn off…
+            </button>
+          )
         ) : (
           !sent &&
           available && (
@@ -1177,6 +1370,7 @@ function EmailCard({
         <form className="stack" onSubmit={enable}>
           <p className="card-text">We sent a code to {email}. Enter it below.</p>
           <CodeField id="email-code" value={code} onChange={setCode} />
+          <MasterPasswordField id="email-password" value={password} onChange={setPassword} hint="Confirms that it's you turning on two-step login." />
           <ErrorText error={error} />
           <div className="card-actions">
             <button type="submit" className="btn btn-primary" disabled={busy}>
@@ -1185,7 +1379,15 @@ function EmailCard({
             <button type="button" className="btn btn-text" onClick={send} disabled={busy}>
               Send a new code
             </button>
-            <button type="button" className="btn btn-text" onClick={() => setSent(false)} disabled={busy}>
+            <button
+              type="button"
+              className="btn btn-text"
+              onClick={() => {
+                setSent(false);
+                setPassword("");
+              }}
+              disabled={busy}
+            >
               Cancel
             </button>
           </div>
@@ -1227,6 +1429,7 @@ function VaultsTab() {
 
   return (
     <>
+      <InvitationsCard />
       <section className="card" aria-labelledby="newvault-title">
         <h2 id="newvault-title">Create a vault</h2>
         <p className="card-text">Use separate vaults to keep things apart, or to share a set of items with family or colleagues.</p>
@@ -1246,6 +1449,133 @@ function VaultsTab() {
         <VaultCard key={v.id} vault={v} count={counts.get(v.id) ?? 0} />
       ))}
     </>
+  );
+}
+
+/** What a role lets the person who accepts do, in a sentence. */
+const ROLE_SENTENCE: Partial<Record<Role, string>> = {
+  read: "You'll be able to view its items.",
+  write: "You'll be able to view and edit its items.",
+  admin: "You'll be able to edit its items and share the vault.",
+};
+
+/** Vaults shared with the user and waiting for an answer (servers with invitations). The invitation email links here. */
+function InvitationsCard() {
+  const { invitations } = useVault();
+  if (invitations.length === 0) return null;
+  return (
+    <section className="card" aria-labelledby="invitations-title">
+      <div className="stack-s">
+        <h2 id="invitations-title">{invitations.length === 1 ? "Invitation to a shared vault" : `Invitations to shared vaults (${invitations.length})`}</h2>
+        <p className="card-text">A vault shared with you appears in your apps only after you accept it.</p>
+      </div>
+      {invitations.map((inv) => (
+        <InvitationRow key={inv.vaultId} invitation={inv} />
+      ))}
+    </section>
+  );
+}
+
+function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
+  const [asking, setAsking] = useState<"accept" | "decline" | null>(null);
+  const from = sharerName(inv);
+  const sharer = sharerShortName(inv);
+  const fp = inv.invitedBy?.publicKey ? safeFingerprint(inv.invitedBy.publicKey) : null;
+  const titleId = `invitation-${inv.vaultId}`;
+  const role = ROLE_LABEL[inv.role] ?? inv.role;
+  // The server says who sent it and gives that account's key: the fingerprint shows which key it lists, but it can't
+  // prove the invitation is genuine, so it isn't presented as a check.
+  const listedFor = inv.invitedBy?.email.trim() || sharer;
+  const fingerprintBlock = fp && (
+    <div className="field">
+      <span>Fingerprint your server lists for {listedFor}</span>
+      <div className="fingerprint">{fp}</div>
+    </div>
+  );
+
+  return (
+    <div className="person" role="group" aria-labelledby={titleId}>
+      <div className="sheet-context">
+        <span className="tile" aria-hidden="true">
+          <Icon name="share" />
+        </span>
+        <div className="grow">
+          <div className="row-title" id={titleId}>
+            {inv.name ?? "Invitation that can't be opened"}
+          </div>
+          <div className="row-sub">
+            From {from}
+            {inv.invitedAt ? `, ${formatDate(inv.invitedAt)}` : ""}
+          </div>
+        </div>
+        <span className="badge">{role}</span>
+      </div>
+      {inv.name === null ? (
+        <div className="alert alert-warn small" role="note">
+          Your account's keys can't open this invitation, so PassAuth can't show the vault's name. Decline it, then ask {sharer} to share the vault again.
+        </div>
+      ) : fp ? (
+        <>
+          {fingerprintBlock}
+          <span className="field-hint">Accept only invitations you expected.</span>
+        </>
+      ) : (
+        <div className="alert alert-warn small" role="note">
+          The account that shared this vault no longer exists. Accept only invitations you expected.
+        </div>
+      )}
+      <div className="card-actions">
+        {inv.name !== null && (
+          <button type="button" className="btn btn-primary" onClick={() => setAsking("accept")}>
+            Accept…
+          </button>
+        )}
+        <button type="button" className="btn btn-text btn-danger" onClick={() => setAsking("decline")}>
+          Decline…
+        </button>
+      </div>
+
+      {asking === "accept" && inv.name !== null && (
+        <ConfirmDialog
+          title={`Accept "${inv.name}"?`}
+          subtitle={`Shared by ${from}`}
+          icon="share"
+          danger={false}
+          action="Accept invitation"
+          busyAction="Accepting…"
+          onConfirm={async () => {
+            await acceptInvitation(inv.vaultId);
+            toast(`You joined "${inv.name}"`);
+          }}
+          onClose={() => setAsking(null)}
+        >
+          <p className="card-text">
+            The vault and its items appear in all your apps. {ROLE_SENTENCE[inv.role] ?? ""} The people who manage it can add and change items in it.
+          </p>
+          {fingerprintBlock}
+          <p className="small muted">Accept only invitations you expected.</p>
+        </ConfirmDialog>
+      )}
+      {asking === "decline" && (
+        <ConfirmDialog
+          title="Decline this invitation?"
+          subtitle={inv.name ?? `From ${from}`}
+          icon="share"
+          action="Decline invitation"
+          busyAction="Declining…"
+          onConfirm={async () => {
+            await declineInvitation(inv.vaultId);
+            toast("Invitation declined");
+          }}
+          onClose={() => setAsking(null)}
+        >
+          <p className="card-text">
+            The vault won't appear in your apps. The invitation already gave your account the vault's key, so the people who manage the vault will be asked to
+            replace it.
+          </p>
+        </ConfirmDialog>
+      )}
+    </div>
   );
 }
 
@@ -1309,6 +1639,7 @@ function VaultCard({ vault, count }: { vault: Vault; count: number }) {
 
 function VaultManager({ vault, count }: { vault: Vault; count: number }) {
   const { userId, pendingRotations } = useVault();
+  const activityLog = hasFeature(usePublicConfig(), "activity_log");
   const [securing, setSecuring] = useState(false);
   const [secureError, setSecureError] = useState<string | null>(null);
   const needsRotation = pendingRotations.includes(vault.id);
@@ -1335,8 +1666,9 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
 
   const loadMembers = useCallback(async () => {
     try {
-      const r = await api<{ members: Member[] }>(`/vaults/${vault.id}/members`);
-      setMembers(r.members);
+      const list = readMembers(await api(`/vaults/${vault.id}/members`));
+      if (!list) throw new Error(UNEXPECTED_RESPONSE);
+      setMembers(list);
       setMembersError(null);
     } catch (e) {
       setMembersError(`Couldn't load the members of this vault. ${friendly(e)}`);
@@ -1365,8 +1697,9 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
 
   async function remove() {
     if (!removing) return;
+    // Cancelling an invitation is a removal too: the invitee's app could open the vault key to show its name.
     await removeMember(vault.id, removing.user_id);
-    toast(`${removing.name || removing.email} removed`);
+    toast(removing.status === "invited" ? "Invitation cancelled" : `${removing.name || removing.email} removed`);
     setRemoving(null);
     await loadMembers();
   }
@@ -1410,34 +1743,50 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         {members === null && !membersError && <p className="muted small">Loading members…</p>}
         {members && (
           <div className="fields" role="list" aria-label="Members">
-            {members.map((m) => (
-              <div key={m.user_id} role="listitem">
-                <span className="avatar" aria-hidden="true">
-                  {((m.name || m.email).trim()[0] ?? "?").toUpperCase()}
-                </span>
-                <span className="grow">
-                  <span className="row-title">
-                    {m.name || m.email}
-                    {m.user_id === userId && <span className="muted"> (you)</span>}
+            {members.map((m) => {
+              const invited = m.status === "invited";
+              return (
+                <div key={m.user_id} role="listitem">
+                  <span className="avatar" aria-hidden="true">
+                    {((m.name || m.email).trim()[0] ?? "?").toUpperCase()}
                   </span>
-                  {m.name && <span className="row-sub">{m.email}</span>}
-                  <span className="fingerprint-s" title="Public key fingerprint">
-                    {safeFingerprint(m.public_key)}
+                  <span className="grow">
+                    <span className="row-title">
+                      {m.name || m.email}
+                      {m.user_id === userId && <span className="muted"> (you)</span>}
+                    </span>
+                    {m.name && <span className="row-sub">{m.email}</span>}
+                    {invited && (
+                      <span className="row-sub">
+                        Invited{m.invited_at ? ` ${formatDate(m.invited_at)}` : ""}. The vault reaches them once they accept.
+                      </span>
+                    )}
+                    <span className="fingerprint-s" title="Public key fingerprint">
+                      {safeFingerprint(m.public_key)}
+                    </span>
                   </span>
-                </span>
-                <span className="badge">{ROLE_LABEL[m.role] ?? m.role}</span>
-                {m.role !== "owner" && m.user_id !== userId && (
-                  <button type="button" className="btn btn-text btn-danger btn-sm" aria-label={`Remove ${m.name || m.email}`} onClick={() => setRemoving(m)}>
-                    Remove
-                  </button>
-                )}
-              </div>
-            ))}
+                  {invited && <span className="badge">Invited</span>}
+                  <span className="badge">{ROLE_LABEL[m.role] ?? m.role}</span>
+                  {m.role !== "owner" && m.user_id !== userId && (
+                    <button
+                      type="button"
+                      className="btn btn-text btn-danger btn-sm"
+                      aria-label={invited ? `Cancel the invitation for ${m.name || m.email}` : `Remove ${m.name || m.email}`}
+                      onClick={() => setRemoving(m)}
+                    >
+                      {invited ? "Cancel invitation" : "Remove"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
       <AddMember vault={vault} members={members ?? []} onAdded={loadMembers} />
+
+      {activityLog && <VaultActivity vault={vault} />}
 
       {vault.role === "owner" && (
         <Setting
@@ -1452,7 +1801,24 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         </Setting>
       )}
 
-      {removing && (
+      {removing && removing.status === "invited" && (
+        <ConfirmDialog
+          title={`Cancel the invitation for ${removing.name || removing.email}?`}
+          subtitle={`To ${vault.name}`}
+          icon="person"
+          action="Cancel invitation"
+          busyAction="Cancelling…"
+          cancel="Keep invitation"
+          onConfirm={remove}
+          onClose={() => setRemoving(null)}
+        >
+          <p className="card-text">
+            They can no longer accept it. The invitation already gave their account the vault's key, so PassAuth then replaces the key and re-encrypts every
+            item.
+          </p>
+        </ConfirmDialog>
+      )}
+      {removing && removing.status !== "invited" && (
         <ConfirmDialog
           title={`Remove ${removing.name || removing.email}?`}
           subtitle={`From ${vault.name}`}
@@ -1493,6 +1859,8 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
   const [role, setRole] = useState<Role>("read");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Servers with invitations: someone new gets an invitation and sees the vault once they accept it.
+  const invitations = hasFeature(usePublicConfig(), "vault_invitations");
 
   async function find(e: FormEvent) {
     e.preventDefault();
@@ -1521,8 +1889,13 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
     setBusy(true);
     setError(null);
     try {
-      await shareVault(vault.id, found, role);
-      toast(`"${vault.name}" shared with ${found.name || found.email}`);
+      const before = members.find((m) => m.user_id === found.user_id);
+      const status = await shareVault(vault.id, found, role);
+      const who = found.name || found.email;
+      if (before?.status === "invited") toast(`Invitation for ${who} changed`);
+      else if (before) toast(`${who}'s access changed`);
+      else if (status === "invited") toast(`Invitation sent to ${who}. "${vault.name}" reaches them once they accept.`);
+      else toast(`"${vault.name}" shared with ${who}`);
       setFound(null);
       setEmail("");
       await onAdded();
@@ -1578,9 +1951,15 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
               don't share and tell your PassAuth administrator.
             </span>
           </div>
-          {existing && (
+          {existing && existing.status === "invited" && (
             <div className="alert alert-info small" role="note">
-              They already have {ROLE_LABEL[existing.role].toLowerCase()} access. Sharing again changes their access to what you choose below.
+              They're already invited with {(ROLE_LABEL[existing.role] ?? existing.role).toLowerCase()} access and haven't accepted yet. Sharing again changes
+              the invitation to what you choose below.
+            </div>
+          )}
+          {existing && existing.status !== "invited" && (
+            <div className="alert alert-info small" role="note">
+              They already have {(ROLE_LABEL[existing.role] ?? existing.role).toLowerCase()} access. Sharing again changes their access to what you choose below.
             </div>
           )}
           <label className="field">
@@ -1595,12 +1974,15 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
           </label>
           <div className="card-actions">
             <button type="button" className="btn btn-primary" onClick={share} disabled={busy || existing?.role === "owner"}>
-              {busy ? "Sharing…" : "Share vault"}
+              {busy ? "Sharing…" : existing ? "Change access" : invitations ? "Send invitation" : "Share vault"}
             </button>
             <button type="button" className="btn btn-text" onClick={() => setFound(null)} disabled={busy}>
               Cancel
             </button>
           </div>
+          {invitations && !existing && (
+            <span className="field-hint">They get an invitation, by email too when the server sends email. The vault appears in their apps after they accept it.</span>
+          )}
         </div>
       )}
       <ErrorText error={error} />
@@ -1611,9 +1993,17 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
 // ---------------------------------------------------------------- sessions
 
 function SessionsTab() {
+  const { email } = useVault();
   const [data, setData] = useState<{ current: string; sessions: Session[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirmOthers, setConfirmOthers] = useState(false);
+  const [forgetting, setForgetting] = useState<Session | null>(null);
+  const config = usePublicConfig();
+  // One request that signs out every other session; older servers sign them out one at a time below.
+  const revokeOthers = hasFeature(config, "revoke_others");
+  // Forget a device: all its sessions end and its next sign-in counts as new (two-step login again).
+  const canForget = hasFeature(config, "forget_device");
 
   const load = useCallback(async () => {
     try {
@@ -1642,13 +2032,37 @@ function SessionsTab() {
     }
   }
 
+  async function signOutOthers() {
+    const r = await api<{ revoked?: number } | null>("/account/sessions/revoke-others", { method: "POST", body: {} });
+    setConfirmOthers(false);
+    const n = typeof r?.revoked === "number" ? r.revoked : null;
+    toast(n === null ? "Other sessions signed out" : `${n} other ${n === 1 ? "session" : "sessions"} signed out`);
+    await load();
+  }
+
+  async function forget(session: Session) {
+    const r = await forgetDevice(session.device_id);
+    // This device: `forgetDevice` signed this app out, and the sign-in page takes over.
+    if (r.current) return toast("This device was forgotten and signed out.");
+    setForgetting(null);
+    toast(`${session.device_name || "Device"} forgotten`);
+    await load();
+  }
+
   const others = data?.sessions.filter((s) => s.id !== data.current) ?? [];
+  const sessionsOn = (deviceId: string) => data?.sessions.filter((s) => s.device_id === deviceId).length ?? 0;
+  const forgettingHere = !!forgetting && !!data?.sessions.some((s) => s.device_id === forgetting.device_id && s.id === data.current);
 
   return (
     <section className="card" aria-labelledby="sessions-title">
       <div className="card-head">
         <h2 id="sessions-title">Signed-in devices</h2>
-        {others.length > 1 && (
+        {revokeOthers && others.length > 0 && (
+          <button type="button" className="btn btn-danger" disabled={busy !== null} onClick={() => setConfirmOthers(true)}>
+            Sign out other sessions
+          </button>
+        )}
+        {!revokeOthers && others.length > 1 && (
           <button
             type="button"
             className="btn btn-danger"
@@ -1664,22 +2078,28 @@ function SessionsTab() {
           </button>
         )}
       </div>
-      <p className="card-text">Signing a device out ends its session. It needs your master password to sign in again.</p>
+      <p className="card-text">
+        Signing a device out ends its session. It needs your master password to sign in again.
+        {canForget &&
+          " Forgetting a device also ends its other sessions and makes its next sign-in count as a new device, so a remembered device has to use two-step login again."}
+      </p>
       <ErrorText error={error} />
       {!data && !error && <p className="muted small">Loading devices…</p>}
       {data && (
         <div className="fields" role="list" aria-label="Signed-in devices">
           {data.sessions.map((s) => {
             const isCurrent = s.id === data.current;
+            const client = clientInfo(s.client);
             return (
               <div key={s.id} role="listitem">
                 <span className="tile" aria-hidden="true">
-                  <Icon name={KIND_ICON[s.device_kind] ?? "desktop"} />
+                  <Icon name={client?.icon ?? deviceKindInfo(s.device_kind).icon ?? "desktop"} />
                 </span>
                 <span className="grow">
                   <span className="row-title">{s.device_name || "Unknown device"}</span>
                   <span className="row-sub" title={`Last used ${formatDate(s.last_used)}`}>
-                    {kindLabel(s.device_kind)}. Signed in {formatDate(s.created_at)}. {isCurrent ? "In use now." : `Last used ${ago(s.last_used).toLowerCase()}.`}
+                    {client?.label ?? deviceKindInfo(s.device_kind).label}. Signed in {formatDate(s.created_at)}.{" "}
+                    {isCurrent ? "In use now." : `Last used ${ago(s.last_used).toLowerCase()}.`}
                   </span>
                 </span>
                 {isCurrent ? (
@@ -1689,12 +2109,58 @@ function SessionsTab() {
                     {busy === s.id ? "Signing out…" : "Sign out"}
                   </button>
                 )}
+                {canForget && (
+                  <button
+                    type="button"
+                    className="btn btn-text btn-danger btn-sm"
+                    disabled={busy !== null}
+                    aria-label={`Forget ${s.device_name || "this device"}`}
+                    onClick={() => setForgetting(s)}
+                  >
+                    Forget…
+                  </button>
+                )}
               </div>
             );
           })}
         </div>
       )}
       {data && others.length === 0 && <p className="small muted">You're not signed in anywhere else.</p>}
+      {forgetting && (
+        <ConfirmDialog
+          title="Forget this device?"
+          subtitle={forgetting.device_name || "Unknown device"}
+          icon="logout"
+          action={forgettingHere ? "Forget and sign out" : "Forget device"}
+          busyAction="Forgetting…"
+          onConfirm={() => forget(forgetting)}
+          onClose={() => setForgetting(null)}
+        >
+          <p className="card-text">
+            {sessionsOn(forgetting.device_id) > 1
+              ? `Its ${sessionsOn(forgetting.device_id)} sessions are signed out at once.`
+              : "Its session is signed out at once."}{" "}
+            The next time it signs in, it counts as a new device: a remembered device has to use two-step login again, and you get an email about it.
+            {forgettingHere && " This is the device you're using, so you're signed out here too."}
+          </p>
+        </ConfirmDialog>
+      )}
+      {confirmOthers && (
+        <ConfirmDialog
+          title="Sign out other sessions?"
+          subtitle={email || undefined}
+          icon="logout"
+          action="Sign out other sessions"
+          busyAction="Signing out…"
+          onConfirm={signOutOthers}
+          onClose={() => setConfirmOthers(false)}
+        >
+          <p className="card-text">
+            Every other device and app signed in to your account is signed out at once, including any you don't recognize. Each one needs your master
+            password to sign in again. This device stays signed in.
+          </p>
+        </ConfirmDialog>
+      )}
     </section>
   );
 }

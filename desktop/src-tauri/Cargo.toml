@@ -25,9 +25,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
+[dev-dependencies]
+# Command tests through the IPC on Tauri's mock runtime (the feature adds no crates).
+tauri = { version = "2.12", features = ["test"] }
+
 [dependencies]
 # Clipboard with "concealed"/history-excluded text; no image support needed.
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+# Attachment uploads: the request body is read from the webview's pieces (an http-body of `Bytes`, what reqwest wraps).
+bytes = "1"
+http-body = "1"
 # OS keychain: macOS Keychain, Windows Credential Manager, Secret Service on Linux (keyring's default stores).
 keyring = "4.2"
 # Same TLS stack as the updater: rustls with the OS trust store (rustls-platform-verifier), ring as the provider.
@@ -45,6 +52,8 @@ tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
 tauri-plugin-updater = "2.14"
 tauri-plugin-window-state = "2.5"
 tauri-plugin-autostart = "2"
+# Attachment transfers: bounded queues between the webview and the connection, and their timeouts (Tauri's runtime).
+tokio = { version = "1", features = ["sync", "time"] }
 
 # Vault timeout "On system lock": screen-lock, sleep and session-switch notifications. Same versions Tauri uses.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -52,5 +61,7 @@ tauri-plugin-autostart = "2"
 security-framework = { version = "3.7", features = ["OSX_10_15"] }
 core-foundation = "0.10"
 block2 = "0.6"
+# setxattr: the quarantine mark on saved attachments (src/files.rs). Already in the tree through Tauri.
+libc = "0.2"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSNotification", "NSDistributedNotificationCenter", "NSString", "NSOperation", "block2"] }

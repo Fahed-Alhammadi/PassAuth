@@ -1,12 +1,35 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams } from "react-router";
+import { ItemAttachments, NewItemFiles } from "../components/Attachments";
 import { ItemEditor } from "../components/ItemEditor";
 import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, SheetActions, SiteIcon, TotpView, toast, type IconName } from "../components/ui";
-import { errorMessage } from "../lib/api";
+import { errorMessage, friendlyError, hasFeature, usePublicConfig } from "../lib/api";
+import { withAttachmentsOf } from "../lib/attachments";
 import { clearDraft, setEditorDirty, useDraft } from "../lib/drafts";
-import { createItem, defaultVaultId, purgeItem, restoreItem, trashItem, updateItem, useVault, writableVaults } from "../lib/vault";
-import { useShowIcons } from "../lib/prefs";
-import { emptyItem, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type VaultEntry } from "../lib/types";
+import { attachFiles } from "../lib/files";
+import { isWeak } from "../lib/health";
+import { useBreachCheck, useHealthReport } from "../lib/health-session";
+import { authorName, passkeysMissingFrom, versionLabel, type ItemVersion } from "../lib/history";
+import { patternNote } from "../lib/patterns";
+import {
+  createItem,
+  defaultVaultId,
+  estimateBits,
+  listItemVersions,
+  newItemId,
+  openItemVersion,
+  purgeItem,
+  restoreItem,
+  restoreItemVersion,
+  trashItem,
+  updateItem,
+  useVault,
+  writableVaults,
+} from "../lib/vault";
+import { useSiteIconsShown } from "../lib/site-icons";
+import { emptyItem, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type LoginUrl, type VaultEntry } from "../lib/types";
+import * as core from "../wasm/passauth_core";
+import type { HealthLinkState } from "./Health";
 import { FilterSelect, filterPath, Notices } from "./Shell";
 
 function matches(e: VaultEntry, filter: string): boolean {
@@ -50,7 +73,7 @@ function hostOf(url: string) {
 
 export function VaultPage() {
   const params = useParams();
-  const showIcons = useShowIcons();
+  const showIcons = useSiteIconsShown();
   const filter = params.filter ?? "all";
   const itemId = params.itemId;
   const nav = useNavigate();
@@ -79,7 +102,9 @@ export function VaultPage() {
   // A prepared edit (desktop: a verification code from a link) shows while its item's route is open.
   const drafted = draft && draft.itemId === itemId && (selected || newKind) ? draft : null;
   const open = (id: string) => nav(`${filterPath(filter)}/${id}`);
-  const close = () => nav(filterPath(filter));
+  // Opened from Password health: Back goes there again.
+  const fromHealth = (useLocation().state as Partial<HealthLinkState> | null)?.from === "/health";
+  const close = () => nav(fromHealth ? "/health" : filterPath(filter));
   useNarrowFocus(itemId);
 
   const { vaults } = useVault();
@@ -288,8 +313,10 @@ function Row({ label, value, secret, mono, children }: { label: string; value?: 
 
 function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) {
   const { vaults } = useVault();
-  const showIcons = useShowIcons();
-  const [editing, setEditing] = useState(false);
+  const showIcons = useSiteIconsShown();
+  const history = hasFeature(usePublicConfig(), "item_history");
+  const wantsEdit = (useLocation().state as Partial<HealthLinkState> | null)?.edit === true;
+  const [editing, setEditing] = useState(() => wantsEdit && !entry.deletedAt && vaults.some((v) => v.id === entry.vaultId && v.role !== "read"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [purging, setPurging] = useState(false);
@@ -298,7 +325,6 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
   const canWrite = vault && vault.role !== "read";
 
   if (editing) return <Editor entry={entry} kind={kindOf(i)} onDone={() => setEditing(false)} />;
-  const href = (url: string) => safeHref(url);
 
   const run = async (fn: () => Promise<void>, msg: string, then?: () => void) => {
     setBusy(true);
@@ -374,6 +400,43 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
       )}
       <ErrorText error={error} />
 
+      <ItemFields item={i} afterLogin={i.login && <PasswordNotes entry={entry} onChange={canWrite ? () => setEditing(true) : undefined} />} />
+
+      <ItemAttachments entry={entry} canWrite={!!canWrite} />
+
+      {history && <ItemHistory entry={entry} canWrite={!!canWrite} />}
+
+      <p className="small muted">
+        Last edited {formatWhen(i.updated_at || entry.revision / 1000)}
+        {i.tags.length > 0 && `. Tags: ${i.tags.join(", ")}`}
+      </p>
+
+      {purging && (
+        <ConfirmDialog
+          title="Delete this item forever?"
+          subtitle={i.name || "Untitled"}
+          icon={<SiteIcon host={siteHost(i)} name={i.name} enabled={showIcons} />}
+          action="Delete forever"
+          busyAction="Deleting…"
+          onClose={() => setPurging(false)}
+          onConfirm={async () => {
+            await purgeItem(entry.id);
+            toast("Item deleted");
+            onClose();
+          }}
+        >
+          <p className="card-text">It is removed from the trash on every device and can't be restored.</p>
+        </ConfirmDialog>
+      )}
+    </article>
+  );
+}
+
+/** An item's fields, read-only, with copy and show buttons: the item view, an earlier version of it, and emergency access. */
+export function ItemFields({ item: i, afterLogin }: { item: Item; afterLogin?: ReactNode }) {
+  const href = (url: string) => safeHref(url);
+  return (
+    <>
       {i.login && (
         <div className="fields">
           <Row label="Username" value={i.login.username} />
@@ -398,6 +461,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
             ))}
         </div>
       )}
+      {afterLogin}
 
       {i.login && i.login.passkeys.length > 0 && (
         <section className="stack-s">
@@ -482,30 +546,187 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
           </div>
         </details>
       )}
+    </>
+  );
+}
 
-      <p className="small muted">
-        Last edited {formatWhen(i.updated_at || entry.revision / 1000)}
-        {i.tags.length > 0 && `. Tags: ${i.tags.join(", ")}`}
-      </p>
+// ----------------------------------------------------------------- history
 
-      {purging && (
-        <ConfirmDialog
-          title="Delete this item forever?"
-          subtitle={i.name || "Untitled"}
-          icon={<SiteIcon host={siteHost(i)} name={i.name} enabled={showIcons} />}
-          action="Delete forever"
-          busyAction="Deleting…"
-          onClose={() => setPurging(false)}
-          onConfirm={async () => {
-            await purgeItem(entry.id);
-            toast("Item deleted");
-            onClose();
-          }}
-        >
-          <p className="card-text">It is removed from the trash on every device and can't be restored.</p>
-        </ConfirmDialog>
+/**
+ * "Earlier versions (n)" (servers with `item_history`): the item as it was before each edit or move to the trash, kept
+ * by the server encrypted. Listed again whenever the item changes, since each change keeps one more.
+ */
+function ItemHistory({ entry, canWrite }: { entry: VaultEntry; canWrite: boolean }) {
+  const { userId } = useVault();
+  const [versions, setVersions] = useState<ItemVersion[]>([]);
+  const [opened, setOpened] = useState<ItemVersion | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    listItemVersions(entry.id)
+      .then((list) => live && setVersions(list))
+      // History is extra: without it (offline, the item gone) the item view simply doesn't offer it.
+      .catch(() => live && setVersions([]));
+    return () => {
+      live = false;
+    };
+  }, [entry.id, entry.revision]);
+
+  if (versions.length === 0) return null;
+  return (
+    <>
+      <details className="disclosure">
+        <summary className="section-title">Earlier versions ({versions.length})</summary>
+        <div className="stack-s">
+          <div className="choices choices-scroll">
+            {versions.map((v) => {
+              const by = authorName(v.savedBy, userId);
+              return (
+                <button key={v.seq} type="button" className="choice" onClick={() => setOpened(v)}>
+                  <span className="tile" aria-hidden="true">
+                    <Icon name="restore" />
+                  </span>
+                  <span className="choice-text">
+                    <span className="choice-title">{formatWhen(v.savedAt)}</span>
+                    {by && <span className="choice-sub">Saved by {by}</span>}
+                  </span>
+                  <span className="choice-trail" aria-hidden="true">
+                    <Icon name="chevron" size={16} />
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="small muted">History starts over when the vault's key is replaced or the item moves to another vault.</p>
+        </div>
+      </details>
+      {opened && <VersionSheet entry={entry} version={opened} canWrite={canWrite} onClose={() => setOpened(null)} />}
+    </>
+  );
+}
+
+/** One earlier version, read-only, with "Restore this version" for people who can edit the item. */
+function VersionSheet({ entry, version, canWrite, onClose }: { entry: VaultEntry; version: ItemVersion; canWrite: boolean; onClose: () => void }) {
+  const { userId } = useVault();
+  const [item, setItem] = useState<Item | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    openItemVersion(entry.id, version.seq)
+      .then((r) => live && setItem(r.item))
+      .catch((e) => live && setError(friendlyError(e)));
+    return () => {
+      live = false;
+    };
+  }, [entry.id, version.seq]);
+
+  const restorable = canWrite && !entry.deletedAt;
+  const lost = item ? passkeysMissingFrom(item, entry.item) : [];
+  const close = () => {
+    if (!busy) onClose();
+  };
+
+  async function restore() {
+    if (!item) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // The item as shown now: a sync since the list opened is taken into account by the revision check.
+      await restoreItemVersion(entry, item);
+      toast("Earlier version restored");
+      onClose();
+    } catch (e) {
+      setError(friendlyError(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={item?.name || entry.item.name || "Untitled"} subtitle={versionLabel(version, userId, formatWhen)} icon="restore" onClose={close}>
+      {!item && !error && (
+        <p className="muted small" role="status">
+          Opening this version…
+        </p>
       )}
-    </article>
+      {item && <ItemFields item={item} />}
+      {item && restorable && (
+        <p className="small muted">Restoring saves this content as the item's newest version. What the item holds now is kept in its earlier versions.</p>
+      )}
+      {item && restorable && lost.length > 0 && (
+        <div className="alert alert-warn small" role="note">
+          This version doesn't have {lost.length === 1 ? "a passkey" : `${lost.length} passkeys`} that the item has now. Restoring removes{" "}
+          {lost.length === 1 ? "it" : "them"} from the item: you may no longer be able to sign in with {lost.length === 1 ? "it" : "them"}.
+        </div>
+      )}
+      {item && canWrite && entry.deletedAt && <p className="small muted">Restore the item from the trash first to bring back this version.</p>}
+      <ErrorText error={error} />
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={close} disabled={busy}>
+            Close
+          </button>
+        }
+      >
+        {item && restorable && (
+          <button type="button" className="btn btn-primary btn-block" onClick={restore} disabled={busy}>
+            {busy ? "Restoring…" : "Restore this version"}
+          </button>
+        )}
+      </SheetActions>
+    </Modal>
+  );
+}
+
+/**
+ * The web vault's notes under website entries (`patternNote`). The web vault keeps no default match of its own (the
+ * "Default" option follows each extension's setting), so "default" counts as the core's own default, "domain": only
+ * entries set to "Regular expression" are checked here.
+ */
+const websiteNote = (url: string, match: LoginUrl["match"]) => patternNote(core, url, match, "domain");
+
+/**
+ * Quiet notes about a login's password: weak, used by other logins, found in a data breach (only after a breach check
+ * in this page session found it). Same rules as Password health.
+ */
+function PasswordNotes({ entry, onChange }: { entry: VaultEntry; onChange?: () => void }) {
+  const { reuseCount } = useHealthReport();
+  const { results } = useBreachCheck();
+  const password = entry.item.login?.password ?? "";
+  if (!password || entry.deletedAt) return null;
+  const weak = isWeak(password, estimateBits);
+  const others = reuseCount.get(entry.id) ?? 0;
+  const breached = (results?.get(password) ?? 0) > 0;
+  if (!weak && !others && !breached) return null;
+  return (
+    <ul className="health-notes" aria-label="Password health">
+      {weak && (
+        <li>
+          <Icon name="shield" size={14} /> Weak password
+        </li>
+      )}
+      {others > 0 && (
+        <li>
+          <Icon name="shield" size={14} />
+          <Link to="/health">
+            Used in {others} other {others === 1 ? "login" : "logins"}
+          </Link>
+        </li>
+      )}
+      {breached && (
+        <li data-tone="danger">
+          <Icon name="shield" size={14} /> Found in a data breach
+        </li>
+      )}
+      {onChange && (
+        <li>
+          <button type="button" className="link" onClick={onChange}>
+            Change password
+          </button>
+        </li>
+      )}
+    </ul>
   );
 }
 
@@ -518,6 +739,10 @@ function Editor({ entry, kind, prefill, onDone }: { entry?: VaultEntry; kind: It
   // The version the edit started from. Saving sends its revision, so the server refuses to overwrite a
   // change made elsewhere in the meantime; the user then decides which version wins.
   const [base, setBase] = useState(entry);
+  // A new item keeps its id across save attempts, so a save whose answer got lost can't create a second copy.
+  const [newId] = useState(newItemId);
+  // Files picked for a new item: uploaded once the item exists on the server.
+  const [files, setFiles] = useState<File[]>([]);
   const [initial] = useState(() => {
     const item = entry ? structuredClone(entry.item) : emptyItem(kind);
     return prefill ? prefill(item) : item;
@@ -546,16 +771,21 @@ function Editor({ entry, kind, prefill, onDone }: { entry?: VaultEntry; kind: It
         vaults={writable}
         defaultVault={entry?.vaultId ?? defaultVaultId()}
         folders={folders}
+        websiteNote={websiteNote}
         onDirtyChange={setEditorDirty}
         onCancel={() => onDone(entry?.id)}
+        extra={!entry && <NewItemFiles files={files} onChange={setFiles} />}
         onSave={async (item, vaultId) => {
           if (base) {
-            await updateItem(base, item, vaultId);
+            // The editor doesn't change the file list: keep the one the item has (files may come and go meanwhile).
+            await updateItem(base, withAttachmentsOf(item, base.item), vaultId);
             toast("Changes saved");
             onDone(base.id);
           } else {
-            const id = await createItem(vaultId, item);
-            toast("Item saved");
+            const id = await createItem(vaultId, withAttachmentsOf(item, null), newId);
+            // The item exists now: its files upload in the background, shown on the item.
+            if (files.length) attachFiles(id, files);
+            toast(files.length ? "Item saved. Attaching files…" : "Item saved");
             onDone(id);
           }
         }}

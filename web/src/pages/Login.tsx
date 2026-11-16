@@ -1,11 +1,27 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router";
+import { LoginPhrase } from "../components/DeviceSignIn";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, Icon, PasswordField, SheetActions, type IconName } from "../components/ui";
-import { errorMessage, friendlyError, usePublicConfig } from "../lib/api";
+import { errorMessage, friendlyError, hasErrorCode, hasFeature, usePublicConfig } from "../lib/api";
+import { CODE_FORMAT, CODE_STOPPED, DEVICE_LOGIN_FEATURE, codeDigits, countdown, wrongCodeText, type DeviceLoginRun, type DeviceLoginState } from "../lib/device-login";
+import { startDeviceLogin } from "../lib/device-login-client";
 import { getDesktop } from "../lib/platform";
 import { server } from "../lib/server";
-import { lastEmail, login, rememberedSecretKey, sendTwoFactorEmail, useVault, verifyTwoFactor, verifyTwoFactorPasskey, WRONG_CREDENTIALS } from "../lib/vault";
+import {
+  cancelPendingSignIn,
+  confirmDeviceLogin,
+  getState,
+  lastEmail,
+  login,
+  logout,
+  rememberedSecretKey,
+  sendTwoFactorEmail,
+  useVault,
+  verifyTwoFactor,
+  verifyTwoFactorPasskey,
+  WRONG_CREDENTIALS,
+} from "../lib/vault";
 import { webauthnSupported } from "../lib/webauthn";
 
 const PROVIDER_LABEL: Record<string, string> = {
@@ -20,6 +36,18 @@ const PROVIDER_ICON: Record<string, IconName> = { totp: "phone", email: "mail", 
 function usableProviders(providers: string[]) {
   const here = (p: string) => p !== "passkey" || (!getDesktop() && webauthnSupported());
   return providers.filter((p) => p in PROVIDER_LABEL && here(p));
+}
+
+/** The current time, ticking every `ms` while `ms` is set. */
+function useNow(ms: number | null) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (ms === null) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(timer);
+  }, [ms]);
+  return now;
 }
 
 export function LoginPage() {
@@ -41,9 +69,54 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
+  /** Signing in with another device's approval: where the request stands (null: the master password form). */
+  const [device, setDevice] = useState<DeviceLoginState | null>(null);
+  const deviceRun = useRef<DeviceLoginRun | null>(null);
+  const deviceTurn = useRef<object | null>(null);
+  const emailInput = useRef<HTMLInputElement>(null);
   const desktop = getDesktop();
+  const canUseDevice = hasFeature(config, DEVICE_LOGIN_FEATURE);
 
-  if (status === "unlocked") return <Navigate to={next} replace />;
+  // Leaving the page ends a request that is still waiting, and drops a sign-in waiting for its two-step login.
+  useEffect(
+    () => () => {
+      deviceRun.current?.cancel();
+      cancelPendingSignIn();
+    },
+    [],
+  );
+
+  // Signed in: the vault, or the "requires two-step login" screen on the way to it. A device sign-in first shows which
+  // account it reached.
+  if ((status === "unlocked" || status === "two-step") && !device) return <Navigate to={next} replace />;
+
+  function showTwoStep(token: string, providers: string[]) {
+    const usable = usableProviders(providers);
+    setTwoFactor({ token, providers: usable });
+    setProvider(usable[0] ?? "recovery");
+    setHint(
+      providers.includes("passkey") && !usable.includes("passkey") && usable.every((p) => p === "recovery")
+        ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault in a browser."
+        : null,
+    );
+  }
+
+  /** A device sign-in's approval arrived (after two-step login, if the account uses it): the approving app's code is next. */
+  function askDeviceCode() {
+    setTwoFactor(null);
+    setCode("");
+    setError(null);
+    setNotice(null);
+    setDevice({ step: "confirm", email: email.trim() });
+  }
+
+  /** After a two-step login: the vault, or for a device sign-in the account it reached. */
+  function signedIn() {
+    if (device) {
+      setTwoFactor(null);
+      setDevice({ step: "done", email: getState().email || email });
+    } else nav(next, { replace: true });
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -54,22 +127,13 @@ export function LoginPage() {
     try {
       const r = await login(email, password, typed || remembered);
       if (r.done) nav(next, { replace: true });
-      else {
-        const usable = usableProviders(r.providers);
-        setTwoFactor({ token: r.twoFactorToken, providers: usable });
-        setProvider(usable[0] ?? "recovery");
-        setHint(
-          r.providers.includes("passkey") && !usable.includes("passkey") && usable.every((p) => p === "recovery")
-            ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault in a browser."
-            : null,
-        );
-      }
+      else showTwoStep(r.twoFactorToken, r.providers);
     } catch (err) {
       const msg = errorMessage(err);
       if (msg === "secret_key_required") {
         setNeedSecretKey(true);
         setError("This account uses a Secret Key. Enter it from your Emergency Kit.");
-      } else if (msg === "email_not_verified") {
+      } else if (hasErrorCode(err, "email_not_verified")) {
         setError("Confirm your email address first. Check your inbox for the verification link.");
       } else if (msg === WRONG_CREDENTIALS && remembered) {
         // The Secret Key saved in this browser may be an old one (it changes with the master password).
@@ -81,14 +145,51 @@ export function LoginPage() {
     }
   }
 
+  /** Ask a device where the account is signed in to approve this one (the request lives only on this page). */
+  function startDevice() {
+    const input = emailInput.current;
+    if (input && !input.checkValidity()) {
+      input.reportValidity();
+      return;
+    }
+    deviceRun.current?.cancel();
+    setError(null);
+    setNotice(null);
+    setHint(null);
+    setTwoFactor(null);
+    setDevice({ step: "asking" });
+    // Only the latest run's news counts ("Try again" starts another).
+    const turn = {};
+    deviceTurn.current = turn;
+    deviceRun.current = startDeviceLogin(email.trim(), (s) => {
+      if (deviceTurn.current !== turn) return;
+      if (s.step === "two-step") showTwoStep(s.token, s.providers);
+      setDevice(s);
+    });
+  }
+
+  /** Back to the master password form; a request still waiting is dropped. */
+  function stopDevice() {
+    deviceRun.current?.cancel();
+    deviceRun.current = null;
+    deviceTurn.current = null;
+    cancelPendingSignIn();
+    setDevice(null);
+    setTwoFactor(null);
+    setCode("");
+    setError(null);
+    setNotice(null);
+    setHint(null);
+  }
+
   async function submitCode(e: FormEvent) {
     e.preventDefault();
     if (!twoFactor) return;
     setBusy(true);
     setError(null);
     try {
-      await verifyTwoFactor(twoFactor.token, provider, code, remember);
-      nav(next, { replace: true });
+      if ((await verifyTwoFactor(twoFactor.token, provider, code, remember)) === "confirm") askDeviceCode();
+      else signedIn();
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -111,8 +212,8 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      await verifyTwoFactorPasskey(twoFactor.token, remember);
-      nav(next, { replace: true });
+      if ((await verifyTwoFactorPasskey(twoFactor.token, remember)) === "confirm") askDeviceCode();
+      else signedIn();
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -123,55 +224,38 @@ export function LoginPage() {
   const usePasskey = provider === "passkey";
 
   const pickProvider = (p: string) => (setProvider(p), setCode(""), setError(null));
-  const startOver = () => (setTwoFactor(null), setCode(""), setError(null), setNotice(null), setHint(null));
+  const startOver = () => {
+    if (device) return stopDevice();
+    setTwoFactor(null);
+    setCode("");
+    setError(null);
+    setNotice(null);
+    setHint(null);
+    cancelPendingSignIn();
+  };
+
+  const done = device?.step === "done" ? device.email : null;
+  const title = done ? "You're signed in" : twoFactor ? "Two-step login" : device ? "Sign in with another device" : "Sign in to PassAuth";
 
   return (
     <main className="auth">
       <div className="auth-card">
         <div className="auth-head">
           <LogoMark size={56} />
-          <h1>{twoFactor ? "Two-step login" : "Sign in to PassAuth"}</h1>
-          {twoFactor && <p className="muted">{email}</p>}
+          <h1>{title}</h1>
+          {(twoFactor || device) && !done && <p className="muted wrap-anywhere">{email.trim()}</p>}
         </div>
 
-        {!twoFactor ? (
-          <form className="auth-panel stack" onSubmit={submit}>
-            <label className="field">
-              <span>Email</span>
-              <input className="input" type="email" name="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus={!email} />
-            </label>
-            <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus={!!email} />
-            {needSecretKey && (
-              <label className="field">
-                <span>Secret Key</span>
-                <input
-                  className="input mono"
-                  value={secretKey}
-                  onChange={(e) => setSecretKey(e.target.value)}
-                  placeholder="PA1-XXXXXX-…"
-                  spellCheck={false}
-                  autoComplete="off"
-                  autoCapitalize="characters"
-                  required
-                />
-              </label>
-            )}
-            <ErrorText error={error} />
-            <SheetActions
-              quiet={
-                config?.signups_allowed !== false && (
-                  <Link className="btn btn-text" to="/register">
-                    Create an account
-                  </Link>
-                )
-              }
-            >
-              <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
-                {busy ? "Signing in…" : "Sign in"}
-              </button>
-            </SheetActions>
-          </form>
-        ) : (
+        {done ? (
+          <SignedInPanel
+            email={done}
+            onContinue={() => nav(next, { replace: true })}
+            onSignOut={async () => {
+              await logout();
+              stopDevice();
+            }}
+          />
+        ) : twoFactor ? (
           <form className="auth-panel stack" onSubmit={submitCode} data-two-step>
             {twoFactor.providers.length > 1 && (
               <fieldset className="choice-group">
@@ -190,6 +274,11 @@ export function LoginPage() {
                   ))}
                 </div>
               </fieldset>
+            )}
+            {device && (
+              <div className="alert alert-ok small" role="status">
+                Your other device approved this sign-in. Finish it with your second step.
+              </div>
             )}
             {usePasskey ? (
               <p className="card-text">Insert or tap your security key, or use the fingerprint, face or PIN prompt on this device.</p>
@@ -247,9 +336,74 @@ export function LoginPage() {
               )}
             </SheetActions>
           </form>
+        ) : device?.step === "confirm" ? (
+          <DeviceCodePanel
+            onDone={(reached) => setDevice({ step: "done", email: reached })}
+            onStopped={() => {
+              stopDevice();
+              setError(CODE_STOPPED);
+            }}
+            onCancel={stopDevice}
+          />
+        ) : device ? (
+          <DevicePanel state={device} onRetry={startDevice} onCancel={stopDevice} />
+        ) : (
+          <form className="auth-panel stack" onSubmit={submit}>
+            <label className="field">
+              <span>Email</span>
+              <input
+                ref={emailInput}
+                className="input"
+                type="email"
+                name="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="username"
+                required
+                autoFocus={!email}
+              />
+            </label>
+            <PasswordField label="Master password" value={password} onChange={setPassword} autoFocus={!!email} />
+            {needSecretKey && (
+              <label className="field">
+                <span>Secret Key</span>
+                <input
+                  className="input mono"
+                  value={secretKey}
+                  onChange={(e) => setSecretKey(e.target.value)}
+                  placeholder="PA1-XXXXXX-…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  required
+                />
+              </label>
+            )}
+            <ErrorText error={error} />
+            <SheetActions
+              quiet={
+                <>
+                  {canUseDevice && (
+                    <button type="button" className="btn btn-text" onClick={startDevice}>
+                      Sign in with another device
+                    </button>
+                  )}
+                  {config?.signups_allowed !== false && (
+                    <Link className="btn btn-text" to="/register">
+                      Create an account
+                    </Link>
+                  )}
+                </>
+              }
+            >
+              <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
+                {busy ? "Signing in…" : "Sign in"}
+              </button>
+            </SheetActions>
+          </form>
         )}
 
-        {desktop && (
+        {desktop && !done && (
           <p className="auth-foot">
             Connected to {server.host()}.{" "}
             <button type="button" className="link" onClick={() => desktop.changeServer()}>
@@ -259,5 +413,177 @@ export function LoginPage() {
         )}
       </div>
     </main>
+  );
+}
+
+/** A request on its way, waiting for its answer, or ended without a sign-in. */
+function DevicePanel({ state, onRetry, onCancel }: { state: DeviceLoginState; onRetry: () => void; onCancel: () => void }) {
+  const now = useNow(state.step === "waiting" ? 1000 : null);
+  const backToPassword = (
+    <button type="button" className="btn btn-text" onClick={onCancel}>
+      Use your master password
+    </button>
+  );
+  const ended = (message: string) => (
+    <div className="auth-panel stack">
+      <div className="alert alert-error" role="alert">
+        {message}
+      </div>
+      <SheetActions quiet={backToPassword}>
+        <button type="button" className="btn btn-accent btn-block" onClick={onRetry} autoFocus>
+          Try again
+        </button>
+      </SheetActions>
+    </div>
+  );
+
+  switch (state.step) {
+    case "waiting": {
+      const left = state.deadline - now;
+      return (
+        <div className="auth-panel stack">
+          <p className="card-text">
+            On a device where you're already signed in, approve this sign-in and choose these words there. Then enter the code it shows.
+          </p>
+          <LoginPhrase phrase={state.phrase} />
+          <div className="stack-s">
+            <p className="small" role="status">
+              Waiting for approval…
+            </p>
+            <p className="small muted">
+              {left > 0 ? (
+                <>
+                  This request expires in <span className="countdown">{countdown(left)}</span>.
+                </>
+              ) : (
+                "This request is about to expire."
+              )}{" "}
+              Nothing on your other device? Unlock PassAuth there, or open Settings, then Sessions.
+            </p>
+          </div>
+          <SheetActions
+            quiet={
+              <button type="button" className="btn btn-text" onClick={onCancel}>
+                Cancel
+              </button>
+            }
+          />
+        </div>
+      );
+    }
+    case "denied":
+      return ended("This sign-in was denied on your other device.");
+    case "expired":
+      return ended("This request expired before it was approved. Requests last 15 minutes.");
+    case "used":
+      return ended("This request was already used. Start a new one.");
+    case "failed":
+      return ended(friendlyError(state.error));
+    default:
+      // Asking, signing in, or handing over to two-step login.
+      return (
+        <div className="auth-panel stack">
+          <p className="card-text" role="status">
+            {state.step === "signing-in" ? "Approved. Signing in…" : "Sending the sign-in request…"}
+          </p>
+          {state.step === "asking" && (
+            <SheetActions
+              quiet={
+                <button type="button" className="btn btn-text" onClick={onCancel}>
+                  Cancel
+                </button>
+              }
+            />
+          )}
+        </div>
+      );
+  }
+}
+
+/**
+ * The approval arrived: it becomes usable only with the code the approving app shows (`confirmDeviceLogin`), which a
+ * server can't make up. Three wrong codes stop the sign-in (`onStopped`); Cancel drops it.
+ */
+function DeviceCodePanel({ onDone, onStopped, onCancel }: { onDone: (email: string) => void; onStopped: () => void; onCancel: () => void }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!codeDigits(code)) return setError(CODE_FORMAT);
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await confirmDeviceLogin(code);
+      if (r.kind === "done") return onDone(r.email);
+      if (r.kind === "stopped") return onStopped();
+      setError(wrongCodeText(r.attemptsLeft));
+      setCode("");
+    } catch (err) {
+      setError(friendlyError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="auth-panel stack" onSubmit={submit}>
+      <div className="alert alert-ok small" role="status">
+        Your other device approved this sign-in.
+      </div>
+      <div className="field">
+        <label htmlFor="device-code">Enter the 6-digit code shown on your other device</label>
+        <input
+          id="device-code"
+          className="input mono code-entry"
+          value={code}
+          onChange={(e) => setCode(e.target.value)}
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={9}
+          spellCheck={false}
+          autoFocus
+          required
+        />
+        <span className="field-hint">It shows right after you approve there. The code proves the approval came from your other device.</span>
+      </div>
+      <ErrorText error={error} />
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+        }
+      >
+        <button className="btn btn-accent btn-block" disabled={busy || !code.trim()}>
+          {busy ? "Checking…" : "Continue"}
+        </button>
+      </SheetActions>
+    </form>
+  );
+}
+
+/** The account a device sign-in reached: shown before the vault opens, so the user can tell it is theirs. */
+function SignedInPanel({ email, onContinue, onSignOut }: { email: string; onContinue: () => void; onSignOut: () => void }) {
+  return (
+    <div className="auth-panel stack">
+      <div className="signed-in-as" role="status">
+        <span className="small muted">Signed in as</span>
+        <strong>{email}</strong>
+      </div>
+      <p className="card-text">Check that this is your account before you save anything in it.</p>
+      <SheetActions
+        quiet={
+          <button type="button" className="btn btn-text" onClick={onSignOut}>
+            Not your account? Sign out
+          </button>
+        }
+      >
+        <button type="button" className="btn btn-accent btn-block" onClick={onContinue} autoFocus>
+          Continue
+        </button>
+      </SheetActions>
+    </div>
   );
 }

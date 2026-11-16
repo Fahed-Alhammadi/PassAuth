@@ -1,13 +1,17 @@
 /** Native → web: menu and tray actions. (Root tells the tray the vault state; `timeout.ts` locks by itself.) */
 import { listen } from "@tauri-apps/api/event";
-import { getState, lock } from "@web/lib/vault";
+import { getState, holdsKeys, lock } from "@web/lib/vault";
 import { changeServer } from "./hooks";
 import { clearPersistedKeys } from "./timeout";
 import { checkForUpdates } from "./updater";
 
-/** "Lock Vault" (menu, tray, ⌘L): always a lock, and the keys kept for "never" are removed from the keychain. */
+/**
+ * "Lock Vault" (menu, tray, ⌘L): always a lock, and the keys kept for "never" are removed from the keychain. Also
+ * behind the "requires two-step login" screen while it holds the keys (server policy).
+ */
 const lockNow = async () => {
-  if (getState().status !== "unlocked") return;
+  const { status } = getState();
+  if (status !== "unlocked" && !(status === "two-step" && holdsKeys())) return;
   lock(false);
   await clearPersistedKeys();
 };

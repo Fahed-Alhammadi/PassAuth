@@ -23,7 +23,7 @@
 <body>
 <main>
   <header><img src="/favicon.svg" alt=""><h1>PassAuth privacy policy</h1></header>
-  <p class="updated">Last updated: 1 November 2026</p>
+  <p class="updated">Last updated: 15 November 2026</p>
 
   <p>PassAuth is a self-hosted password manager. This policy covers the PassAuth browser extension and the PassAuth web vault. You choose the PassAuth server they connect to; it is run by you or by the organization that gave you an account, not by the PassAuth developer.</p>
 
@@ -41,6 +41,7 @@
   <ul>
     <li>Encrypted vault data and account details go only to the PassAuth server address you enter.</li>
     <li>If "Show website icons" is on, the extension asks <em>your</em> PassAuth server for the icon of a website saved in your vault. Your server then fetches that icon from the website, so it learns which website addresses have icons requested, but nothing else from your vault. You can turn this off in Settings → Appearance.</li>
+    <li>Password health in the web vault can check your passwords against Have I Been Pwned (api.pwnedpasswords.com), a public list of passwords found in data breaches, but only when you press "Check for exposed passwords". For each password, your device works out its SHA-1 hash and sends only the first 5 characters of it. The answer lists every breached hash that starts with those characters, padded with made-up entries so its size gives nothing away, and the comparison happens on your device. Your passwords and their full hashes never leave your device. Have I Been Pwned also sees your IP address, as with any web request. The admin of your PassAuth server can turn this check off.</li>
     <li>Nothing is sent to the PassAuth developer. There are no analytics, ads, trackers or third-party services in the extension.</li>
   </ul>
 
@@ -62,7 +63,7 @@
   <h2>Changes</h2>
   <p>If this policy changes, the new version will be published at this address with a new date.</p>
 
-  <footer>© Fahed Alhammadi</footer>
+  <footer>© 2026 Fahed Alhammadi</footer>
 </main>
 </body>
 </html>

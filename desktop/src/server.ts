@@ -1,7 +1,9 @@
 /** The saved server address, the check that an address really is a PassAuth server, and requests to it. */
 import { invoke } from "@tauri-apps/api/core";
 import type { PublicConfig } from "@web/lib/api";
+import { clientId } from "@web/lib/platform";
 import { configureServer } from "@web/lib/server";
+import { transfers } from "./transfers";
 
 const KEY = "desktop.server";
 
@@ -19,20 +21,32 @@ export function rememberServer(base: string | null) {
   else localStorage.removeItem(KEY);
 }
 
-/** Only the Rust side talks to the network: the web vault's `fetch` becomes an `api_fetch` command. */
+/** Statuses whose responses can't have a body (the Response constructor refuses one). */
+const NULL_BODY = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * Only the Rust side talks to the network: the web vault's `fetch` becomes an `api_fetch` command. Its answer carries
+ * the headers the web vault reads (content type, `Retry-After` for 429 waits, `x-request-id`), so `api()` behaves as in
+ * the browser. Attachment files, which are bytes, go through the `transfers` commands instead (`./transfers`).
+ */
 const nativeFetch: typeof fetch = async (input, init) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const path = url.slice(url.indexOf("/api") + 4);
   const headers = Object.fromEntries(new Headers(init?.headers).entries());
   const body = typeof init?.body === "string" ? init.body : undefined;
-  const res = await invoke<{ status: number; body: string }>("api_fetch", { path, method: init?.method ?? "GET", headers, body });
-  return new Response(res.body, { status: res.status });
+  const res = await invoke<{ status: number; headers?: Record<string, string>; body: string }>("api_fetch", {
+    path,
+    method: init?.method ?? "GET",
+    headers,
+    body,
+  });
+  return new Response(NULL_BODY.has(res.status) ? null : res.body, { status: res.status, headers: res.headers ?? {} });
 };
 
 /** Route the web vault's requests to `base`. */
 export async function connectServer(base: string) {
   await invoke("set_server", { base });
-  configureServer({ base, fetch: nativeFetch });
+  configureServer({ base, fetch: nativeFetch, transfers });
 }
 
 export class ConnectError extends Error {}
@@ -61,7 +75,7 @@ export async function probeServer(base: string): Promise<PublicConfig> {
   await connectServer(base);
   let res: Response;
   try {
-    res = await nativeFetch(`${base}/api/config`, { headers: { accept: "application/json" } });
+    res = await nativeFetch(`${base}/api/config`, { headers: { accept: "application/json", "x-passauth-client": clientId() } });
   } catch (e) {
     throw new ConnectError(typeof e === "string" ? e : `Can't reach ${host}. Check the address and your connection, then try again.`);
   }

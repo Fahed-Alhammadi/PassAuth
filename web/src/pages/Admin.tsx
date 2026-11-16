@@ -1,8 +1,13 @@
-import { Fragment, useCallback, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import QRCode from "qrcode";
 import { Wordmark } from "../components/Logo";
 import { CodeField, RecoveryCodesModal } from "../components/TwoStep";
 import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, toast } from "../components/ui";
+import { EVENT_TYPES, type ActivityEvent, type DescribeContext } from "../lib/activity";
+import { hasFeature, usePublicConfig } from "../lib/api";
+import { clientId } from "../lib/platform";
+import { formatBytes } from "../lib/sizes";
+import { EventList } from "./Activity";
 import "../styles/tools.css";
 
 const TOKEN_KEY = "pa.admin";
@@ -12,6 +17,11 @@ interface Overview {
   users: number;
   vaults: number;
   items: number;
+  /**
+   * The least free space, in bytes, on the disks that hold the database and the attachment files (null when there is
+   * none to measure; older servers omit it). Below the `min_free_disk_mb` reserve the server stores nothing new.
+   */
+  disk_free_bytes?: number | null;
   config: {
     domain: string;
     database: "sqlite" | "postgresql";
@@ -44,12 +54,28 @@ interface Smtp {
   from_name: string;
 }
 
+/** Accepted values of a limit (`GET /admin/settings` `ranges`). */
+interface LimitRange {
+  min: number;
+  max: number;
+  default: number;
+}
+
 interface Settings {
   log_level: string;
   log_levels: string[];
   icons: boolean;
   signups_verify: boolean;
   smtp: Smtp | null;
+  /** Days items stay in the trash before they are deleted for good; 0 = never (older servers omit it). */
+  trash_days?: number;
+  /** Password health may ask Have I Been Pwned (older servers omit it). */
+  breach_check?: boolean;
+  /** Range and default of every limit by name; the limits' values are fields of the same name (older servers omit both). */
+  ranges?: Record<string, LimitRange>;
+  /** Default of every on/off setting by name (Send, account policies); their values are booleans of the same name. */
+  switches?: Record<string, { default: boolean }>;
+  [limit: string]: unknown;
 }
 
 interface User {
@@ -60,7 +86,11 @@ interface User {
   disabled: number;
   created_at: number;
   last_seen: number | null;
+  /** Items in the vaults the user owns (older name of `item_count`). */
   items: number;
+  /** What counts against the quotas: items and bytes (encrypted) in the vaults the user owns, trash included (older servers omit them). */
+  item_count?: number;
+  storage_bytes?: number;
   two_factor: number;
 }
 
@@ -110,6 +140,7 @@ async function adminFetch<T = any>(token: string, path: string, opts: { method?:
     res = await fetch(`/api/admin${path}`, {
       method,
       headers: {
+        "x-passauth-client": clientId(),
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
       },
@@ -386,6 +417,9 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
   const [settings, setSettings] = useState<Settings | null>(null);
   const [twoStep, setTwoStep] = useState<TwoStep | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Servers with the activity log: the Activity card, and "Show activity" for each user.
+  const activityLog = hasFeature(usePublicConfig(), "activity_log");
+  const [activityUser, setActivityUser] = useState("");
 
   /** Run an admin call; a 401 or 404 here means the token or panel is gone. */
   const call = useCallback(
@@ -450,9 +484,25 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
     <main className="admin-main">
       <OverviewCard o={overview} />
       <SignupsCard config={overview.config} call={call} reload={load} />
-      <UsersCard users={users} call={call} reload={load} />
+      <UsersCard
+        users={users}
+        call={call}
+        reload={load}
+        onShowActivity={
+          activityLog
+            ? (id) => {
+                setActivityUser(id);
+                document.getElementById("admin-activity")?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }
+            : undefined
+        }
+      />
+      {activityLog && <ActivityCard users={users} call={call} user={activityUser} onUser={setActivityUser} />}
       <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />
       <SettingsCard settings={settings} call={call} reload={load} />
+      {settings.ranges && (
+        <LimitsCard settings={settings} call={call} reload={load} withoutTwoStep={users.filter((u) => !u.disabled && !u.two_factor).length} />
+      )}
       <EmailCard smtp={settings.smtp} call={call} reload={load} />
       <AdminSecurityCard twoStep={twoStep} networks={overview.config.admin_networks} call={call} reload={load} />
     </main>
@@ -519,6 +569,12 @@ function OverviewCard({ o }: { o: Overview }) {
               {c.admin_2fa ? " + code" : ""}
             </dd>
           </div>
+          {typeof o.disk_free_bytes === "number" && Number.isFinite(o.disk_free_bytes) && (
+            <div>
+              <dt>Free disk space</dt>
+              <dd>{formatBytes(Math.max(0, o.disk_free_bytes))}</dd>
+            </div>
+          )}
         </dl>
       </div>
     </section>
@@ -586,7 +642,20 @@ function SignupsCard({ config, call, reload }: { config: Overview["config"]; cal
 
 // ------------------------------------------------------------------ users
 
-function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload: () => Promise<void> }) {
+function UsersCard({
+  users,
+  call,
+  reload,
+  onShowActivity,
+}: {
+  users: User[];
+  call: Call;
+  reload: () => Promise<void>;
+  /** Show the Activity card for this user (servers with the activity log). */
+  onShowActivity?: (userId: string) => void;
+}) {
+  // Servers with quotas report each user's storage.
+  const storage = users.some((u) => typeof u.storage_bytes === "number");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<User | null>(null);
@@ -631,6 +700,11 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
                 <th scope="col" className="col-wide">
                   Items
                 </th>
+                {storage && (
+                  <th scope="col" className="col-wide">
+                    Storage
+                  </th>
+                )}
                 <th scope="col" className="col-wide">
                   Last seen
                 </th>
@@ -659,7 +733,12 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
                         </div>
                       </td>
                       <td>{u.two_factor ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}</td>
-                      <td className="col-wide num">{u.items.toLocaleString()}</td>
+                      <td className="col-wide num">{(u.item_count ?? u.items).toLocaleString()}</td>
+                      {storage && (
+                        <td className="col-wide num" title="Encrypted size of the items in the vaults this user owns, trash included">
+                          {typeof u.storage_bytes === "number" ? formatBytes(u.storage_bytes) : ""}
+                        </td>
+                      )}
                       <td className="col-wide" title={u.last_seen ? formatDateTime(u.last_seen) : undefined}>
                         {u.last_seen ? relative(u.last_seen) : <span className="muted">Never</span>}
                       </td>
@@ -672,7 +751,7 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
                     </tr>
                     {open && (
                       <tr className="row-detail">
-                        <td colSpan={6}>
+                        <td colSpan={storage ? 7 : 6}>
                           <div className="card-actions">
                             {u.disabled ? (
                               <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => act(u, "/enable", `${u.email} can sign in again`)}>
@@ -692,6 +771,11 @@ function UsersCard({ users, call, reload }: { users: User[]; call: Call; reload:
                             <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => act(u, "/sessions/revoke", `${u.email} is signed out on every device`)}>
                               Sign out everywhere
                             </button>
+                            {onShowActivity && (
+                              <button type="button" className="btn btn-sm" onClick={() => onShowActivity(u.id)}>
+                                Show activity
+                              </button>
+                            )}
                             {u.two_factor > 0 && (
                               <button type="button" className="btn btn-sm" disabled={busy === u.id} onClick={() => setResetting(u)}>
                                 Reset two-step login…
@@ -908,20 +992,175 @@ const LEVEL_LABELS: Record<string, string> = {
   trace: "Everything (very large)",
 };
 
+// --------------------------------------------------------------- activity
+
+/** The admin page decrypts nothing: vaults and items are named by what happened to them, and filtered by id. */
+const ADMIN_CONTEXT: DescribeContext = { me: null, admin: true, vaultName: () => null, itemName: () => null };
+
+/** The server's activity log (`GET /admin/events`), filtered by type or category, person and vault. */
+function ActivityCard({ users, call, user, onUser }: { users: User[]; call: Call; user: string; onUser: (userId: string) => void }) {
+  const [type, setType] = useState("");
+  const [vault, setVault] = useState("");
+  const [vaultText, setVaultText] = useState("");
+  const emails = useMemo(() => new Map(users.map((u) => [u.id, u.email])), [users]);
+
+  const load = useCallback(
+    (before: string | null) => {
+      const q = new URLSearchParams();
+      if (type) q.set("type", type);
+      if (user) q.set("user", user);
+      if (vault) q.set("vault", vault);
+      if (before) q.set("before", before);
+      const s = q.toString();
+      return call<unknown>(`/events${s ? `?${s}` : ""}`);
+    },
+    [call, type, user, vault],
+  );
+
+  const showVault = (id: string) => {
+    setVault(id);
+    setVaultText(id);
+  };
+  const filtered = !!(type || user || vault);
+
+  /** Under each event: narrow the list to a person or a vault it names. */
+  const extra = (e: ActivityEvent) => {
+    const people = new Map<string, string>();
+    for (const p of [e.actor, e.target_user]) if (p && p.id !== user) people.set(p.id, p.email ?? "a deleted account");
+    if (!people.size && (!e.vault_id || e.vault_id === vault)) return null;
+    return (
+      <span className="activity-tags">
+        {[...people].map(([id, email]) => (
+          <button key={id} type="button" className="link" onClick={() => onUser(id)}>
+            Only {email}
+          </button>
+        ))}
+        {e.vault_id && e.vault_id !== vault && (
+          <button type="button" className="link" title={`Vault ${e.vault_id}`} onClick={() => showVault(e.vault_id!)}>
+            Only vault {e.vault_id.slice(0, 8)}
+          </button>
+        )}
+      </span>
+    );
+  };
+
+  return (
+    <section className="card" id="admin-activity" aria-labelledby="activity-title">
+      <div className="stack-s">
+        <h2 id="activity-title">Activity</h2>
+        <p className="card-text">
+          Sign-ins, account and sharing changes and item changes on this server, newest first. Vault contents are never recorded, so vaults and items are
+          known here by what happened to them.
+        </p>
+      </div>
+      <div className="activity-filters">
+        <label className="field">
+          <span>What</span>
+          <select className="select" value={type} onChange={(e) => setType(e.target.value)}>
+            <option value="">Everything</option>
+            {EVENT_TYPES.map((c) => (
+              <optgroup key={c.category} label={c.label}>
+                <option value={c.category}>All: {c.label.toLowerCase()}</option>
+                {c.types.map(([t, label]) => (
+                  <option key={t} value={t}>
+                    {label}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Person</span>
+          <select className="select" value={user} onChange={(e) => onUser(e.target.value)}>
+            <option value="">Everyone</option>
+            {user && !emails.has(user) && <option value={user}>A deleted account</option>}
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.email}
+              </option>
+            ))}
+          </select>
+        </label>
+        <form
+          className="field"
+          onSubmit={(e) => {
+            e.preventDefault();
+            setVault(vaultText.trim());
+          }}
+        >
+          <label htmlFor="activity-vault">Vault id</label>
+          <input
+            id="activity-vault"
+            className="input mono"
+            value={vaultText}
+            onChange={(e) => setVaultText(e.target.value)}
+            onBlur={() => setVault(vaultText.trim())}
+            placeholder="Any vault"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </form>
+      </div>
+      {filtered && (
+        <div className="row">
+          <button
+            type="button"
+            className="btn btn-text btn-sm"
+            onClick={() => {
+              setType("");
+              onUser("");
+              showVault("");
+            }}
+          >
+            Clear filters
+          </button>
+        </div>
+      )}
+      <EventList
+        load={load}
+        context={ADMIN_CONTEXT}
+        label="Server activity"
+        empty={filtered ? "Nothing matches these filters." : "Nothing has been recorded yet."}
+        errorText={(e) => (e as Error).message}
+        extra={extra}
+      />
+    </section>
+  );
+}
+
+/** "Empty trash after" choices in days; 0 keeps the trash until someone empties it. */
+const TRASH_DAYS = [0, 30, 60, 90];
+
 function SettingsCard({ settings, call, reload }: { settings: Settings; call: Call; reload: () => Promise<void> }) {
   const [level, setLevel] = useState(settings.log_level);
   const [icons, setIcons] = useState(settings.icons);
   const [verify, setVerify] = useState(settings.signups_verify);
+  const hasBreach = typeof settings.breach_check === "boolean";
+  const [breach, setBreach] = useState(settings.breach_check ?? true);
+  // Only servers that can empty the trash by themselves report trash_days; with `ranges` it is set under Limits.
+  const trashDaysNow = typeof settings.trash_days === "number" ? settings.trash_days : undefined;
+  const hasTrash = trashDaysNow !== undefined && !settings.ranges;
+  const [trashDays, setTrashDays] = useState(trashDaysNow ?? 0);
+  const trashChoices = TRASH_DAYS.includes(trashDaysNow ?? 0) ? TRASH_DAYS : [...TRASH_DAYS, trashDaysNow!].sort((a, b) => a - b);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const changed = level !== settings.log_level || icons !== settings.icons || verify !== settings.signups_verify;
+  const changed =
+    level !== settings.log_level ||
+    icons !== settings.icons ||
+    verify !== settings.signups_verify ||
+    (hasBreach && breach !== settings.breach_check) ||
+    (hasTrash && trashDays !== trashDaysNow);
 
   async function save(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await call("/settings", { method: "PUT", body: { log_level: level, icons, signups_verify: verify } });
+      await call("/settings", {
+        method: "PUT",
+        body: { log_level: level, icons, signups_verify: verify, ...(hasBreach ? { breach_check: breach } : {}), ...(hasTrash ? { trash_days: trashDays } : {}) },
+      });
       await reload();
       toast("Server settings saved");
     } catch (err) {
@@ -952,6 +1191,18 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
             </span>
           </span>
         </label>
+        {hasBreach && (
+          <label className="check">
+            <input type="checkbox" checked={breach} onChange={(e) => setBreach(e.target.checked)} />
+            <span>
+              Check passwords against Have I Been Pwned
+              <span className="field-hint block">
+                Lets people find out in Password health whether their passwords appear in known data breaches, sending only the first 5 characters of
+                each password's SHA-1 hash from their device (never a password, and never through this server).
+              </span>
+            </span>
+          </label>
+        )}
         <label className="field">
           <span>Server log</span>
           <select className="select" value={level} onChange={(e) => setLevel(e.target.value)}>
@@ -964,6 +1215,22 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
           </select>
           <span className="field-hint">How much the server writes to its log (docker compose logs). Vault contents and passwords are never logged.</span>
         </label>
+        {hasTrash && (
+          <label className="field">
+            <span>Empty trash after</span>
+            <select className="select" value={trashDays} onChange={(e) => setTrashDays(Number(e.target.value))}>
+              {trashChoices.map((d) => (
+                <option key={d} value={d}>
+                  {d === 0 ? "Never" : `${d} days`}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">
+              Items that stay in the trash longer than this are deleted for good, for every account on this server. With Never, items stay in the trash
+              until someone deletes them.
+            </span>
+          </label>
+        )}
         <ErrorText error={error} />
         <div className="card-actions">
           <button type="submit" className="btn btn-primary" disabled={busy || !changed}>
@@ -972,6 +1239,405 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
           <span className="small muted">Takes effect immediately and replaces SIGNUPS_VERIFY, ICON_SERVICE and LOG_LEVEL from the server's .env file.</span>
         </div>
       </form>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------ limits
+
+interface LimitField {
+  name: string;
+  label: string;
+  /** Shown after the input, e.g. "days". */
+  unit: string;
+  hint: string;
+  /** What 0 means, for limits that may be turned off. */
+  zero?: string;
+}
+
+/** What a switch's confirmation can mention. */
+interface ConfirmContext {
+  /** Accounts (not disabled) without any two-step method, from the user list. */
+  withoutTwoStep: number;
+}
+
+/** An on/off setting in a group (`GET /admin/settings` booleans), shown when the server reports it. */
+interface SwitchField {
+  name: string;
+  label: string;
+  hint: string;
+  /** Saving it at `when` asks first: it erases something, or changes a lot for users. */
+  confirm?: {
+    when: boolean;
+    title: string;
+    subtitle: string;
+    action: string;
+    /** Red action button (the default for ConfirmDialog): erases something for good. */
+    danger: boolean;
+    text: (ctx: ConfirmContext) => string;
+  };
+}
+
+const EVENT_IP: SwitchField = {
+  name: "event_ip",
+  label: "Record IP addresses in the activity log",
+  hint: "Shown on this page, to the person who acted, and to account owners for failed sign-ins to their account. Turning this off also erases the addresses already kept.",
+  confirm: {
+    when: false,
+    title: "Stop recording IP addresses?",
+    subtitle: "Activity log",
+    action: "Erase addresses and save",
+    danger: true,
+    text: () =>
+      "The activity log stops keeping the IP address of each event, and every address it has kept so far is erased for good. The events themselves stay. You can turn recording on again later, but erased addresses don't come back.",
+  },
+};
+
+const ACCOUNTS = (n: number) => (n === 1 ? "1 account" : `${n.toLocaleString()} accounts`);
+
+const POLICY_SWITCHES: SwitchField[] = [
+  {
+    name: "require_two_step",
+    label: "Require two-step login",
+    hint: "Accounts without two-step login can only set it up (or sign out) until they do, and nobody can turn off their last method.",
+    confirm: {
+      when: true,
+      title: "Require two-step login?",
+      subtitle: "Account policies",
+      action: "Require two-step login",
+      danger: false,
+      text: ({ withoutTwoStep: n }) =>
+        `Accounts without two-step login will only be able to set it up: until they turn on a method, they can sign in but can't open or sync their vaults in any app. ${
+          n === 0 ? "Every active account uses it already." : `${ACCOUNTS(n)} ${n === 1 ? "doesn't" : "don't"} use it yet.`
+        } While this is on, nobody can turn off their last method.`,
+    },
+  },
+  {
+    name: "require_secret_key",
+    label: "Require a Secret Key",
+    hint: "New accounts and master password changes must use a Secret Key, and accounts without one are asked to turn it on.",
+  },
+  {
+    name: "disable_export",
+    label: "Turn off export",
+    hint: "The apps stop offering to export a vault to a file.",
+  },
+  {
+    name: "login_with_device",
+    label: "Allow approving sign-ins from another device",
+    hint: "A new device can sign in when one of the account's signed-in devices approves it, without typing the master password there. While this is off, nobody can ask or approve, and requests already waiting can't be used.",
+  },
+];
+
+const SENDS: SwitchField = {
+  name: "sends",
+  label: "Allow Send",
+  hint: "People can share text through an encrypted link that expires; while this is off, existing links stop opening.",
+};
+
+const ATTACHMENTS: SwitchField = {
+  name: "attachments",
+  label: "Allow attachments",
+  hint: "People can attach files to items, encrypted on their devices. While this is off, nobody can add files; files already attached can still be downloaded and removed.",
+};
+
+const EMERGENCY_ACCESS: SwitchField = {
+  name: "emergency_access",
+  label: "Allow emergency access",
+  hint: "People can name trusted contacts who may ask to view their vaults after a waiting period. While this is off, nobody can add contacts, ask for access or view a vault through it.",
+};
+
+/**
+ * The limits and policies, by group. A field is shown only when the server reports its value and range, a switch only
+ * when the server reports its value.
+ */
+const LIMIT_GROUPS: { title: string; note?: string; fields: LimitField[]; switches?: SwitchField[]; switchesFirst?: true }[] = [
+  {
+    title: "Sign-in",
+    fields: [
+      { name: "session_days", label: "Sign-ins last", unit: "days", hint: "Devices must sign in again this long after signing in, however often they're used." },
+      { name: "refresh_days", label: "Unused devices stay signed in", unit: "days", hint: "A device that hasn't been used for this long must sign in again." },
+      { name: "remember_device_days", label: "Remember a device for two-step login", unit: "days", hint: "How long \"Remember this device\" skips the second step." },
+      { name: "signin_attempts_per_minute", label: "Sign-in attempts per address", unit: "per minute", hint: "Further attempts from that address wait until the minute is over." },
+      { name: "two_step_attempts_per_hour", label: "Wrong two-step codes per account", unit: "per hour", hint: "Then two-step login pauses for an hour and the user gets an email." },
+    ],
+  },
+  {
+    title: "Storage",
+    fields: [
+      { name: "max_items_per_user", label: "Items per user", unit: "items", zero: "no limit", hint: "Every item in the vaults a user owns counts, the trash included." },
+      { name: "max_storage_mb_per_user", label: "Storage per user", unit: "MB", zero: "no limit", hint: "The encrypted size of the items in the vaults a user owns, the trash included." },
+      { name: "max_item_kib", label: "Largest item", unit: "KB", hint: "The encrypted size of one item. Apps leave larger items out of imports." },
+      { name: "max_import_items", label: "Items per import request", unit: "items", hint: "Apps split larger imports into several requests." },
+      {
+        name: "min_free_disk_mb",
+        label: "Keep this much disk space free",
+        unit: "MB",
+        zero: "no check",
+        hint: "Below it nothing new is stored; sign-in, sync and deleting keep working.",
+      },
+    ],
+  },
+  {
+    title: "Attachments",
+    switchesFirst: true,
+    switches: [ATTACHMENTS],
+    fields: [
+      { name: "max_attachment_mb", label: "Largest attachment", unit: "MB", hint: "The encrypted size of one file." },
+      {
+        name: "max_attachment_storage_mb_per_user",
+        label: "Attachment storage per user",
+        unit: "MB",
+        zero: "no limit",
+        hint: "Files attached to items in the vaults a user owns, and uploads they started that haven't finished.",
+      },
+    ],
+  },
+  {
+    title: "Sync and trash",
+    fields: [
+      { name: "trash_days", label: "Empty the trash after", unit: "days", zero: "never", hint: "Items in the trash longer than this are deleted for good, for every account." },
+      { name: "tombstone_days", label: "Remember deletions for", unit: "days", hint: "Apps that sync only changes and were away longer than this download their vaults in full once." },
+      { name: "websocket_ping_seconds", label: "Check live-sync connections every", unit: "seconds", hint: "Shorter notices dropped connections sooner, for a little more traffic." },
+    ],
+  },
+  {
+    title: "History and activity",
+    fields: [
+      { name: "event_days", label: "Keep the activity log for", unit: "days", hint: "Older entries are deleted. The log never holds vault contents or setting values." },
+      {
+        name: "item_versions_kept",
+        label: "Earlier versions kept per item",
+        unit: "versions",
+        zero: "no item history",
+        hint: "They count toward the vault owner's storage. Lowering this deletes the oldest versions at once.",
+      },
+    ],
+    switches: [EVENT_IP],
+  },
+  {
+    title: "Account policies",
+    note: "Apps that can't create keys as strong as the key derivation minimums can't create accounts or change master passwords while they apply.",
+    switchesFirst: true,
+    switches: POLICY_SWITCHES,
+    fields: [
+      {
+        name: "master_password_min_length",
+        label: "Shortest master password",
+        unit: "characters",
+        hint: "New accounts and master password changes need at least this many characters; current passwords keep working.",
+      },
+      {
+        name: "max_vault_timeout_minutes",
+        label: "Longest vault timeout",
+        unit: "minutes",
+        zero: "no limit",
+        hint: "The apps lock after this much inactivity at the latest and stop offering longer timeouts or Never.",
+      },
+      {
+        name: "min_kdf_memory_mib",
+        label: "Least memory for key derivation",
+        unit: "MiB",
+        hint: "New account keys must use at least this much memory to derive keys from the master password; accounts below it are asked to update.",
+      },
+      {
+        name: "min_kdf_iterations",
+        label: "Least key derivation passes",
+        unit: "passes",
+        hint: "New account keys must use at least this many passes; accounts below it are asked to update.",
+      },
+    ],
+  },
+  {
+    title: "Send",
+    switchesFirst: true,
+    switches: [SENDS],
+    fields: [{ name: "send_max_days", label: "Delete Sends after at most", unit: "days", hint: "Nobody can keep a Send longer than this; each one is deleted by then." }],
+  },
+  {
+    title: "Emergency access",
+    switches: [EMERGENCY_ACCESS],
+    fields: [],
+  },
+];
+
+/**
+ * Lifetimes, attempt limits, quotas, sync settings, account policies and Send (`GET /admin/settings` values,
+ * `ranges` and `switches`); saves only what changed, after asking for the switches that need it.
+ */
+function LimitsCard({ settings, call, reload, withoutTwoStep }: { settings: Settings; call: Call; reload: () => Promise<void>; withoutTwoStep: number }) {
+  const ranges = settings.ranges ?? {};
+  const savedValue = (name: string) => settings[name] as number;
+  const savedSwitch = (name: string) => settings[name] as boolean;
+  const groups = LIMIT_GROUPS.map((g) => ({
+    ...g,
+    fields: g.fields.filter((f) => ranges[f.name] && typeof settings[f.name] === "number"),
+    switches: (g.switches ?? []).filter((sw) => typeof settings[sw.name] === "boolean"),
+  })).filter((g) => g.fields.length > 0 || g.switches.length > 0);
+  const fields = groups.flatMap((g) => g.fields);
+  const switches = groups.flatMap((g) => g.switches);
+  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(fields.map((f) => [f.name, String(savedValue(f.name))])));
+  const [on, setOn] = useState<Record<string, boolean>>(() => Object.fromEntries(switches.map((sw) => [sw.name, savedSwitch(sw.name)])));
+  /** Switches whose confirmation is still to be given, in order. */
+  const [confirming, setConfirming] = useState<SwitchField[]>([]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const valueOf = (f: LimitField) => (values[f.name] ?? String(savedValue(f.name))).trim();
+  const switchOf = (sw: SwitchField) => on[sw.name] ?? savedSwitch(sw.name);
+  const changed = fields.filter((f) => valueOf(f) !== String(savedValue(f.name)));
+  const changedSwitches = switches.filter((sw) => switchOf(sw) !== savedSwitch(sw.name));
+  const unsaved = changed.length + changedSwitches.length;
+  const erasesIps = changedSwitches.some((sw) => sw.name === "event_ip" && !switchOf(sw));
+
+  function problem(f: LimitField): string | null {
+    const r = ranges[f.name];
+    const text = valueOf(f);
+    const n = Number(text);
+    return /^\d+$/.test(text) && n >= r.min && n <= r.max ? null : `Enter a whole number from ${r.min.toLocaleString()} to ${r.max.toLocaleString()}.`;
+  }
+
+  function edit(f: LimitField, value: string) {
+    setValues((v) => ({ ...v, [f.name]: value }));
+    if (errors[f.name]) setErrors(({ [f.name]: _gone, ...rest }) => rest);
+  }
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const found = Object.fromEntries(changed.flatMap((f) => (problem(f) ? [[f.name, problem(f)!]] : [])));
+    setErrors(found);
+    if (Object.keys(found).length) return;
+    // Erasing the kept IP addresses, or requiring two-step login: ask first.
+    const asks = changedSwitches.filter((sw) => sw.confirm && switchOf(sw) === sw.confirm.when);
+    if (asks.length) return setConfirming(asks);
+    await send();
+  }
+
+  async function send() {
+    setBusy(true);
+    setError(null);
+    try {
+      const numbers = Object.fromEntries(changed.map((f) => [f.name, Number(valueOf(f))]));
+      const flags = Object.fromEntries(changedSwitches.map((sw) => [sw.name, switchOf(sw)]));
+      await call("/settings", { method: "PUT", body: { ...numbers, ...flags } });
+      // As the server stores them ("090" is 90), so they don't show as unsaved.
+      setValues((v) => ({ ...v, ...Object.fromEntries(Object.entries(numbers).map(([name, n]) => [name, String(n)])) }));
+      await reload();
+      toast(erasesIps ? "Changes saved. IP addresses in the activity log were erased." : "Changes saved");
+    } catch (err) {
+      if (err instanceof AdminError && err.status === 401) return;
+      const message = (err as Error).message;
+      // The server names a refused setting in parentheses, e.g. "… (session_days) must be …": show it at that field.
+      const named = err instanceof AdminError && err.status === 400 ? fields.find((f) => message.includes(`(${f.name})`)) : undefined;
+      if (named) setErrors({ [named.name]: message });
+      else setError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const asking = confirming[0]?.confirm;
+
+  const switchRow = (sw: SwitchField) => (
+    <label className="setting" key={sw.name}>
+      <span className="setting-text">
+        <span className="setting-title">{sw.label}</span>
+        <span className="setting-desc">{sw.hint}</span>
+      </span>
+      <input type="checkbox" role="switch" className="switch" checked={switchOf(sw)} onChange={(e) => setOn((o) => ({ ...o, [sw.name]: e.target.checked }))} />
+    </label>
+  );
+
+  return (
+    <section className="card" aria-labelledby="limits-title">
+      <div className="stack-s">
+        <h2 id="limits-title">Limits and policies</h2>
+        <p className="card-text">These apply to every account on this server and take effect immediately.</p>
+      </div>
+      <form className="stack" onSubmit={save} noValidate>
+        {groups.map((g) => (
+          <fieldset key={g.title} className="limit-group">
+            <legend className="section-title">{g.title}</legend>
+            {g.switchesFirst && g.switches.map(switchRow)}
+            {g.fields.length > 0 && (
+              <div className="limit-grid">
+                {g.fields.map((f) => {
+                  const r = ranges[f.name];
+                  const id = `limit-${f.name}`;
+                  const fieldError = errors[f.name];
+                  return (
+                    <div className="field" key={f.name}>
+                      <label htmlFor={id}>
+                        {f.label}
+                        <span className="sr-only"> ({f.unit})</span>
+                      </label>
+                      <div className="input-group limit-input">
+                        <input
+                          id={id}
+                          className="input"
+                          type="number"
+                          inputMode="numeric"
+                          min={r.min}
+                          max={r.max}
+                          step={1}
+                          value={values[f.name] ?? ""}
+                          aria-invalid={fieldError ? true : undefined}
+                          aria-describedby={fieldError ? `${id}-error ${id}-hint` : `${id}-hint`}
+                          onChange={(e) => edit(f, e.target.value)}
+                        />
+                        <span className="input-trail" aria-hidden="true">
+                          {f.unit}
+                        </span>
+                      </div>
+                      {fieldError && (
+                        <span className="field-error" id={`${id}-error`}>
+                          {fieldError}
+                        </span>
+                      )}
+                      <span className="field-hint" id={`${id}-hint`}>
+                        {f.hint} {f.zero ? `0 means ${f.zero}. ` : ""}From {r.min.toLocaleString()} to {r.max.toLocaleString()}, {r.default.toLocaleString()} by default.
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {!g.switchesFirst && g.switches.map(switchRow)}
+            {g.note && g.fields.length > 0 && <p className="small muted">{g.note}</p>}
+          </fieldset>
+        ))}
+        <ErrorText error={error} />
+        <div className="card-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy || unsaved === 0}>
+            {busy ? "Saving…" : "Save changes"}
+          </button>
+          {unsaved > 0 && !busy && (
+            <span className="small muted" role="status">
+              {unsaved === 1 ? "1 change not saved yet" : `${unsaved} changes not saved yet`}
+            </span>
+          )}
+        </div>
+      </form>
+      {asking && (
+        <ConfirmDialog
+          key={confirming[0].name}
+          title={asking.title}
+          subtitle={asking.subtitle}
+          icon="shield"
+          action={asking.action}
+          busyAction="Saving…"
+          danger={asking.danger}
+          onConfirm={() => {
+            const rest = confirming.slice(1);
+            setConfirming(rest);
+            return rest.length ? undefined : send();
+          }}
+          onClose={() => setConfirming([])}
+        >
+          <p className="card-text">{asking.text({ withoutTwoStep })}</p>
+        </ConfirmDialog>
+      )}
     </section>
   );
 }

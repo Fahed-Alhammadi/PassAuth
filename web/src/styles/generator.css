@@ -1,0 +1,7 @@
+/* Generator options (components/GeneratorOptions.tsx): web vault Generator page and the extension. Builds on app.css tokens. */
+
+.range-row { display: flex; align-items: center; gap: var(--space-4); }
+.range-row input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.range-row .input { flex: none; width: 84px; text-align: center; font-variant-numeric: tabular-nums; }
+
+.check-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3) var(--space-5); }

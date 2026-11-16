@@ -3025,8 +3025,11 @@ version = "0.7.0"
 dependencies = [
  "arboard",
  "block2",
+ "bytes",
  "core-foundation 0.10.1",
+ "http-body",
  "keyring",
+ "libc",
  "objc2-app-kit",
  "objc2-foundation",
  "reqwest",
@@ -3044,6 +3047,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tokio",
 ]
 
 [[package]]
