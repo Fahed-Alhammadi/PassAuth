@@ -71,7 +71,17 @@ Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign i
 - manage users and send invitations,
 - open or close sign-ups, or limit them to email domains,
 - set up email delivery and send a test email,
-- choose whether new accounts must confirm their email, whether the server fetches website icons, and how much it logs.
+- choose whether new accounts must confirm their email, whether the server fetches website icons, and how much it logs,
+- empty the trash automatically after 30, 60 or 90 days (off by default: deleted items stay in the trash until someone empties it),
+- set limits: how long a sign-in lasts and how long a device may stay offline or skip two-step login, sign-in and two-step attempt limits, the largest item and import, an item or storage quota per user (off by default), live-sync connection checks, and how long deletions are kept for apps that sync only changes,
+- see the server's activity log (sign-ins and failed attempts, admin actions, vault, sharing and item changes; ids only, never vault contents), kept 365 days by default (30 days to 10 years), and choose whether it records IP addresses (on by default; turning it off also erases the ones kept),
+- keep earlier versions of items so users can restore them (10 per item by default, up to 100; 0 turns history off). Versions count toward storage quotas,
+- let users share text through encrypted links that expire (Send, on by default): choose the longest time before a Send is deleted (30 days by default, up to 365); turning it off stops every link at once; Sends count toward storage quotas. The key is in the part of the link after `#`, which never reaches the server; a reverse proxy's access log sees only `/send/<id>`,
+- set account policies: require two-step login (accounts without it can only set it up), require a Secret Key for new accounts and password changes, minimum key-derivation memory and passes, minimum master password length, the longest vault timeout the apps offer, and hiding vault export in the apps. Existing accounts can still sign in; the apps ask them to update,
+- allow file attachments (on by default) and set the largest file (100 MB by default, up to 4096 MB) and the attachment storage per user (1 GB by default, 0 = no limit); set a per-user storage limit to cap disk use,
+- keep a free-disk reserve (1024 MB by default, 0 = off): below it nothing new is stored, but sign-in, sync and deleting keep working, so you can free space safely. The overview shows the free space,
+- allow emergency access (on by default): users can let a trusted contact on this server request view-only access to their own vaults after a waiting period they choose (1–90 days). Confirming a contact gives them the user's account key, which also opens shared vaults; the waiting period is enforced by the server, not by encryption, and an approved contact keeps what they had,
+- turn the password breach check on or off (on by default: the web vault sends Have I Been Pwned only the first 5 characters of a password's hash, and only when the user asks; the server isn't involved).
 
 These settings are saved in the database and take effect at once, without a restart.
 
@@ -105,6 +115,7 @@ Tell PassAuth which header carries each visitor's real address, so rate limits w
 
 - Caddy: `IP_HEADER=X-Forwarded-For`
 - nginx: add `proxy_set_header X-Real-IP $remote_addr;` and set `IP_HEADER=X-Real-IP`
+- nginx and file attachments: nginx accepts only 1 MB request bodies by default. Set `client_max_body_size` to at least the admin page's largest file (100m by default) and preferably `proxy_request_buffering off;`, or uploads of larger files fail.
 
 PassAuth believes that header only from proxies on the same machine or a private network (loopback, `10.x`, `172.16–31.x`, `192.168.x`, IPv6 ULA). If your proxy connects from another address, list it in `TRUSTED_PROXIES`.
 
@@ -118,6 +129,8 @@ docker compose up -d
 ```
 
 The image line ends in `:latest`, so this always brings you to the newest release. To stay on one version, write it instead, e.g. `ghcr.io/fahed-alhammadi/passauth:0.7.0`. Database changes are applied automatically when the new version starts.
+
+Going back to an older version doesn't work once a newer one has upgraded the database: the older server refuses to start and says why. Start the newer version again, or restore the backup you made before upgrading.
 
 ### Move to the short files
 
@@ -134,13 +147,25 @@ Your `SIGNUPS_*`, `SMTP_*`, `ICON_SERVICE` and `LOG_LEVEL` values are still read
 
 ## Back up
 
-All data is in `./data`. To back up the SQLite database while PassAuth is running:
+All data is in `./data`. To back up the SQLite database while PassAuth keeps running:
 
 ```bash
-sqlite3 data/passauth.db ".backup 'passauth-backup.db'"
+docker compose exec passauth passauth-server backup /data/passauth-backup-$(date +%F).db
 ```
 
-Or stop the container (`docker compose stop`), copy the `data` folder, and start it again. Vault contents in the backup are encrypted, but keep the backup private anyway.
+This writes a consistent copy into `./data` and never overwrites a file, plus a `passauth-backup-….db.attachments/` folder with the attachment files. Only the PUID user can read the copy. It holds the server's sign-in key and every account's encrypted vault, so store it as carefully as the server itself. With PostgreSQL, use `pg_dump` first, then copy the attachments folder (`/data/attachments` or `ATTACHMENTS_DIR`); files deleted between the two steps will be missing, extra ones are swept after a restore.
+
+Or stop the container (`docker compose stop`), copy the `data` folder, and start it again.
+
+To restore: stop the container, replace `data/passauth.db` with the backup and `data/attachments` with its `.attachments` folder (delete any `passauth.db-wal` and `passauth.db-shm` next to it), and start it again. After a restore from a `backup` copy, every app downloads its vaults in full once. After restoring a backup made any other way (a copied `data` folder, `pg_dump`), run this once before starting PassAuth, so apps don't trust what they synced after the backup was made:
+
+```bash
+docker compose run --rm passauth reset-sync
+```
+
+### Run one instance
+
+PassAuth keeps some state in the server process: sign-ins in progress (password and two-step steps, re-authentication, security-key challenges), rate limits, live-sync connections, admin page sessions and the admin settings it applies. Run exactly one PassAuth container per database. Several instances behind a load balancer would break sign-ins that land on another instance, multiply the rate limits, and miss live-sync messages from the other instance. A restart is harmless: sign-ins in progress start again, the admin page asks you to sign in again, and rate-limit counters reset.
 
 ## Configuration reference
 
@@ -154,6 +179,8 @@ Or stop the container (`docker compose stop`), copy the `data` folder, and start
 | `PASSAUTH_ADMIN_ALLOWED_NETWORKS` | anywhere | Networks the admin page may be opened from, as IPs or CIDRs, e.g. `192.168.1.0/24,10.8.0.0/24`. |
 | `DOMAIN` | `http://localhost:8080` | Public address of the server, e.g. `https://vault.example.com`. Also the origin security keys / passkeys are bound to: if it isn't the exact address people open in their browser, two-step login with a security key can't be set up (the server logs a warning and the setting is greyed out in the web vault). |
 | `DATABASE_URL` | SQLite in `/data` | `postgres://user:pass@host:5432/db` to use PostgreSQL. |
+| `ATTACHMENTS_DIR` | beside the database | Folder for attachment files. With PostgreSQL the default is `/data/attachments`, so keep the `./data:/data` volume or set this; without either, attachments are off. |
+| `DATABASE_MAX_CONNECTIONS` | `10` | Database connections the server keeps open (1–1000). |
 | `IP_HEADER` | none | Header with the visitor's address when behind a proxy. |
 | `TRUSTED_PROXIES` | loopback + private networks | Proxies whose `IP_HEADER` is believed, as IPs or CIDRs, e.g. `10.0.0.5,fd00::/8`. |
 | `LOG_FORMAT` | text | `json` for structured logs. |
@@ -168,3 +195,5 @@ Set on the admin page (saved in the database, no restart). The `.env` names stil
 | Server log | `LOG_LEVEL` |
 | Email delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME` |
 | Admin sign-in | `ADMIN_TOKEN` (an Argon2 hash from `passauth-server hash-admin-token`; used only when `PASSAUTH_ADMIN_PASSWORD` is not set) |
+
+Limits and quotas (sign-in length, attempt limits, item and import size, per-user quotas, trash and deletion history, live-sync checks, activity log and item history, Send and account policies) exist only on the admin page.
