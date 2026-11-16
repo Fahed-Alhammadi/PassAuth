@@ -166,14 +166,21 @@ public struct Invitation: Identifiable, Equatable, Sendable {
         return trust == nil || acceptance != nil
     }
 
-    /// Decline is offered: always for an invitation; for a vault the server added only when it is
-    /// signed (a signer is named), not a replaced key (kept locked instead), and not waiting
-    /// while trust memory is missing (cross-client rule 1).
+    /// Decline is offered only where the verdict says `declinable` (round 5 M2: never for a
+    /// re-join, a replaced key, the account's own vault, a first signature or a vault it holds —
+    /// "Not now" keeps those locked): an invitation whose verdict says so, or that can only be
+    /// declined (not signed, didn't verify); a vault the server added only when it is signed (a
+    /// signer is named), declinable, and not waiting while trust memory is missing (cross-client
+    /// rule 1).
     public var canDecline: Bool {
+        if let flags = acceptance?.flags, !flags.declinable { return false }
         guard let consent else { return true }
-        guard consent != .replaced, !declineHidden, case .signed? = trust else { return false }
+        guard consent != .replaced, !declineHidden, case .signed? = trust, acceptance?.flags.declinable == true else { return false }
         return true
     }
+
+    /// The verdict's consent flags (nil: none known, e.g. an invitation that isn't signed).
+    public var flags: ConsentFlags? { acceptance?.flags }
 
     /// Whether `current` (the entry as it is now) is still the decision `shown` showed: the same
     /// vault, kind (invitation or consent), role and listed sharer key, and with signed sharing
@@ -184,6 +191,9 @@ public struct Invitation: Identifiable, Equatable, Sendable {
               shown.invitedBy?.publicKey == current.invitedBy?.publicKey, (shown.trust == nil) == (current.trust == nil) else { return false }
         guard shown.acceptance?.epochPin == current.acceptance?.epochPin, shown.acceptance?.rosterHash == current.acceptance?.rosterHash,
               shown.acceptance?.rosterVersion == current.acceptance?.rosterVersion,
+              // The verdict's flags (re-join, held, first signature, …) and kind (round 5, Android M).
+              shown.acceptance?.flags == current.acceptance?.flags, shown.acceptance?.invitation == current.acceptance?.invitation,
+              shown.acceptance?.kind == current.acceptance?.kind,
               shown.acceptance?.signer?.identityHash == current.acceptance?.signer?.identityHash,
               shown.acceptance?.signer?.pinEmailToWrite == current.acceptance?.signer?.pinEmailToWrite,
               shown.acceptance?.signer?.pinVerifiedToWrite == current.acceptance?.signer?.pinVerifiedToWrite else { return false }
@@ -444,50 +454,52 @@ extension VaultRepository {
 
     /// Decline a vault shared with the account. The server then asks the vault's owners and
     /// admins to replace its key (the invitation already gave this account the key). Already gone
-    /// (404) is fine: the list is refreshed. With signed sharing the vault is tombstoned in the
-    /// account's key pins (it comes back only re-shared with a newer member list; a tombstone not
-    /// written now is written at the next sync); a vault the server added without an invitation
-    /// is left (`DELETE /vaults/{id}/members/{me}`). A vault waiting while the trust memory is
-    /// missing (`declineHidden`) or after an unsigned key replacement stays as it is (later).
+    /// (404) is fine: the list is refreshed. A vault the server added without an invitation is
+    /// left (`DELETE /vaults/{id}/members/{me}`).
     ///
-    /// Unsigned vaults the server added, replaced keys and vaults waiting while trust memory is
-    /// missing can't be declined (they stay locked; throws). A declined invitation for a vault
-    /// this account uses now never tombstones it, and nothing is tombstoned before the server
-    /// has shown it signs (cross-client rules 1–3).
+    /// Offered only where the verdict says `declinable` (`Invitation.canDecline`; round 5 M2):
+    /// never for a re-join, a replaced key, the account's own vault, a first signature, a vault it
+    /// holds, an unsigned vault the server added or one waiting while trust memory is missing
+    /// (they stay locked; throws). With signed sharing the key pins are written first with
+    /// `pins_decline` (a tombstone at roster version 0, only for a vault the account doesn't hold
+    /// and that isn't one of this sync's vault rows, whatever its verdict: a vault the server
+    /// added never is; a server-chosen roster version never goes into it); one not written now
+    /// is written at the next sync. The server's decline follows either way (cross-client rules
+    /// 1–3: nothing written before the server has shown it signs).
     public func declineInvitation(_ vaultId: String) async throws {
         try await lock.run {
             let account = activeId
             let inv = vault?.invitations.first { $0.vaultId == vaultId }
             let session = sessions[account]
             if let inv, !inv.canDecline { throw UserError(SharingText.cantDecline) }
-            let usable = vault?.vaults.contains { $0.id == vaultId } ?? false
+            // Unknown copy: counted as a current row (nothing tombstoned).
+            let currentRow = inv?.consent != nil || (copySnapshot?.vaults.contains { $0.id == vaultId } ?? true)
             let proven = session.map { sharingMemory.load(account).proven || $0.sharingProven } ?? false
+            if let session, signedSharingOn(account, copySnapshot), proven, !currentRow {
+                do {
+                    try await decline(account, session, vaultId: vaultId, currentRow: currentRow)
+                } catch {
+                    // Written at the next sync (kept in this process, and in the device memory as
+                    // soon as it can be written, so a restart doesn't lose it).
+                    pendingTombstones[account, default: [:]][vaultId] = 0
+                    let stored = loadMemory(account, session)
+                    var update = SharingMemoryRecord().owned(by: session.meId, server: store.get().file.accounts[account]?.server ?? "")
+                    update.tombstones = (stored.unreadable ? [:] : stored.tombstones ?? [:])
+                        .merging(pendingTombstones[account] ?? [:]) { max($0, $1) }
+                    saveMemory(account, session, update)
+                }
+            }
             if inv?.consent != nil, let session {
-                // Tombstoned first: if the server keeps listing it, it stays refused.
-                try await leave(account, session, vaultId: vaultId, rosterVersion: inv?.acceptance?.rosterVersion ?? 0)
                 do {
                     _ = try await api.call(account, "/vaults/\(Self.pathSegment(vaultId))/members/\(Self.pathSegment(session.meId))", method: "DELETE")
-                } catch let e as ApiError where e.status == 404 || e.status == 403 {}
+                } catch let e as ApiError where e.status == 404 {
+                    // Gone already (the server answers non-members 404). A 403 is a refusal
+                    // (policy, two-step login, reauth) and is shown, never taken as done.
+                }
             } else {
                 do {
                     _ = try await api.call(account, "/vaults/\(Self.pathSegment(vaultId))/invitation", method: "DELETE")
                 } catch let e as ApiError where e.status == 404 {}
-                if let session, signedSharingOn(account, copySnapshot), proven, !usable {
-                    let version = inv?.acceptance?.rosterVersion ?? 0
-                    do {
-                        try await leave(account, session, vaultId: vaultId, rosterVersion: version)
-                    } catch {
-                        // The server took the decline: the tombstone is written at the next sync
-                        // (kept in this process, and in the device memory as soon as it can be
-                        // written, so a restart doesn't lose it).
-                        pendingTombstones[account, default: [:]][vaultId] = max(pendingTombstones[account]?[vaultId] ?? 0, version)
-                        let stored = loadMemory(account, session)
-                        var update = SharingMemoryRecord().owned(by: session.meId, server: store.get().file.accounts[account]?.server ?? "")
-                        update.tombstones = (stored.unreadable ? [:] : stored.tombstones ?? [:])
-                            .merging(pendingTombstones[account] ?? [:]) { max($0, $1) }
-                        saveMemory(account, session, update)
-                    }
-                }
             }
             await syncAfterWrite()
         }

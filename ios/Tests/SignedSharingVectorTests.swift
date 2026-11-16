@@ -103,8 +103,8 @@ final class SignedSharingVectorTests: XCTestCase {
 
     func testSectionsAreThere() {
         for name in ["accounts", "openings", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles",
-                     "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "accepts", "merges", "observations", "emails",
-                     "legacyWraps"] {
+                     "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "accepts", "merges", "mergesLastKnown", "declines",
+                     "observations", "emails", "legacyWraps"] {
             XCTAssertFalse(list(name).isEmpty, "no \(name) vectors")
         }
         for name in ["keyPins", "keyPinsWithEpoch", "keyPinsRaised", "keyPinsLeft", "keyPinsGrandfathered", "keyPinsWithheld", "keyPinsUnsigned", "keyPinsRosterMax", "keyPinsOwn", "mergedEpochs", "ownIdentity", "keyIds",
@@ -287,6 +287,9 @@ final class SignedSharingVectorTests: XCTestCase {
         }
         for c in list("emails") {
             XCTAssertEqual(normalizeEmail(email: c["email"] as? String ?? ""), c["expected"] as? String, "\(c)")
+            // Normalizing twice gives the same (round 5): apps compare stored, normalized emails again.
+            let once = normalizeEmail(email: c["email"] as? String ?? "")
+            XCTAssertEqual(normalizeEmail(email: once), once, "twice \(c)")
         }
         // Shown in that form (an internationalized domain in punycode).
         XCTAssertEqual(SharingText.shownEmail("erin@B\u{00FC}cher.example"), "erin@xn--bcher-kva.example")
@@ -311,24 +314,34 @@ final class SignedSharingVectorTests: XCTestCase {
             let pinned = try c["pinned"].flatMap { $0 is NSNull ? nil : try text($0) }
             XCTAssertEqual(try epochCheck(pinnedJson: pinned, currentJson: try text(c["current"])), c["expected"] as? String, "\(c)")
         }
-        let withEpoch = try pinsSetEpoch(pinsJson: pins, vaultId: vaultId, currentJson: try key.epochPinJson(vaultId: vaultId, keyEpoch: 1), rosterVersion: 2)
+        // A key this device gave the vault itself (`pins_record_rotation`, round 5: a roster version
+        // only with its hash), recorded as the account's sealed row.
+        func record(_ p: String?, _ current: String, _ version: UInt64? = nil, _ roster: String? = nil) throws -> String {
+            let hash = try roster.map { try rosterHash(rosterJson: try XCTUnwrap(rosters[$0], $0)) }
+            return try pinsRecordRotation(pinsJson: p, vaultId: vaultId, keyKind: "sealed", currentJson: current, rosterVersion: version, rosterHash: hash)
+        }
+        let withEpoch = try record(pins, try key.epochPinJson(vaultId: vaultId, keyEpoch: 1), 2, "v2")
         XCTAssertEqual(object(withEpoch), v["keyPinsWithEpoch"] as? NSDictionary)
+        // A version without its hash is refused; a lower key is a rollback.
+        XCTAssertThrowsError(try record(withEpoch, try second.epochPinJson(vaultId: vaultId, keyEpoch: 2), 3))
+        XCTAssertThrowsError(try record(withEpoch, try key.epochPinJson(vaultId: vaultId, keyEpoch: 0), 2, "v2")) { XCTAssertEqual(self.code($0), "rollback") }
         for c in list("pinsEpochChecks") {
             XCTAssertEqual(try pinsEpochCheck(pinsJson: withEpoch, vaultId: vaultId, currentJson: try text(c["current"]),
                                               rosterVersion: optNumber(c["rosterVersion"])), c["expected"] as? String, "\(c)")
         }
-        let raised = try pinsSetEpoch(pinsJson: withEpoch, vaultId: vaultId, currentJson: try second.epochPinJson(vaultId: vaultId, keyEpoch: 2), rosterVersion: 3)
+        let raised = try record(withEpoch, try second.epochPinJson(vaultId: vaultId, keyEpoch: 2), 3, "v3")
         XCTAssertEqual(object(raised), v["keyPinsRaised"] as? NSDictionary)
-        let otherDevice = try pinsSetEpoch(pinsJson: nil, vaultId: vaultId, currentJson: try second.epochPinJson(vaultId: vaultId, keyEpoch: 2), rosterVersion: nil)
+        let otherDevice = try record(nil, try second.epochPinJson(vaultId: vaultId, keyEpoch: 2))
         XCTAssertEqual(object(try mergePins(baseJson: withEpoch, oursJson: otherDevice))?["epochs"] as? NSDictionary, v["mergedEpochs"] as? NSDictionary)
         let left = try pinsLeave(pinsJson: raised, vaultId: vaultId, rosterVersion: 3, now: 2000)
         XCTAssertEqual(object(left), v["keyPinsLeft"] as? NSDictionary)
-        let grandfathered = try pinsGrandfather(pinsJson: pins, vaultIds: [vaultId], createdIdentity: true)
+        // Grandfathered with the key each vault has now (round 5).
+        let candidates = SignedSharing.candidatesJson([(vaultId, try key.keyId(vaultId: vaultId))])
+        let grandfathered = try pinsGrandfather(pinsJson: pins, vaultsJson: candidates, createdIdentity: true)
         XCTAssertEqual(object(grandfathered), v["keyPinsGrandfathered"] as? NSDictionary)
-        let withheld = try pinsGrandfather(pinsJson: pins, vaultIds: [vaultId], createdIdentity: false)
+        let withheld = try pinsGrandfather(pinsJson: pins, vaultsJson: candidates, createdIdentity: false)
         XCTAssertEqual(object(withheld), v["keyPinsWithheld"] as? NSDictionary)
-        let unsigned = try pinsSetEpoch(pinsJson: grandfathered, vaultId: vaultId, currentJson: try key.epochPinJson(vaultId: vaultId, keyEpoch: 1),
-                                        rosterVersion: nil)
+        let unsigned = try record(grandfathered, try key.epochPinJson(vaultId: vaultId, keyEpoch: 1))
         XCTAssertEqual(object(unsigned), v["keyPinsUnsigned"] as? NSDictionary)
         let v3 = try XCTUnwrap(rosters["v3"])
         let observed = try XCTUnwrap(SignedSharing.observe(withEpoch, vaultId: vaultId, kind: "sealed", epochPin: try key.epochPinJson(vaultId: vaultId, keyEpoch: 1),
@@ -354,7 +367,8 @@ final class SignedSharingVectorTests: XCTestCase {
                                                       epochPin: o["key"].flatMap { $0 is NSNull ? nil : try? text($0) },
                                                       rosterVersion: optNumber(o["roster_version"]), rosterHash: o["roster_hash"] as? String,
                                                       chainHashes: o["chain_hashes"] as? [String: String],
-                                                      signedShare: o["signed_share"] as? Bool ?? false, paused: o["paused"] as? Bool ?? false)
+                                                      signedShare: o["signed_share"] as? Bool ?? false, paused: o["paused"] as? Bool ?? false,
+                                                      invitation: o["invitation"] as? Bool ?? false)
                 outcome(c, "app admission \(c)", { try pinsAdmit(pinsJson: p, observationJson: built) },
                         same: { self.object($0) == ($1 as? NSDictionary) })
             }
@@ -366,14 +380,36 @@ final class SignedSharingVectorTests: XCTestCase {
                     same: { self.object($0) == ($1 as? NSDictionary) })
         }
         for c in list("merges") {
-            XCTAssertEqual(object(try mergePins(baseJson: try text(c["base"]), oursJson: try text(c["ours"]))), c["expected"] as? NSDictionary,
-                           "merge \(c["name"] ?? "")")
+            outcome(c, "merge \(c["name"] ?? "")", { try mergePins(baseJson: try self.text(c["base"]), oursJson: try self.text(c["ours"])) },
+                    same: { self.object($0) == ($1 as? NSDictionary) })
         }
+        XCTAssertTrue(list("merges").contains { $0["error"] as? String == "identity_mismatch" })
+        // Last-known pins merged into a newer server copy (round 5 M1): the server wins for people.
+        for c in list("mergesLastKnown") {
+            outcome(c, "last known \(c["name"] ?? "")", {
+                try pinsMergeLastKnown(serverJson: try self.text(c["base"]), lastKnownJson: try self.text(c["lastKnown"]))
+            }, same: { self.object($0) == ($1 as? NSDictionary) })
+        }
+        XCTAssertFalse(list("mergesLastKnown").isEmpty)
+        // Declines (round 5 M2): never for a held vault, a current row or one left.
+        for c in list("declines") {
+            let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""], "\(c)")
+            let got = try pinsDecline(pinsJson: p, vaultId: c["vaultId"] as? String ?? "", currentRow: c["currentRow"] as? Bool ?? false, now: 3000)
+            XCTAssertEqual(object(got), c["expected"] as? NSDictionary, "decline \(c)")
+        }
+        XCTAssertFalse(list("declines").isEmpty)
         var step: String? = grandfathered
         for c in list("observations") {
-            let got = try pinsObserve(pinsJson: step, observationJson: try text(c["observation"]))
+            let observation = try text(c["observation"])
+            let got = try pinsObserve(pinsJson: step, observationJson: observation)
             XCTAssertEqual(object(got), c["expected"] as? NSDictionary, "observation \(c)")
-            step = try text(object(got)?["pins"])
+            if c["accept"] as? Bool == true {
+                // The user accepted this step's consent (`first_signed`).
+                step = try pinsAccept(pinsJson: step, observationJson: observation)
+                XCTAssertEqual(object(try XCTUnwrap(step)), c["accepted"] as? NSDictionary, "accepted \(c)")
+            } else {
+                step = try text(object(got)?["pins"])
+            }
         }
         for c in list("legacyWraps") {
             let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""])

@@ -68,6 +68,9 @@ data class Invitation(
 ) {
     /** It can be accepted: checked and signed, or from a server without signed sharing. */
     val acceptable: Boolean get() = name != null && (trust is InvitationTrust.Signed || trust == InvitationTrust.Unchecked)
+
+    /** Decline may be offered: always, except for a signed one the core says isn't `declinable` (a re-join or a vault the account has: round 5). */
+    val declinable: Boolean get() = (trust as? InvitationTrust.Signed)?.declinable ?: true
 }
 
 object Invitations {

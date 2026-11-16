@@ -298,6 +298,45 @@ public enum InvitationTrust: Equatable, Sendable {
     }
 }
 
+/// The flags of a `pins_admit` verdict (round 5): `consent` with `rejoin`, `replaced`, `own`,
+/// `first_signed`, `held` and `declinable`; an `ok` verdict (a plain new invitation) is
+/// declinable and nothing else. Decline is offered only where `declinable` is true.
+public struct ConsentFlags: Equatable, Sendable {
+    /// The verdict was `consent` (not `ok`).
+    public var consent = false
+    public var rejoin = false
+    public var replaced = false
+    public var own = false
+    /// The first signature of a vault from before, at the same key (or a signed replaced key):
+    /// its signer is trusted only with the user's OK.
+    public var firstSigned = false
+    /// A new key for a vault the account already holds (an invitation).
+    public var held = false
+    public var declinable = false
+
+    public init(consent: Bool = false, rejoin: Bool = false, replaced: Bool = false, own: Bool = false, firstSigned: Bool = false,
+                held: Bool = false, declinable: Bool = false) {
+        self.consent = consent
+        self.rejoin = rejoin
+        self.replaced = replaced
+        self.own = own
+        self.firstSigned = firstSigned
+        self.held = held
+        self.declinable = declinable
+    }
+
+    /// From a verdict (`{"status": "consent", …}` or `{"status": "ok", …}`).
+    init(verdict: JSON) {
+        if verdict.str("status") == "consent" {
+            self.init(consent: true, rejoin: verdict["rejoin"]?.bool ?? false, replaced: verdict["replaced"]?.bool ?? false,
+                      own: verdict["own"]?.bool ?? false, firstSigned: verdict["first_signed"]?.bool ?? false,
+                      held: verdict["held"]?.bool ?? false, declinable: verdict["declinable"]?.bool ?? false)
+        } else {
+            self.init(declinable: verdict.str("status") == "ok")
+        }
+    }
+}
+
 /// What accepting an invitation, or consenting to a vault the server added, writes once the user
 /// says yes (`pins_accept` with the same observation the checks admitted): the vault's key epoch
 /// pin with the trusted roster's version and hash (and the hashes of the chain fetched for it),
@@ -317,9 +356,15 @@ public struct Acceptance: Equatable, Sendable {
     var signedShare = false
     /// `{"<version>": rosterHash}` of the chain the checks fetched (nil: none fetched).
     var chainHashes: [String: String]?
+    /// An invitation (`invitation: true` in the observation, round 5): never grandfathered,
+    /// never the account's own vault, and a held vault only as a newer signed key.
+    var invitation = false
+    /// What the verdict said (consent flags, `declinable`): shown, bound to the decision and
+    /// accepted with the same observation.
+    var flags = ConsentFlags()
 
     init(epochPin: String, rosterVersion: UInt64?, roster: String?, rosterHash: String? = nil, signer: SignerInfo?, kind: String = "sealed",
-         signedShare: Bool = false, chainHashes: [String: String]? = nil) {
+         signedShare: Bool = false, chainHashes: [String: String]? = nil, invitation: Bool = false, flags: ConsentFlags = ConsentFlags()) {
         self.epochPin = epochPin
         self.rosterVersion = rosterVersion
         self.roster = roster
@@ -328,12 +373,14 @@ public struct Acceptance: Equatable, Sendable {
         self.kind = kind
         self.signedShare = signedShare
         self.chainHashes = chainHashes
+        self.invitation = invitation
+        self.flags = flags
     }
 
     /// The observation `pins_accept` gets for `vaultId` (the one the checks admitted).
     func observation(vaultId: String, paused: Bool) -> String {
         SignedSharing.observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
-                                  chainHashes: chainHashes, signedShare: signedShare, paused: paused)
+                                  chainHashes: chainHashes, signedShare: signedShare, paused: paused, invitation: invitation)
     }
 
     /// The key id of the key accepting pins (from the epoch pin), as an unsigned vault's consent
@@ -464,15 +511,21 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
     /// The server's version this device's pins build on.
     var serverBase: Int64 { uploaded ? pinsSeq : max(0, pinsSeq - 1) }
 
-    /// The record for `userId` on `server`: this one when it is theirs (or nobody's yet), else an
-    /// empty one (another account's memory under the same local account, after "Change server").
+    /// The record for `userId` on `server`: this one when it is theirs (or nobody's yet); an empty
+    /// one after "Change server" (another server's memory under the same local account); and
+    /// **unreadable** for another user id on the same server (round 5, iOS H: fail closed — "me"
+    /// is always an id the core authenticated, so another id here is never taken for an empty
+    /// memory; a sign-in with the master password clears it first, `VaultRepository.finishSession`).
     func owned(by userId: String, server: String) -> SharingMemoryRecord {
-        if (self.userId.isEmpty || self.userId == userId) && (self.server.isEmpty || self.server == server) {
+        if unreadable { return self }
+        let sameServer = self.server.isEmpty || self.server == server
+        if sameServer && (self.userId.isEmpty || self.userId == userId) {
             var r = self
             r.userId = userId
             r.server = server
             return r
         }
+        if sameServer { return Self.unreadableRecord }
         var fresh = SharingMemoryRecord()
         fresh.userId = userId
         fresh.server = server
@@ -482,10 +535,12 @@ public struct SharingMemoryRecord: Codable, Equatable, Sendable {
     /// `ours` written over this (the stored) record without losing what another process (the app
     /// or its AutoFill extension) stored meanwhile: the higher key pins version with its sealed
     /// copy (at the same version a copy the server has wins), the higher trusted roster per
-    /// vault, the union of the vaults seen signed. Another account's record is replaced.
+    /// vault, the union of the vaults seen signed. Another server's record is replaced; another
+    /// account's record on the same server is kept as it is (round 5: only a sign-in with the
+    /// master password clears it).
     func merging(_ ours: SharingMemoryRecord) -> SharingMemoryRecord {
-        if !userId.isEmpty, !ours.userId.isEmpty, userId != ours.userId { return ours }
         if !server.isEmpty, !ours.server.isEmpty, server != ours.server { return ours }
+        if !userId.isEmpty, !ours.userId.isEmpty, userId != ours.userId { return self }
         var out = self
         if out.userId.isEmpty { out.userId = ours.userId }
         if out.server.isEmpty { out.server = ours.server }
@@ -867,6 +922,12 @@ enum SignedSharing {
         return out
     }
 
+    /// `pins_grandfather`'s candidates (round 5): `[{"vault_id", "key_id"}]`, each vault with the
+    /// key id of the key it has now (only that key is grandfathered).
+    static func candidatesJson(_ list: [(vaultId: String, keyId: String)]) -> String {
+        JSON.array(list.map { JSON.object(["vault_id": .string($0.vaultId), "key_id": .string($0.keyId)]) }).text
+    }
+
     /// One vault row (`docs/ARCHITECTURE.md` "What the apps do", step 1), its key opened with the
     /// row's epoch: (b) the roster chain from the remembered roster ending exactly at the row's,
     /// the key's epoch and commitment against it and this account's role in it; (c) a sealed
@@ -947,7 +1008,8 @@ enum SignedSharing {
         case "consent":
             // Accepting runs `pins_accept` on this same observation.
             return .consent(Acceptance(epochPin: epochPin, rosterVersion: version, roster: trusted, rosterHash: hash,
-                                       signer: signer?.needsPin == true ? signer : nil, kind: kind, signedShare: signedShare, chainHashes: chain),
+                                       signer: signer?.needsPin == true ? signer : nil, kind: kind, signedShare: signedShare, chainHashes: chain,
+                                       flags: ConsentFlags(verdict: verdict)),
                             rejoin: verdict["rejoin"]?.bool ?? false, replaced: verdict["replaced"]?.bool ?? false,
                             own: verdict["own"]?.bool ?? false, signer: signer)
         default:
@@ -959,13 +1021,15 @@ enum SignedSharing {
     /// The observation of a row for `pins_admit` / `pins_observe` / `pins_accept`: `signed_share`
     /// and `paused` always (required since round 4), `chain_hashes` whenever a chain was fetched.
     static func observation(vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String? = nil,
-                            chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool) -> String {
+                            chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool, invitation: Bool = false) -> String {
         var o: [String: JSON] = ["vault_id": .string(vaultId), "key_kind": .string(kind), "signed_share": .bool(signedShare),
                                  "paused": .bool(paused)]
         o["key"] = epochPin.flatMap { try? JSON.parse($0) } ?? .null
         o["roster_version"] = rosterVersion.map { .int(Int64($0)) } ?? .null
         if let rosterHash { o["roster_hash"] = .string(rosterHash) }
         if let chainHashes { o["chain_hashes"] = .object(chainHashes.mapValues { .string($0) }) }
+        // Only when true (unknown fields are refused; an absent one means a vault row).
+        if invitation { o["invitation"] = .bool(true) }
         return JSON.object(o).text
     }
 
@@ -1048,13 +1112,16 @@ enum SignedSharing {
               let epochPin = try? key.epochPinJson(vaultId: inv.vaultId, keyEpoch: epoch) else { return (.refused, nil) }
         let version = rosterVersion(roster)
         guard let hash = try? rosterHash(rosterJson: roster) else { return (.refused, nil) }
+        // An invitation (round 5, `invitation: true`): never the account's own vault (`own_vault`),
+        // a vault it holds only as a newer signed key (`consent {held}`), else `held`; the consent
+        // flags (`rejoin`, `held`, `first_signed`, …) are shown, bound and accepted as they are.
         let o = observation(vaultId: inv.vaultId, kind: "sealed", epochPin: epochPin, rosterVersion: version,
-                            rosterHash: hash, chainHashes: trusted.chainHashes, signedShare: true, paused: me.paused)
+                            rosterHash: hash, chainHashes: trusted.chainHashes, signedShare: true, paused: me.paused, invitation: true)
         guard let text = try? pinsAdmit(pinsJson: pins, observationJson: o), let verdict = try? JSON.parse(text),
-              verdict.str("status") != "refused" else { return (.refused, nil) }
+              verdict.str("status") == "ok" || verdict.str("status") == "consent" else { return (.refused, nil) }
         return (.signed(signer), Acceptance(epochPin: epochPin, rosterVersion: version, roster: roster, rosterHash: hash,
                                             signer: signer.needsPin ? signer : nil, kind: "sealed", signedShare: true,
-                                            chainHashes: trusted.chainHashes))
+                                            chainHashes: trusted.chainHashes, invitation: true, flags: ConsentFlags(verdict: verdict)))
     }
 
     /// A roster's key epoch (read only after the core verified the roster).
@@ -1274,6 +1341,8 @@ public enum SharingText {
             case "downgraded": refused + " It was signed before, and your server now sends it without its signature or member list."
             case "missing_epoch": refused + " Your server didn't say which key it uses."
             case "roster_forked": refused + " Your server sent two different member lists with the same number."
+            case "own_vault": refused + " Your server sent it as an invitation, but it is your own vault."
+            case "held": refused + " Your server sent it as an invitation, but you already have this vault."
             case "pins_unavailable": pinsUnavailable
             case "memory_unreadable": memoryUnreadable
             default: refused
@@ -1321,6 +1390,47 @@ public enum SharingText {
             return "The key of \(vault) was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key."
         }
         return "The key of \(vault) was replaced and signed by \(signer.heading) for the first time. Compare their fingerprint before you accept."
+    }
+
+    /// A vault from before (accepted, never seen signed), now signed for the first time (round 5
+    /// `first_signed`): its first signer is trusted only with the user's OK.
+    public static func firstSigned(_ name: String?, signer: SignerInfo) -> String {
+        (name.map { "\u{201C}\($0)\u{201D}" } ?? "This vault") + " is signed for the first time, by \(signer.heading). Compare their fingerprint before you accept."
+    }
+
+    /// An invitation with a new key for a vault the account already has (round 5 `held`).
+    public static func held(_ name: String?) -> String {
+        "This is a new key for " + (name.map { "\u{201C}\($0)\u{201D}" } ?? "a vault") + ", which you already have. Accept only if someone in this vault just replaced its key."
+    }
+
+    /// What the app says about a vault the server added (consent) or an invitation whose verdict
+    /// carries consent flags (round 5: `rejoin`, `held`, `first_signed`, `replaced`), nil for a
+    /// plain invitation. A replaced key and a first signature name who signed it (pinned email
+    /// first; the fingerprint is shown below), and a vault that was the account's own says so first.
+    public static func consentText(_ inv: Invitation) -> String? {
+        let signer: SignerInfo? = if case .signed(let s)? = inv.trust { s } else { nil }
+        let flags = inv.acceptance?.flags ?? ConsentFlags()
+        let text: String
+        switch inv.consent {
+        case .replaced?: text = replaced(inv.name, signer: signer)
+        case .rejoin?: text = rejoin(inv.name)
+        case .added?:
+            if flags.firstSigned, let signer { text = firstSigned(inv.name, signer: signer) } else { text = consent(inv.name) }
+        case nil:
+            guard flags.consent else { return nil }
+            if flags.rejoin {
+                text = rejoin(inv.name)
+            } else if flags.held {
+                text = held(inv.name)
+            } else if flags.replaced {
+                text = replaced(inv.name, signer: signer)
+            } else if flags.firstSigned, let signer {
+                text = firstSigned(inv.name, signer: signer)
+            } else {
+                return nil
+            }
+        }
+        return inv.own || flags.own ? ownVault(inv.name) + " " + text : text
     }
 
     /// Before the consent text of a vault the account held with its own key wrap.

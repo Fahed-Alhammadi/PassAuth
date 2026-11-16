@@ -4,7 +4,8 @@ import { friendlyError, usePolicies } from "../lib/api";
 import { anyAttachments, stripAttachments } from "../lib/attachments";
 import { downloadFile } from "../lib/kit";
 import { exportAllowed } from "../lib/policies";
-import { exportVaultCsv, exportVaultEncrypted, exportVaultJson, reauth, useVault } from "../lib/vault";
+import { cleanText } from "../lib/signing";
+import { exportVaultCsv, exportVaultEncrypted, exportVaultJson, reauth, useVault, type BlockedVault, type ConsentVault } from "../lib/vault";
 import "../styles/tools.css";
 
 type Format = "encrypted" | "json" | "csv";
@@ -16,6 +17,17 @@ const FORMATS: { value: Format; title: string; text: string }[] = [
 ];
 
 const save = (name: string, text: string, type: string) => downloadFile(name, text, type);
+
+/**
+ * The vaults this export leaves out because they aren't opened here (signed sharing): those waiting for the user's OK, by
+ * name, and those PassAuth couldn't verify (never opened, so only counted). Null when there are none.
+ */
+export function leftOutText(consents: readonly ConsentVault[], blocked: readonly BlockedVault[]): string | null {
+  const names = consents.map((c) => `"${cleanText(c.name) || "Shared vault"}"`);
+  if (blocked.length) names.push(blocked.length === 1 ? "1 shared vault PassAuth couldn't verify" : `${blocked.length} shared vaults PassAuth couldn't verify`);
+  if (!names.length) return null;
+  return `Not in this export, because they aren't opened on this device: ${names.join(", ")}. Accept or check them in Settings, Vaults & sharing first if you need them.`;
+}
 
 /** Export the vault to a file, unless the server's admin turned export off (policy `disable_export`). */
 export function ExportPage() {
@@ -39,7 +51,8 @@ function ExportTurnedOff() {
 
 /** Runs in the browser; nothing new is sent to the server. */
 function ExportForm() {
-  const { items } = useVault();
+  const { items, consents, blockedVaults } = useVault();
+  const leftOut = leftOutText(consents, blockedVaults);
   const [format, setFormat] = useState<Format>("encrypted");
   const [exportPassword, setExportPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -121,6 +134,11 @@ function ExportForm() {
             hint={<span className="field-hint">Confirms that it's you exporting the vault.</span>}
           />
 
+          {leftOut && (
+            <p className="small muted" role="note">
+              {leftOut}
+            </p>
+          )}
           {withFiles && (
             <p className="small muted" role="note">
               Files attached to items aren't exported. Download the ones you need from each item.

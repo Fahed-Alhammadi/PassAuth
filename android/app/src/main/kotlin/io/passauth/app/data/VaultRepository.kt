@@ -8,7 +8,6 @@ import io.passauth.core.EncryptedItem
 import io.passauth.core.LoginRequestKey
 import io.passauth.core.MasterKeys
 import io.passauth.core.VaultKey
-import io.passauth.core.accountFromSessionBytes
 import io.passauth.core.createAccountWithKdf
 import io.passauth.core.deriveMasterKeys
 import io.passauth.core.newId
@@ -829,9 +828,8 @@ class VaultRepository(
             val s = store.get()
             val id = s.activeId
             val a = s.active ?: throw UserException("Sign in first.")
-            val bundle = a.bundle ?: api.call(id, "/sync").jsonObject["bundle"].toString().also { b ->
-                store.updateAccount(id) { it.copy(bundle = b) }
-            }
+            val fetched = a.bundle == null
+            val bundle = a.bundle ?: api.call(id, "/sync").jsonObject["bundle"].toString()
             val b = AppJson.parseToJsonElement(bundle).jsonObject
             val skEnabled = b.bool("secret_key_enabled")
             val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
@@ -849,6 +847,8 @@ class VaultRepository(
             if (sk != null && secretKey?.isNotBlank() == true) {
                 store.update { it.copy(secretKeys = it.secretKeys + (a.email.lowercase() to sk)) }
             }
+            // A bundle fetched now is kept only once it opened under the master password (its account id authenticated).
+            if (fetched) store.updateAccount(id) { it.copy(bundle = bundle) }
             openSession(id, Session(b.str("account_id"), account))
             syncOrGate(fallbackToCache = true, cacheFirst = true)
             refreshPoliciesLater(id)
@@ -885,10 +885,10 @@ class VaultRepository(
             val bundle = a.bundle ?: throw UserException("Unlock with your master password.")
             val bytes = Keystore.open(cipher, sealed)
             val account = try {
-                core { accountFromSessionBytes(bundleAccountId(bundle), bytes) }
+                core { AccountBundles.restore(bundle, bytes) }
             } finally {
                 bytes.fill(0)
-            }
+            } ?: throw UserException("Unlock with your master password.")
             openSession(id, Session(bundleAccountId(bundle), account))
             syncOrGate(fallbackToCache = true, cacheFirst = true)
             refreshPoliciesLater(id)
@@ -912,8 +912,12 @@ class VaultRepository(
             if (a.tokens == null || sessions.containsKey(id)) continue
             runCatching {
                 val bytes = Base64.decode(keys)
-                val account = core { accountFromSessionBytes(bundleAccountId(bundle), bytes) }
-                bytes.fill(0)
+                // Only a session whose stored bundle is its own (round 5 iOS H): else the master password is asked.
+                val account = try {
+                    core { AccountBundles.restore(bundle, bytes) }
+                } finally {
+                    bytes.fill(0)
+                } ?: return@runCatching
                 openSession(id, Session(bundleAccountId(bundle), account))
                 restored = true
             }
@@ -1172,11 +1176,14 @@ class VaultRepository(
                     // Unlocked and shown meanwhile: its own sync writes the copy.
                     if (sessions.containsKey(id) && activeId() == id) return@withLock
                     withContext(Dispatchers.IO) { store.writeCache(id, text) }
+                    // Locked: a bundle naming another account than the one kept is never stored (round 5 iOS H);
+                    // an unlocked (inactive) session checks it is the account's own.
+                    val unlocked = sessions[id]?.account
                     store.updateAccount(id) {
                         it.copy(
                             lastSync = System.currentTimeMillis(),
                             name = (next.user as? JsonObject)?.strOrNull("name") ?: it.name,
-                            bundle = next.bundle?.toString() ?: it.bundle,
+                            bundle = AccountBundles.toStore(unlocked, it.bundle, next.bundle?.toString()),
                         )
                     }
                 }
@@ -1303,7 +1310,8 @@ class VaultRepository(
                     it.copy(
                         lastSync = System.currentTimeMillis(),
                         name = (snap.user as? JsonObject)?.strOrNull("name") ?: it.name,
-                        bundle = snap.bundle?.toString() ?: it.bundle,
+                        // Only the unlocked account's own bundle is stored (round 5 iOS H).
+                        bundle = AccountBundles.toStore(session.account, it.bundle, snap.bundle?.toString()),
                     )
                 }
             }
@@ -1555,7 +1563,7 @@ class VaultRepository(
                 api.call(id, "/vaults/${enc(vaultId)}/members")
                 true
             } catch (e: ApiException) {
-                if (e.status == 403 || e.status == 404) false else null
+                if (SignedSharing.removalConfirmed(e)) false else null
             }
         }
         // Memory is keyed by the server and the account id the core authenticated (never the server's word).
@@ -1607,8 +1615,21 @@ class VaultRepository(
             } catch (_: Exception) {
                 // Identity or pins not reachable now: checked with what this phone has.
             }
-            // Only the unsigned shared vaults present now that this phone's copy from an earlier session had (signed ones are checked on their own).
-            sh.grandfather(snap.vaults.filter { it.keyKind == "sealed" && (it.share == null || it.share is kotlinx.serialization.json.JsonNull) }.map { it.id }, online)
+            // Only the unsigned shared vaults present now that this phone's copy from an earlier session had (signed ones are
+            // checked on their own), each with the key id of the key it has now (round 5); one whose key doesn't open isn't kept.
+            sh.grandfather(
+                snap.vaults.filter { it.keyKind == "sealed" && (it.share == null || it.share is kotlinx.serialization.json.JsonNull) }.mapNotNull { v ->
+                    runCatching {
+                        val k = session.account.openVaultKey(v.id, v.wrappedKey, "sealed", (v.keyEpoch ?: 0).toULong(), false)
+                        try {
+                            v.id to k.keyId(v.id)
+                        } finally {
+                            k.destroy()
+                        }
+                    }.getOrNull()
+                },
+                online,
+            )
             sh.beginChecks()
             val vaults = mutableMapOf<String, VaultCheck>()
             val names = mutableMapOf<String, String>()
@@ -2101,7 +2122,8 @@ class VaultRepository(
                 // The tombstone at the roster version the check verified (a later share needs a newer one),
                 // never for a vault id this account uses now (a made-up invitation carrying it).
                 val rows = copy?.takeIf { it.first == id }?.second?.vaults.orEmpty().map { it.id }.toSet()
-                sh.declineInvitation(vaultId, (shown.trust as? InvitationTrust.Signed)?.rosterVersion, vaultHeaders.keys, rows)
+                // Only where it may be declined; `pins_decline` writes nothing for a vault this sync lists as a row.
+                sh.declineInvitation(vaultId, shown.trust, rows)
                 savePinsQuietly(sh)
             }
             id
@@ -2531,6 +2553,8 @@ class VaultRepository(
             val oldKey = vaultKeys[vaultId] ?: return Rotation.Skipped
             val oldEpoch = header.keyEpoch
             val sh = session.sharing?.takeIf { signedSharingOn(id, session, online = true) }
+            // Round 5 Info: no key replacement (own vaults included) without loaded, readable key pins.
+            sh?.requireReadyToReplace()
             val me = sh?.me ?: session.accountId
             val members = api.call(id, "/vaults/$enc/members") as? JsonObject ?: throw UserException(EmergencyClient.UNEXPECTED)
             val rows = (members["members"] as? kotlinx.serialization.json.JsonArray)?.map { it as? JsonObject ?: throw UserException(EmergencyClient.UNEXPECTED) }

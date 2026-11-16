@@ -148,23 +148,31 @@ describe("signed sharing vectors", () => {
   it("checks key epochs with key ids, raises, merges, leaves and grandfathers pins", () => {
     for (const c of v.epochChecks) expect(core.epochCheck(c.pinned, c.current)).toBe(c.expected);
     const ep = (k: core.VaultKey, e: number) => k.epochPin(v.vault.id, e);
-    const withEpoch = core.pinsSetEpoch(v.keyPins, v.vault.id, ep(vaultKey, 1), 2);
+    const hashOf = (name: string) => v.rosters.find((r) => r.name === name)!.hash;
+    // A key this device gave the vault itself (`pinsRecordRotation`): a roster version only ever with its hash.
+    const record = (p: core.KeyPins | null, current: core.EpochPin, rosterVersion: number | null = null, name: string | null = null) =>
+      core.pinsRecordRotation(p, v.vault.id, "sealed", current, rosterVersion, name ? hashOf(name) : null);
+    const withEpoch = record(v.keyPins, ep(vaultKey, 1), 2, "v2");
     expect(withEpoch).toEqual(v.keyPinsWithEpoch);
+    expect(outcome(() => record(withEpoch, ep(vaultKey, 0), 2, "v2")).error).toBe("rollback");
+    expect(outcome(() => record(withEpoch, ep(secondKey, 2), 3)).error).toBeDefined();
     for (const c of v.pinsEpochChecks) expect(core.pinsEpochCheck(withEpoch, v.vault.id, c.current, c.rosterVersion), JSON.stringify(c)).toBe(c.expected);
-    const raised = core.pinsSetEpoch(withEpoch, v.vault.id, ep(secondKey, 2), 3);
+    const raised = record(withEpoch, ep(secondKey, 2), 3, "v3");
     expect(raised).toEqual(v.keyPinsRaised);
-    const other = core.pinsSetEpoch(null, v.vault.id, ep(secondKey, 2), null);
+    const other = record(null, ep(secondKey, 2));
     expect(core.mergePins(withEpoch, other).epochs).toEqual(v.mergedEpochs);
     const left = core.pinsLeave(raised, v.vault.id, 3, 2000);
     expect(left).toEqual(v.keyPinsLeft);
-    const grandfathered = core.pinsGrandfather(v.keyPins, [v.vault.id], true);
+    // Grandfathered vaults are bound to the key id they have now (round 5).
+    const candidates = [{ vault_id: v.vault.id, key_id: v.keyIds.first }];
+    const grandfathered = core.pinsGrandfather(v.keyPins, candidates, true);
     expect(grandfathered).toEqual(v.keyPinsGrandfathered);
+    expect(outcome(() => core.pinsGrandfather(v.keyPins, [v.vault.id] as never, true)).error).toBeDefined();
     // Trust memory missing (an identity from before, no key pins): nothing grandfathered.
-    const withheld = core.pinsGrandfather(v.keyPins, [v.vault.id], false);
+    const withheld = core.pinsGrandfather(v.keyPins, candidates, false);
     expect(withheld).toEqual(v.keyPinsWithheld);
-    const unsigned = core.pinsSetEpoch(grandfathered, v.vault.id, ep(vaultKey, 1), null);
+    const unsigned = record(grandfathered, ep(vaultKey, 1));
     expect(unsigned).toEqual(v.keyPinsUnsigned);
-    const hashOf = (name: string) => v.rosters.find((r) => r.name === name)!.hash;
     for (const r of v.rosters) expect(core.rosterHash(r.json), r.name).toBe(r.hash);
     const rosterMax = core.pinsObserve(withEpoch, {
       vault_id: v.vault.id,
@@ -191,15 +199,22 @@ describe("signed sharing vectors", () => {
     for (const c of v.admissions) expect(core.pinsAdmit(sets[c.pins], c.observation), JSON.stringify(c)).toEqual(c.expected);
     // Some admissions carry `chain_hashes` (round 4): a chain that forks the pinned roster is refused.
     expect(v.admissions.some((c) => c.observation.chain_hashes)).toBe(true);
-    // Accepting (consents, invitations): pins like pinsSetEpoch plus the roster hash and `own`, or throws what admission refuses.
+    // Accepting (consents, invitations): pins like pinsRecordRotation plus the roster hash and `own`, or throws what admission refuses.
     for (const c of v.accepts) expect(outcome(() => core.pinsAccept(sets[c.pins], c.observation)), JSON.stringify(c)).toEqual(want(c));
     // Merges are monotone: retired keys never come back, tombstones absorb the pins they beat, re-joins are explicit.
-    for (const c of v.merges) expect(core.mergePins(c.base, c.ours), c.name).toEqual(c.expected);
+    for (const c of v.merges) expect(outcome(() => core.mergePins(c.base, c.ours)), c.name).toEqual(want(c));
+    // A device's last-known copy merged into a newer server copy (round 5 M1): the server wins for people pinned with
+    // another identity (no rewrite loop); keys, tombstones, verified marks are kept; another own identity throws.
+    for (const c of v.mergesLastKnown) expect(outcome(() => core.pinsMergeLastKnown(c.base, c.lastKnown)), c.name).toEqual(want(c));
+    // Declines (round 5 M2): never a vault held, a current row or one left; else a tombstone at roster version 0.
+    for (const c of v.declines) expect(core.pinsDecline(sets[c.pins], c.vaultId, c.currentRow, 3000), JSON.stringify([c.pins, c.vaultId, c.currentRow])).toEqual(c.expected);
     let step = grandfathered;
     for (const c of v.observations) {
       const observed = core.pinsObserve(step, c.observation);
       expect(observed, JSON.stringify(c.observation)).toEqual(c.expected);
-      step = observed.pins;
+      // `accept`: the user accepted that step's consent (`first_signed`: re-signed at the same key, round 5).
+      step = c.accept ? core.pinsAccept(step, c.observation) : observed.pins;
+      if (c.accept) expect(step, "accepted").toEqual(c.accepted);
     }
     for (const c of v.legacyWraps) expect(core.pinsLegacyWrapAllowed(sets[c.pins], v.vault.id)).toBe(c.expected);
   });

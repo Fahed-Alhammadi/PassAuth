@@ -135,8 +135,15 @@ extension VaultRepository {
         var pins = prepared.pins
         var changed = prepared.changed
         let hadPins = pins != nil
-        let ident = await prepareSigning(id, session, &snapshot, pins: &pins, changed: &changed, memory: &memory, network: network,
-                                         mayCreate: prepared.unavailable == nil, ownBefore: prepared.deviceOwn, earlier: earlier)
+        var ident = await prepareSigning(id, session, &snapshot, pins: &pins, changed: &changed, memory: &memory, network: network,
+                                         mayCreate: prepared.unavailable == nil && !prepared.identityMismatch, ownBefore: prepared.deviceOwn,
+                                         earlier: earlier)
+        if prepared.identityMismatch {
+            // Two own identities (round 5): merge nothing, write nothing, pause sharing.
+            session.signingPaused = true
+            ident.known = false
+            ident.created = false
+        }
         // Kept only once the server has shown it signs (rule 4): its config lists the feature (and
         // an identity upload wasn't answered 404), its answers carry signing, or this device
         // already has memory of it.
@@ -159,8 +166,19 @@ extension VaultRepository {
                     memory.missing = sealedIds.filter { !candidates.contains($0) }
                     memory.missingDevice = true
                 }
-                let ids = ident.created ? snapshot.vaults.map(\.id).filter { candidates.contains($0) } : []
-                if let next = try? pinsGrandfather(pinsJson: pins, vaultIds: ids, createdIdentity: ident.created) {
+                // Each with the key it has now (round 5): a planted key under a grandfathered id
+                // later needs consent.
+                let account = session.account
+                let pinsNow = pins
+                let rows = ident.created ? snapshot.vaults.filter { candidates.contains($0.id) } : []
+                let ids: [(vaultId: String, keyId: String)] = rows.compactMap { v in
+                    let legacy = (try? pinsLegacyWrapAllowed(pinsJson: pinsNow, vaultId: v.id)) ?? true
+                    guard let key = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
+                                                              keyEpoch: UInt64(max(0, v.keyEpoch ?? 0)), legacyAllowed: legacy),
+                          let keyId = try? key.keyId(vaultId: v.id) else { return nil }
+                    return (v.id, keyId)
+                }
+                if let next = try? pinsGrandfather(pinsJson: pins, vaultsJson: SignedSharing.candidatesJson(ids), createdIdentity: ident.created) {
                     pins = next
                     changed = true
                 }
@@ -174,13 +192,15 @@ extension VaultRepository {
         }
         let firstSyncDone = keep && prepared.unavailable == nil && ident.known && !session.signingPaused
             && KeyPinsReader.field(pins, "grandfathered") != nil
-        // Tombstones whose write failed before (a decline the server already took): written now,
-        // except for a vault this account uses now (a decline never tombstones a usable vault).
+        // Declines whose key pins write failed before: written now with `pins_decline` (round 5,
+        // iOS L): never for a vault the account holds (an epoch pin) or one of this sync's vault
+        // rows, whatever its verdict, and always at roster version 0.
         let waiting = (memory.tombstones ?? [:]).merging(pendingTombstones[id] ?? [:]) { max($0, $1) }
-        if network, keep, prepared.unavailable == nil, !waiting.isEmpty {
-            let usable = Set(vault?.vaults.map(\.id) ?? [])
-            for (vault, version) in waiting where !usable.contains(vault) {
-                guard let next = try? pinsLeave(pinsJson: pins, vaultId: vault, rosterVersion: version, now: now) else { continue }
+        if network, keep, prepared.unavailable == nil, !session.signingPaused, !waiting.isEmpty {
+            let rows = Set(snapshot.vaults.map(\.id))
+            for vault in waiting.keys.sorted() {
+                guard let next = try? pinsDecline(pinsJson: pins, vaultId: vault, currentRow: rows.contains(vault), now: now),
+                      Self.pinsChanged(from: pins, to: next) else { continue }
                 pins = next
                 changed = true
             }
@@ -210,7 +230,7 @@ extension VaultRepository {
         // Without the key pins to check against, nothing is kept; a list the server withholds
         // isn't written over (this device's changes wait on it).
         inputs.keep = keep && prepared.unavailable == nil
-        inputs.holdPins = prepared.withheld
+        inputs.holdPins = prepared.withheld || prepared.identityMismatch
         inputs.notice = notice
         inputs.firstSyncDone = firstSyncDone
         session.sharingProven = inputs.keep
@@ -267,7 +287,9 @@ extension VaultRepository {
             let account = session.account
             if let j = try? await api.call(id, "/account/key-pins"), let seq = j["seq"]?.number, seq >= 0, let sealed = j["key_pins"]?.string,
                let opened = try? await core({ try account.openKeyPins(sealed: sealed, seq: UInt64(seq)) }) {
-                pins = pins.flatMap { try? mergePins(baseJson: opened, oursJson: $0) } ?? opened
+                // Read only: the device's last-known pins merged into the server's (round 5 M1);
+                // another own identity → only this unlock's.
+                pins = pins.map { (try? pinsMergeLastKnown(serverJson: opened, lastKnownJson: $0)) ?? $0 } ?? opened
             }
         }
         // The account has key pins (the copy says so) but none can be had: not used (as offline).
@@ -303,10 +325,15 @@ extension VaultRepository {
         if memory.unreadable { return nil }
         let server = store.get().file.accounts[id]?.server ?? ""
         let mine = memory.owned(by: session.meId, server: server)
+        if mine.unreadable { return nil }
         if let seen = mine.seen, mine.userId == memory.userId || memory.userId.isEmpty {
             session.earlierCopy = Set(seen)
             return session.earlierCopy
         }
+        // The offline copy (which a background refresh may have written while locked) stands in
+        // only for an app from before that kept no device memory at all (round 5, iOS H): once
+        // any record exists, its `seen` list (or none) is the earlier copy.
+        if !memory.isEmpty || memory.seen != nil || memory.candidates != nil || !memory.userId.isEmpty { return nil }
         let copy: SyncSnapshot?
         if let given { copy = given } else { copy = await readSnapshot(id) }
         guard let copy else { return nil }
@@ -395,8 +422,9 @@ extension VaultRepository {
                 if let made = await madeIdentity(id, session, memory: &memory, earlier: earlier) {
                     do {
                         let answer = try await api.call(id, "/account/identity", body: made.record, method: "PUT")
-                        // Answered: not sent again by this unlock.
+                        // Answered: not sent again by this unlock; the server signs.
                         session.identityTried = true
+                        memory.proven = true
                         if answer["created"]?.bool == true {
                             session.openedSigning = made.identity
                             session.signingRecord = made.record
@@ -414,6 +442,7 @@ extension VaultRepository {
                         // Another device made one meanwhile: open the stored one. Grandfathering
                         // waits for the next sync (rule 3).
                         session.identityTried = true
+                        memory.proven = true
                         if let fresh = try? await fetchSnapshot(id), case .object? = fresh.user?["identity"] {
                             snapshot = fresh
                             var other = memory
@@ -465,7 +494,7 @@ extension VaultRepository {
         memory.pendingIdentity = made.identity.identityHash()
         memory.pendingRecord = made.recordJson
         if memory.candidates == nil { memory.candidates = (earlier ?? []).sorted() }
-        memory.proven = true
+        // Not `proven` yet: only an answer other than 404 shows the server signs (round 5 Info).
         guard saveMemory(id, session, memory) else { return nil }
         return (made.identity, record)
     }
@@ -488,6 +517,9 @@ extension VaultRepository {
         var fetched = false
         /// The own identity this device's pins remembered before this sync (nil: none).
         var deviceOwn: String?
+        /// The server's newer pins remember another own identity than this device's (round 5):
+        /// nothing merged or written, sharing paused.
+        var identityMismatch = false
     }
 
     /// The key pins to check with. With the server: a newer list (`user.key_pins_seq` above what
@@ -539,15 +571,36 @@ extension VaultRepository {
             return seq > 0 || serverSeq > 0 ? missingNewer() : out
         }
         let ours = out.pins
+        // This device's pins merged into every newer server copy (cross-client rule 5), not only
+        // with unsent changes: unsent changes on top (`merge_pins`, this device's decision wins);
+        // otherwise its last-known pins with `pins_merge_last_known` (round 5 M1: only what never
+        // goes back, the server's copy wins for people pinned with another identity, so two
+        // devices don't rewrite each other's pins in a loop). Written back (`finishSharing`) only
+        // when the merge adds anything. Another own identity on either side (`identity_mismatch`):
+        // nothing merged or written, the device's copy stays, sharing paused.
+        var merged = opened
+        if let ours {
+            do {
+                merged = memory.uploaded ? try pinsMergeLastKnown(serverJson: opened, lastKnownJson: ours)
+                    : try mergePins(baseJson: opened, oursJson: ours)
+            } catch let e as CoreError {
+                if case .IdentityMismatch = e {
+                    out.identityMismatch = true
+                    return out
+                }
+                // Unmergeable otherwise: keep the device's list (as withheld).
+                out.withheld = true
+                return out
+            } catch {
+                out.withheld = true
+                return out
+            }
+        }
         memory.pinsSeq = seq
         memory.sealedPins = sealed
         memory.uploaded = true
         out.pins = opened
-        // This device's last-known pins merged into every newer server copy (cross-client rule
-        // 5), not only with unsent changes: retired keys, tombstones and rosters it knows are never
-        // dropped because another device wrote first. Written back (`finishSharing`) when the
-        // merge adds anything.
-        if let ours, let merged = try? mergePins(baseJson: opened, oursJson: ours), !Self.samePins(merged, opened) {
+        if !Self.samePins(merged, opened) {
             out.pins = merged
             out.changed = true
         }
@@ -770,13 +823,46 @@ extension VaultRepository {
         saveMemory(id, session, memory)
     }
 
-    /// Leaving or declining a vault: its tombstone in the account's key pins (with the trusted
-    /// roster version then, 0: none), so the server can't bring it back unless it is re-shared
-    /// with a newer roster. The caller holds the lock.
-    func leave(_ id: String, _ session: Session, vaultId: String, rosterVersion: UInt64) async throws {
+    /// Declining an invitation or a vault the server added (round 5 M2, `pins_decline`): a
+    /// tombstone at roster version 0, and only for a vault the account doesn't hold (no epoch
+    /// pin), hasn't left already and that isn't one of this sync's vault rows (`currentRow`,
+    /// whatever its verdict); otherwise nothing changes. A server-chosen roster version never
+    /// goes into a tombstone. The caller holds the lock.
+    func decline(_ id: String, _ session: Session, vaultId: String, currentRow: Bool) async throws {
         let now = Int64(Date().timeIntervalSince1970)
         try await updatePins(id, session) { pins in
-            try pinsLeave(pinsJson: pins, vaultId: vaultId, rosterVersion: rosterVersion, now: now)
+            let next = try pinsDecline(pinsJson: pins, vaultId: vaultId, currentRow: currentRow, now: now)
+            return Self.pinsChanged(from: pins, to: next) ? next : nil
+        }
+    }
+
+    /// Whether `next` says something `pins` (nil: none yet) doesn't: an empty list made from none
+    /// isn't a change.
+    nonisolated static func pinsChanged(from pins: String?, to next: String) -> Bool {
+        if let pins { return !samePins(next, pins) }
+        guard case .object(let o)? = try? JSON.parse(next) else { return true }
+        return o.contains { key, value in
+            switch (key, value) {
+            case ("version", _), (_, .null): false
+            case (_, .array(let a)): !a.isEmpty
+            case (_, .object(let m)): !m.isEmpty
+            default: true
+            }
+        }
+    }
+
+    /// After this device's own key replacement was accepted (step 5): the new key recorded in
+    /// the account's key pins (`pins_record_rotation`, round 5; the roster it signed with its
+    /// hash, or neither), kept on the device as an unsent change until written. Best effort:
+    /// the next sync observes the account's own row anyway.
+    func recordOwnRotation(_ id: String, _ session: Session, vaultId: String, epochPin: String, roster: String?) async {
+        guard signedSharingOn(id, copySnapshot) else { return }
+        let version = roster.flatMap(SignedSharing.rosterVersion)
+        let hash = roster.flatMap { try? rosterHash(rosterJson: $0) }
+        guard (version == nil) == (hash == nil) else { return }
+        try? await updatePins(id, session) { pins in
+            try pinsRecordRotation(pinsJson: pins, vaultId: vaultId, keyKind: VaultInfo.accountKeyKind, currentJson: epochPin,
+                                   rosterVersion: version, rosterHash: hash)
         }
     }
 
@@ -882,10 +968,11 @@ extension VaultRepository {
         let account = session.account
         let name = info.name
         let digest = review.digest
-        let made: (keys: [JSON], items: [JSON], meta: String, roster: String)
+        let made: (keys: [JSON], items: [JSON], meta: String, roster: String, epochPin: String)
         do {
             made = try await core {
                 let nv = try account.newVaultKey(vaultId: vid)
+                let epochPin = try nv.key.epochPinJson(vaultId: vid, keyEpoch: next)
                 var keys: [JSON] = []
                 for m in members {
                     if m.userId == me {
@@ -899,7 +986,7 @@ extension VaultRepository {
                 let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
                 let roster = try signing.signRoster(vaultKey: nv.key, vaultId: vid, previous: trusted, keyEpoch: next, membersJson: membersJson,
                                                     reviewed: digest)
-                return (keys, items, meta, roster)
+                return (keys, items, meta, roster, epochPin)
             }
         } catch let e as CoreError {
             if case .ReviewMismatch = e { throw moved }
@@ -922,8 +1009,10 @@ extension VaultRepository {
         } catch let e as ApiError where e.status == 409 && e.hasCode("member_roster_changed") {
             throw MembersChanged(text: apiErrorText(e))
         }
+        // The key this device gave the vault, with the roster it signed (round 5).
+        await recordOwnRotation(id, session, vaultId: vid, epochPin: made.epochPin, roster: made.roster)
         // The roster this device signed is the one it trusts now; members seen for the first time
-        // (in the review) are pinned, unverified.
+        // in a version-1 review are pinned, unverified, with the emails the review showed.
         var remembered = loadMemory(id, session)
         remembered.rosters[vid] = made.roster
         if !onlyMe, !remembered.signed.contains(vid) { remembered.signed.append(vid) }
@@ -932,15 +1021,17 @@ extension VaultRepository {
         // this second members answer's.
         let shownEmails = review.first ? reviewedEmails[vid]?[review.digest] : nil
         reviewedEmails[vid] = nil
-        let toPin = review.members.filter { !$0.isSelf && ($0.pin == "new" || $0.pin == "upgraded") }
+        // A later review shows no one to compare (round 5 Info): people new to the pins stay
+        // unpinned (each is checked, and compared, where they are first shown) instead of being
+        // pinned with an email the user never saw.
+        let toPin = review.first ? review.members.filter { !$0.isSelf && ($0.pin == "new" || $0.pin == "upgraded") } : []
         if !toPin.isEmpty {
             let now = Int64(Date().timeIntervalSince1970)
             try? await updatePins(id, session) { pins in
                 var p = pins
                 for person in toPin {
                     guard let m = members.first(where: { $0.userId == person.userId }) else { continue }
-                    let email = review.first ? shownEmails?[m.userId] : m.email
-                    guard let email else { continue }
+                    guard let email = shownEmails?[m.userId] else { continue }
                     p = try pinSet(pinsJson: p, identityJson: m.identity, email: email, verified: false, now: now)
                 }
                 return p

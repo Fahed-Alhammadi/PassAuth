@@ -141,6 +141,11 @@ public struct AccountData: Codable, Equatable, Sendable {
     public var lastSync: Double = 0
     /// The account bundle (encrypted keys) from the server, as JSON.
     public var bundle: String?
+    /// The account id the core authenticated: set by an unlock with the master password (or
+    /// another device's approval), whose bundle opened under the Account Key (round 5, iOS H).
+    /// Kept session bytes are restored only under it, and a bundle with another `account_id` is
+    /// never stored. nil for records from before (until their next unlock).
+    public var accountId: String?
     /// Face ID / Touch ID unlock is set up (session bytes in a biometry-bound Keychain item).
     public var biometric = false
     /// The server's `/api/config` `features` when last asked (`featuresAt`, unix seconds); nil

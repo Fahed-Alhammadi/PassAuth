@@ -54,11 +54,13 @@ interface SharingVectors {
   keyPinsUnsigned: core.KeyPins;
   keyPinsRosterMax: core.KeyPins;
   keyPinsOwn: core.KeyPins;
-  observations: { observation: core.VaultObservation; expected: core.Observed }[];
+  observations: { observation: core.VaultObservation; expected: core.Observed; accept?: boolean; accepted?: core.KeyPins }[];
   emails: { email: string; expected: string }[];
   admissions: { pins: string; observation: core.VaultObservation; expected: core.Admission }[];
   accepts: ({ pins: string; observation: core.VaultObservation } & Outcome)[];
-  merges: { name: string; base: core.KeyPins; ours: core.KeyPins; expected: core.KeyPins }[];
+  merges: ({ name: string; base: core.KeyPins; ours: core.KeyPins } & Outcome)[];
+  mergesLastKnown: ({ name: string; base: core.KeyPins; lastKnown: core.KeyPins } & Outcome)[];
+  declines: { pins: string; vaultId: string; currentRow: boolean; expected: core.KeyPins }[];
   legacyWraps: { pins: string; expected: boolean }[];
   ownIdentity: { hash: string; pins: core.KeyPins; checks: { pins: string; listed: string | null; expected: string }[] };
 }
@@ -199,22 +201,35 @@ test("signedSharing vectors: key pins, pin checks, reviews, epochs, tombstones, 
   for (const c of V.epochChecks) expect(core.epochCheck(c.pinned, c.current), JSON.stringify(c)).toBe(c.expected);
   const key = aliceKey();
   const second = aliceKey("secondKeyV2");
-  const withEpoch = core.pinsSetEpoch(V.keyPins, VID, key.epochPin(VID, 1), 2);
+  // Round 5: a key this device gave the vault itself is pinned with `pinsRecordRotation` (a roster version only with its hash).
+  const hashOf = (name: string) => V.rosters.find((r) => r.name === name)!.hash;
+  const record = (p: core.KeyPins | null, current: core.EpochPin, rosterVersion: number | null = null, roster: string | null = null) =>
+    core.pinsRecordRotation(p, VID, "sealed", current, rosterVersion, roster ? hashOf(roster) : null);
+  const withEpoch = record(V.keyPins, key.epochPin(VID, 1), 2, "v2");
   expect(withEpoch).toStrictEqual(V.keyPinsWithEpoch);
+  expect(codeOf(() => record(withEpoch, key.epochPin(VID, 0), 2, "v2"))).toBe("rollback");
+  // A roster version without its hash (or a hash without its version) throws.
+  expect(codeOf(() => record(withEpoch, second.epochPin(VID, 2), 3))).not.toBe("no error");
+  expect(codeOf(() => core.pinsRecordRotation(withEpoch, VID, "sealed", second.epochPin(VID, 2), null, hashOf("v3")))).not.toBe("no error");
   for (const c of V.pinsEpochChecks) expect(core.pinsEpochCheck(withEpoch, VID, c.current, c.rosterVersion), JSON.stringify(c)).toBe(c.expected);
-  const raised = core.pinsSetEpoch(withEpoch, VID, second.epochPin(VID, 2), 3);
+  const raised = record(withEpoch, second.epochPin(VID, 2), 3, "v3");
   expect(raised).toStrictEqual(V.keyPinsRaised);
-  expect(core.mergePins(withEpoch, core.pinsSetEpoch(null, VID, second.epochPin(VID, 2), null)).epochs).toStrictEqual(V.mergedEpochs);
+  expect(core.mergePins(withEpoch, record(null, second.epochPin(VID, 2))).epochs).toStrictEqual(V.mergedEpochs);
   const left = core.pinsLeave(raised, VID, 3, 2000);
   expect(left).toStrictEqual(V.keyPinsLeft);
-  const grandfathered = core.pinsGrandfather(V.keyPins, [VID], true);
+  // Round 5: each grandfathered vault with the key id it has now (only that key is covered).
+  const candidates = [{ vault_id: VID, key_id: V.keyIds.first }];
+  const grandfathered = core.pinsGrandfather(V.keyPins, candidates, true);
   expect(grandfathered).toStrictEqual(V.keyPinsGrandfathered);
+  expect(grandfathered.grandfathered?.[VID]).toBe(V.keyIds.first);
   // Set once: a second call changes nothing.
-  expect(core.pinsGrandfather(grandfathered, ["00000000-0000-4000-8000-0000000000f2"], true)).toStrictEqual(grandfathered);
+  expect(core.pinsGrandfather(grandfathered, [{ vault_id: "00000000-0000-4000-8000-0000000000f2", key_id: V.keyIds.second }], true)).toStrictEqual(grandfathered);
+  // A bare vault id (the format from before round 5) is refused.
+  expect(codeOf(() => core.pinsGrandfather(V.keyPins, [VID] as unknown as core.GrandfatherCandidate[], true))).not.toBe("no error");
   // Trust memory missing (the identity wasn't created by this unlock): an empty list.
-  const withheld = core.pinsGrandfather(V.keyPins, [VID], false);
+  const withheld = core.pinsGrandfather(V.keyPins, candidates, false);
   expect(withheld).toStrictEqual(V.keyPinsWithheld);
-  const unsigned = core.pinsSetEpoch(grandfathered, VID, key.epochPin(VID, 1), null);
+  const unsigned = record(grandfathered, key.epochPin(VID, 1));
   expect(unsigned).toStrictEqual(V.keyPinsUnsigned);
   const rosterMax = core.pinsObserve(withEpoch, {
     vault_id: VID,
@@ -236,12 +251,20 @@ test("signedSharing vectors: key pins, pin checks, reviews, epochs, tombstones, 
   // Accepts (consents and invitations) go through `pinsAccept`: what it pins, or the refusal it throws.
   for (const c of V.accepts) outcome(c, () => core.pinsAccept(sets[c.pins], c.observation));
   // Merges are monotone: retired key ids never shrink, a tombstone absorbs the pins it beats, a re-join beats its tombstone.
-  for (const c of V.merges) expect(core.mergePins(c.base, c.ours), c.name).toStrictEqual(c.expected);
+  for (const c of V.merges) outcome(c, () => core.mergePins(c.base, c.ours));
+  // Round 5 M1: a device's last-known copy merged into a newer server copy (person pins of another identity: the server's).
+  expect(V.mergesLastKnown.length).toBeGreaterThan(0);
+  for (const c of V.mergesLastKnown) outcome(c, () => core.pinsMergeLastKnown(c.base, c.lastKnown));
+  // Round 5 M2: a decline never gives up a held vault or one listed now, and never takes a server's roster version.
+  expect(V.declines.length).toBeGreaterThan(0);
+  for (const c of V.declines) expect(core.pinsDecline(sets[c.pins], c.vaultId, c.currentRow, 3000), JSON.stringify([c.pins, c.currentRow])).toStrictEqual(c.expected);
   let step: core.KeyPins = grandfathered;
   for (const c of V.observations) {
     const observed = core.pinsObserve(step, c.observation);
     expect(observed, JSON.stringify(c.observation)).toStrictEqual(c.expected);
-    step = observed.pins;
+    // Round 5: a first signature needs the user's OK (`first_signed`); the vectors accept it with `pinsAccept`.
+    step = c.accept ? core.pinsAccept(step, c.observation) : observed.pins;
+    if (c.accept) expect(step).toStrictEqual(c.accepted);
   }
   for (const c of V.emails) expect(core.normalizeEmail(c.email), c.email).toBe(c.expected);
   for (const c of V.legacyWraps) expect(core.pinsLegacyWrapAllowed(sets[c.pins], VID)).toBe(c.expected);
@@ -290,10 +313,13 @@ function world() {
   };
   const v1 = roster(null, 0);
   /** Bob's pins after he accepted the vault at epoch 0 with roster v1. */
-  const accepted = (pins: core.KeyPins | null = null) => core.pinsSetEpoch(pins, VID, key.epochPin(VID, 0), 1);
+  const accepted = (pins: core.KeyPins | null = null) => core.pinsRecordRotation(pins, VID, "sealed", key.epochPin(VID, 0), 1, core.rosterHash(v1));
   return { alice, bob, aliceSigner, bobSigner, key, share, signerSnap, roster, snapshot, v1, accepted };
 }
 type World = ReturnType<typeof world>;
+
+/** Bob's pins with Alice's vault grandfathered at the key it has (round 5: bound to its key id). */
+const grandfatheredFor = (w: World) => core.pinsGrandfather(null, [{ vault_id: VID, key_id: w.key.keyId(VID) }], true);
 
 const sealedRow = (wrapped: string, role: string, epoch: number | undefined, share: unknown, roster: string | null = null): import("../src/background/signed-sharing").SignedVaultRow => ({
   id: VID,
@@ -382,7 +408,7 @@ test("H3: a sealed vault the account never accepted (planted by the server) isn'
   expect(unsigned.trust).toMatchObject({ state: "waiting", acceptable: false });
   expect((await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { pins: null, accept: "x" })).trust.state).toBe("waiting");
   // Grandfathered at the first signed sync: an unsigned share from before stays usable, "Not yet signed".
-  expect((await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { pins: core.pinsGrandfather(null, [VID], true) })).trust).toStrictEqual({ state: "unsigned" });
+  expect((await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { pins: grandfatheredFor(w) })).trust).toStrictEqual({ state: "unsigned" });
   ck.free();
   carol.free();
 });
@@ -402,11 +428,11 @@ test("H4: epochs and key ids: an older key, a retired key or an old key relabell
   const w = world();
   // Bob accepted the vault at epoch 1 with Alice's second key (a key replacement); the server serves the first key at epoch 0.
   const second = aliceKey("secondKeyV2");
-  const pins = core.pinsSetEpoch(null, VID, second.epochPin(VID, 1), 2);
+  const pins = core.pinsRecordRotation(null, VID, "sealed", second.epochPin(VID, 1), null, null);
   expect(why(await check(w, signedRow(w), { pins }))).toBe("older");
   // The first key relabelled as epoch 2 (signed by Alice at epoch 2, a roster chain v1 → v2 at epoch 2): its key id is retired.
-  const raised = core.pinsSetEpoch(w.accepted(), VID, second.epochPin(VID, 1), 2);
   const v2 = w.roster(w.v1, 2);
+  const raised = core.pinsRecordRotation(w.accepted(), VID, "sealed", second.epochPin(VID, 1), 2, core.rosterHash(v2));
   expect(why(await check(w, signedRow(w, "write", { epoch: 2, roster: v2 }), { pins: raised, fetchRosters: async () => [w.v1, v2] }))).toBe("older");
   // The same key at a higher epoch than pinned (never replaced): conflict.
   expect(why(await check(w, signedRow(w, "write", { epoch: 2, roster: v2 }), { fetchRosters: async () => [w.v1, v2] }))).toBe("conflict");
@@ -421,7 +447,7 @@ test("round 3: an unsigned key replacement on an accepted vault waits (replaced)
   const w = world();
   const second = aliceKey("secondKeyV2");
   // Bob had the vault from before (grandfathered, unsigned) at epoch 0; an app that doesn't sign replaced the key.
-  const pins = core.pinsSetEpoch(core.pinsGrandfather(null, [VID], true), VID, w.key.epochPin(VID, 0), null);
+  const pins = core.pinsRecordRotation(grandfatheredFor(w), VID, "sealed", w.key.epochPin(VID, 0), null, null);
   const row = sealedRow(second.shareTo(VID, who("bob").public_key), "write", 1, null);
   const r = await check(w, row, { pins });
   expect(r.trust).toMatchObject({ state: "waiting", replaced: true, acceptable: true });
@@ -436,7 +462,7 @@ test("round 3: an unsigned key replacement on an accepted vault waits (replaced)
 test("round 3: trust memory missing: an unsigned vault waits and may be accepted (the key shown); otherwise it can't", async () => {
   const w = world();
   const row = sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null);
-  const withheld = core.pinsGrandfather(null, [VID], false);
+  const withheld = core.pinsGrandfather(null, [{ vault_id: VID, key_id: w.key.keyId(VID) }], false);
   expect((await check(w, row, { pins: withheld })).trust).toMatchObject({ state: "waiting", acceptable: false, token: "" });
   const r = await check(w, row, { pins: withheld, memoryMissing: true });
   expect(r.trust).toMatchObject({ state: "waiting", acceptable: true });
@@ -479,7 +505,7 @@ test("downgrades: a signed share without its roster, an unsigned share where a r
   // The account's pins say signed since v1, and the server drops both share and roster.
   expect(why(await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null)))).toBe("downgraded");
   // This browser saw it signed (even with pins that don't know it).
-  expect(why(await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { pins: core.pinsGrandfather(null, [VID], true), seenSigned: true }))).toBe("downgraded");
+  expect(why(await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { pins: grandfatheredFor(w), seenSigned: true }))).toBe("downgraded");
 });
 
 test("L5/L6: the trusted roster must list this account with the row's role; the signer must be an owner or admin listed with their full identity", async () => {
@@ -550,7 +576,7 @@ test("M3: names and emails from the server are cleaned; the pinned email comes f
 test("paused: every shared vault is refused (signed or not); own vaults stay", async () => {
   const w = world();
   expect((await check(w, signedRow(w), { paused: true })).trust).toMatchObject({ state: "refused", reason: ss.PAUSED_TEXT });
-  expect(why(await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { paused: true, pins: core.pinsGrandfather(null, [VID], true) }))).toBe("paused");
+  expect(why(await check(w, sealedRow(w.key.shareTo(VID, who("bob").public_key), "write", 0, null), { paused: true, pins: grandfatheredFor(w) }))).toBe("paused");
 });
 
 test("a pinned person's changed key stops the vault; trusting it (pinned again) makes it verify, marked verified", async () => {
@@ -639,7 +665,20 @@ test("L1: the consent token binds what was shown (key id and epoch, signer, rost
   const r = await check(w, changed, { pins: withheld, memoryMissing: true, accept: tokenOf(shown) });
   expect(r.trust.state).toBe("waiting");
   expect(tokenOf(r)).not.toBe(tokenOf(shown));
-  const base = { vaultId: VID, role: "write", keyId: "k", epoch: 0, signer: "s", email: "alice@example.com", pinned: false, roster: "r", replaced: false, rejoin: false, own: false };
+  const base = {
+    vaultId: VID,
+    role: "write",
+    keyId: "k",
+    epoch: 0,
+    signer: "s",
+    email: "alice@example.com",
+    pinned: false,
+    roster: "r",
+    replaced: false,
+    rejoin: false,
+    own: false,
+    firstSigned: false,
+  };
   const t = await ss.consentToken(base);
   for (const over of [
     { vaultId: OTHER },
@@ -657,6 +696,8 @@ test("L1: the consent token binds what was shown (key id and epoch, signer, rost
     { email: null },
     { pinned: true },
     { own: true },
+    // Round 5: a first signature on a vault the account holds is its own kind of consent.
+    { firstSigned: true },
   ]) {
     expect(await ss.consentToken({ ...base, ...over }), JSON.stringify(over)).not.toBe(t);
   }
@@ -859,6 +900,17 @@ async function bobSignedIn(setup: Setup = {}) {
   return { w, ownKey, stored, bob: accountOf("bob") };
 }
 
+/**
+ * The vectors carry session bytes but no account bundles, so the worker tests can't hand the core a bundle it
+ * authenticates: `Account.matchesBundle` answers as the core does for the account id (a bundle of this account's own id
+ * matches), and false for a bundle a test marks as the server's swap (`swapped: true`).
+ */
+const stubMatchesBundle = () =>
+  vi.spyOn(core.Account.prototype, "matchesBundle").mockImplementation(function (this: core.Account, b: unknown) {
+    const bundle = b as { account_id?: unknown; swapped?: unknown } | null;
+    return !!bundle && bundle.account_id === this.legacyIdentity().user_id && bundle.swapped !== true;
+  });
+
 const sessionFor = (name: string) => {
   const a = V.accounts.find((x) => x.name === name)!;
   const bytes = fromB64u(a.sessionBytes);
@@ -902,6 +954,8 @@ function carolsVault(w: World, vaultId: string, email: string) {
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+  // Restored after every test (vitest `restoreMocks`).
+  stubMatchesBundle();
 });
 
 test("worker: a verified shared vault's logins are used; the key pins (new signer, own vault's epoch) are written once", async () => {
@@ -919,7 +973,7 @@ test("worker: a verified shared vault's logins are used; the key pins (new signe
   expect(pins.epochs?.[VID]?.signed_since).toBe(1);
   expect(pins.own_identity).toBe(ident("bob").hash);
   // Grandfathering happens only when this unlock made the identity: written, empty.
-  expect(pins.grandfathered).toStrictEqual([]);
+  expect(pins.grandfathered).toStrictEqual({});
   // A later sync doesn't write them again.
   await vault.sync();
   expect(server.requests.filter((r) => r.method === "PUT" && r.path === "/account/key-pins")).toHaveLength(1);
@@ -976,6 +1030,9 @@ test("worker H3: a vault planted after the first signed sync isn't used; it wait
       token: expect.any(String),
       replaced: false,
       own: false,
+      // Round 5 M2: a plain signed consent may be declined (in the web vault).
+      firstSigned: false,
+      declinable: true,
     },
   ]);
   expect(notice?.vaultsUrl).toBe("https://vault.test/settings/vaults");
@@ -1109,9 +1166,17 @@ async function unlockAgain() {
   await vault.sync();
 }
 /** Bob used the extension with the server before it signed (an offline copy with the shared vault), then it signs. */
-async function beforeSigning() {
+async function beforeSigning(oldExtension = true) {
   const ctx = await bobSignedIn({ identity: null, pins: () => null, features: OLD_FEATURES, shared: unsignedShare });
   expect(names()).toStrictEqual(["Own", "Team login"]);
+  // This extension marks a copy written with the checks off (round 5 H); one from an extension from before signed
+  // sharing (`oldExtension`) has no mark.
+  const copy = await storage.syncCache.get("a1");
+  expect(copy?.checks).toBe("off");
+  if (oldExtension && copy) {
+    delete copy.checks;
+    await storage.syncCache.set("a1", copy);
+  }
   server.features = SIGNED_FEATURES;
   forgetServerFeatures();
   return ctx;
@@ -1126,7 +1191,7 @@ test("worker: a share from before, in this browser's offline copy from an earlie
   const team = vault.allEntries().find((e) => e.item.name === "Team login")!;
   expect(vault.summarize(team).vaultLabel).toBe("Not yet signed");
   expect(vault.editorInfo().defaultVault).toBe(OWN);
-  expect(serverPins(stored).grandfathered?.slice().sort()).toStrictEqual([OWN, VID].sort());
+  expect(Object.keys(serverPins(stored).grandfathered ?? {}).sort()).toStrictEqual([OWN, VID].sort());
   expect(vault.sharingNotice()).toBe(null);
 });
 
@@ -1134,7 +1199,7 @@ test("M1: a browser with no earlier offline copy grandfathers nothing: an unsign
   const { stored } = await bobSignedIn({ identity: null, pins: () => null, shared: unsignedShare });
   expect(identityPuts()).toHaveLength(1);
   expect(names()).toStrictEqual(["Own"]);
-  expect(serverPins(stored).grandfathered).toStrictEqual([]);
+  expect(serverPins(stored).grandfathered).toStrictEqual({});
   const notice = vault.sharingNotice();
   expect(notice?.warnings).toStrictEqual([ss.NEW_DEVICE_TEXT]);
   expect(notice?.waiting).toMatchObject([{ vaultId: VID, acceptable: true, note: ss.UNSIGNED_LABEL }]);
@@ -1170,7 +1235,7 @@ test("M1: after a worker restart, this session's own offline copy doesn't count 
   server.revision++;
   await vault.sync();
   expect(identityPuts()).toHaveLength(2);
-  expect(serverPins(stored).grandfathered).toStrictEqual([]);
+  expect(serverPins(stored).grandfathered).toStrictEqual({});
   expect(names()).toStrictEqual(["Own"]);
   expect(vault.sharingNotice()?.waiting).toMatchObject([{ vaultId: VID, acceptable: true }]);
 });
@@ -1193,7 +1258,7 @@ test("M2: grandfathering waits while the identity state is unknown (upload faile
   };
   server.revision++;
   await vault.sync();
-  expect(serverPins(stored).grandfathered?.slice().sort()).toStrictEqual([OWN, VID].sort());
+  expect(Object.keys(serverPins(stored).grandfathered ?? {}).sort()).toStrictEqual([OWN, VID].sort());
   expect(names()).toStrictEqual(["Own", "Team login"]);
 });
 
@@ -1209,7 +1274,7 @@ test("B: an upload whose answer was lost still counts as made here once the serv
   server.revision++;
   await vault.sync();
   expect(identityPuts()).toHaveLength(1);
-  expect(serverPins(stored).grandfathered?.slice().sort()).toStrictEqual([OWN, VID].sort());
+  expect(Object.keys(serverPins(stored).grandfathered ?? {}).sort()).toStrictEqual([OWN, VID].sort());
   expect(names()).toStrictEqual(["Own", "Team login"]);
   const memory = ss.readMemory(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id), V.accounts[1]!.id);
   expect(memory?.pendingIdentities).toBeUndefined();
@@ -1237,11 +1302,14 @@ test("A: while the server's features are unknown the checks run, but nothing tur
 });
 
 const legacyRoster = (w: World) => w.roster(null, 0, "write", w.key, VID, who("bob", true));
+/** Bob's pins after he accepted the vault at epoch 0 with the roster naming his legacy identity. */
+const legacyAccepted = (w: World) => core.pinsRecordRotation(null, VID, "sealed", w.key.epochPin(VID, 0), 1, core.rosterHash(legacyRoster(w)));
 
 test("worker: without a signing identity on the server, one is made (with its X25519 signature) and uploaded once, and used", async () => {
   await bobSignedIn({
     identity: null,
-    pins: (w) => w.accepted(),
+    // Accepted with the roster Alice signed then (round 5: a pinned roster version always carries its hash).
+    pins: (w) => legacyAccepted(w),
     // Alice shared the vault while Bob had no signing key yet: her share and roster name his legacy identity.
     shared: (w) => {
       const s = w.share("write", 0, who("bob", true));
@@ -1343,7 +1411,7 @@ test("worker: a pinned person's keys changed: their vault stops until the user t
 test("L3: an identity made here is in the offline copy: an offline reopen isn't paused", async () => {
   await bobSignedIn({
     identity: null,
-    pins: (w) => w.accepted(),
+    pins: (w) => legacyAccepted(w),
     shared: (w) => {
       const s = w.share("write", 0, who("bob", true));
       return { wrapped_key: s.sealed_key, share: { signature: s.signature, signer: w.signerSnap, signer_deleted: false }, member_roster: legacyRoster(w) };
@@ -1424,13 +1492,18 @@ test("rule 3: an accepted shared vault missing from one verified sync isn't give
   expect(vault.sharingNotice()?.refused).toMatchObject([{ vaultId: VID }]);
 });
 
-test("rule 3: a removal its rosters confirm (403/404) is remembered as left at once", async () => {
-  const { stored } = await bobSignedIn();
-  server.vaults.splice(1, 1);
-  server.handlers[`GET /vaults/${VID}/rosters`] = () => ({ status: 404, body: { error: "not_found", message: "not found" } });
-  server.revision++;
-  await vault.sync();
-  expect(serverPins(stored).left?.[VID]).toMatchObject({ roster_version: 1 });
+test("rule 3: a removal its rosters confirm (404: not a member) is remembered as left at once; a 403 confirms nothing (round 5 Info)", async () => {
+  for (const [status, left] of [
+    [403, false],
+    [404, true],
+  ] as const) {
+    const { stored } = await bobSignedIn();
+    server.vaults.splice(1, 1);
+    server.handlers[`GET /vaults/${VID}/rosters`] = () => ({ status, body: { error: status === 404 ? "not_found" : "two_step_required", message: "no" } });
+    server.revision++;
+    await vault.sync();
+    expect(serverPins(stored).left?.[VID], String(status)).toEqual(left ? expect.objectContaining({ roster_version: 1 }) : undefined);
+  }
 });
 
 test("L6: a vault signed by an account deleted since, not pinned here: the label marks the email as the server's and the fingerprint stays shown", async () => {
@@ -1460,7 +1533,7 @@ function secondKeyRow(w: World, epoch: number) {
 test("round 4 (puppet signer): a signed new key on a vault never seen signed waits for consent, naming the signer; accepting goes through pinsAccept", async () => {
   const w = world();
   // Bob had the vault from before (grandfathered, unsigned) at epoch 0; a key signed for the first time arrives at epoch 1.
-  const pins = core.pinsSetEpoch(core.pinsGrandfather(null, [VID], true), VID, w.key.epochPin(VID, 0), null);
+  const pins = core.pinsRecordRotation(grandfatheredFor(w), VID, "sealed", w.key.epochPin(VID, 0), null, null);
   const { second, row, roster } = secondKeyRow(w, 1);
   const r = await check(w, row, { pins, fetchRosters: async () => [roster] });
   expect(r.trust).toMatchObject({ state: "waiting", replaced: true, own: false, acceptable: true, signer: { email: "alice@example.com", fingerprint: ident("alice").fingerprint } });
@@ -1585,7 +1658,7 @@ test("M: only rows an offline copy showed as usable count as earlier (never wait
     vault.usableVaultIds(
       copy({
         [VID]: verdict(ok, { state: "unsigned" }),
-        [OTHER]: verdict(planted, { state: "waiting", name: "", rejoin: false, replaced: false, own: false, keyId: "k", acceptable: true, token: "t" }),
+        [OTHER]: verdict(planted, { state: "waiting", name: "", rejoin: false, replaced: false, own: false, firstSigned: false, declinable: false, keyId: "k", acceptable: true, token: "t" }),
       }),
     ),
   ).toStrictEqual([VID]);
@@ -1691,7 +1764,7 @@ test("worker rule 6 / M: a vault planted while the first signed sync couldn't fi
   expect(names()).toStrictEqual(["Own"]);
   // The next session: the server lists the identity made here; the planted vault (in this browser's copy, but held) isn't covered.
   await unlockAgain();
-  expect(serverPins(stored).grandfathered?.slice().sort()).toStrictEqual([OWN, VID].sort());
+  expect(Object.keys(serverPins(stored).grandfathered ?? {}).sort()).toStrictEqual([OWN, VID].sort());
   expect(names()).toStrictEqual(["Own", "Team login"]);
   expect(vault.sharingNotice()?.waiting).toMatchObject([{ vaultId: OTHER, acceptable: true, keyId: expect.any(String) }]);
   const memory = ss.readMemory(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id), V.accounts[1]!.id);
@@ -1767,13 +1840,153 @@ test("rule 7: a sealed copy of the pins that doesn't open, with unsent changes, 
   await corrupt(false);
   server.revision++;
   await vault.sync();
+  // Round 5 Info: the server's copy at the same version doesn't repair it (only a strictly newer one does).
+  expect(names()).toStrictEqual(["Own"]);
+  expect(vault.sharingNotice()?.warnings).toContain(ss.UNREADABLE_TEXT);
+  // Another device writes a newer copy: that one replaces the broken copy.
+  stored.pins = accountOf("bob").sealKeyPins(serverPins(stored), stored.seq + 1);
+  stored.seq += 1;
+  userField("key_pins_seq", stored.seq);
+  await vault.sync();
   expect(names()).toStrictEqual(["Own", "Team login"]);
   expect(vault.sharingNotice()).toBe(null);
   expect(ss.readMemory(await storage.trustMemory.get("https://vault.test", userId), userId)?.pinsSealed).not.toBe("broken");
+  const seq = stored.seq;
   await corrupt(true);
   server.revision++;
   await vault.sync();
   expect(names()).toStrictEqual(["Own"]);
   expect(vault.sharingNotice()?.warnings).toContain(ss.UNREADABLE_TEXT);
+  expect(stored.seq).toBe(seq);
+});
+
+// ------------------------------------------------------------------ review round 5
+
+test("round 5 H: a copy this extension wrote with the checks off gives no grandfathering candidates: shares from before wait for consent (new browser)", async () => {
+  // A server turned the checks off for this browser (no `signed_sharing`), then signs: nothing it served meanwhile counts.
+  const { stored } = await beforeSigning(false);
+  await unlockAgain();
+  expect(identityPuts()).toHaveLength(1);
+  expect(names()).toStrictEqual(["Own"]);
+  expect(serverPins(stored).grandfathered).toStrictEqual({});
+  const notice = vault.sharingNotice();
+  expect(notice?.warnings).toStrictEqual([ss.NEW_DEVICE_TEXT]);
+  expect(notice?.waiting).toMatchObject([{ vaultId: VID, acceptable: true, keyId: expect.any(String) }]);
+  // usableVaultIds: a marked copy without verdicts gives none; an unmarked one (from before signed sharing) all.
+  const rows = [{ id: VID }, { id: OWN }] as never;
+  expect(vault.usableVaultIds({ vaults: rows, checks: "off" })).toStrictEqual([]);
+  expect(vault.usableVaultIds({ vaults: rows })).toStrictEqual([VID, OWN]);
+});
+
+test("round 5 Info: a grandfathering candidate is bound to the key it had in the earlier copy: another key under that vault id waits for consent", async () => {
+  const { stored, w } = await beforeSigning();
+  // At the first signed sync the server serves another key under the shared vault's id.
+  const second = aliceKey("secondKeyV2");
+  server.vaults[1] = { ...server.vaults[1], wrapped_key: second.shareTo(VID, who("bob").public_key) } as never;
+  await unlockAgain();
+  expect(serverPins(stored).grandfathered?.[VID]).toBe(w.key.keyId(VID));
+  expect(names()).toStrictEqual(["Own"]);
+  // Unsigned and not covered by the trust-memory-missing state: locked until its owner signs it.
+  expect(vault.sharingNotice()?.waiting).toMatchObject([{ vaultId: VID, acceptable: false, note: ss.ASK_OWNER_TEXT }]);
+  // Session storage keeps the candidates with their key ids.
+  expect(fake.session.data.get("earlier:a1")).toEqual(expect.arrayContaining([{ vault_id: VID, key_id: w.key.keyId(VID) }]));
+  second.free();
+});
+
+test("round 5 H: a newer server copy of the key pins remembering another own identity is never merged or written; sharing pauses", async () => {
+  const { stored, bob } = await bobSignedIn();
   expect(stored.seq).toBe(2);
+  const before = serverPins(stored);
+  // The server (or a device it gave a fake identity) writes version 3 remembering another own identity.
+  const forged = core.pinsSetOwnIdentity(core.pinsGrandfather(null, [], false), ident("carol").hash);
+  stored.pins = bob.sealKeyPins(forged, 3);
+  stored.seq = 3;
+  userField("key_pins_seq", 3);
+  await vault.sync();
+  // Nothing written (still the server's version 3), nothing merged either way, shared vaults refused, own vaults used.
+  expect(stored.seq).toBe(3);
+  expect(server.requests.filter((r) => r.method === "PUT" && r.path === "/account/key-pins")).toHaveLength(1);
+  expect(names()).toStrictEqual(["Own"]);
+  expect(vault.sharingNotice()?.warnings).toContain(ss.PAUSED_TEXT);
+  // This browser's copy keeps its own identity and what it knew (not the server's).
+  const memory = ss.readMemory(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id), V.accounts[1]!.id)!;
+  const mine = bob.openKeyPins(memory.pinsSealed!, memory.pinsSeq);
+  expect(memory.pinsSeq).toBe(2);
+  expect(mine.own_identity).toBe(before.own_identity);
+  expect(mine.epochs?.[VID]).toStrictEqual(before.epochs?.[VID]);
+});
+
+test("round 5 M1: a newer server copy that only differs in a person's pin isn't rewritten from this browser's last-known copy (no write loop)", async () => {
+  // This browser knows Dave by his old (legacy) keys; Alice's share is pinned and written at the first sync (version 2).
+  const { stored, bob } = await bobSignedIn({
+    pins: (w) => core.pinSet(core.pinsSetOwnIdentity(w.accepted(), ident("bob").hash), who("dave", true), "dave@example.com", false, 1000),
+  });
+  expect(stored.seq).toBe(2);
+  // Another device later pinned Dave with his new keys, as verified (version 3).
+  const newer = core.pinSet(serverPins(stored), who("dave"), "dave@example.com", true, 5000);
+  stored.pins = bob.sealKeyPins(newer, 3);
+  stored.seq = 3;
+  userField("key_pins_seq", 3);
+  await vault.sync();
+  // The server's later decision stands: nothing written back (`mergePins` would have put the old keys back).
+  expect(stored.seq).toBe(3);
+  expect(serverPins(stored).pins.find((p) => p.email === "dave@example.com")).toMatchObject({ identity: ident("dave").hash, verified: true });
+  expect(names()).toStrictEqual(["Own", "Team login"]);
+  // This browser follows it.
+  const memory = ss.readMemory(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id), V.accounts[1]!.id)!;
+  expect(memory.pinsSeq).toBe(3);
+  expect(memory.pinsDirty).toBe(false);
+  expect(bob.openKeyPins(memory.pinsSealed!, 3).pins.find((p) => p.email === "dave@example.com")?.identity).toBe(ident("dave").hash);
+});
+
+test("round 5 L: while the trust memory can't be read, a server copy below the version this browser session opened isn't used", async () => {
+  const { stored } = await bobSignedIn();
+  expect(stored.seq).toBe(2);
+  expect(fake.session.data.get("pinsFloor:a1")).toBe(2);
+  // The memory record breaks, and the server rolls its copy back to version 1.
+  await storage.trustMemory.update("https://vault.test", V.accounts[1]!.id, () => ({ broken: true }) as never);
+  const old = core.pinsSetOwnIdentity(null, ident("bob").hash);
+  stored.pins = accountOf("bob").sealKeyPins(old, 1);
+  stored.seq = 1;
+  userField("key_pins_seq", 1);
+  const fetched = () => server.requests.filter((r) => r.method === "GET" && r.path === "/account/key-pins").length;
+  const n = fetched();
+  await vault.sync();
+  expect(fetched()).toBe(n);
+  expect(vault.sharingNotice()?.warnings).toContain(ss.UNREADABLE_TEXT);
+  // Own vaults still checked against what this session last used (its own pins), shared ones refused.
+  expect(names()).toStrictEqual(["Own"]);
+});
+
+test("round 5 (iOS H): kept keys whose bundle the core doesn't authenticate are never restored; a sync with a swapped bundle is never kept", async () => {
+  await bobSignedIn();
+  // A sync answer whose account bundle isn't this account's: refused, nothing kept.
+  server.bundle = { account_id: V.accounts[1]!.id, secret_key_enabled: false, swapped: true };
+  server.revision++;
+  await expect(vault.sync()).rejects.toThrow(ss.WRONG_ACCOUNT_TEXT);
+  expect((await storage.syncCache.get("a1"))?.bundle).not.toHaveProperty("swapped");
+  expect((await storage.session.get("a1"))?.bundle).not.toHaveProperty("swapped");
+  // Session keys kept with a swapped bundle (from disk, timeout "never"): dropped; the master password is asked for.
+  await vault.lockAll();
+  const kept = { ...sessionFor("bob"), bundle: { account_id: V.accounts[1]!.id, secret_key_enabled: false, swapped: true } };
+  const l = (await fake.local.get(["accounts", "settings"])) as { accounts: Record<string, object>; settings?: object };
+  await fake.local.set({ accounts: { ...l.accounts, a1: { ...l.accounts.a1, persistedKeys: kept } }, settings: { ...(l.settings ?? {}), vaultTimeout: "never" } });
+  expect(await vault.ensureUnlocked()).toBe(false);
+  expect(await storage.session.get("a1")).toBe(null);
+  expect((await storage.local.account("a1")).data?.persistedKeys ?? null).toBe(null);
+});
+
+test("round 5: a first signature on a vault the account holds needs one OK (first_signed, never declinable); accepting pins the signer", async () => {
+  const w = world();
+  // Bob had the vault from before (grandfathered, unsigned) at epoch 0; Alice signs it now at the same key.
+  const pins = core.pinsRecordRotation(grandfatheredFor(w), VID, "sealed", w.key.epochPin(VID, 0), null, null);
+  const r = await check(w, signedRow(w), { pins });
+  expect(r.trust).toMatchObject({ state: "waiting", firstSigned: true, replaced: false, declinable: false, acceptable: true, signer: { email: "alice@example.com" } });
+  expect(r.pins).toBe(pins);
+  expect(ss.firstSignedText("Team", "alice@example.com", true)).toBe('"Team" was signed for the first time, by alice@example.com. Compare their fingerprint before you accept.');
+  expect(ss.firstSignedText("Team", "alice@example.com", false)).toContain("someone listed by your server as alice@example.com");
+  const ok = await check(w, signedRow(w), { pins, accept: tokenOf(r) });
+  expect(ok.trust.state).toBe("ok");
+  expect(ok.pins?.epochs?.[VID]).toMatchObject({ key_id: w.key.keyId(VID), signed_since: 1, roster_version_max: 1, roster_hash: core.rosterHash(w.v1) });
+  expect(ok.pins?.pins.map((p) => p.email)).toContain("alice@example.com");
 });

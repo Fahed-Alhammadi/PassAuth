@@ -15,7 +15,9 @@ import io.passauth.core.pinsCheckOwnIdentity
 import io.passauth.core.pinsGrandfather
 import io.passauth.core.pinsLeave
 import io.passauth.core.pinsLegacyWrapAllowed
-import io.passauth.core.pinsSetEpoch
+import io.passauth.core.pinsDecline
+import io.passauth.core.pinsMergeLastKnown
+import io.passauth.core.pinsRecordRotation
 import io.passauth.core.pinsSetOwnIdentity
 import io.passauth.core.rosterHash
 import io.passauth.core.rosterHead
@@ -75,7 +77,10 @@ import kotlinx.serialization.json.put
  * at the first signed sync, when the trust memory was missing ([missingWhy] "memory") or this phone
  * made the identity without an earlier copy ("device"); it only shrinks); [absent]: accepted shared
  * vaults a verified sync no longer listed, with how many syncs in a row (tombstoned at two, or when
- * the server says the vault is gone). Writes merge ([merge]), never overwrite.
+ * the server says the vault is gone). Round 5 (Android H): [unsentSealed] = this phone's key pins
+ * with changes the server doesn't have yet (sealed with version [unsentSeq]), kept until a `PUT`
+ * succeeded and merged on top of every copy loaded, so a failed write never leaves a change (an own
+ * key replacement, a tombstone, an accept) only in session memory. Writes merge ([merge]), never overwrite.
  */
 @Serializable
 data class SigningMemory(
@@ -90,9 +95,11 @@ data class SigningMemory(
     val missing: Set<String>? = null,
     val missingWhy: String? = null,
     val absent: Map<String, Int> = emptyMap(),
+    val unsentSealed: String? = null,
+    val unsentSeq: Long = 0,
 ) {
     /** Nothing remembered yet (a server without signed sharing may be used without checks; [generated] and [usable] alone don't count). */
-    val isEmpty: Boolean get() = pinsSeq == 0L && pinsSealed == null && rosters.isEmpty() && signed.isEmpty() && ownIdentity == null
+    val isEmpty: Boolean get() = pinsSeq == 0L && pinsSealed == null && rosters.isEmpty() && signed.isEmpty() && ownIdentity == null && unsentSealed == null
 
     /**
      * [other] merged in: the higher pins version with its sealed copy, per vault the roster with the
@@ -114,6 +121,8 @@ data class SigningMemory(
         return SigningMemory(
             seq, sealed, r, signed + other.signed, ownIdentity ?: other.ownIdentity, (generated + other.generated).distinct().takeLast(MAX_GENERATED),
             other.usable ?: usable, candidates ?: other.candidates, m, missingWhy ?: other.missingWhy, absent + other.absent,
+            // Unsent pins are never dropped by a merge (only a successful write clears them).
+            unsentSealed ?: other.unsentSealed, if (unsentSealed != null) unsentSeq else other.unsentSeq,
         )
     }
 
@@ -180,11 +189,19 @@ data class ConsentVault(
     val own: Boolean = false,
     /** The key id of the key it would accept (shown for unsigned ones). */
     val keyId: String = "",
+    /** A vault from before signed for the first time at the same key (round 5): trusted only with the user's OK. */
+    val firstSigned: Boolean = false,
+    /** The core's `declinable` (round 5 M2): none of rejoin, replaced, own, first signed or held, and signed. */
+    val coreDeclinable: Boolean = false,
 ) {
     val acceptable: Boolean get() = signer != null || replaced || unsignedAllowed
 
-    /** Decline only for a signed one that names its signer, never for a replaced key (that would leave a vault in use). */
-    val declinable: Boolean get() = signer != null && !replaced
+    /**
+     * Decline only where the core's verdict says `declinable` and a signer is named: never for a
+     * replaced key, a vault that was the account's own, a re-join or a first signature (a
+     * puppet-signed consent for a vault the account uses must not lead the user into giving it up).
+     */
+    val declinable: Boolean get() = coreDeclinable && signer != null && !replaced && !own && !rejoin && !firstSigned
 }
 
 /**
@@ -234,6 +251,14 @@ sealed interface InvitationTrust {
         internal val epochPin: String,
         internal val observation: String = "",
         internal val pinVerified: Boolean = false,
+        /**
+         * The core's admission of the invitation (`invitation: true`, round 5 Android M): [rejoin] a
+         * vault left before and shared again, [held] a new key for a vault the account has (signed
+         * history required), [declinable] whether Decline may be offered (never for a vault in use).
+         */
+        val rejoin: Boolean = false,
+        val held: Boolean = false,
+        val declinable: Boolean = true,
     ) : InvitationTrust
 }
 
@@ -336,7 +361,9 @@ interface SharingApi {
 
     /**
      * Whether the account still holds vault [vaultId] (`GET /vaults/{id}/members`): false when the
-     * server answers 403 or 404 (gone), true when it lists the members, null when it can't be told.
+     * server answers 404 (gone: non-members get 404; a 403 can be a policy, two-step or reauth
+     * refusal and never counts, [SignedSharing.removalConfirmed]), true when it lists the members,
+     * null when it can't be told.
      */
     suspend fun stillMember(vaultId: String): Boolean? = null
 }
@@ -383,6 +410,8 @@ object SignedSharing {
     const val PINS_NOT_SAVED = "PassAuth couldn't save your list of known keys on your server, so nothing was accepted. Try again when your server can be reached."
     const val NO_DECLINE_NOW = "While PassAuth can't find your list of known keys, shared vaults can only be accepted or left for later."
     const val COMPARE_FIRST = "Compare the fingerprint with them first: this account uses an email you already know under another account."
+    const val NOT_DECLINABLE = "PassAuth keeps this one locked until you decide. It can't be declined here, because that could give up a vault you use."
+    const val PINS_UNSENT = "PassAuth couldn't check your list of known keys right now, so it didn't replace any key. Try again when your server can be reached."
 
     /**
      * Whether signed sharing is checked for an account: its server lists `signed_sharing` (in the
@@ -409,6 +438,13 @@ object SignedSharing {
     fun keyReplacementLimited(e: ApiException): String? =
         if (!e.isRateLimited) null else TOO_MANY_KEY_REPLACEMENTS + (tooManyAttemptsMessage(e)?.let { " ($it)" } ?: "")
 
+    /**
+     * Whether an error of `GET /vaults/{id}/members` confirms the account no longer holds the vault:
+     * only a 404 (the server answers non-members with 404). A 403 can be a policy, two-step or reauth
+     * refusal and must never tombstone a vault.
+     */
+    fun removalConfirmed(e: ApiException): Boolean = e.status == 404
+
     /** Someone this phone knows only by user id (never pinned, no longer listed). */
     fun someone(userId: String) = "a former member (${userId.take(8)})"
 
@@ -419,6 +455,13 @@ object SignedSharing {
         signedBy(s.email, deleted) + (s.listedEmail?.let { " (listed by your server as $it)" } ?: "") + if (s.verified && s.listedEmail == null) " · Verified" else ""
 
     fun unsignedInvitation(name: String) = "This invitation isn't signed. Ask $name to update PassAuth and share again."
+
+    /** What a signed invitation's admission adds (round 5 Android M): a re-join, or a new key for a vault the account has; null for none. */
+    fun invitationNote(t: InvitationTrust.Signed, vaultName: String): String? = when {
+        t.held -> "This is a new key for $vaultName, which you already have. Accept only if someone in this vault just replaced its key."
+        t.rejoin -> "You left or declined $vaultName before, and it was shared with you again."
+        else -> null
+    }
 
     fun keysChanged(email: String) = "$email's keys changed. Compare their fingerprint with them before you continue."
 
@@ -440,6 +483,8 @@ object SignedSharing {
         val base = when {
             c.replaced && s != null -> "The key of ${c.name} was replaced and signed by ${signerName(s)} for the first time. Compare their fingerprint before you accept."
             c.replaced -> "The key of ${c.name} was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key."
+            // Round 5 M: the first signature of a vault from before, at the same key.
+            c.firstSigned && s != null -> "${c.name} is signed for the first time, by ${signerName(s)}. Compare their fingerprint before you accept."
             else -> CONSENT
         }
         return if (c.own) "${c.name} was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change. $base" else base
@@ -464,6 +509,8 @@ object SignedSharing {
         "conflict" -> "$REFUSED (Your server sent a different key than the one it listed before.)"
         "downgraded" -> "$REFUSED (It was signed before and now isn't.)"
         "roster_forked" -> "$REFUSED (Your server sent a different member list than the one you saw before.)"
+        "own_vault" -> "$REFUSED (It names a vault that is your own.)"
+        "held" -> "$REFUSED (It names a vault you already have, without the signed history a new key needs.)"
         else -> REFUSED
     }
 
@@ -528,9 +575,8 @@ object SignedSharing {
     /** The epoch pin of a vault in key pins (JSON); null when the account never accepted it. */
     fun epochOf(pins: String?, vaultId: String): JsonObject? = ((pins?.let(::obj))?.get("epochs") as? JsonObject)?.get(vaultId) as? JsonObject
 
-    /** The vault ids the key pins grandfathered (empty before the first signed sync). */
-    fun grandfathered(pins: String?): Set<String> =
-        (pins?.let(::obj)?.get("grandfathered") as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.toSet()
+    /** The vault ids the key pins grandfathered (`{vault id: key id}` since round 5; empty before the first signed sync). */
+    fun grandfathered(pins: String?): Set<String> = (pins?.let(::obj)?.get("grandfathered") as? JsonObject)?.keys.orEmpty()
 
     /** Whether two key pins (JSON) say the same, apart from their version (the seq they were sealed with). */
     fun samePins(a: String?, b: String?): Boolean {
@@ -582,8 +628,12 @@ object SignedSharing {
         else -> PinState.New
     }
 
-    /** An email as the key pins compare it (trimmed, NFKC, lower case, IDNA ASCII domain): how pinned emails are shown. */
-    fun normalized(email: String?): String = email?.takeIf { it.isNotBlank() }?.let { runCatching { normalizeEmail(it) }.getOrDefault(it) }.orEmpty()
+    /**
+     * An email as the key pins compare it (trimmed, NFKC, lower case, IDNA ASCII domain): how pinned
+     * emails are shown. Empty when the core can't normalize it (round 5 Info: never the raw email,
+     * which isn't pinned then and shows as "someone listed by your server").
+     */
+    fun normalized(email: String?): String = email?.takeIf { it.isNotBlank() }?.let { runCatching { normalizeEmail(it) }.getOrNull() }.orEmpty()
 
     internal fun sameEmail(a: String?, b: String?): Boolean = normalized(a) == normalized(b)
 
@@ -783,7 +833,16 @@ class SharingSession(
     /** Set while the server's key pins can't be used (rollback, unreadable): nothing is written. */
     var pinsProblem: String? = null
         private set
+
+    /** The pins differ from the server's copy (this phone changed them, or knows more): written at the next save. */
     private var dirty = false
+
+    /** Round 5: the server's pins and this phone's remember different own identities: nothing merged or written, sharing paused. */
+    private var conflict = false
+
+    /** The sealed unsent pins this session wrote or read ([SigningMemory.unsentSealed]), and the pins it wrote there. */
+    private var knownUnsent: String? = null
+    private var unsentText: String? = null
 
     /** Identities that differ from their pins, by user id: kept until the user trusts the new key (never cleared by a sync). */
     private val changes = linkedMapOf<String, IdentityChange>()
@@ -850,6 +909,8 @@ class SharingSession(
             rec !is JsonObject -> pause()
             rec.toString() != record || paused -> open(rec.toString())
         }
+        // Another own identity in the server's pins than in this phone's: paused (round 5).
+        if (conflict) pause()
     }
 
     private suspend fun remembersOwn(): Boolean = SignedSharing.ownIdentityOf(pins) != null || memory.read().ownIdentity != null
@@ -948,46 +1009,141 @@ class SharingSession(
 
     private fun openLocal(m: SigningMemory): String? = m.pinsSealed?.let { runCatching { account.openKeyPins(it, m.pinsSeq.toULong()) }.getOrNull() }
 
-    /** Pins this phone changed and couldn't write yet win over [base] (the core's merge). */
-    private fun withOurs(base: String?): String? {
-        val ours = pins
-        if (!dirty || ours == null) return base
-        if (base == null) return ours
-        return runCatching { mergePins(base, ours) }.getOrDefault(ours)
+    /**
+     * This phone's unsent pins ([SigningMemory.unsentSealed]); null when there are none. Ones that
+     * can't be opened make the trust memory unreadable (rule 7: nothing is used or written then).
+     */
+    private fun openUnsent(m: SigningMemory): String? {
+        val sealed = m.unsentSealed ?: return null
+        knownUnsent = sealed
+        return try {
+            account.openKeyPins(sealed, m.unsentSeq.toULong())
+        } catch (_: CoreException) {
+            memoryUnreadable = true
+            null
+        }
     }
 
-    private fun useLocal(m: SigningMemory) {
+    /**
+     * Round 5: the account's own identity differs between the server's pins and this phone's
+     * (`identity_mismatch`): nothing is merged or written and sharing pauses for this session.
+     */
+    private fun identityConflict() {
+        conflict = true
+        pinsProblem = SignedSharing.PAUSED
+    }
+
+    /**
+     * [base] (the copy loaded: the server's, merged with this phone's last-known pins, or this phone's
+     * own) with this phone's unsent changes on top: this session's pins when it changed them, else
+     * the unsent pins kept on this phone (`mergePins`: only for unsent changes). [server]: the copy as
+     * written on the server, which decides whether anything is left to write ([dirty]).
+     */
+    private suspend fun adopt(base: String?, server: String?, m: SigningMemory): String? {
+        val ours = if (dirty && pins != null) pins else openUnsent(m)
+        val merged = when {
+            ours == null -> base
+            base == null -> ours
+            else -> try {
+                mergePins(base, ours)
+            } catch (_: CoreException.IdentityMismatch) {
+                identityConflict()
+                dirty = false
+                return base
+            }
+        }
+        dirty = merged != null && !SignedSharing.samePins(merged, server)
+        // Already on the server (a write whose answer was lost): the unsent copy is done with.
+        if (!dirty && m.unsentSealed != null && !memoryUnreadable) clearUnsent()
+        return merged
+    }
+
+    /**
+     * Rule 5 / round 5 M1: whenever a newer server copy arrives and this phone has no unsent changes,
+     * only what never goes back is taken from its last-known pins (`pinsMergeLastKnown`); with unsent
+     * changes those win ([adopt]). Another own identity on either side: nothing merged.
+     */
+    private fun withLastKnown(server: String, local: String?, m: SigningMemory): String {
+        if (local == null || (dirty && pins != null) || m.unsentSealed != null) return server
+        return try {
+            pinsMergeLastKnown(server, local)
+        } catch (_: CoreException.IdentityMismatch) {
+            identityConflict()
+            server
+        } catch (_: CoreException) {
+            server
+        }
+    }
+
+    /**
+     * The pins this session changed, kept on this phone as unsent (round 5 Android H) before any
+     * write is tried and whatever its outcome; cleared only once a `PUT` succeeded ([clearUnsent]).
+     */
+    private suspend fun persistUnsent() {
+        if (!dirty || memoryUnreadable || conflict) return
+        val p = pins ?: return
+        if (p == unsentText) return
+        val seq = pinsSeq
+        val sealed = account.sealKeyPins(p, seq.toULong())
+        memory.write { it.copy(unsentSealed = sealed, unsentSeq = seq) }
+        knownUnsent = sealed
+        unsentText = p
+    }
+
+    /** The unsent pins this session knows of are written: forgotten (another process's newer ones are kept). */
+    private suspend fun clearUnsent() {
+        val known = knownUnsent
+        memory.write { if (it.unsentSealed == null || it.unsentSealed != known) it else it.copy(unsentSealed = null, unsentSeq = 0) }
+        knownUnsent = null
+        unsentText = null
+    }
+
+    /** Rolls the unsent copy back to [before] (an accept whose pins couldn't be written: nothing was accepted). */
+    private suspend fun restoreUnsent(before: String?, wasDirty: Boolean) {
+        if (memoryUnreadable || conflict) return
+        if (wasDirty && before != null) {
+            unsentText = null
+            persistUnsent()
+        } else if (knownUnsent != null) {
+            clearUnsent()
+        }
+    }
+
+    private suspend fun useLocal(m: SigningMemory) {
         if (pinsLoaded) return
         val local = openLocal(m)
         memoryUnreadable = m.pinsSealed != null && local == null
-        pins = withOurs(local)
+        pins = adopt(local, local, m)
         pinsSeq = m.pinsSeq
         pinsLoaded = true
         loadedOnline = false
     }
 
     /** The server answered that it has no key pins (version 0). */
-    private fun serverHasNone() {
-        pins = withOurs(null)
+    private suspend fun serverHasNone(m: SigningMemory) {
+        pinsProblem = null
+        memoryUnreadable = false
+        pins = adopt(null, null, m)
         pinsSeq = 0
         pinsLoaded = true
         loadedOnline = true
-        pinsProblem = null
-        memoryUnreadable = false
-        noPinsFound = true
+        if (conflict) pinsProblem = SignedSharing.PAUSED
+        // Unsent pins kept on this phone from before are the account's memory: it isn't missing here.
+        noPinsFound = m.unsentSealed == null
     }
 
     private suspend fun loadPins(serverSeq: Long?, online: Boolean) {
         val m = memory.read()
-        if (!online || serverSeq == null) return useLocal(m)
-        if (pinsLoaded && loadedOnline && serverSeq == pinsSeq && pinsProblem == null) {
+        if (!online) return useLocal(m)
+        // Round 5 L: a sync without `user.key_pins_seq` says nothing about the pins: they are fetched anyway.
+        if (serverSeq != null && pinsLoaded && loadedOnline && serverSeq == pinsSeq && pinsProblem == null) {
             pinsUnreachable = false
             return
         }
-        if (serverSeq < m.pinsSeq) return rollback(m, SignedSharing.PINS_ROLLED_BACK, online = true)
+        if (serverSeq != null && serverSeq < m.pinsSeq) return rollback(m, SignedSharing.PINS_ROLLED_BACK, online = true)
         if (serverSeq == 0L) {
             pinsUnreachable = false
-            return serverHasNone()
+            return serverHasNone(m)
         }
         val (sealed, seq) = try {
             api.getKeyPins()
@@ -995,8 +1151,8 @@ class SharingSession(
             throw e
         } catch (_: Exception) {
             // Treated as offline: this phone's copy, nothing written or grandfathered, tried again next sync
-            // (when this phone's copy is as new as the server says, it is simply used).
-            pinsUnreachable = serverSeq > m.pinsSeq
+            // (when this phone's copy is as new as the server says, it is simply used; an unknown version is offline).
+            pinsUnreachable = serverSeq == null || serverSeq > m.pinsSeq
             return useLocal(m)
         }
         pinsUnreachable = false
@@ -1004,25 +1160,25 @@ class SharingSession(
         if (sealed == null) {
             // A version without pins is unreadable; none at all (version 0) is the server having none.
             if (seq > 0) return rollback(m, SignedSharing.PINS_UNREADABLE)
-            return serverHasNone()
+            return serverHasNone(m)
         }
         val opened = try {
             account.openKeyPins(sealed, seq.toULong())
         } catch (_: CoreException) {
             return rollback(m, SignedSharing.PINS_UNREADABLE)
         }
-        // Rule 5: this phone's last-known pins are merged into every newer server copy (not only on a
-        // 409), and the result is written back when it adds anything (retired keys, tombstones, rosters).
-        val local = openLocal(m)
-        val merged = local?.let { runCatching { mergePins(opened, it) }.getOrNull() } ?: opened
-        pins = withOurs(merged)
+        pinsProblem = null
+        memoryUnreadable = false
+        // Rule 5: this phone's last-known pins (no unsent changes) or its unsent changes, on top of the server's.
+        val base = withLastKnown(opened, openLocal(m), m)
+        pins = adopt(base, opened, m)
         pinsSeq = seq
         pinsLoaded = true
         loadedOnline = true
-        pinsProblem = null
-        memoryUnreadable = false
         noPinsFound = false
-        if (!SignedSharing.samePins(merged, opened)) dirty = true
+        if (conflict) pinsProblem = SignedSharing.PAUSED
+        // What the server's copy lacks is kept as unsent first: the server's copy never replaces it unwritten.
+        persistUnsent()
         memory.write { it.merge(SigningMemory(pinsSeq = seq, pinsSealed = sealed)) }
     }
 
@@ -1043,9 +1199,10 @@ class SharingSession(
             } catch (_: Exception) {
                 null
             }
+            dirty = false
         } else {
             memoryUnreadable = false
-            pins = withOurs(local)
+            pins = adopt(local, local, m)
         }
         pinsSeq = m.pinsSeq
         pinsLoaded = true
@@ -1063,11 +1220,15 @@ class SharingSession(
 
     /**
      * Write the key pins when this phone changed them (compare-and-swap; on 409 `key_pins_changed`
-     * read, merge and write again once). Nothing is written while the server's copy can't be used.
+     * read, merge and write again once). The change is kept on this phone as unsent first (round 5
+     * Android H) and stays there until a write succeeds. Nothing is written while the server's copy
+     * can't be used, before the pins were loaded, or while the own identity differs.
      */
     suspend fun savePins() {
         if (dirty && memoryUnreadable) throw UserException(SignedSharing.MEMORY_UNREADABLE)
-        if (!dirty || pinsProblem != null || pinsUnreachable) return
+        if (!dirty || !pinsLoaded || conflict) return
+        persistUnsent()
+        if (pinsProblem != null || pinsUnreachable) return
         for (attempt in 0..1) {
             val p = pins ?: return
             val next = pinsSeq + 1
@@ -1077,6 +1238,7 @@ class SharingSession(
                 pinsSeq = next
                 dirty = false
                 memory.write { it.merge(SigningMemory(pinsSeq = next, pinsSealed = sealed)) }
+                clearUnsent()
                 clearPendingIdentity()
                 return
             } catch (e: ApiException) {
@@ -1089,22 +1251,42 @@ class SharingSession(
                 } catch (_: CoreException) {
                     return rollback(m, SignedSharing.PINS_UNREADABLE)
                 }
-                memory.write { it.merge(SigningMemory(pinsSeq = seq, pinsSealed = s)) }
-                pins = mergePins(theirs, p)
+                // This phone's unsent changes on the newer copy ("ours wins" only for them).
+                val merged = try {
+                    mergePins(theirs, p)
+                } catch (_: CoreException.IdentityMismatch) {
+                    identityConflict()
+                    return
+                }
+                pins = merged
                 pinsSeq = seq
+                dirty = !SignedSharing.samePins(merged, theirs)
+                persistUnsent()
+                memory.write { it.merge(SigningMemory(pinsSeq = seq, pinsSealed = s)) }
+                if (!dirty) {
+                    clearUnsent()
+                    return
+                }
             }
         }
     }
 
     private fun pin(identityJson: String, email: String, verified: Boolean) {
-        // One form everywhere: the normalized email (round 4).
-        pins = pinSet(pins, identityJson, SignedSharing.normalized(email).ifEmpty { email }, verified, now())
+        // One form everywhere: the normalized email (round 4). One the core can't normalize isn't pinned (round 5 Info).
+        val normalized = SignedSharing.normalized(email)
+        if (normalized.isEmpty() && email.isNotBlank()) throw CoreException.Invalid("email")
+        pins = pinSet(pins, identityJson, normalized, verified, now())
         dirty = true
     }
 
-    private fun setEpoch(vaultId: String, current: String, rosterVersion: Long?) {
-        val next = pinsSetEpoch(pins, vaultId, current, rosterVersion?.toULong())
-        if (next != pins) {
+    /**
+     * A key this phone itself just gave the vault (its own key replacement): `pins_record_rotation`
+     * with this account's own row's kind ([keyKind]) and the signed [roster]'s version and hash
+     * together (or neither, unsigned).
+     */
+    private fun recordRotation(vaultId: String, keyKind: String, current: String, roster: String?) {
+        val next = pinsRecordRotation(pins, vaultId, keyKind, current, roster?.let { SignedSharing.rosterVersion(it)?.toULong() ?: throw CoreException.Invalid("roster version") }, roster?.let { rosterHash(it) })
+        if (!SignedSharing.samePins(next, pins)) {
             pins = next
             dirty = true
         }
@@ -1112,7 +1294,8 @@ class SharingSession(
 
     /**
      * At the account's first signed sync, only when this unlock created its signing identity ([online],
-     * key pins usable, sharing not paused): the unsigned shared vaults it has now ([vaultIds]) that
+     * key pins usable, sharing not paused): the unsigned shared vaults it has now ([vaults]: vault id
+     * and the key id of the key it has now) that
      * this phone showed as usable before (the candidates recorded when it made the identity; none on
      * a fresh install or a re-added account) stay usable without a consent ("Not yet signed"). Once
      * per account, and only once the identity state is known (made here, or the listed one opened):
@@ -1123,8 +1306,9 @@ class SharingSession(
      * phone made the identity without an earlier copy, and, when another device wrote the list first,
      * the ones this phone had before (iOS final review M1, case c).
      */
-    suspend fun grandfather(vaultIds: List<String>, online: Boolean) {
+    suspend fun grandfather(vaults: List<Pair<String, String>>, online: Boolean) {
         if (!online || paused || pinsProblem != null || pinsUnreachable || !pinsLoaded || memoryUnreadable) return
+        val vaultIds = vaults.map { it.first }
         if (identity == null) return
         if (skipGrandfather) {
             skipGrandfather = false
@@ -1136,7 +1320,10 @@ class SharingSession(
         val first = SignedSharing.needsGrandfathering(pins)
         if (first) {
             // Only the unlock that created the identity writes the ids; otherwise an empty list.
-            pins = pinsGrandfather(pins, if (createdHere) vaultIds.filter { it in candidates } else emptyList(), createdHere)
+            // Each with the key id it has now (round 5: a planted key under a grandfathered id needs consent).
+            val chosen = if (createdHere) vaults.filter { it.first in candidates } else emptyList()
+            val list = JsonArray(chosen.map { (vid, keyId) -> buildJsonObject { put("vault_id", vid); put("key_id", keyId) } }).toString()
+            pins = pinsGrandfather(pins, list, createdHere)
             dirty = true
         }
         val kept = SignedSharing.grandfathered(pins)
@@ -1164,7 +1351,7 @@ class SharingSession(
      * copy shown before) and that a verified sync ([current]: its vault ids) no longer lists get a
      * tombstone at the remembered roster version, so the server can't bring back the old copy later
      * (re-review L) — but only once the removal is confirmed (cross-client rule 3): the server says
-     * the vault is gone (403/404 for its members), or two verified syncs in a row didn't list it.
+     * the vault is gone (404 for its members; never a 403), or two verified syncs in a row didn't list it.
      * One sync that omitted it never makes the account give it up. Only online with usable pins.
      */
     suspend fun tombstoneRemoved(current: Set<String>, sharedBefore: Set<String>, online: Boolean) {
@@ -1366,6 +1553,8 @@ class SharingSession(
         if (paused && sealed) return refused(SignedSharing.PAUSED)
         // This phone's trust memory can't be read (rule 7): no shared vault is used.
         if (memoryUnreadable && sealed) return refused(SignedSharing.MEMORY_UNREADABLE)
+        // No key pins loaded (identity or pins couldn't be read at all): no shared vault is used (round 5 Info).
+        if (!pinsLoaded && sealed) return refused(SignedSharing.UNCHECKED)
         val epoch = v.keyEpoch ?: return refused(SignedSharing.refusedReason("missing_epoch"))
         val key = try {
             open(legacyAllowed(v.id))
@@ -1416,8 +1605,9 @@ class SharingSession(
             return when (status) {
                 "ok" -> {
                     // Every check of the row passed: only now its pins and the roster are remembered.
-                    signer?.let { s -> if (s.userId != me && (s.view.pin == PinState.New || s.view.pin == PinState.Upgraded)) pin(s.json, s.pinEmail, s.pinVerified) }
-                    if (SignedSharing.flag(observed, "changed")) {
+                    // Nothing is written to pins that were never loaded (they'd replace the account's).
+                    if (pinsLoaded) signer?.let { s -> if (s.userId != me && (s.view.pin == PinState.New || s.view.pin == PinState.Upgraded)) pin(s.json, s.pinEmail, s.pinVerified) }
+                    if (pinsLoaded && SignedSharing.flag(observed, "changed")) {
                         // Applied to the pins as they are now (with the signer pinned just now).
                         pins = (SignedSharing.obj(pinsObserve(pins, observation))?.get("pins") as? JsonObject)?.toString() ?: return refused(SignedSharing.REFUSED)
                         dirty = true
@@ -1438,15 +1628,17 @@ class SharingSession(
                     val replaced = SignedSharing.flag(admission, "replaced")
                     val rejoin = SignedSharing.flag(admission, "rejoin")
                     val own = SignedSharing.flag(admission, "own")
+                    val firstSigned = SignedSharing.flag(admission, "first_signed")
+                    val declinable = SignedSharing.flag(admission, "declinable")
                     // Unsigned: by the key id shown, only for the vaults written as waiting at the first signed sync (rule 1).
                     val unsignedAllowed = signer == null && !replaced && v.id in memory.read().missing.orEmpty()
                     val keyId = SignedSharing.text(SignedSharing.obj(current), "key_id").orEmpty()
                     val token = SignedSharing.token(
-                        v.id, v.role, rejoin, replaced, own, unsignedAllowed, deleted, keyId,
+                        v.id, v.role, rejoin, replaced, own, firstSigned, declinable, unsignedAllowed, deleted, keyId,
                         signer?.userId, signer?.hash, signer?.json, signer?.pinEmail, signer?.pinVerified, signer?.view?.email, signer?.view?.listedEmail,
                         current, rosterVersion, roster?.let { rosterHash(it) },
                     )
-                    val shown = ConsentVault(v.id, nameOf(), v.role, rejoin, signer?.view, deleted, replaced, unsignedAllowed, token, own, keyId)
+                    val shown = ConsentVault(v.id, nameOf(), v.role, rejoin, signer?.view, deleted, replaced, unsignedAllowed, token, own, keyId, firstSigned, declinable)
                     consentPlans[v.id] = ConsentPlan(signer, roster, rosterVersion, observation, replaced, shown)
                     VaultCheck.Consent(shown)
                 }
@@ -1463,9 +1655,10 @@ class SharingSession(
 
     /**
      * A `VaultObservation` (JSON) for the core: `signed_share` and `paused` always (required since
-     * round 4), `chain_hashes` whenever a chain was fetched ([chain]).
+     * round 4), `roster_hash` exactly with `roster_version`, `chain_hashes` whenever a chain was
+     * fetched ([chain]), `invitation: true` for an invitation ([invitation]).
      */
-    private fun observation(vaultId: String, kind: String, current: String, rosterVersion: Long?, roster: String?, chain: Map<String, String>?, signedShare: Boolean): JsonObject = buildJsonObject {
+    private fun observation(vaultId: String, kind: String, current: String, rosterVersion: Long?, roster: String?, chain: Map<String, String>?, signedShare: Boolean, invitation: Boolean = false): JsonObject = buildJsonObject {
         put("vault_id", vaultId)
         put("key_kind", kind)
         put("key", AppJson.parseToJsonElement(current))
@@ -1474,6 +1667,8 @@ class SharingSession(
         if (chain != null) put("chain_hashes", JsonObject(chain.mapValues { JsonPrimitive(it.value) }))
         put("signed_share", signedShare)
         put("paused", paused)
+        // An invitation (round 5 Android M): never grandfathered or own, held when the account has the vault; the same in admit and accept.
+        if (invitation) put("invitation", true)
     }
 
     /** The key pins with [observation] accepted (`pins_accept`); what the core refuses is said in words. */
@@ -1507,6 +1702,7 @@ class SharingSession(
      */
     private suspend fun committing(block: () -> Unit) {
         val before = Triple(pins, pinsSeq, dirty)
+        if (!pinsLoaded || conflict) throw UserException(SignedSharing.PINS_NOT_SAVED)
         try {
             block()
             savePins()
@@ -1515,6 +1711,8 @@ class SharingSession(
             pins = before.first
             pinsSeq = before.second
             dirty = before.third
+            // The unsent copy on this phone goes back too: nothing was accepted.
+            if (e !is kotlinx.coroutines.CancellationException) runCatching { restoreUnsent(before.first, before.third) }
             if (e is kotlinx.coroutines.CancellationException || e is UserException || e is ApiException) throw e
             throw UserException(SignedSharing.PINS_NOT_SAVED)
         }
@@ -1545,9 +1743,11 @@ class SharingSession(
     }
 
     /**
-     * Decline a vault held for consent exactly as [shown]: a tombstone at the roster version its check
-     * verified (or the remembered one). Only a signed one that names its signer, never a replaced key
-     * or an unsigned vault (cross-client rule 1: a server could make a real vault look like this).
+     * Decline a vault held for consent exactly as [shown], only where the core's verdict says
+     * `declinable` (round 5 M2: never a re-join, a replaced key, an own vault, a first signature or a
+     * held key; never unsigned): `pins_decline` for a row of this sync, which leaves the key pins as
+     * they are (a server-chosen roster version never goes into a tombstone). The account then leaves
+     * the vault on the server.
      */
     suspend fun declineConsent(shown: ConsentVault) {
         val p = consentPlans[shown.vaultId]?.takeIf { it.shown == shown } ?: throw UserException(SignedSharing.CHANGED_JUST_NOW)
@@ -1555,32 +1755,41 @@ class SharingSession(
         if (memoryMissing) throw UserException(SignedSharing.NO_DECLINE_NOW)
         if (!shown.declinable || p.signer == null) throw UserException(SignedSharing.CANT_DECLINE)
         if (memoryUnreadable) throw UserException(SignedSharing.MEMORY_UNREADABLE)
-        leave(shown.vaultId, p.rosterVersion)
+        decline(shown.vaultId, currentRow = true)
         answered(shown.vaultId)
     }
 
     /**
-     * Declining invitation [vaultId]: a tombstone at the roster version its check verified — unless
-     * that vault id is one the account uses now ([usable]: vaults shown as usable; or an accepted one
-     * the copy still lists, [rows]): a made-up invitation carrying the id of a real vault must not
-     * make the account give it up (final review L).
+     * Declining invitation [vaultId] ([trust]: its check as shown): only where it may be declined (a
+     * signed one whose admission says `declinable`), with `pins_decline` (round 5 M2): a tombstone at
+     * roster version 0 only for a vault the account doesn't hold — none when the key pins accepted it,
+     * it was left already, or it is one of this sync's vault rows ([rows], whatever its check said).
      */
-    suspend fun declineInvitation(vaultId: String, rosterVersion: Long?, usable: Set<String>, rows: Set<String>) {
+    suspend fun declineInvitation(vaultId: String, trust: InvitationTrust, rows: Set<String>) {
+        if (trust is InvitationTrust.Signed && !trust.declinable) throw UserException(SignedSharing.NOT_DECLINABLE)
         invitationPlans.remove(vaultId)
-        if (vaultId in usable || (vaultId in rows && SignedSharing.epochOf(pins, vaultId) != null)) return
         if (memoryUnreadable) throw UserException(SignedSharing.MEMORY_UNREADABLE)
-        leave(vaultId, rosterVersion)
+        if (!pinsLoaded || conflict) return
+        decline(vaultId, currentRow = vaultId in rows)
+    }
+
+    private fun decline(vaultId: String, currentRow: Boolean) {
+        val next = pinsDecline(pins, vaultId, currentRow, now())
+        if (!SignedSharing.samePins(next, pins)) {
+            pins = next
+            dirty = true
+        }
+        consentPlans.remove(vaultId)
+        invitationPlans.remove(vaultId)
     }
 
     /**
-     * Leaving, declining or a vault held for consent declined: a tombstone, so it never comes back
-     * unless shared again; at the higher of the remembered roster version and [rosterVersion] (the
-     * version a check of the declined invitation or consent verified).
+     * Leaving, or a removal this phone confirmed: a tombstone, so it never comes back unless shared
+     * again; at the remembered roster version (the core raises it to what the pin knew).
      */
-    suspend fun leave(vaultId: String, rosterVersion: Long? = null) {
+    suspend fun leave(vaultId: String) {
         val remembered = memory.read().rosters[vaultId]?.let { SignedSharing.rosterVersion(it) } ?: 0
-        val version = maxOf(remembered, rosterVersion ?: 0)
-        pins = pinsLeave(pins, vaultId, version.toULong(), now())
+        pins = pinsLeave(pins, vaultId, remembered.toULong(), now())
         dirty = true
         consentPlans.remove(vaultId)
         invitationPlans.remove(vaultId)
@@ -1625,12 +1834,26 @@ class SharingSession(
             }
             // With the chain's roster hashes when it was fetched (round 4: a chain re-signed from version 1
             // must contain the roster the account last trusted).
-            val observation = observation(inv.vaultId, "sealed", current, version, top, trusted.chain, true).toString()
+            // `invitation: true` (round 5 Android M): an invitation never re-pins a vault the account has
+            // (`held` unless a signed newer key on a vault with signed history), never its own (`own_vault`);
+            // the same observation is what accepting passes to `pins_accept`, so the flags shown are the flags accepted.
+            val observation = observation(inv.vaultId, "sealed", current, version, top, trusted.chain, true, invitation = true).toString()
             val admission = SignedSharing.obj(pinsAdmit(pins, observation)) ?: return refused
-            if (SignedSharing.text(admission, "status") == "refused") {
-                return InvitationTrust.Refused(SignedSharing.refusedReason(SignedSharing.text(admission, "reason").orEmpty()))
+            when (SignedSharing.text(admission, "status")) {
+                "consent" -> {}
+                "refused" -> return InvitationTrust.Refused(SignedSharing.refusedReason(SignedSharing.text(admission, "reason").orEmpty()))
+                // Anything else for an invitation isn't what the core promises: not accepted.
+                else -> return refused
             }
-            InvitationTrust.Signed(s.view, s.json, s.pinEmail, top, version, current, observation, s.pinVerified)
+            // An own vault or a replaced key are never offered as an invitation (the core refuses own vaults).
+            if (SignedSharing.flag(admission, "own")) return InvitationTrust.Refused(SignedSharing.refusedReason("own_vault"))
+            if (SignedSharing.flag(admission, "replaced")) return refused
+            InvitationTrust.Signed(
+                s.view, s.json, s.pinEmail, top, version, current, observation, s.pinVerified,
+                rejoin = SignedSharing.flag(admission, "rejoin"),
+                held = SignedSharing.flag(admission, "held"),
+                declinable = SignedSharing.flag(admission, "declinable"),
+            )
         } catch (_: SharingOffline) {
             InvitationTrust.Refused(SignedSharing.UNCHECKED)
         } catch (_: ApiException) {
@@ -1733,10 +1956,26 @@ class SharingSession(
      * After a key replacement the server took: the new key ([epochPin]) is pinned, and with a signed
      * [roster] that roster is what this phone trusts now; reviewed members new to the pins are pinned.
      */
-    suspend fun rememberRotation(vaultId: String, roster: String?, epochPin: String, newPins: List<Triple<String, String, Boolean>>) {
+    suspend fun rememberRotation(vaultId: String, roster: String?, epochPin: String, newPins: List<Triple<String, String, Boolean>>, keyKind: String = "account") {
         for ((json, email, verified) in newPins) runCatching { pin(json, email, verified) }
-        setEpoch(vaultId, epochPin, roster?.let { SignedSharing.rosterVersion(it) })
+        // `pins_record_rotation` (round 5): the roster's version always with its hash. The server took the
+        // replacement already, so a refusal here leaves the pins to the next sync's checks.
+        runCatching { recordRotation(vaultId, keyKind, epochPin, roster) }
         if (roster != null) remember(vaultId, roster)
+        // Kept on this phone as unsent at once (round 5 Android H): a failed key-pins write must not
+        // let the old key be accepted again after the next unlock.
+        persistUnsent()
+    }
+
+    /**
+     * Before any key replacement (round 5 Info): the key pins loaded and readable, not paused, not
+     * rolled back or unreachable; otherwise a [UserException] and nothing is replaced.
+     */
+    fun requireReadyToReplace() {
+        if (paused) throw UserException(SignedSharing.PAUSED)
+        if (memoryUnreadable) throw UserException(SignedSharing.MEMORY_UNREADABLE)
+        pinsProblem?.let { throw UserException(it) }
+        if (!pinsLoaded || pinsUnreachable) throw UserException(SignedSharing.PINS_UNSENT)
     }
 
     companion object {
@@ -1744,5 +1983,38 @@ class SharingSession(
         private const val MAX_ROSTER_PAGES = 10
         private const val MAX_ROSTER_VERSIONS = 1000
         private const val MAX_ROSTER_BYTES = 16L * 1024 * 1024
+    }
+}
+
+/**
+ * Whose account bundle this is (round 5, iOS H, checked on every client): a restored session
+ * (biometric unlock, timeout "never") is used only when the stored bundle is its own, and a bundle a
+ * sync or a locked background refresh brings is stored only when it is the account's own, so a server
+ * can't make "me" (and with it this phone's trust memory) another account id.
+ */
+object AccountBundles {
+    /**
+     * The account restored from its session bytes under the stored [bundle]'s account id, only when
+     * the bundle opens under its Account Key to its keys (`Account.matches_bundle`); null otherwise
+     * (ask for the master password).
+     */
+    fun restore(bundle: String, bytes: ByteArray): Account? {
+        val id = Stored.bundleUserId(bundle) ?: return null
+        val account = io.passauth.core.accountFromSessionBytes(id, bytes)
+        if (account.matchesBundle(bundle)) return account
+        account.destroy()
+        return null
+    }
+
+    /**
+     * The bundle to keep after a sync brought [next] ([stored]: the one kept): with the account
+     * unlocked ([unlocked]) only one `matches_bundle` accepts; locked, only one naming the same
+     * account id as the kept one (checked when a session is restored from it). Else the kept one.
+     */
+    fun toStore(unlocked: Account?, stored: String?, next: String?): String? {
+        if (next == null || next == stored) return stored
+        if (unlocked != null) return if (unlocked.matchesBundle(next)) next else stored
+        val keptId = Stored.bundleUserId(stored) ?: return stored
+        return if (Stored.bundleUserId(next) == keptId) next else stored
     }
 }

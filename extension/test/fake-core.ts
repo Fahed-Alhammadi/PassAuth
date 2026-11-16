@@ -20,6 +20,8 @@ export const control = {
   rewrapped: 0,
   /** The account id every fake account authenticates as (the fake server's user). */
   userId: "u-1",
+  /** A bundle with this `account_id` isn't one the fake account authenticates (`matchesBundle`: false). */
+  foreignAccountId: "acc-foreign",
 };
 
 let seq = 0;
@@ -64,6 +66,10 @@ export class FakeAccount {
   }
   openVaultKey(_id: string, wrapped: string, _kind: string, _keyEpoch?: number, _legacyAllowed?: boolean) {
     return new FakeVaultKey(wrapped);
+  }
+  /** Like the core's check that a bundle is this account's: false only for a bundle of `control.foreignAccountId`. */
+  matchesBundle(bundle: { account_id?: unknown } | null | undefined) {
+    return !!bundle && bundle.account_id !== control.foreignAccountId;
   }
   /** The account's own identity: what the background reads as "me" (the account id the core authenticated). */
   legacyIdentity() {

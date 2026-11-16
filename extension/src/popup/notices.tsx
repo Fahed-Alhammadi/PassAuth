@@ -41,7 +41,7 @@ const openTab = (url: string) => void chrome.tabs.create({ url });
 /**
  * A shared vault the server added without the account ever accepting it (or whose key was replaced on a vault never
  * seen signed): who signed it with their fingerprint, or the key id of an unsigned one, and Accept (after a
- * confirmation). Only a signed vault can be declined (in the web vault); an unsigned one that can't be accepted stays
+ * confirmation). Only a signed vault the core marks declinable can be declined (in the web vault); an unsigned one that can't be accepted stays
  * locked with "Ask the vault's owner to sign this vault." (no Decline: a server could make a real vault look like it).
  */
 function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["waiting"][number]; vaultsUrl?: string; refresh: () => void; notify: (t: string) => void }) {
@@ -88,9 +88,11 @@ function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["wai
             ? s
               ? "Accept only if you compared this fingerprint with them and someone in this vault just replaced its key."
               : "Accept only if someone in this vault just replaced its key."
-            : s
-              ? "Accept only if you expected this vault from them."
-              : "Accept only if you expected this vault, with this key id."}{" "}
+            : w.firstSigned && s
+              ? "Accept only if you compared this fingerprint with them."
+              : s
+                ? "Accept only if you expected this vault from them."
+                : "Accept only if you expected this vault, with this key id."}{" "}
           <button type="button" className="link" disabled={busy} onClick={() => void accept()}>
             I expected it: accept
           </button>{" "}
@@ -99,7 +101,7 @@ function WaitingVault({ w, vaultsUrl, refresh, notify }: { w: SharingNotice["wai
           </button>
         </>
       )}{" "}
-      {vaultsUrl && s && !w.replaced && (
+      {vaultsUrl && s && w.declinable && (
         <button type="button" className="link" onClick={() => openTab(vaultsUrl)}>
           Decline in the web vault
         </button>

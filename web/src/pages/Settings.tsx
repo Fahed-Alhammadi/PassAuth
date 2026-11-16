@@ -16,17 +16,30 @@ import { server } from "../lib/server";
 import { UNEXPECTED_RESPONSE, readRecoveryCodes, type Role } from "../lib/types";
 import {
   ASK_OWNER_TO_SIGN,
+  NOT_NOW_HINT,
   NOT_YET_SIGNED,
   cleanText,
   consentText,
+  firstSignedText,
   firstTimeText,
+  heldInvitationText,
   ownVaultReplacedText,
   replacedSignedText,
   replacedText,
   unsignedInvitationText,
   type SignedMemberRow,
 } from "../lib/signing";
-import { KeyChangedError, consentAcceptable, consentDeclinable, emailText, needsSigning, type Consent, type SignerView } from "../lib/signed-sharing";
+import {
+  KeyChangedError,
+  consentAcceptable,
+  consentDeclinable,
+  emailText,
+  invitationDeclinable,
+  needsSigning,
+  type Consent,
+  type InvitationTrust,
+  type SignerView,
+} from "../lib/signed-sharing";
 import { formatBytes } from "../lib/sizes";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
@@ -1463,7 +1476,18 @@ const replacedBy = (signer: SignerView) =>
 function consentWarning(c: Consent, name: string): string {
   if (c.own) return ownVaultReplacedText(name);
   if (c.replaced) return c.signer ? replacedSignedText(name, replacedBy(c.signer)) : replacedText(name);
+  if (c.firstSigned && c.signer) return firstSignedText(name, replacedBy(c.signer));
   return consentText(name);
+}
+
+/** The warning a signed invitation shows for its admission flags (own, replaced, first signed, held); null for none. */
+function invitationWarning(t: InvitationTrust | undefined, name: string): string | null {
+  if (t?.kind !== "signed") return null;
+  if (t.own) return ownVaultReplacedText(name);
+  if (t.replaced) return replacedSignedText(name, replacedBy(t.signer));
+  if (t.held) return heldInvitationText(name, replacedBy(t.signer));
+  if (t.firstSigned) return firstSignedText(name, replacedBy(t.signer));
+  return null;
 }
 
 /** A sealed vault the server lists that the account never accepted: shown like an invitation (signed sharing). */
@@ -1478,8 +1502,9 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
   const replaced = c.consent.replaced;
   // Signed, or (unsigned) a replaced key, or while the account's trust memory is missing: by the key id shown.
   const acceptable = consentAcceptable(c.consent);
-  // Only a signed one that names its signer is offered for decline (rule 1): a server could make a real vault look
-  // like an unsigned one waiting here, and declining writes a tombstone.
+  // Only where the core says `declinable`, and only a signed one that names its signer (rule 1: a server could make a
+  // real vault look like an unsigned one waiting here; round 5 M2: never a re-join, replaced, own, first-signed or held
+  // one). Otherwise "Not now": it stays locked until accepted.
   const declinable = consentDeclinable(c.consent);
   return (
     <div className="person" role="group" aria-labelledby={titleId}>
@@ -1518,6 +1543,7 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
       {c.consent.unsignedAllowed && !replaced && (
         <span className="field-hint">Until you accept, the vault stays locked on this device. If you don't recognise it, leave it for later and ask your server's admin.</span>
       )}
+      {signer && !declinable && <span className="field-hint">{NOT_NOW_HINT}</span>}
       <div className="card-actions">
         {acceptable && (
           <button
@@ -1554,7 +1580,7 @@ function ConsentRow({ vault: c }: { vault: ConsentVault }) {
             setShown(null);
           }}
         >
-          {(shown.own || shown.replaced) && (
+          {(shown.own || shown.replaced || shown.firstSigned) && (
             <div className="alert alert-warn small" role="note">
               {consentWarning(shown, name)}
             </div>
@@ -1599,6 +1625,9 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
   const role = ROLE_LABEL[inv.role] ?? inv.role;
   // Signed sharing: only a signed invitation that passed every check can be accepted; the rest can only be declined.
   const acceptable = inv.name !== null && (trust === undefined || trust.kind === "signed");
+  // A signed one only where its admission says `declinable` (round 5 M2); otherwise "Not now".
+  const declinable = invitationDeclinable(trust);
+  const warning = invitationWarning(trust, inv.name ?? "Shared vault");
   // The server says who sent it and gives that account's key: the fingerprint shows which key it lists, but it can't
   // prove the invitation is genuine, so it isn't presented as a check.
   const listedFor = cleanText(inv.invitedBy?.email) || sharer;
@@ -1653,8 +1682,13 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
         </div>
       ) : fingerprintBlock ? (
         <>
+          {warning && (
+            <div className="alert alert-warn small" role="note">
+              {warning}
+            </div>
+          )}
           {fingerprintBlock}
-          <span className="field-hint">Accept only invitations you expected.</span>
+          <span className="field-hint">{declinable ? "Accept only invitations you expected." : NOT_NOW_HINT}</span>
         </>
       ) : (
         <div className="alert alert-warn small" role="note">
@@ -1674,9 +1708,11 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
             Accept…
           </button>
         )}
-        <button type="button" className="btn btn-text btn-danger" onClick={() => setAsking("decline")}>
-          Decline…
-        </button>
+        {declinable && (
+          <button type="button" className="btn btn-text btn-danger" onClick={() => setAsking("decline")}>
+            Decline…
+          </button>
+        )}
       </div>
 
       {asking === "trust" && trust?.kind === "refused" && trust.changed && (
@@ -1707,6 +1743,11 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
             setShown(null);
           }}
         >
+          {invitationWarning(shown.trust, inv.name) && (
+            <div className="alert alert-warn small" role="note">
+              {invitationWarning(shown.trust, inv.name)}
+            </div>
+          )}
           <p className="card-text">
             The vault and its items appear in all your apps. {ROLE_SENTENCE[inv.role] ?? ""} The people who manage it can add and change items in it.
           </p>
@@ -1714,7 +1755,7 @@ function InvitationRow({ invitation: inv }: { invitation: Invitation }) {
           <p className="small muted">Accept only invitations you expected.</p>
         </ConfirmDialog>
       )}
-      {asking === "decline" && (
+      {asking === "decline" && declinable && (
         <ConfirmDialog
           title="Decline this invitation?"
           subtitle={inv.name ?? `From ${from}`}

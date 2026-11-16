@@ -67,8 +67,10 @@ export interface SignedVectors {
   keyPinsOwn: core.KeyPins;
   admissions: { pins: string; observation: core.VaultObservation; expected: core.Admission }[];
   accepts: ({ pins: string; observation: core.VaultObservation } & Outcome)[];
-  merges: { name: string; base: core.KeyPins; ours: core.KeyPins; expected: core.KeyPins }[];
-  observations: { observation: core.VaultObservation; expected: core.Observed }[];
+  merges: ({ name: string; base: core.KeyPins; ours: core.KeyPins } & Outcome)[];
+  mergesLastKnown: ({ name: string; base: core.KeyPins; lastKnown: core.KeyPins } & Outcome)[];
+  declines: { pins: string; vaultId: string; currentRow: boolean; expected: core.KeyPins }[];
+  observations: { observation: core.VaultObservation; expected: core.Observed; accept?: true; accepted?: core.KeyPins }[];
   emails: { email: string; expected: string }[];
   legacyWraps: { pins: string; expected: boolean }[];
   ownIdentity: { hash: string; pins: core.KeyPins; checks: { pins: string; listed: string | null; expected: string }[] };

@@ -50,6 +50,8 @@ import {
   acceptConsent,
   acceptInvitation,
   declineConsent,
+  declineInvitation,
+  getBundle,
   rotateVaultKeys,
   boot,
   getState,
@@ -71,7 +73,14 @@ beforeAll(async () => {
   await loadCore();
   v = await signedVectors();
   accounts = vectorAccounts(v);
+  // The vectors carry session bytes, not bundles: the fake server's bundle is `{account_id}`, and "this account's own
+  // bundle" is modelled by its account id (the core's real check is tested in the core). `bundleRefused` makes it fail.
+  vi.spyOn(core.Account.prototype, "matchesBundle").mockImplementation(function (this: core.Account, b: unknown) {
+    const id = (b as { account_id?: unknown } | null)?.account_id;
+    return !bundleRefused && id === (this.legacyIdentity() as { user_id: string }).user_id;
+  });
 });
+let bundleRefused = false;
 afterAll(() => vi.unstubAllGlobals());
 
 // ------------------------------------------------------------- fake server
@@ -497,7 +506,13 @@ describe("signed sharing in the vault", () => {
     expect(body.key_epoch).toBe(0);
     expect(w.vault.rosters).toHaveLength(1);
 
+    // Round 5: signed for the first time at the key Bob already holds: his OK once (Accept or Not now, no Decline).
     await signIn("bob");
+    expect(getState().vaults).toHaveLength(0);
+    const c = getState().consents[0];
+    expect(c.consent).toMatchObject({ firstSigned: true, declinable: false, signer: { label: "alice@example.com" } });
+    await expect(declineConsent(vid())).rejects.toThrow("can't be declined here");
+    await acceptConsent(vid(), c.consent);
     expect(getState().vaults[0].trust).toMatchObject({ kind: "signed", signer: { label: "alice@example.com" } });
   });
 
@@ -808,5 +823,64 @@ describe("servers without signed sharing", () => {
     expect(getState().invitations[0].trust).toBeUndefined();
     await acceptInvitation(vid(), shownInvitation());
     expect(getState().vaults).toHaveLength(1);
+  });
+});
+
+describe("round 5 (web)", () => {
+  /** This device's saved key pins for `name` (opened). */
+  const savedPins = (name: string) => {
+    const key = [...storage.keys()].find((k) => k.startsWith("pa.key-pins.") && k.endsWith(id(name)));
+    if (!key) return null;
+    const l = JSON.parse(storage.get(key)!) as { seq: number; sealed: string };
+    return accounts.get(name)!.account.openKeyPins(l.sealed, l.seq);
+  };
+
+  it("a saved session is used only with this account's own bundle (matchesBundle)", async () => {
+    w.me = id("alice");
+    await boot();
+    bundleRefused = true;
+    try {
+      const a = v.accounts.find((x) => x.name === "alice")!;
+      await expect(restoreUnlocked(a.id, unb64(a.sessionBytes))).rejects.toThrow("master password");
+      expect(getState().status).not.toBe("unlocked");
+    } finally {
+      bundleRefused = false;
+    }
+  });
+
+  it("a sync's bundle is kept only when it is the unlocked account's own", async () => {
+    await signIn("alice");
+    const before = getBundle();
+    const orig = h.handler!;
+    h.handler = async (path, opts) => {
+      const r = await orig(path, opts);
+      return path.startsWith("/sync") ? { ...(r as object), bundle: { account_id: id("bob") } } : r;
+    };
+    try {
+      await syncNow();
+    } finally {
+      h.handler = orig;
+    }
+    expect(getBundle()).toBe(before);
+  });
+
+  it("I2: a declined invitation is tombstoned only after the server answered", async () => {
+    await signIn("alice");
+    await confirming((c) => shareVault(vid(), found("bob"), "write", { confirmed: c }));
+    await signIn("bob");
+    expect(getState().invitations[0].trust).toMatchObject({ kind: "signed", declinable: true });
+    w.next.push({ path: `/vaults/${vid()}/invitation`, error: err(500, "server_error") });
+    await expect(declineInvitation(vid())).rejects.toBeTruthy();
+    expect(savedPins("bob")?.left?.[vid()]).toBeUndefined();
+    // Answered (404 here: already gone counts): tombstoned at roster version 0, never the server's chain version.
+    await declineInvitation(vid());
+    expect(savedPins("bob")?.left?.[vid()]?.roster_version).toBe(0);
+  });
+
+  it("M2: an unsigned invitation's decline tombstones nothing (it can never be accepted)", async () => {
+    legacyShare("bob", "write", "invited");
+    await signIn("bob");
+    await declineInvitation(vid());
+    expect(savedPins("bob")?.left?.[vid()]).toBeUndefined();
   });
 });

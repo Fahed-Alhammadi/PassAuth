@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.data.Invitation
+import io.passauth.app.data.Invitations
 import io.passauth.app.data.InvitationText
 import io.passauth.app.data.ConsentVault
 import io.passauth.app.data.InvitationTrust
@@ -154,12 +155,16 @@ private fun InvitationCard(inv: Invitation, onAccept: () -> Unit, onDecline: () 
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (inv.acceptable) Button(onClick = onAccept) { Text("Accept…") }
-                TextButton(
-                    onClick = onDecline,
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                    modifier = Modifier.heightIn(min = 48.dp),
-                ) { Text("Decline…") }
+                // No Decline where declining could give up a vault in use (round 5): it stays until the user decides.
+                if (inv.declinable) {
+                    TextButton(
+                        onClick = onDecline,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text("Decline…") }
+                }
             }
+            if (!inv.declinable) Muted(SignedSharing.NOT_DECLINABLE)
         }
     }
 }
@@ -178,7 +183,10 @@ private fun RoleBadge(text: String) {
 @Composable
 private fun SignedBlock(inv: Invitation) {
     when (val t = inv.trust) {
-        is InvitationTrust.Signed -> SignerBlock(t.signer, false)
+        is InvitationTrust.Signed -> {
+            SignerBlock(t.signer, false)
+            SignedSharing.invitationNote(t, inv.name ?: Invitations.UNNAMED)?.let { WarningNote(it) }
+        }
         InvitationTrust.Unsigned -> WarningNote(SignedSharing.unsignedInvitation(InvitationText.sharerShort(inv)))
         is InvitationTrust.Refused -> WarningNote(t.reason)
         InvitationTrust.Unchecked -> {}
@@ -213,13 +221,15 @@ private fun ConsentCard(c: ConsentVault, missingWhy: String?, onAccept: () -> Un
             ConsentDetails(c, missingWhy)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (c.acceptable) Button(onClick = onAccept) { Text("Accept…") }
-                // Only a signed vault naming its signer can be declined (never a replaced key or an unsigned vault).
+                // Only where the core says `declinable` (round 5: never a replaced key, an own vault, a re-join,
+                // a first signature or an unsigned vault).
                 if (canDecline) TextButton(
                     onClick = onDecline,
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                     modifier = Modifier.heightIn(min = 48.dp),
                 ) { Text("Decline…") }
             }
+            if (!canDecline && c.signer != null && !c.declinable) Muted(SignedSharing.NOT_DECLINABLE)
         }
     }
 }

@@ -26,6 +26,11 @@ export interface StoredSync extends SyncResponse {
    * offline unlock or a service-worker restart never uses a vault that failed, and checks only rows it has no verdict for.
    */
   trust?: Record<string, StoredVerdict>;
+  /**
+   * Written with the signed-sharing checks off (round 5 H): such a copy is never a source of grandfathering candidates.
+   * Only a copy with neither this nor `trust` (written before signed sharing existed) counts all its rows as usable.
+   */
+  checks?: "off";
 }
 
 /** Signed-sharing fields of an invitation that `readInvitations` (web) doesn't keep: the extension checks them. */

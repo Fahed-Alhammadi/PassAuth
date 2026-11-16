@@ -20,7 +20,9 @@ import io.passauth.core.pinsGrandfather
 import io.passauth.core.pinsLeave
 import io.passauth.core.pinsLegacyWrapAllowed
 import io.passauth.core.pinsObserve
-import io.passauth.core.pinsSetEpoch
+import io.passauth.core.pinsDecline
+import io.passauth.core.pinsMergeLastKnown
+import io.passauth.core.pinsRecordRotation
 import io.passauth.core.pinsSetOwnIdentity
 import io.passauth.core.rosterHash
 import io.passauth.core.rosterHead
@@ -159,7 +161,7 @@ class SignedSharingVectorsTest {
 
     @Test
     fun vectorsAreThere() {
-        for (name in listOf("accounts", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles", "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "legacyWraps", "openings", "observations", "emails", "accepts", "merges")) {
+        for (name in listOf("accounts", "identities", "shares", "rosters", "commitments", "chains", "heads", "memberDiffs", "rosterRoles", "pinChecks", "reviews", "epochChecks", "pinsEpochChecks", "admissions", "legacyWraps", "openings", "observations", "emails", "accepts", "merges", "mergesLastKnown", "declines")) {
             assertTrue("no $name vectors", (v[name] as? JsonArray)?.isNotEmpty() == true)
         }
     }
@@ -311,26 +313,37 @@ class SignedSharingVectorsTest {
             val pinned = c["pinned"]?.takeIf { it !is JsonNull }?.toString()
             check(failures, "epoch check ${c["pinned"]} / ${c["current"]}", c.s("expected"), epochCheck(pinned, c["current"].toString()))
         }
-        val withEpoch = pinsSetEpoch(pins, vaultId, vaultKey.epochPinJson(vaultId, 1u), 2u)
+        // A key this device gave the vault itself (`pins_record_rotation`, round 5: a roster version only with its hash).
+        fun record(p: String?, current: String, rosterVersion: Long? = null, rosterName: String? = null): String =
+            pinsRecordRotation(p, vaultId, "sealed", current, rosterVersion?.toULong(), rosterName?.let { n -> cases("rosters").first { it.s("name") == n }.s("hash") })
+        val withEpoch = record(pins, vaultKey.epochPinJson(vaultId, 1u), 2, "v2")
+        val noHash = try {
+            record(withEpoch, secondKey.epochPinJson(vaultId, 2u), 3)
+            "accepted"
+        } catch (e: CoreException) {
+            code(e)
+        }
+        check(failures, "a roster version without its hash", "malformed", noHash)
         check(failures, "pins with epoch", v["keyPinsWithEpoch"], json(withEpoch))
         for (c in cases("pinsEpochChecks")) {
             val rv = (c["rosterVersion"] as? JsonPrimitive)?.longOrNull?.toULong()
             check(failures, "pins epoch check ${c["current"]} @${c["rosterVersion"]}", c.s("expected"), pinsEpochCheck(withEpoch, vaultId, c["current"].toString(), rv))
         }
-        val raised = pinsSetEpoch(withEpoch, vaultId, secondKey.epochPinJson(vaultId, 2u), 3u)
+        val raised = record(withEpoch, secondKey.epochPinJson(vaultId, 2u), 3, "v3")
         check(failures, "raised", v["keyPinsRaised"], json(raised))
-        val otherDevice = pinsSetEpoch(null, vaultId, secondKey.epochPinJson(vaultId, 2u), null)
+        val otherDevice = record(null, secondKey.epochPinJson(vaultId, 2u))
         check(failures, "merged epochs", v["mergedEpochs"], json(mergePins(withEpoch, otherDevice)).jsonObject["epochs"])
         val left = pinsLeave(raised, vaultId, 3u, 2000)
         check(failures, "left", v["keyPinsLeft"], json(left))
-        val grandfathered = pinsGrandfather(pins, listOf(vaultId), true)
+        val candidates = """[{"vault_id":"$vaultId","key_id":"${vaultKey.keyId(vaultId)}"}]"""
+        val grandfathered = pinsGrandfather(pins, candidates, true)
         check(failures, "grandfathered", v["keyPinsGrandfathered"], json(grandfathered))
         check(failures, "needs grandfathering", true, SignedSharing.needsGrandfathering(pins))
         check(failures, "grandfathered once", false, SignedSharing.needsGrandfathering(grandfathered))
         // Trust memory missing: an identity this unlock didn't create grandfathers nothing.
-        val withheld = pinsGrandfather(pins, listOf(vaultId), false)
+        val withheld = pinsGrandfather(pins, candidates, false)
         check(failures, "withheld", v["keyPinsWithheld"], json(withheld))
-        val unsigned = pinsSetEpoch(grandfathered, vaultId, vaultKey.epochPinJson(vaultId, 1u), null)
+        val unsigned = record(grandfathered, vaultKey.epochPinJson(vaultId, 1u))
         check(failures, "unsigned", v["keyPinsUnsigned"], json(unsigned))
         val v3 = cases("rosters").first { it.s("name") == "v3" }
         val observation = """{"vault_id":"$vaultId","key_kind":"sealed","key":${vaultKey.epochPinJson(vaultId, 1u)},"roster_version":3,"roster_hash":"${v3.s("hash")}","signed_share":true,"paused":false}"""
@@ -364,14 +377,28 @@ class SignedSharingVectorsTest {
         }
         // Merging key pins (round 4: retired keys never come back, tombstones beat stale pins).
         for (c in cases("merges")) {
-            check(failures, "merge ${c.s("name")}", c["expected"], json(mergePins(c["base"].toString(), c["ours"].toString())))
+            expect(failures, "merge ${c.s("name")}", c) { json(mergePins(c["base"].toString(), c["ours"].toString())) }
+        }
+        // A newer server copy with this device's last-known pins (round 5 M1): the server wins for another identity.
+        for (c in cases("mergesLastKnown")) {
+            expect(failures, "merge last known ${c.s("name")}", c) { json(pinsMergeLastKnown(c["base"].toString(), c["lastKnown"].toString())) }
+        }
+        // Declines (round 5 M2): never a vault held, left or listed as a row; else a tombstone at version 0.
+        for (c in cases("declines")) {
+            val what = "decline ${c.s("pins")} ${c.s("vaultId")} ${c["currentRow"]}"
+            check(failures, what, c["expected"], json(pinsDecline(sets.getValue(c.s("pins")), c.s("vaultId"), c["currentRow"]!!.jsonPrimitive.boolean, 3000)))
         }
         // Observations chained over a sync's rows, from the grandfathered pins.
         var step: String = grandfathered
         for (c in cases("observations")) {
             val observed = json(pinsObserve(step, c["observation"].toString()))
             check(failures, "observation ${c["observation"]}", c["expected"], observed)
-            step = observed.jsonObject["pins"].toString()
+            // `accept`: the user accepted that step's consent (round 5: a first signature needs one).
+            step = if ((c["accept"] as? JsonPrimitive)?.booleanOrNull == true) {
+                pinsAccept(step, c["observation"].toString()).also { check(failures, "accepted ${c["observation"]}", c["accepted"], json(it)) }
+            } else {
+                observed.jsonObject["pins"].toString()
+            }
         }
         for (c in cases("emails")) {
             check(failures, "email ${c.s("email")}", c.s("expected"), normalizeEmail(c.s("email")))

@@ -826,7 +826,14 @@ export async function restoreUnlocked(accountId: string, keys: Uint8Array) {
   if (!bundle) throw new Error("Sign in again to unlock this vault.");
   if (bundle.account_id !== accountId) throw new Error("The saved keys belong to another account.");
   dropKeys();
-  account = core.accountFromSessionBytes(accountId, keys);
+  const restored = core.accountFromSessionBytes(accountId, keys);
+  // The id is only one the core authenticated (round 5): the bundle's private key must open under these keys with its
+  // account id bound. Otherwise the saved keys aren't used (the master password is asked for).
+  if (!restored.matchesBundle(bundle)) {
+    restored.free();
+    throw new Error("The saved keys don't match this account. Unlock with your master password.");
+  }
+  account = restored;
   let opened: boolean;
   try {
     opened = await openVault();
@@ -972,7 +979,8 @@ async function doSync() {
   checksOn = on;
   verdicts = checked;
   if (delta) synced = snap;
-  bundle = snap.bundle;
+  // Kept only when it is this unlocked account's own bundle (round 5: never another account id's).
+  if (account.matchesBundle(snap.bundle)) bundle = snap.bundle;
   materialize(snap);
   if (checked) void signed.flushPins().catch(() => {});
   // Not expected: the answer was older than an own write already shown. Ask again rather than keep it stale.
@@ -1931,24 +1939,29 @@ export async function acceptInvitation(vaultId: string, shown?: InvitationTrust)
 
 /**
  * Decline a vault shared with the account. The server then asks the vault's owners and admins to replace its key: the
- * invitation already gave this account the key. Already gone (404) is fine: the list is refreshed. Signed sharing: the
- * vault is tombstoned, so the same invitation served again is refused.
+ * invitation already gave this account the key. Already gone (404) is fine: the list is refreshed. Signed sharing: a
+ * signed invitation is declined only where its admission says `declinable` (else "Not now"), and once the server
+ * answered (or 404) it is tombstoned with `pinsDecline` (round 5 M2: never a vault the account holds or one of this
+ * sync's vault rows, never at a server-chosen roster version), so the same invitation served again is refused. An
+ * unsigned or refused one is only declined on the server (nothing to remember: it can never be accepted).
  */
 export async function declineInvitation(vaultId: string) {
-  if (signedSharingOn()) {
-    const trust = state.invitations.find((i) => i.vaultId === vaultId)?.trust;
-    // Not when the id is a vault in use here (an invitation listed under it must not make the account give it up).
-    signed.markLeft(vaultId, trust?.kind === "signed" ? trust.rosterVersion : 0, { decline: true });
-  }
+  const trust = signedSharingOn() ? state.invitations.find((i) => i.vaultId === vaultId)?.trust : undefined;
+  if (!signed.invitationDeclinable(trust)) throw new Error(DECLINE_NOT_OFFERED);
   try {
     await api(`/vaults/${vaultId}/invitation`, { method: "DELETE" });
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404)) throw e;
-  } finally {
+  }
+  // Only after the server answered (review r5 I2): a failed decline leaves nothing behind.
+  if (trust?.kind === "signed") {
+    signed.markDeclined(vaultId);
     void signed.flushPins().catch(() => {});
   }
   await sync();
 }
+
+const DECLINE_NOT_OFFERED = "This vault can't be declined here. Leave it for now: it stays locked on this device until you accept it.";
 
 /**
  * Accept a vault the server lists that the account never accepted (signed sharing; a signed one, or unsigned ones as
@@ -1963,16 +1976,18 @@ export async function acceptConsent(vaultId: string, shown: Consent) {
 }
 
 /**
- * Decline a vault the server lists that the account never accepted: tombstoned here, and the membership is left. Only a
- * signed one that names its signer (rule 1: a server could make a real vault look like an unsigned one waiting here),
- * and never a vault in use here.
+ * Decline a vault the server lists that the account never accepted, and leave the membership. Only where its admission
+ * says `declinable` and it names its signer (rule 1: a server could make a real vault look like an unsigned one waiting
+ * here; round 5 M2: never a re-join, replaced, own, first-signed or held one), and never a vault in use here. The pins
+ * go through `pinsDecline`, which never tombstones one of this sync's vault rows.
  */
 export async function declineConsent(vaultId: string) {
   const c = state.consents.find((x) => x.id === vaultId);
   if (!c) throw new Error("This vault is no longer waiting for you. Reload the page.");
-  if (!signed.consentDeclinable(c.consent)) throw new Error(`This vault isn't signed, so it can't be declined here. ${ASK_OWNER_TO_SIGN}`);
+  if (!signed.consentDeclinable(c.consent))
+    throw new Error(c.consent.signer ? DECLINE_NOT_OFFERED : `This vault isn't signed, so it can't be declined here. ${ASK_OWNER_TO_SIGN}`);
   if (state.vaults.some((v) => v.id === vaultId)) throw new Error("This vault is in use now, so it wasn't declined. Reload the page.");
-  signed.markLeft(vaultId, c.consent.rosterVersion ?? 0, { decline: true });
+  signed.markDeclined(vaultId);
   await signed.flushPins().catch(() => {});
   await api(`/vaults/${vaultId}/members/${state.userId}`, { method: "DELETE" }).catch(() => {});
   await sync();
@@ -2190,6 +2205,8 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
         );
       }
       if (roster) signed.rememberSigned(vaultId, roster);
+      // The new key is this device's own: pinned with the roster it signed (persisted unsent first, written below).
+      if (signing && v?.epoch !== undefined) signed.recordOwnKey(vaultId, "account", fresh.epochPin(vaultId, v.epoch + 1), roster ?? null);
       // Servers from before the vault name moved into the rotation request (they report no key epoch) need it separately.
       if (meta && !without && typeof r?.key_epoch !== "number") await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
       if (signing) void signed.flushPins().catch(() => {});
@@ -2231,6 +2248,8 @@ export async function resignVault(vaultId: string, opts: ChangeOptions = {}) {
         throw e;
       }
       signed.rememberSigned(vaultId, body.roster);
+      // Re-signed at the current key: this device doesn't then see its own signature as `first_signed`.
+      signed.recordOwnKey(vaultId, v.kind, v.key.epochPin(vaultId, v.epoch), body.roster);
       void signed.flushPins().catch(() => {});
       await sync();
       return;

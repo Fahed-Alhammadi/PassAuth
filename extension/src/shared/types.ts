@@ -143,8 +143,8 @@ export interface SharingNotice {
   }[];
   /**
    * Shared vaults the server added to this account that it never accepted, or whose key was replaced on a vault never
-   * seen signed: not used until the user accepts them (here or in the web vault). Only signed ones (with a `signer`) can
-   * be declined (in the web vault); unsigned ones are accepted by the key id shown where that is allowed, else they stay
+   * seen signed: not used until the user accepts them (here or in the web vault). Only signed ones the core marks
+   * `declinable` can be declined (in the web vault); unsigned ones are accepted by the key id shown where that is allowed, else they stay
    * locked ("Ask the vault's owner to sign this vault").
    */
   waiting: {
@@ -159,6 +159,10 @@ export interface SharingNotice {
     replaced: boolean;
     /** The account held this vault with its own key wrap (the text carries the extra warning). */
     own?: boolean;
+    /** Signed for the first time on a vault the account holds: Accept only after comparing the signer's fingerprint. */
+    firstSigned?: boolean;
+    /** Decline may be offered (in the web vault): only a signed, plain consent the core marks declinable. */
+    declinable?: boolean;
     /** The key id of an unsigned vault that may be accepted: shown, and what accepting names. */
     keyId?: string;
     note?: string;

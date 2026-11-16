@@ -79,7 +79,8 @@ final class SignedSharingTests: XCTestCase {
     /// The pins of a Bob who accepted the vault (its epoch pinned with roster 1, Alice pinned).
     private func accepted(_ w: World, verified: Bool = false) throws -> String {
         var p = try pinSet(pinsJson: nil, identityJson: w.alicePub, email: "alice@example.com", verified: verified, now: 1)
-        p = try pinsSetEpoch(pinsJson: p, vaultId: w.vaultId, currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1)
+        p = try pinsRecordRotation(pinsJson: p, vaultId: w.vaultId, keyKind: "sealed", currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: w.roster))
         return p
     }
 
@@ -129,10 +130,23 @@ final class SignedSharingTests: XCTestCase {
 
     func testAnAcceptedSignedShareIsUsedAndItsNewSignerPinnedOnlyOnceItPassed() throws {
         let w = try world()
-        // The epoch accepted (an earlier app), Alice not pinned yet.
-        let pins = try pinsSetEpoch(pinsJson: nil, vaultId: w.vaultId, currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0),
-                                    rosterVersion: nil)
-        let result = try check(w, try bobRow(w), pins: pins, newer: [w.roster])
+        // The epoch accepted unsigned (an earlier app), Alice not pinned yet: its first signature
+        // needs the user's OK (round 5 `first_signed`), never Decline.
+        let unsignedPins = try pinsRecordRotation(pinsJson: nil, vaultId: w.vaultId, keyKind: "sealed",
+                                                  currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: nil, rosterHash: nil)
+        let first = try check(w, try bobRow(w), pins: unsignedPins, newer: [w.roster])
+        guard case .consent(let acceptance, false, false, false, let firstSigner?) = first else { return XCTFail("\(first)") }
+        XCTAssertTrue(acceptance.flags.firstSigned)
+        XCTAssertFalse(acceptance.flags.declinable)
+        var shown = Invitation(vaultId: w.vaultId, role: "write", name: "Family", trust: .signed(firstSigner))
+        shown.consent = .added
+        shown.acceptance = acceptance
+        XCTAssertFalse(shown.canDecline, "a first signature never offers Decline")
+        XCTAssertEqual(SharingText.consentText(shown),
+                       "\u{201C}Family\u{201D} is signed for the first time, by \(firstSigner.heading). Compare their fingerprint before you accept.")
+        // Accepting it pins the vault signed: the same row is then used.
+        let pins = try pinsAccept(pinsJson: unsignedPins, observationJson: acceptance.observation(vaultId: w.vaultId, paused: false))
+        let result = try check(w, try bobRow(w), pins: pins, remembered: w.roster)
         guard case .ok(.signed(let signer), let roster, let after) = result else { return XCTFail("\(result)") }
         XCTAssertEqual(roster, w.roster)
         XCTAssertEqual(signer.pin, .new)
@@ -142,7 +156,7 @@ final class SignedSharingTests: XCTestCase {
         XCTAssertEqual(try pinCheck(pinsJson: after, identityJson: w.alicePub, email: nil), "match")
         XCTAssertTrue(KeyPinsReader.signedSince(after, w.vaultId), "the first trusted roster marks the vault signed for the account")
         // A row that fails a later check pins nothing (pins come back only with `.ok`).
-        XCTAssertEqual(try check(w, try bobRow(w, role: "admin"), pins: pins, newer: [w.roster]), .refused(.unverified))
+        XCTAssertEqual(try check(w, try bobRow(w, role: "admin"), pins: pins, remembered: w.roster), .refused(.unverified))
     }
 
     func testForgedOrChangedSharesAreRefused() throws {
@@ -195,11 +209,13 @@ final class SignedSharingTests: XCTestCase {
         let w = try world()
         // The account accepted epoch 3 of another key: epoch 0 now is older.
         let later = try w.alice.newVaultKey(vaultId: w.vaultId).key
-        var pins = try pinsSetEpoch(pinsJson: nil, vaultId: w.vaultId, currentJson: try later.epochPinJson(vaultId: w.vaultId, keyEpoch: 3), rosterVersion: nil)
+        var pins = try pinsRecordRotation(pinsJson: nil, vaultId: w.vaultId, keyKind: "sealed", currentJson: try later.epochPinJson(vaultId: w.vaultId, keyEpoch: 3), rosterVersion: nil,
+                                        rosterHash: nil)
         XCTAssertEqual(try check(w, try bobRow(w), pins: pins, newer: [w.roster]), .refused(.admission("older")))
         // The same epoch under another key: a conflict.
         let other = try w.alice.newVaultKey(vaultId: w.vaultId).key
-        pins = try pinsSetEpoch(pinsJson: nil, vaultId: w.vaultId, currentJson: try other.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: nil)
+        pins = try pinsRecordRotation(pinsJson: nil, vaultId: w.vaultId, keyKind: "sealed", currentJson: try other.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: nil,
+                                        rosterHash: nil)
         XCTAssertEqual(try check(w, try bobRow(w), pins: pins, newer: [w.roster]), .refused(.admission("conflict")))
     }
 
@@ -226,7 +242,8 @@ final class SignedSharingTests: XCTestCase {
         let colleague = try createAccount(accountId: try newId(), password: "correct horse battery", withSecretKey: false).account
         var pins = try pinSet(pinsJson: nil, identityJson: try colleague.newSigningIdentity().identity.publicIdentityJson(),
                               email: "alice@example.com", verified: true, now: 1)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: w.vaultId, currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: nil)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: w.vaultId, keyKind: "sealed", currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: nil,
+                                        rosterHash: nil)
         let result = try check(w, try bobRow(w, share: try shareJSON(w.share.signature, w.aliceSigning, email: " Alice@Example.com ")), pins: pins,
                                newer: [w.roster])
         guard case .refused(.keyChanged(let s)) = result else { return XCTFail("\(result)") }
@@ -240,11 +257,18 @@ final class SignedSharingTests: XCTestCase {
         let plain = try w.key.shareTo(vaultId: w.vaultId, recipientPublicKey: w.bob.publicKey())
         let old = SyncVault(id: w.vaultId, role: "write", wrappedKey: plain, keyKind: "sealed", keyEpoch: 0, share: nil, memberRoster: nil, memberRosterSeq: 0)
         // Present at the first signed sync: usable as "Not yet signed".
-        let grandfathered = try pinsGrandfather(pinsJson: nil, vaultIds: [w.vaultId], createdIdentity: true)
+        let grandfathered = try pinsGrandfather(pinsJson: nil, vaultsJson: SignedSharing.candidatesJson([(w.vaultId, try w.key.keyId(vaultId: w.vaultId))]),
+                                                createdIdentity: true)
         guard case .ok(.notYetSigned, nil, let p) = try check(w, old, pins: grandfathered) else { return XCTFail() }
         XCTAssertNotNil(p)
+        // Round 5: grandfathered with that key only; another key under the same id asks first.
+        let planted = try w.alice.newVaultKey(vaultId: w.vaultId).key
+        let swapped = SyncVault(id: w.vaultId, role: "write", wrappedKey: try planted.shareTo(vaultId: w.vaultId, recipientPublicKey: w.bob.publicKey()),
+                                keyKind: "sealed", keyEpoch: 0, share: nil, memberRoster: nil, memberRosterSeq: 0)
+        guard case .consent = SignedSharing.checkVault(swapped, key: planted, me: w.bobSelf, pins: grandfathered, remembered: nil, newer: nil,
+                                                       tooLarge: false, seenSigned: false, now: 1) else { return XCTFail("a planted key was grandfathered") }
         // Not grandfathered: a consent that can't be accepted (no signer).
-        guard case .consent(_, false, false, false, nil) = try check(w, old, pins: try pinsGrandfather(pinsJson: nil, vaultIds: [], createdIdentity: true)) else { return XCTFail() }
+        guard case .consent(_, false, false, false, nil) = try check(w, old, pins: try pinsGrandfather(pinsJson: nil, vaultsJson: "[]", createdIdentity: true)) else { return XCTFail() }
         // Seen signed before (on this device, or by the account) and now not: refused.
         XCTAssertEqual(try check(w, old, pins: grandfathered, seenSigned: true), .refused(.admission("downgraded")))
         XCTAssertEqual(try check(w, old, pins: try accepted(w)), .refused(.admission("downgraded")))
@@ -352,6 +376,47 @@ final class SignedSharingTests: XCTestCase {
         let again = try checkInvitation(w, try invitation(w, roster: v2), pins: left, remembered: w.roster, newer: [v2])
         guard case .signed = again.0 else { return XCTFail("\(again.0)") }
         XCTAssertEqual(again.1?.rosterVersion, 2)
+    }
+
+    /// Round 5 (Android M, `invitation: true`): an invitation never takes back a vault the
+    /// account holds or owns; its consent flags (re-join, held, …) are shown, bound to the
+    /// decision and accepted with the same observation; Decline only where `declinable`.
+    func testInvitationsCarryTheVerdictsFlagsAndNeverRepinAHeldOrOwnVault() throws {
+        let w = try world()
+        // A plain new invitation: declinable, nothing to say beyond the usual.
+        let fresh = try checkInvitation(w, try invitation(w), newer: [w.roster])
+        let freshAcceptance = try XCTUnwrap(fresh.1)
+        XCTAssertTrue(freshAcceptance.invitation)
+        XCTAssertTrue(freshAcceptance.observation(vaultId: w.vaultId, paused: false).contains(#""invitation":true"#))
+        XCTAssertEqual(freshAcceptance.flags, ConsentFlags(consent: true, declinable: true))
+        var plain = Invitation(vaultId: w.vaultId, role: "write", name: "Family", trust: fresh.0)
+        plain.acceptance = freshAcceptance
+        XCTAssertTrue(plain.canDecline)
+        XCTAssertNil(SharingText.consentText(plain))
+        // The vault the account holds, the same key again: refused (`held`), never re-pinned.
+        XCTAssertEqual(try checkInvitation(w, try invitation(w), pins: try accepted(w), remembered: w.roster, newer: nil).0, .refused)
+        // The account's own vault (pinned from its `account` row): refused (`own_vault`).
+        let own = try XCTUnwrap(SignedSharing.observe(nil, vaultId: w.vaultId, kind: "account", epochPin: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0),
+                                                       rosterVersion: nil, rosterHash: nil, signedShare: false, paused: false)?.pins ?? nil)
+        XCTAssertEqual(try checkInvitation(w, try invitation(w), pins: own, newer: [w.roster]).0, .refused)
+        XCTAssertEqual(SharingText.refusal(.admission("own_vault")), SharingText.refused + " Your server sent it as an invitation, but it is your own vault.")
+        // A vault left, re-shared with a newer roster: the re-join consent, shown and bound, no Decline.
+        let left = try pinsLeave(pinsJson: nil, vaultId: w.vaultId, rosterVersion: 1, now: 5)
+        let v2 = try Self.signRoster(w.aliceSigning, key: w.key, vault: w.vaultId, previous: w.roster, epoch: 0,
+                                     members: [Self.member(w.alicePub, "owner"), Self.member(w.bobPub, "write")].reversed())
+        let again = try checkInvitation(w, try invitation(w, roster: v2), pins: left, remembered: w.roster, newer: [v2])
+        let rejoin = try XCTUnwrap(again.1)
+        XCTAssertTrue(rejoin.flags.consent && rejoin.flags.rejoin && !rejoin.flags.declinable)
+        var shown = Invitation(vaultId: w.vaultId, role: "write", name: "Family", trust: again.0)
+        shown.acceptance = rejoin
+        XCTAssertFalse(shown.canDecline, "a re-join offers Accept or Not now, never Decline")
+        XCTAssertEqual(SharingText.consentText(shown), SharingText.rejoin("Family"))
+        XCTAssertFalse(Invitation.sameDecision(shown, plain), "another verdict is another decision")
+        // Accepting uses the same observation (with `invitation`): the tombstone cleared, re-joined.
+        let accepted = try JSON.parse(try pinsAccept(pinsJson: left, observationJson: rejoin.observation(vaultId: w.vaultId, paused: false)))
+        XCTAssertEqual(accepted["epochs"]?[w.vaultId]?["rejoined_at"]?.number, 2)
+        XCTAssertEqual(SharingText.held("Family"),
+                       "This is a new key for \u{201C}Family\u{201D}, which you already have. Accept only if someone in this vault just replaced its key.")
     }
 
     func testInvitationsAreReadWithTheirSignedFields() throws {
@@ -482,11 +547,17 @@ final class SignedSharingTests: XCTestCase {
         none.pinsSeq = 9
         none.sealedPins = nil
         XCTAssertEqual(stored.merging(none).sealedPins, "five")
-        // Another account's record is replaced, not merged.
+        // Another account's record on the same server is never written over (round 5, iOS H:
+        // only a sign-in with the master password clears it); another server's is replaced.
         var other = SharingMemoryRecord()
         other.userId = "someone-else"
         other.signed = ["z"]
-        XCTAssertEqual(stored.merging(other), other)
+        XCTAssertEqual(stored.merging(other), stored)
+        var elsewhere = stored
+        elsewhere.server = "https://a.example"
+        var otherServer = other
+        otherServer.server = "https://b.example"
+        XCTAssertEqual(elsewhere.merging(otherServer), otherServer)
         let mem = InMemorySharingMemory()
         mem.save("acc", stored)
         mem.save("acc", stale)
@@ -500,7 +571,10 @@ final class SignedSharingTests: XCTestCase {
         r.userId = "old"
         r.server = "https://a.example"
         r.signed = ["v"]
-        XCTAssertTrue(r.owned(by: "new", server: "https://a.example").isEmpty)
+        // Round 5, iOS H: another user id on the same server is unreadable (fail closed), never
+        // an empty memory a server could start over; another server's starts empty.
+        XCTAssertTrue(r.owned(by: "new", server: "https://a.example").unreadable)
+        XCTAssertFalse(r.owned(by: "new", server: "https://a.example").isEmpty)
         XCTAssertTrue(r.owned(by: "old", server: "https://b.example").isEmpty)
         XCTAssertEqual(r.owned(by: "old", server: "https://a.example"), r)
         var unowned = SharingMemoryRecord()
@@ -765,7 +839,8 @@ final class SignedSharingTests: XCTestCase {
     func testAnUpgradedSignerKeepsThePinnedEmailAndVerified() throws {
         let w = try world()
         var pins = try pinSet(pinsJson: nil, identityJson: try w.alice.legacyIdentityJson(), email: "alice@corp.example", verified: true, now: 1)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: w.vaultId, currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: w.vaultId, keyKind: "sealed", currentJson: try w.key.epochPinJson(vaultId: w.vaultId, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: w.roster))
         let got = try check(w, try bobRow(w), pins: pins, remembered: w.roster)
         guard case .ok(.signed(let s), _, let p?) = got else { return XCTFail("\(got)") }
         XCTAssertEqual(s.pin, .upgraded)
@@ -817,6 +892,8 @@ final class SignedSharingTests: XCTestCase {
         XCTAssertEqual(SharingText.consentUnsigned, "This vault isn't signed, so PassAuth can't accept it. Ask the vault's owner to sign this vault.")
         var signed = Invitation(vaultId: "v", role: "read", name: "Family", trust: .signed(s))
         signed.consent = .added
+        XCTAssertFalse(signed.canDecline, "no verdict that says declinable")
+        signed.acceptance = Acceptance(epochPin: "{}", rosterVersion: 1, roster: nil, signer: nil, flags: ConsentFlags(consent: true, declinable: true))
         XCTAssertTrue(signed.canDecline)
         XCTAssertEqual(InvitationText.sharerHeading(signed), "alice@example.com")
         signed.consent = .replaced

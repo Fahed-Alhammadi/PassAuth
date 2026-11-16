@@ -603,6 +603,14 @@ public final class VaultRepository {
         let email = result.str("email")
         let before = store.get()
         let server = before.file.accounts[id]?.server
+        // The bundle opened under the Account Key: its account id is authenticated (round 5, iOS H).
+        let authenticated = Self.authenticatedId(account)
+        // Another account's device memory on this server under this local record (signed out,
+        // then signed in as someone else): this sign-in proves the slot is now this account's.
+        let memory = sharingMemory.load(id)
+        if !memory.unreadable, !memory.userId.isEmpty, memory.userId != authenticated, memory.server.isEmpty || memory.server == server {
+            sharingMemory.clear(id)
+        }
         // Signing in again to an account that is already listed replaces the old record.
         let dupes = before.file.accounts.filter { $0.key != id && $0.value.server == server && $0.value.email.lowercased() == email.lowercased() }.map(\.key)
         for d in dupes {
@@ -619,6 +627,7 @@ public final class VaultRepository {
             var a = s.file.accounts[id] ?? AccountData()
             a.email = email
             a.bundle = bundle
+            a.accountId = authenticated
             a.biometric = false
             s.file.accounts[id] = a
             s.file.activeId = id
@@ -628,7 +637,7 @@ public final class VaultRepository {
         Keychain.deleteBiometric(id)
         twoStepGated.remove(id)
         violations[id] = nil
-        openSession(id, Session(accountId: Self.bundleAccountId(bundle), account: account))
+        openSession(id, Session(accountId: authenticated, account: account))
     }
 
     /// Create an account on the active record's server (the web vault's Register), with keys
@@ -678,12 +687,14 @@ public final class VaultRepository {
             let id = s.activeId
             guard let a = s.active else { throw UserError("Sign in first.") }
             let bundle: String
+            let fetched: Bool
             if let b = a.bundle {
                 bundle = b
+                fetched = false
             } else {
-                let b = (try await api.call(id, "/sync")["bundle"] ?? .null).text
-                store.updateAccount(id) { $0.bundle = b }
-                bundle = b
+                // Stored only once it opened under the master password (below).
+                bundle = (try await api.call(id, "/sync")["bundle"] ?? .null).text
+                fetched = true
             }
             let b = try JSON.parse(bundle)
             let skEnabled = b["secret_key_enabled"]?.bool ?? false
@@ -704,7 +715,13 @@ public final class VaultRepository {
             if let sk, typed?.isEmpty == false {
                 store.update { $0.secrets.secretKeys[a.email.lowercased()] = sk }
             }
-            openSession(id, Session(accountId: accountId, account: account))
+            // Opened with the master password: the bundle's account id is authenticated.
+            let authenticated = Self.authenticatedId(account)
+            store.updateAccount(id) { acc in
+                if fetched { acc.bundle = bundle }
+                acc.accountId = authenticated
+            }
+            openSession(id, Session(accountId: authenticated, account: account))
             try await syncOrGate(fallbackToCache: true, cacheFirst: true)
             afterOpen()
         }
@@ -748,10 +765,12 @@ public final class VaultRepository {
                 throw UserError(m)
             case .ok(var bytes):
                 defer { bytes.wipe() }
-                let accountId = Self.bundleAccountId(bundle)
                 let copy = bytes
-                let account = try await core { try accountFromSessionBytes(accountId: accountId, bytes: copy) }
-                openSession(id, Session(accountId: accountId, account: account))
+                let known = a.accountId
+                guard let restored = try? await core({ Self.restoreSession(bundle: bundle, authenticatedId: known, bytes: copy) }) else {
+                    throw UserError(Self.restoreRefused)
+                }
+                openSession(id, Session(accountId: restored.accountId, account: restored.account))
                 try await syncOrGate(fallbackToCache: true, cacheFirst: true)
                 afterOpen()
                 return true
@@ -769,10 +788,11 @@ public final class VaultRepository {
                 guard let keys = s.secrets.persistedKeys[id], let bundle = a.bundle, s.tokens(id) != nil, sessions[id] == nil,
                       var bytes = Data(base64Encoded: keys) else { continue }
                 defer { bytes.wipe() }
-                let accountId = Self.bundleAccountId(bundle)
                 let copy = bytes
-                if let account = try? await core({ try accountFromSessionBytes(accountId: accountId, bytes: copy) }) {
-                    openSession(id, Session(accountId: accountId, account: account))
+                let known = a.accountId
+                // Only for the stored bundle the kept keys open (round 5, iOS H); else locked.
+                if let r = try? await core({ Self.restoreSession(bundle: bundle, authenticatedId: known, bytes: copy) }) {
+                    openSession(id, Session(accountId: r.accountId, account: r.account))
                     restored = true
                 }
             }
@@ -1112,10 +1132,13 @@ public final class VaultRepository {
             let data = try await core { try snapshot.encoded() }
             await store.writeCacheInBackground(id, data)
             if mode == .synced {
+                let bundle = snapshot.bundle?.text
+                let storeBundle = bundle.map { Self.bundleMayBeStored($0, account: account, authenticatedId: session.meId) } ?? false
                 store.updateAccount(id) { a in
                     a.lastSync = Date().timeIntervalSince1970
                     if let name = snapshot.user?["name"]?.string { a.name = name }
-                    if let bundle = snapshot.bundle { a.bundle = bundle.text }
+                    if storeBundle, let bundle { a.bundle = bundle }
+                    if a.accountId == nil, storeBundle { a.accountId = session.meId }
                 }
             }
         }
@@ -1234,6 +1257,10 @@ public final class VaultRepository {
             if result == .current { store.updateAccount(id) { $0.lastSync = Date().timeIntervalSince1970 } }
             return
         }
+        // Another account's bundle (round 5, iOS H): nothing of this answer is kept.
+        if let known = a.accountId, !known.isEmpty, let bundle = next.bundle, !Self.bundleMayBeStored(bundle.text, account: nil, authenticatedId: known) {
+            return
+        }
         let data = try await core { try next.encoded() }
         try Task.checkCancellation()
         await lock.run {
@@ -1242,7 +1269,7 @@ public final class VaultRepository {
             await store.writeCacheInBackground(id, data)
             store.updateAccount(id) { a in
                 a.lastSync = Date().timeIntervalSince1970
-                if let bundle = next.bundle { a.bundle = bundle.text }
+                if let bundle = next.bundle?.text, Self.bundleMayBeStored(bundle, account: nil, authenticatedId: a.accountId) { a.bundle = bundle }
             }
         }
     }
@@ -1485,10 +1512,16 @@ public final class VaultRepository {
         out.trash.sort { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
         out.revision = snap.revision
         if var o = outputs, let m = o.memory.missing {
-            // The consent states last while a vault they cover still waits for the user.
-            let waiting = Set(consent.map(\.vaultId))
-            o.memory.missing = m.filter { waiting.contains($0) }
-            outputs = o
+            // A vault leaves the consent states only once it is settled (round 5 Info): accepted
+            // (`accept`), used (an `ok` verdict now) or tombstoned; not because one process (an
+            // AutoFill extension, an offline open) didn't see its consent this time.
+            let usable = Set(out.vaults.map(\.id))
+            let left: Set<String> = if case .object(let l)? = KeyPinsReader.field(o.pins, "left") { Set(l.keys) } else { [] }
+            let next = m.filter { !usable.contains($0) && !left.contains($0) }
+            if next != m {
+                o.memory.missing = next
+                outputs = o
+            }
         }
         var names: [String: String?] = [:]
         if invitations {
@@ -1506,6 +1539,7 @@ public final class VaultRepository {
                                                                 newer: s.fetched[inv.vaultId], tooLarge: s.tooLarge.contains(inv.vaultId))
                     shown.trust = checked.0
                     shown.acceptance = checked.1
+                    shown.own = checked.1?.flags.own ?? false
                     return shown
                 }
                 out.invitations += consent
@@ -1805,10 +1839,11 @@ public final class VaultRepository {
         let me = session.meId
         let account = session.account
         let name = info.name
-        let made: (wrapped: String, items: [JSON], meta: String) = try await core {
+        let next = info.keyEpoch.map { UInt64(max(0, $0) + 1) }
+        let made: (wrapped: String, items: [JSON], meta: String, epochPin: String?) = try await core {
             let nv = try account.newVaultKey(vaultId: vid)
             let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
-            return (nv.wrapped, items, meta)
+            return (nv.wrapped, items, meta, try next.map { try nv.key.epochPinJson(vaultId: vid, keyEpoch: $0) })
         }
         var body: [String: JSON] = [
             "keys": [["user_id": .string(me), "wrapped_key": .string(made.wrapped), "key_kind": .string(VaultInfo.accountKeyKind)]],
@@ -1817,6 +1852,8 @@ public final class VaultRepository {
         ]
         if let e = info.keyEpoch { body["key_epoch"] = .int(e) }
         try await postRotation(id, vid, body)
+        // The key this device gave the vault (round 5; no roster: neither version nor hash).
+        if let pin = made.epochPin { await recordOwnRotation(id, session, vaultId: vid, epochPin: pin, roster: nil) }
         try await syncLocked()
         return .rotated
     }
@@ -2089,6 +2126,39 @@ public final class VaultRepository {
         (try? JSON.parse(bundle))?.str("account_id") ?? ""
     }
 
+    /// The account id the core authenticated for an unlocked account (its own id, as signed
+    /// sharing's "me").
+    nonisolated static func authenticatedId(_ account: Account) -> String {
+        (try? account.legacyIdentityJson()).flatMap { try? JSON.parse($0) }?.str("user_id") ?? ""
+    }
+
+    public static let restoreRefused = "PassAuth couldn't confirm the keys kept on this device. Unlock with your master password."
+
+    /// Session bytes kept on this device (Face ID, timeout "Never", the macOS AutoFill timed
+    /// unlock) reopened for the stored `bundle` (round 5, iOS H): under the account id an earlier
+    /// unlock authenticated (`AccountData.accountId`; the bundle's own id for records from
+    /// before), and only when the bundle is that account's own (`Account.matchesBundle`: its
+    /// private-key blob opens under this Account Key with associated data bound to its id), so a
+    /// server can't make "me" another id by swapping the stored bundle. nil: ask for the master
+    /// password.
+    nonisolated static func restoreSession(bundle: String, authenticatedId known: String?, bytes: Data) -> (accountId: String, account: Account)? {
+        let listed = bundleAccountId(bundle)
+        if let known, !known.isEmpty, known != listed { return nil }
+        guard !listed.isEmpty, let account = try? accountFromSessionBytes(accountId: listed, bytes: bytes),
+              account.matchesBundle(bundleJson: bundle), authenticatedId(account) == listed else { return nil }
+        return (listed, account)
+    }
+
+    /// Whether a bundle from the server may be stored for the account (round 5, iOS H): never one
+    /// with another `account_id` than the authenticated one. Unlocked: it must be this account's
+    /// own (`matchesBundle`); locked (a background refresh): its id must be the one an unlock
+    /// authenticated (nothing is stored before one did).
+    nonisolated static func bundleMayBeStored(_ bundle: String, account: Account?, authenticatedId known: String?) -> Bool {
+        if let account { return account.matchesBundle(bundleJson: bundle) && (known.map { $0.isEmpty || $0 == bundleAccountId(bundle) } ?? true) }
+        guard let known, !known.isEmpty else { return false }
+        return bundleAccountId(bundle) == known
+    }
+
     /// Hosts where plain http is allowed: this device and local-network addresses (test servers).
     /// This device only (no network involved).
     nonisolated public static func isLoopback(_ host: String) -> Bool {
@@ -2149,10 +2219,11 @@ extension VaultRepository {
             let s = store.get()
             let id = s.activeId
             guard sessions[id] == nil, let bundle = s.active?.bundle, s.tokens(id) != nil else { return sessions[id] != nil }
-            let accountId = Self.bundleAccountId(bundle)
             let copy = sessionBytes
-            guard let account = try? await core({ try accountFromSessionBytes(accountId: accountId, bytes: copy) }) else { return false }
-            openSession(id, Session(accountId: accountId, account: account))
+            let known = s.active?.accountId
+            // Only for the stored bundle the kept keys open (round 5, iOS H); else locked.
+            guard let r = try? await core({ Self.restoreSession(bundle: bundle, authenticatedId: known, bytes: copy) }) else { return false }
+            openSession(id, Session(accountId: r.accountId, account: r.account))
             try? await syncLocked(fallbackToCache: true, cacheFirst: true)
             return true
         }

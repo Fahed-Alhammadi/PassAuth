@@ -124,6 +124,10 @@ export interface Consent {
   replaced: boolean;
   /** The account held this vault with its own key wrap: a personal vault now comes as one someone else sealed. */
   own: boolean;
+  /** Signed for the first time at the key the account already holds: its first signer is trusted only with the user's OK. */
+  firstSigned: boolean;
+  /** `pinsAdmit`'s `declinable`: Decline may be offered (`pinsDecline`); otherwise only "Not now" (it stays locked). */
+  declinable: boolean;
   /**
    * The account's trust memory is missing for this vault (no key pins on the server, or no earlier copy on this device
    * at the first signed sync): an unsigned vault may be accepted too ("Not yet signed", by the key id shown), and it
@@ -147,7 +151,22 @@ export type VaultVerdict =
 /** How an invitation is vouched for. */
 export type InvitationTrust =
   /** Signed: the signer's identity checked against the pins, the roster chain, roles and the key's commitment. */
-  | { kind: "signed"; signer: SignerView; roster: string; rosterVersion: number; chainHashes: Record<string, string> | null; epoch: core.EpochPin; rejoin: boolean }
+  | {
+      kind: "signed";
+      signer: SignerView;
+      roster: string;
+      rosterVersion: number;
+      chainHashes: Record<string, string> | null;
+      epoch: core.EpochPin;
+      /** Admission flags (shown, and bound to the accept): a re-join, a newer key for a vault the account holds (`held`), … */
+      rejoin: boolean;
+      replaced: boolean;
+      own: boolean;
+      firstSigned: boolean;
+      held: boolean;
+      /** Decline may be offered; otherwise only "Not now" (a puppet-signed invitation must not lead to giving a vault up). */
+      declinable: boolean;
+    }
   /** Not signed, on a server that signs: decline only. */
   | { kind: "unsigned" }
   /** Signed, but a check failed: decline only. */
@@ -214,13 +233,20 @@ interface Session {
    * once confirmed (rule 3).
    */
   sharedSeen: Set<string>;
-  /** Per accepted shared vault, how many consecutive verified syncs didn't list it (a tombstone needs two, or a 403/404). */
+  /** Per accepted shared vault, how many consecutive verified syncs didn't list it (a tombstone needs two, or a 404). */
   absent: Map<string, number>;
   /**
    * This device's trust memory is stored but can't be read (rule 7): shared vaults are refused, own vaults keep their
    * epoch and key id checks against the server's pins (read only), and nothing is written.
    */
   broken: boolean;
+  /**
+   * The server's key pins and this device's remember different own identities (`identity_mismatch` from a merge): sharing
+   * is paused and nothing is merged or written (neither on this device nor to the server) for the session.
+   */
+  frozen: boolean;
+  /** The vault row ids of the last sync checked (a decline never tombstones one of them: `pinsDecline` `currentRow`). */
+  rows: Set<string>;
   /** The local copy this session wrote last (to tell another tab's write). */
   lastWritten: string | null;
   pins: KeyPins | null;
@@ -392,6 +418,8 @@ export async function prepareSigning(
       sharedSeen: new Set(),
       absent: new Map(),
       broken: false,
+      frozen: false,
+      rows: new Set(),
       lastWritten: null,
       pins: null,
       pinsSeq: 0,
@@ -419,7 +447,10 @@ export async function prepareSigning(
   await checkIdentity(s, user.identity, refetchUser);
   if (session !== s) return true;
   if (s.notSigning && !s.proven) {
-    // This server doesn't sign: nothing of this session is kept (nothing was written either).
+    // This server doesn't sign: nothing of this session is kept. The identity hash and the grandfathering candidates
+    // recorded before the upload are dropped too (review r5 L2): a stale `earlier` list would otherwise decide the
+    // grandfathering when this server signs one day, and lock every vault added since.
+    if (s.generated) updateMemory(store, s.scope, { clearPending: true });
     s.identity?.free();
     session = null;
     return false;
@@ -489,6 +520,8 @@ async function checkIdentity(s: Session, record: unknown, refetchUser: () => Pro
   if (rec === null) {
     // None listed, but this account had one: the server dropped it (a rollback). Never make a second one.
     if (s.identity || rememberedOwn(s)) return pause(s);
+    // Unreadable device memory may be what remembered one (review r5 I4): never upload a second identity then.
+    if (s.broken) return;
     return createIdentity(s, refetchUser);
   }
   if (s.identity) {
@@ -513,6 +546,7 @@ function openIdentity(s: Session, rec: unknown) {
   // An own identity this device or the pins already knew before this open: then a hash generated here doesn't make
   // this the identity's first signed sync (rule 6).
   const knownBefore = !!rememberedOwn(s);
+  const unwritten = s.pins?.grandfathered === null || s.pins?.grandfathered === undefined;
   if (!rememberOwn(s, hash)) {
     identity.free();
     return pause(s);
@@ -520,7 +554,9 @@ function openIdentity(s: Session, rec: unknown) {
   adopt(s, identity);
   // Made here, even if the answer to its `PUT` was lost: a server can't forge a record that opens under the account key
   // to a hash this device generated (review L-A).
-  if (!knownBefore && (s.generated === hash || readMemory(store, s.scope).generated.includes(hash))) s.createdIdentity = true;
+  // Also when the unlock that created it (`created: true`) remembered it but its first signed sync slipped: the pins
+  // still lack the grandfathered list (review r5 I1).
+  if ((!knownBefore || unwritten) && (s.generated === hash || readMemory(store, s.scope).generated.includes(hash))) s.createdIdentity = true;
 }
 
 const statusOf = (e: unknown): number | null => {
@@ -596,7 +632,13 @@ async function loadPins(s: Session, serverSeq: unknown) {
   }
   const localSeq = localPins && local ? local.seq : 0;
   const hold = (notice: string) => {
-    if (localPins) setPinsRaw(s, s.pins ? (core.mergePins(localPins, s.pins) as KeyPins) : localPins);
+    if (localPins) {
+      try {
+        setPinsRaw(s, s.pins ? mergeCopies(localPins, !!local?.dirty, s.pins, s.dirty) : localPins);
+      } catch (e) {
+        if (!mismatched(s, e)) throw e;
+      }
+    }
     s.pinsSeq = Math.max(localSeq, s.pinsSeq);
     s.dirty = s.dirty || !!local?.dirty;
     s.held = true;
@@ -621,23 +663,34 @@ async function loadPins(s: Session, serverSeq: unknown) {
   }
   // This device's last-known pins (its local copy and this session's) are always merged into a newer server copy, not
   // only unsent changes (rule 5): retired keys, tombstones and rosters this device knows are never dropped because
-  // another device wrote first. When the merge adds anything, it is written back.
+  // another device wrote first. Unsent changes win (`mergePins`); a last-known copy only adds what never goes back
+  // (`pinsMergeLastKnown`: the server's person pins win, so two devices never rewrite each other's in a loop, review r5
+  // M1). When the merge adds anything, it is written back. Another own identity: paused, nothing merged or written.
   let pins = serverPins;
   let dirty = false;
-  for (const [ours, unsent] of [
-    [localPins, !!local?.dirty],
-    [s.pins, s.dirty],
-  ] as const) {
-    if (!ours) continue;
-    if (!pins) {
-      // No server copy (version 0): this device's is the only one; unsent while it was.
-      pins = ours;
-      dirty = dirty || unsent;
-      continue;
+  try {
+    for (const [ours, unsent] of [
+      [localPins, !!local?.dirty],
+      [s.pins, s.dirty],
+    ] as const) {
+      if (!ours) continue;
+      if (!pins) {
+        // No server copy (version 0): this device's is the only one; unsent while it was.
+        pins = ours;
+        dirty = dirty || unsent;
+        continue;
+      }
+      const merged = (unsent ? core.mergePins(pins, ours) : core.pinsMergeLastKnown(pins, ours)) as KeyPins;
+      if (!samePins(merged, pins)) dirty = true;
+      pins = merged;
     }
-    const merged = core.mergePins(pins, ours) as KeyPins;
-    if (!samePins(merged, pins)) dirty = true;
-    pins = merged;
+  } catch (e) {
+    if (!mismatched(s, e)) throw e;
+    // This device's own copy stays in use (read only) for its own vaults' checks; the server's isn't asked for again.
+    if (!s.pins && localPins) setPinsRaw(s, localPins);
+    s.pinsSeq = Math.max(s.pinsSeq, got);
+    s.loaded = true;
+    return;
   }
   if (pins) setPinsRaw(s, pins);
   s.pinsSeq = got;
@@ -664,13 +717,35 @@ function samePins(a: KeyPins, b: KeyPins): boolean {
 }
 
 /**
+ * Two copies of this account's pins merged: unsent changes win (`mergePins(other, unsent)`); with none, the newer-based
+ * copy (`a`) takes only what never goes back from the other (`pinsMergeLastKnown`). Throws `identity_mismatch`.
+ */
+function mergeCopies(a: KeyPins, aUnsent: boolean, b: KeyPins, bUnsent: boolean): KeyPins {
+  if (bUnsent) return core.mergePins(a, b) as KeyPins;
+  if (aUnsent) return core.mergePins(b, a) as KeyPins;
+  return core.pinsMergeLastKnown(a, b) as KeyPins;
+}
+
+/**
+ * `identity_mismatch` from a merge (the copies remember different own identities): pause sharing, and merge and write
+ * nothing for this session (round 5). False for any other error.
+ */
+function mismatched(s: Session, e: unknown): boolean {
+  if (errCode(e) !== "identity_mismatch") return false;
+  s.frozen = true;
+  s.held = true;
+  pause(s);
+  return true;
+}
+
+/**
  * Save the pins on this device (sealed, marked unsent while `dirty`). Only once the server showed it signs. A copy
  * another tab or window wrote meanwhile (not ours: the same or a higher version, or unsent changes at any version) is
  * merged in first, so its unsent changes aren't dropped; nothing is written over a stored copy that can't be read or
  * opened.
  */
 function saveLocal(s: Session) {
-  if (!s.pins || !s.proven || s.broken) return;
+  if (!s.pins || !s.proven || s.broken || s.frozen) return;
   const have = localPinsState(store, s.scope);
   if (have === "unreadable") return;
   if (have && have.sealed !== s.lastWritten && (have.seq >= s.pinsSeq || have.dirty)) {
@@ -681,8 +756,10 @@ function saveLocal(s: Session) {
       return;
     }
     try {
-      setPinsRaw(s, core.mergePins(theirs, s.pins) as KeyPins);
-    } catch {
+      // Theirs is based on the same or a newer server copy, or carries unsent changes (which win over a last-known copy).
+      setPinsRaw(s, mergeCopies(theirs, have.dirty, s.pins, s.dirty));
+    } catch (e) {
+      mismatched(s, e);
       return;
     }
     // Their version is the server's they are based on; their unsent changes are ours to send now too.
@@ -726,7 +803,7 @@ function setPins(s: Session, pins: KeyPins) {
 export function flushPins(): Promise<void> {
   const s = session;
   // Nothing goes to the server before it showed it signs (review M-A), nor from a device whose memory is unreadable.
-  if (!s || !s.dirty || s.held || !s.pins || !s.proven || s.broken) return Promise.resolve();
+  if (!s || !s.dirty || s.held || s.frozen || !s.pins || !s.proven || s.broken) return Promise.resolve();
   if (s.flushing) return s.flushing;
   s.flushing = (async () => {
     for (let attempt = 0; attempt < 2 && session === s && s.dirty; attempt++) {
@@ -758,10 +835,12 @@ export function flushPins(): Promise<void> {
         }
         try {
           const theirs = s.account.openKeyPins(r.key_pins, r.seq) as KeyPins;
+          // This device's changes are unsent: they win (`mergePins`).
           setPinsRaw(s, core.mergePins(theirs, s.pins!) as KeyPins);
           s.pinsSeq = r.seq;
           saveLocal(s);
-        } catch {
+        } catch (e) {
+          mismatched(s, e);
           return;
         }
       }
@@ -1004,17 +1083,18 @@ export async function verifySnapshot(vaults: readonly SignedVaultRow[], invitati
     // a device with no earlier record grandfathers nothing (a server could fake "created" to it): each shared vault
     // waits for consent, like when the trust memory is missing (review M-B). An identity from before with no key pins
     // (withheld, or never written) is a missing trust memory: nothing is grandfathered, every shared vault needs consent.
-    const unsigned = vaults.filter((r) => r.share === null || r.share === undefined).map((r) => r.id);
     const sealed = vaults.filter((r) => r.key_kind === "sealed").map((r) => r.id);
     if (s.createdIdentity) {
       // The vaults this device had shown as usable when the identity was first generated here (rule 6), else (an
-      // identity made before that record existed) the ones recorded before this unlock.
+      // identity made before that record existed) the ones recorded before this unlock. Each with the key id it has
+      // now: only that key is grandfathered (round 5).
       const recorded = readMemory(store, s.scope).earlier;
       const before = recorded !== undefined ? recorded : earlierSeen(s.scope);
-      setPins(s, core.pinsGrandfather(s.pins, [...new Set(before ? unsigned.filter((id) => before.includes(id)) : [])], true) as KeyPins);
+      setPins(s, core.pinsGrandfather(s.pins, before ? grandfatherCandidates(s, vaults, before) : [], true) as KeyPins);
       if (!before) setMissing(s, sealed, "device");
     } else {
-      setPins(s, core.pinsGrandfather(s.pins, [...new Set(unsigned)], false) as KeyPins);
+      // Trust memory missing: nothing is grandfathered (the core writes an empty list).
+      setPins(s, core.pinsGrandfather(s.pins, [], false) as KeyPins);
       setMissing(s, sealed, "pins");
     }
   }
@@ -1024,6 +1104,7 @@ export async function verifySnapshot(vaults: readonly SignedVaultRow[], invitati
     const m = readMemory(store, s.scope);
     if (m.generated.length || m.earlier !== undefined) updateMemory(store, s.scope, { clearPending: true });
   }
+  s.rows = new Set(vaults.map((r) => r.id));
   // Built aside and swapped in at the end: a change planned meanwhile sees the last complete sync's state.
   const verified = new Map<string, { roster: string | null; epoch: number }>();
   for (const row of vaults) {
@@ -1067,6 +1148,30 @@ export async function verifySnapshot(vaults: readonly SignedVaultRow[], invitati
   return out;
 }
 
+/**
+ * The grandfathering candidates: the unsigned rows among `ids`, each with the key id (`VaultKey.keyId`) of the key it
+ * has now (a row whose key doesn't open is left out: it is checked like any other).
+ */
+function grandfatherCandidates(s: Session, vaults: readonly SignedVaultRow[], ids: readonly string[]): core.GrandfatherCandidate[] {
+  const out = new Map<string, string>();
+  for (const r of vaults) {
+    if ((r.share !== null && r.share !== undefined) || !ids.includes(r.id) || out.has(r.id)) continue;
+    const kind = r.key_kind === "account" || r.key_kind === "sealed" ? r.key_kind : null;
+    if (!kind || !wholeNumber(r.key_epoch)) continue;
+    try {
+      const key = s.account.openVaultKey(r.id, r.wrapped_key, kind, r.key_epoch, core.pinsLegacyWrapAllowed(s.pins, r.id));
+      try {
+        out.set(r.id, key.keyId(r.id));
+      } finally {
+        key.free();
+      }
+    } catch {
+      /* not openable: not grandfathered */
+    }
+  }
+  return [...out].map(([vault_id, key_id]) => ({ vault_id, key_id }));
+}
+
 /** The vaults waiting without trust memory, written once (device memory `missing`; only shrinks after). */
 function setMissing(s: Session, ids: string[], why: "pins" | "device") {
   const m = s.proven ? updateMemory(store, s.scope, { missing: { ids, why } }) : null;
@@ -1098,7 +1203,7 @@ function settleMissing(s: Session, verdicts: Map<string, VaultVerdict>) {
  * An accepted shared vault verified syncs no longer list (the account left, was removed or the vault was deleted):
  * tombstoned with the roster version this device trusted, so the server can't bring it back unless it is shared again
  * with a newer member list. A removal is observed, not assumed (rule 3): only once the vault is absent from two
- * consecutive verified syncs, or its members request answers 403/404 — never after one sync that omitted it. Not while
+ * consecutive verified syncs, or its members request answers 404 — never after one sync that omitted it. Not while
  * paused (nothing is verified then) or before the server showed it signs.
  */
 async function tombstoneGone(s: Session, vaults: readonly SignedVaultRow[], invitations: readonly SignedInvitationRow[]) {
@@ -1130,14 +1235,14 @@ async function tombstoneGone(s: Session, vaults: readonly SignedVaultRow[], invi
   }
 }
 
-/** Whether the server says this account is no longer in the vault (its members request answers 403 or 404). */
+/** Whether the server says this account is no longer in the vault (its members request answers 404; a 403 can be a two-step or re-auth refusal, so it doesn't count). */
 async function membershipGone(vaultId: string): Promise<boolean> {
   try {
     await api(`/vaults/${encodeURIComponent(vaultId)}/members`);
     return false;
   } catch (e) {
     const st = statusOf(e);
-    return st === 403 || st === 404;
+    return st === 404;
   }
 }
 
@@ -1151,7 +1256,7 @@ function vaultState(s: Session, vaultId: string): unknown[] {
     memory?.signed ?? false,
     s.pins?.epochs?.[vaultId] ?? null,
     s.pins?.left?.[vaultId] ?? null,
-    s.pins?.grandfathered?.includes(vaultId) ?? null,
+    s.pins?.grandfathered?.[vaultId] ?? null,
     s.missing.has(vaultId),
     s.peopleVersion,
   ];
@@ -1186,7 +1291,7 @@ async function verifyVault(s: Session, row: SignedVaultRow): Promise<RowResult> 
   if (kind === "sealed" && s.broken) return { verdict: refuse(MEMORY_UNREADABLE) };
   const paused = !!s.paused;
   if (!wholeNumber(row.key_epoch)) {
-    const a = core.pinsAdmit(s.pins, { vault_id: row.id, key_kind: kind, key: null, roster_version: null, signed_share: false, paused });
+    const a = core.pinsAdmit(s.pins, { vault_id: row.id, key_kind: kind, key: null, roster_version: null, roster_hash: null, signed_share: false, paused });
     return { verdict: refuse(a.status === "refused" ? refusedText(a.reason) : VAULT_REFUSED) };
   }
   const epoch = row.key_epoch;
@@ -1273,6 +1378,8 @@ async function verifyVault(s: Session, row: SignedVaultRow): Promise<RowResult> 
           rejoin: a.rejoin,
           replaced: a.replaced,
           own: a.own === true,
+          firstSigned: a.first_signed === true,
+          declinable: a.declinable === true,
           unsignedAllowed: s.missing.has(row.id),
           signer,
           roster: trusted,
@@ -1356,12 +1463,28 @@ async function verifyInvitation(s: Session, inv: SignedInvitationRow): Promise<I
       ...(chain ? { chain_hashes: chain } : {}),
       signed_share: true,
       paused: !!s.paused,
+      // Never grandfathered, never the account's own vault, `held` for a vault it holds (round 5).
+      invitation: true,
     });
   } catch {
     return refused();
   }
   if (a.status === "refused") return refused(refusedText(a.reason));
-  return { kind: "signed", signer: view, roster, rosterVersion: n.version, chainHashes: chain, epoch: current, rejoin: a.status === "consent" && a.rejoin };
+  const c = a.status === "consent" ? a : null;
+  return {
+    kind: "signed",
+    signer: view,
+    roster,
+    rosterVersion: n.version,
+    chainHashes: chain,
+    epoch: current,
+    rejoin: c?.rejoin === true,
+    replaced: c?.replaced === true,
+    own: c?.own === true,
+    firstSigned: c?.first_signed === true,
+    held: c?.held === true,
+    declinable: c ? c.declinable === true : true,
+  };
 }
 
 /**
@@ -1379,6 +1502,13 @@ interface Shown {
   rosterVersion: number | null;
   chainHashes: Record<string, string> | null;
   epoch: core.EpochPin;
+  /** The admission flags the dialog showed (the wording depends on them): accepted only while they are the same. */
+  rejoin?: boolean;
+  replaced?: boolean;
+  own?: boolean;
+  firstSigned?: boolean;
+  held?: boolean;
+  declinable?: boolean;
 }
 
 /**
@@ -1386,7 +1516,7 @@ interface Shown {
  * with the roster's hash; clears a tombstone and marks the re-join), pin its signer with exactly the email the dialog
  * showed (rule 4), and remember its roster. Nothing is written when the core refuses.
  */
-function admit(s: Session, vaultId: string, shown: Shown) {
+function admit(s: Session, vaultId: string, shown: Shown, invitation = false) {
   let accepted: KeyPins;
   try {
     accepted = core.pinsAccept(s.pins, {
@@ -1398,6 +1528,8 @@ function admit(s: Session, vaultId: string, shown: Shown) {
       ...(shown.chainHashes ? { chain_hashes: shown.chainHashes } : {}),
       signed_share: !!shown.signer,
       paused: !!s.paused,
+      // The same observation the invitation's admission saw, so the flags shown are the flags accepted.
+      ...(invitation ? { invitation: true } : {}),
     }) as KeyPins;
   } catch {
     // rollback (left, older, conflict, downgraded), roster_forked, identity_mismatch: what admission would refuse.
@@ -1424,7 +1556,8 @@ function shownKey(x: Shown): string {
     rosterHash = "unreadable";
   }
   const chain = x.chainHashes ? Object.entries(x.chainHashes).sort(([a], [b]) => Number(a) - Number(b)) : null;
-  return JSON.stringify([x.signer?.hash ?? null, x.signer?.email ?? null, x.signer?.label ?? null, x.epoch?.key_id ?? null, x.epoch?.key_epoch ?? null, rosterHash, x.rosterVersion, chain]);
+  const flags = [x.rejoin, x.replaced, x.own, x.firstSigned, x.held, x.declinable].map((f) => f === true);
+  return JSON.stringify([x.signer?.hash ?? null, x.signer?.email ?? null, x.signer?.label ?? null, x.epoch?.key_id ?? null, x.epoch?.key_epoch ?? null, rosterHash, x.rosterVersion, chain, flags]);
 }
 
 /** Whether a vault needing consent is still exactly what was shown (signer and their email, key id, epoch, roster, role, kind). */
@@ -1448,14 +1581,21 @@ export const sameInvitationTrust = (a: InvitationTrust | undefined, b: Invitatio
 export function acceptInvitationTrust(vaultId: string, trust: Extract<InvitationTrust, { kind: "signed" }>, shown: InvitationTrust = trust) {
   const s = live();
   if (!sameInvitationTrust(trust, shown) || shown.kind !== "signed") throw new Error(CHANGED_SINCE_SHOWN);
-  admit(s, vaultId, shown);
+  admit(s, vaultId, shown, true);
 }
 
 /** Whether a vault needing consent may be accepted: signed, a replaced key, or unsigned while trust memory is missing (rule 1). */
 export const consentAcceptable = (c: Consent): boolean => !!c.signer || c.replaced || c.unsignedAllowed;
 
-/** Whether a vault needing consent may be declined: only a signed one that names its signer (rule 1). */
-export const consentDeclinable = (c: Consent): boolean => !!c.signer;
+/**
+ * Whether a vault needing consent may be declined: only where the core says `declinable` (signed, and none of re-join,
+ * replaced, own, first signed, held: a puppet-signed consent for a vault the account uses must not lead the user into
+ * giving it up, round 5 M2), and only a signed one that names its signer (rule 1). Otherwise "Not now".
+ */
+export const consentDeclinable = (c: Consent): boolean => c.declinable && !!c.signer;
+
+/** Whether a signed invitation may be declined (`declinable`); unsigned and refused ones always may (nothing is tombstoned). */
+export const invitationDeclinable = (t: InvitationTrust | undefined): boolean => t?.kind !== "signed" || t.declinable;
 
 /**
  * The user accepts a vault needing consent: a signed one (its signer and key pinned, roster remembered); an unsigned one
@@ -1470,22 +1610,55 @@ export function acceptConsent(consent: Consent, shown: Consent = consent) {
 }
 
 /**
- * The account leaves, declines or deletes a vault (or declines one needing consent): its key pin becomes a tombstone,
- * so the vault served again is refused unless shared again with a newer member list. `decline`: a declined invitation
- * or consent; when its vault id is a vault this sync verified as usable, nothing is tombstoned (a server could list an
- * invitation under the id of a vault in use to make the user give it up: rule 3). Nothing is written before the server
+ * The account leaves or deletes a vault: its key pin becomes a tombstone (at the roster version this device trusts), so
+ * the vault served again is refused unless shared again with a newer member list. Nothing is written before the server
  * showed it signs, or while this device's memory is unreadable.
  */
-export function markLeft(vaultId: string, rosterVersion?: number | null, opts: { decline?: boolean } = {}) {
+export function markLeft(vaultId: string) {
   const s = session;
   // Also while paused (the pins don't need the signing identity): the tombstone is what keeps the vault out later.
-  if (!s || !s.loaded || !s.proven || s.broken) return;
-  if (opts.decline && s.verified.has(vaultId)) return;
-  const version = rosterVersion ?? rosterNumbers(s.verified.get(vaultId)?.roster ?? readMemory(store, s.scope).vaults[vaultId]?.roster ?? "")?.version ?? 0;
+  if (!s || !s.loaded || !s.proven || s.broken || s.frozen) return;
+  const version = rosterNumbers(s.verified.get(vaultId)?.roster ?? readMemory(store, s.scope).vaults[vaultId]?.roster ?? "")?.version ?? 0;
   try {
     setPins(s, core.pinsLeave(s.pins, vaultId, version, now()) as KeyPins);
   } catch {
     /* too large: refused at the next write too; the server's own state still removes the membership */
+  }
+  s.cache.delete(`v:${vaultId}`);
+}
+
+/**
+ * The user declined a signed invitation or a vault needing consent (`pinsDecline`, round 5 M2): a tombstone at roster
+ * version 0 (never a server-chosen version), and only for a vault the account doesn't hold: nothing changes when it
+ * has an epoch pin, was left already, or is one of the last sync's vault rows (whatever its verdict).
+ */
+export function markDeclined(vaultId: string) {
+  const s = session;
+  if (!s || !s.loaded || !s.proven || s.broken || s.frozen) return;
+  try {
+    const next = core.pinsDecline(s.pins, vaultId, s.rows.has(vaultId), now()) as KeyPins;
+    if (!s.pins || !samePins(next, s.pins)) setPins(s, next);
+  } catch {
+    /* too large: nothing written */
+  }
+  s.cache.delete(`v:${vaultId}`);
+  s.cache.delete(`i:${vaultId}`);
+}
+
+/**
+ * A key this device itself just gave a vault and the server accepted (its own key replacement, or re-signing at the
+ * current key): pinned with the roster it signed (version and hash together, or neither), so this device never asks
+ * about its own key (`pinsRecordRotation`). `keyKind`: this account's own row's (`account`, or `sealed`). Kept unsent
+ * on this device until written.
+ */
+export function recordOwnKey(vaultId: string, keyKind: string, current: core.EpochPin, roster: string | null) {
+  const s = session;
+  if (!s || !s.loaded || !s.proven || s.broken || s.frozen || s.paused) return;
+  const version = roster ? (rosterNumbers(roster)?.version ?? null) : null;
+  try {
+    setPins(s, core.pinsRecordRotation(s.pins, vaultId, keyKind, current, version, version === null ? null : core.rosterHash(roster!)) as KeyPins);
+  } catch {
+    /* refused (an older key, a vault left, a forked roster) or too large: the next sync's checks decide */
   }
   s.cache.delete(`v:${vaultId}`);
 }

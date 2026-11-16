@@ -99,7 +99,10 @@ import {
   noteVaultsSeen,
   flushPins,
   identityFingerprint,
+  invitationDeclinable,
+  markDeclined,
   markLeft,
+  recordOwnKey,
   personState,
   pinReviewed,
   pinsNotice,
@@ -119,6 +122,7 @@ import {
 } from "./signed-sharing";
 import {
   ACCOUNT_MISMATCH,
+  HELD_INVITATION,
   MEMORY_UNREADABLE,
   NEW_DEVICE,
   STILL_CHECKING,
@@ -133,6 +137,7 @@ import {
   namesFromRows,
   pinsKey,
   readMemory,
+  updateMemory,
   trustScope,
   type MembersAnswer,
   type PublicIdentity,
@@ -662,7 +667,7 @@ describe("final review fixes (web)", () => {
     h.server.identity.set(id("alice"), null);
     h.server.fail = { path: "/account/identity", error: new h.ApiError(404, "not_found", "no route") };
     expect(await unlockUnproven("alice")).toBe(false);
-    // Only the hash generated before the upload is remembered: nothing that keeps the checks on.
+    // Nothing that keeps the checks on; and (review r5 L2) not the hash or candidates recorded before the upload either.
     expect(local.get(pinsKey(scope("alice")))).toBeUndefined();
     expect(readMemory(store, scope("alice"))).toMatchObject({ on: false, own: null });
     expect(checksRemembered(acct("alice").account, { user: { identity: null, key_pins_seq: 0 }, vaults: [ownRow()], invitations: [] })).toBe(false);
@@ -783,23 +788,32 @@ describe("final review fixes (web)", () => {
     expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
   });
 
-  it("tombstones at once when the vault's members request answers 403/404 (rule 3)", async () => {
+  it("tombstones at once when the vault's members request answers 404 (rule 3)", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    h.server.members.set(VID(), 404);
+    await verifySnapshot([], []);
+    expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
+  });
+
+  it("a 403 from the members request (two-step or re-auth refusal) doesn't confirm a removal (rule 3)", async () => {
     const row = sharedRow("bob", "write");
     await bobAccepts(row);
     expect(await verdict(row)).toMatchObject({ status: "ok" });
     h.server.members.set(VID(), 403);
     await verifySnapshot([], []);
-    expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
   });
 
   it("declining an invitation or consent listed under the id of a vault in use doesn't tombstone that vault (rule 3)", async () => {
     const row = sharedRow("bob", "write");
     await bobAccepts(row);
     expect(await verdict(row)).toMatchObject({ status: "ok" });
-    markLeft(VID(), 1, { decline: true });
+    markDeclined(VID());
     expect(await verdict(row)).toMatchObject({ status: "ok" });
     // Leaving it is still a tombstone.
-    markLeft(VID(), 1);
+    markLeft(VID());
     expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
   });
 
@@ -810,7 +824,7 @@ describe("final review fixes (web)", () => {
     await flushPins();
     await as("bob", { identity: acct("carol").record });
     expect(signingProblem()).toBe(SHARING_PAUSED);
-    markLeft(VID(), 1);
+    markLeft(VID());
     await as("bob");
     expect(await verdict(row)).toMatchObject({ status: "refused", reason: VAULT_LEFT });
   });
@@ -844,7 +858,7 @@ describe("final review fixes (web)", () => {
     const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
     expect(inv).toEqual({ kind: "refused", reason: MEMORY_UNREADABLE });
     expect(await verdict(row)).toMatchObject({ status: "refused", reason: MEMORY_UNREADABLE });
-    expect(() => markLeft(VID(), 1)).not.toThrow();
+    expect(() => markLeft(VID())).not.toThrow();
     expect(() => trustPerson(pub("alice"), EMAIL.alice, { mode: "trust", shownHash: core.verifyIdentity(pub("alice")).hash })).toThrow(MEMORY_UNREADABLE);
     await flushPins();
     expect(h.server.calls.some((c) => c.startsWith("PUT /account/key-pins"))).toBe(false);
@@ -962,8 +976,12 @@ describe("round 4 (web)", () => {
     const sealed = signers.get("carol")!.sealAndSignShare(fresh, VID(), pub("alice"), "write", 1);
     const puppet: SignedVaultRow = { id: VID(), role: "write", wrapped_key: sealed.sealed_key, key_kind: "sealed", key_epoch: 1, member_roster: r1, member_roster_seq: 1, share: shareOf("carol", sealed.signature) };
     const c = await verdict(puppet);
-    expect(c).toMatchObject({ status: "consent", consent: { replaced: true, own: true, signer: { email: "carol@example.com", pin: "new" } } });
-    expect(consentDeclinable((c as { consent: Consent }).consent)).toBe(true);
+    expect(c).toMatchObject({ status: "consent", consent: { replaced: true, own: true, declinable: false, signer: { email: "carol@example.com", pin: "new" } } });
+    // Round 5 M2: a puppet-signed consent for a vault the account holds is never offered for decline ("Not now").
+    expect(consentDeclinable((c as { consent: Consent }).consent)).toBe(false);
+    // And a decline (had one been sent) never tombstones one of this sync's vault rows (`pinsDecline` currentRow).
+    markDeclined(VID());
+    expect(await verdict(puppet)).toMatchObject({ status: "consent" });
   });
 
   it("rule 1: an unsigned consent is never declinable; it's acceptable only while trust memory is missing or for a replaced key", async () => {
@@ -1002,7 +1020,7 @@ describe("round 4 (web)", () => {
     h.server.fail = { path: "/account/identity", error: new h.ApiError(503, "unavailable", "down") };
     await prepareSigning(a.account, { id: a.id, identity: null, key_pins_seq: 0 }, async () => ({ identity: null }), false);
     await verifySnapshot([], []);
-    markLeft(VID(), 1);
+    markLeft(VID());
     await flushPins();
     expect(local.get(pinsKey(scope("alice")))).toBeUndefined();
     expect(h.server.calls.some((c) => c.startsWith("PUT /account/key-pins"))).toBe(false);
@@ -1024,7 +1042,7 @@ describe("round 4 (web)", () => {
     const row = sharedRow("bob", "write");
     await bobAccepts(row);
     await verdict(row);
-    markLeft("vault-left-here", 3);
+    markLeft("vault-left-here");
     await flushPins();
     expect(h.server.pins.get(id("bob"))?.seq).toBe(1);
     // Another device writes version 2 without this device's tombstone (its own copy, not merged).
@@ -1043,7 +1061,7 @@ describe("round 4 (web)", () => {
     await bobAccepts(row);
     await verdict(row);
     await flushPins();
-    markLeft("vault-a", 1);
+    markLeft("vault-a");
     await flushPins();
     expect(h.server.pins.get(id("bob"))?.seq).toBe(2);
     // Another tab, still at version 1, declined a vault and hasn't sent it.
@@ -1073,15 +1091,172 @@ describe("round 4 (web)", () => {
     expect(readMemory(store, scope("bob")).earlier).toBeUndefined();
   });
 
-  it("rule 6: a hash generated here doesn't count as created here when an own identity was already known", async () => {
+  it("rule 6 (review r5 I1): an identity created here whose first signed sync slipped to the next unlock still counts as created here", async () => {
     h.server.identity.set(id("bob"), null);
     noteVaultsSeen(acct("bob").account, [VID()]);
-    // The identity is made and uploaded, but this unlock never finishes a sync (no grandfathered list).
+    // The identity is made and uploaded (`created: true`), but this unlock never finishes a sync (no grandfathered list).
     await as("bob", { identity: null });
     expect(readMemory(store, scope("bob")).own).toBeTruthy();
-    // Next unlock: the own identity was known before this open, so this isn't its first signed sync any more.
+    // Next unlock: the own identity is known now, but the pins still lack the grandfathered list and the hash was
+    // generated here: the vaults recorded before are grandfathered, no false "missing" notice.
+    await as("bob");
+    expect(await verdict(unsignedRow())).toMatchObject({ status: "ok", trust: { kind: "unsigned" } });
+    expect(pinsNotice()).toBeNull();
+  });
+
+  it("rule 6: a hash not generated here doesn't count as created here when an own identity was already known", async () => {
+    h.server.identity.set(id("bob"), null);
+    noteVaultsSeen(acct("bob").account, [VID()]);
+    await as("bob", { identity: null });
+    // Another device's memory: the hash generated here is forgotten.
+    updateMemory(store, scope("bob"), { clearPending: true });
     await as("bob");
     expect(await verdict(unsignedRow())).toMatchObject({ status: "consent", consent: { unsignedAllowed: true } });
     expect(pinsNotice()).toBe(TRUST_MEMORY_MISSING);
+  });
+});
+
+describe("round 5 (web)", () => {
+  const unsignedRow = (): SignedVaultRow => {
+    const key = vaultKey();
+    const row: SignedVaultRow = { id: VID(), role: "write", wrapped_key: key.shareTo(VID(), pub("bob").public_key), key_kind: "sealed", key_epoch: 0, member_roster: null, member_roster_seq: 0, share: null };
+    key.free();
+    return row;
+  };
+  const stored = (name: string) => {
+    const p = h.server.pins.get(id(name))!;
+    return { seq: p.seq, pins: acct(name).account.openKeyPins(p.key_pins!, p.seq) };
+  };
+  const putServer = (name: string, pins: core.KeyPins, seq: number) =>
+    h.server.pins.set(id(name), { key_pins: acct(name).account.sealKeyPins({ ...pins, version: seq }, seq), seq });
+  const localPins = (name: string) => {
+    const l = JSON.parse(local.get(pinsKey(scope(name)))!) as { seq: number; sealed: string; dirty: boolean };
+    return { ...l, pins: acct(name).account.openKeyPins(l.sealed, l.seq) };
+  };
+  const puts = () => h.server.calls.filter((c) => c.startsWith("PUT /account/key-pins")).length;
+
+  it("M1: a newer server copy that differs only in a person pin is taken as it is: nothing is written back (no rewrite loop)", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    await verdict(row);
+    await flushPins();
+    const before = stored("bob");
+    // Another device decided later: Alice is pinned there with another identity.
+    const other = core.pinSet(before.pins, acct("alice").account.legacyIdentity() as PublicIdentity, EMAIL.alice, false, 50);
+    putServer("bob", other, before.seq + 1);
+    h.server.calls.length = 0;
+    await as("bob", { key_pins_seq: before.seq + 1 });
+    await flushPins();
+    expect(puts()).toBe(0);
+    expect(stored("bob").seq).toBe(before.seq + 1);
+    // The device keeps the server's (newer) decision for Alice, not its last-known one.
+    expect(localPins("bob").pins.pins.find((p) => p.user_id === id("alice"))?.signing_key ?? null).toBeNull();
+  });
+
+  it("M1: what never goes back (a tombstone this device knows) is still merged into a newer server copy and written back", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    await verdict(row);
+    await flushPins();
+    const before = stored("bob");
+    // This device saved a tombstone the server copy (written by another device from older state) lacks.
+    markLeft("vault-known-here");
+    await flushPins();
+    putServer("bob", before.pins, stored("bob").seq + 1);
+    h.server.calls.length = 0;
+    await as("bob", { key_pins_seq: stored("bob").seq });
+    await flushPins();
+    expect(puts()).toBe(1);
+    expect(stored("bob").pins.left?.["vault-known-here"]).toBeTruthy();
+  });
+
+  it("M1: a server copy remembering another own identity pauses sharing and nothing is merged or written", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    await verdict(row);
+    await flushPins();
+    const before = stored("bob");
+    const savedLocal = local.get(pinsKey(scope("bob")));
+    putServer("bob", { ...before.pins, own_identity: signers.get("carol")!.identityHash() }, before.seq + 1);
+    h.server.calls.length = 0;
+    await as("bob", { key_pins_seq: before.seq + 1 });
+    expect(signingProblem()).toBe(SHARING_PAUSED);
+    expect(await verdict(row)).toMatchObject({ status: "refused", reason: SHARING_PAUSED });
+    markLeft("vault-x");
+    await flushPins();
+    expect(puts()).toBe(0);
+    expect(local.get(pinsKey(scope("bob")))).toBe(savedLocal);
+  });
+
+  it("M2: an invitation listed under the id of a vault the account holds is held, and declining it never tombstones that vault", async () => {
+    const row = sharedRow("bob", "write");
+    await bobAccepts(row);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+    // The server omits the vault this sync and lists an invitation under its id.
+    const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
+    expect(inv).toEqual({ kind: "refused", reason: HELD_INVITATION });
+    expect(invitationDeclinable(inv)).toBe(true);
+    markDeclined(VID());
+    expect(localPins("bob").pins.left?.[VID()]).toBeUndefined();
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+  });
+
+  it("M2: declining a signed invitation tombstones at roster version 0 (never the server's chain version); served again it isn't declinable", async () => {
+    const row = sharedRow("bob", "write");
+    await as("bob");
+    const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
+    expect(inv).toMatchObject({ kind: "signed", declinable: true, held: false, own: false, firstSigned: false });
+    markDeclined(VID());
+    expect(localPins("bob").pins.left?.[VID()]?.roster_version).toBe(0);
+    const again = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
+    expect(again).toMatchObject({ kind: "signed", rejoin: true, declinable: false });
+    expect(invitationDeclinable(again)).toBe(false);
+  });
+
+  it("M2: the invitation's flags are bound to the accept (a changed flag is CHANGED_SINCE_SHOWN)", async () => {
+    const row = sharedRow("bob", "write");
+    await as("bob");
+    const inv = (await verifySnapshot([], [invitationOf(row)]))!.invitations.get(row.id)!;
+    if (inv.kind !== "signed") throw new Error("expected signed");
+    expect(() => acceptInvitationTrust(row.id, inv, { ...inv, held: true })).toThrow(CHANGED_SINCE_SHOWN);
+    acceptInvitationTrust(row.id, inv, inv);
+    expect(await verdict(row)).toMatchObject({ status: "ok" });
+  });
+
+  it("first_signed: a held vault signed for the first time at the same key asks once (not declinable); the re-signing device itself doesn't", async () => {
+    // Bob's identity exists, his key pins don't: the unsigned vault is accepted by its key id (pinned, never signed).
+    await as("bob");
+    const waiting = await verdict(unsignedRow());
+    expect(waiting).toMatchObject({ status: "consent", consent: { unsignedAllowed: true } });
+    acceptConsent((waiting as { consent: Consent }).consent);
+    expect(await verdict(unsignedRow())).toMatchObject({ status: "ok", trust: { kind: "unsigned" } });
+    const signedRow = sharedRow("bob", "write");
+    const c = await verdict(signedRow);
+    expect(c).toMatchObject({ status: "consent", consent: { firstSigned: true, declinable: false } });
+    expect(consentDeclinable((c as { consent: Consent }).consent)).toBe(false);
+    // Had Bob re-signed it himself, the key he signed is recorded with the roster: no consent for his own signature.
+    const key = vaultKey();
+    recordOwnKey(VID(), "sealed", key.epochPin(VID(), 0), signedRow.member_roster as string);
+    key.free();
+    expect(await verdict(signedRow)).toMatchObject({ status: "ok" });
+  });
+
+  it("L2: a 404 on the identity before the server showed it signs drops the hash and candidates recorded before the upload", async () => {
+    h.server.identity.set(id("alice"), null);
+    noteVaultsSeen(acct("alice").account, [VID()]);
+    h.server.fail = { path: "/account/identity", error: new h.ApiError(404, "not_found", "no route") };
+    endSigning();
+    h.server.user = id("alice");
+    expect(await prepareSigning(acct("alice").account, { id: id("alice"), identity: null, key_pins_seq: 0 }, async () => ({ identity: null }), false)).toBe(false);
+    expect(readMemory(store, scope("alice")).generated).toEqual([]);
+    expect(readMemory(store, scope("alice")).earlier).toBeUndefined();
+  });
+
+  it("I4: unreadable device memory and no listed identity: no second identity is uploaded", async () => {
+    h.server.identity.set(id("bob"), null);
+    local.set(memoryKey(scope("bob")), "not json");
+    await as("bob", { identity: null });
+    expect(h.server.calls.some((c) => c === "PUT /account/identity")).toBe(false);
+    expect(signingReady()).toBe(false);
   });
 });

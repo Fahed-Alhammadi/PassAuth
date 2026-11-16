@@ -53,6 +53,12 @@ export const replacedText = (name: string) =>
  */
 export const replacedSignedText = (name: string, signer: string, pinned: boolean) =>
   `The key of ${name ? `"${name}"` : "a shared vault"} was replaced and signed by ${pinned ? signer || "someone" : `someone listed by your server as ${signer || "unknown"}`} for the first time. Compare their fingerprint before you accept.`;
+/**
+ * Consent for a vault the account holds, signed for the first time at the same key (round 5 `consent.first_signed`):
+ * the signer becomes the vault's first trusted signer only with the user's OK, named with the pinned email first.
+ */
+export const firstSignedText = (name: string, signer: string, pinned: boolean) =>
+  `${name ? `"${name}"` : "A shared vault"} was signed for the first time, by ${pinned ? signer || "someone" : `someone listed by your server as ${signer || "unknown"}`}. Compare their fingerprint before you accept.`;
 /** Added to a consent for a vault the account held with its own key wrap (`consent.own`). */
 export const ownVaultText = (name: string) =>
   `${name ? `"${name}"` : "This vault"} was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change.`;
@@ -218,6 +224,10 @@ export type Trust =
       replaced: boolean;
       /** The account held this vault with its own key wrap (`consent.own`): a personal vault now sealed by someone else. */
       own: boolean;
+      /** Signed for the first time on a vault the account holds (`consent.first_signed`): its signer needs the user's OK. */
+      firstSigned: boolean;
+      /** Decline may be offered (`consent.declinable`; in the web vault): never for re-joins, replaced keys, own or first-signed vaults. */
+      declinable: boolean;
       /** The key id of the key shown (accepting an unsigned vault names it; the popup shows it). */
       keyId: string;
       acceptable: boolean;
@@ -271,10 +281,11 @@ export interface TrustMemory {
    */
   pendingIdentities?: string[];
   /**
-   * The vault ids grandfathering may cover, recorded once when this browser first made a signing identity (cross-client
-   * rule 6): the vaults its offline copy from an earlier session showed as usable then. Cleared with `pendingIdentities`.
+   * The vaults grandfathering may cover, recorded once when this browser first made a signing identity (cross-client
+   * rule 6): the vaults its offline copy from an earlier session showed as usable then, each with the key id it had there
+   * (round 5: only that key is grandfathered). Cleared with `pendingIdentities`.
    */
-  candidates?: string[];
+  candidates?: core.GrandfatherCandidate[];
   /**
    * Accepted (or waiting) shared vaults missing from the last verified sync, not yet confirmed gone (cross-client rule 3):
    * per vault id, the trusted roster version to remember when leaving and whether it was accepted (`leave`: tombstone
@@ -306,9 +317,22 @@ export function readMemory(v: unknown, userId: string): TrustMemory | null {
     ...(Array.isArray(m.missing) ? { missing: m.missing.filter((s): s is string => typeof s === "string") } : {}),
     ...(m.missingWhy === "device" ? { missingWhy: "device" as const } : {}),
     ...pendingOf(m),
-    ...(Array.isArray(m.candidates) ? { candidates: m.candidates.filter((s): s is string => typeof s === "string") } : {}),
+    ...candidatesOf(m.candidates),
     ...goneOf(m.gone),
   };
+}
+
+/**
+ * `candidates` as stored: `{vault_id, key_id}` pairs. A list of bare vault ids (an extension from before round 5) is
+ * dropped: a candidate without its key would grandfather whatever key the server serves under that id.
+ */
+function candidatesOf(v: unknown): { candidates?: core.GrandfatherCandidate[] } {
+  if (!Array.isArray(v)) return {};
+  const list = v.flatMap((c): core.GrandfatherCandidate[] => {
+    const x = c as { vault_id?: unknown; key_id?: unknown } | null;
+    return x && typeof x === "object" && isStr(x.vault_id) && isStr(x.key_id) ? [{ vault_id: x.vault_id, key_id: x.key_id }] : [];
+  });
+  return list.length === v.length ? { candidates: list } : {};
 }
 
 /** `pendingIdentities`, also from a record of an extension from before (one `pendingIdentity`). */
@@ -457,7 +481,7 @@ export const pinsDigest = (pins: core.KeyPins | null) => sha256(JSON.stringify(p
  * The version of these checks. Part of every stamp (review L2): a verdict kept by an older version of the extension is
  * checked again rather than reused offline. Raise it whenever a check changes what it decides.
  */
-export const CHECKS_VERSION = 5;
+export const CHECKS_VERSION = 6;
 
 /** The stamp of a verdict: the row and everything else it depends on (pins, roster memory, paused, own identity, the checks' version). */
 export const contextStamp = (row: SignedVaultRow, c: StampContext, version = CHECKS_VERSION) => sha256(JSON.stringify([version, rowStamp(row), c.pins, c.remembered, c.seenSigned, c.paused, c.me]));
@@ -481,7 +505,8 @@ export const consentToken = (c: {
   replaced: boolean;
   rejoin: boolean;
   own: boolean;
-}) => sha256(JSON.stringify(["passauth/consent/v2", c.vaultId, c.role, c.keyId, c.epoch, c.signer, c.email, c.pinned, c.roster, c.replaced, c.rejoin, c.own]));
+  firstSigned: boolean;
+}) => sha256(JSON.stringify(["passauth/consent/v3", c.vaultId, c.role, c.keyId, c.epoch, c.signer, c.email, c.pinned, c.roster, c.replaced, c.rejoin, c.own, c.firstSigned]));
 
 /** The error code the core threw (its message), for logs. */
 export const coreCode = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -743,6 +768,7 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
               replaced: adm.replaced,
               rejoin: adm.rejoin,
               own: adm.own,
+              firstSigned: adm.first_signed,
             })
           : "";
       if (token && input.accept !== undefined && input.accept === token) {
@@ -768,7 +794,20 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
         name = "";
       }
       return {
-        trust: { state: "waiting", name, ...(view ? { signer: view } : {}), rejoin: adm.rejoin, replaced: adm.replaced, own: adm.own, keyId: current.key_id, acceptable: !!token, token },
+        trust: {
+          state: "waiting",
+          name,
+          ...(view ? { signer: view } : {}),
+          rejoin: adm.rejoin,
+          replaced: adm.replaced,
+          own: adm.own,
+          firstSigned: adm.first_signed,
+          // Decline only where the core allows it, and only for a signed row (an unsigned one could be a real vault).
+          declinable: adm.declinable && signedShare,
+          keyId: current.key_id,
+          acceptable: !!token,
+          token,
+        },
         pins: input.pins,
         roster: null,
         signed: false,

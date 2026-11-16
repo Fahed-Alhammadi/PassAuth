@@ -105,11 +105,11 @@ final class SignedSharingRepoTests: XCTestCase {
 
     /// A `/sync` answer for `me` with these vaults, items and invitations.
     private func syncBody(_ me: Person, identity: Bool = true, identityRecord: Any? = nil, userId: String? = nil, vaults: [[String: Any]],
-                          items: [[String: Any]], invitations: [[String: Any]] = [], pinsSeq: Int64 = 0) throws -> Data {
+                          items: [[String: Any]], invitations: [[String: Any]] = [], pinsSeq: Int64 = 0, bundle: String? = nil) throws -> Data {
         var user: [String: Any] = ["id": userId ?? me.id, "email": me.email, "name": "Me", "email_verified": true, "key_pins_seq": pinsSeq]
         user["identity"] = identity ? (identityRecord ?? json(me.record)) : NSNull()
         return try JSONSerialization.data(withJSONObject: [
-            "revision": 5, "user": user, "bundle": json(me.created.bundleJson),
+            "revision": 5, "user": user, "bundle": json(bundle ?? me.created.bundleJson),
             "vaults": vaults, "items": items, "invitations": invitations,
         ] as [String: Any])
     }
@@ -191,6 +191,12 @@ final class SignedSharingRepoTests: XCTestCase {
         ScriptedServer.recorded().filter { $0.method == method && $0.path == path }
     }
 
+    /// The grandfathered vault ids of key pins (`{vault id: key id}` since round 5); nil: not written.
+    private func grandfatheredIds(_ pins: JSON) -> Set<String>? {
+        guard case .object(let g)? = pins["grandfathered"] else { return nil }
+        return Set(g.keys)
+    }
+
     /// The key pins the app wrote last, opened.
     private func writtenPins(_ me: Person) throws -> JSON {
         let put = try XCTUnwrap(requests("PUT", "/api/account/key-pins").last, "key pins written")
@@ -229,7 +235,7 @@ final class SignedSharingRepoTests: XCTestCase {
         // The key pins remember the own identity; only the unsigned share is grandfathered.
         let pins = try writtenPins(bob)
         XCTAssertEqual(pins["own_identity"]?.string, opened.identityHash())
-        XCTAssertTrue(pins["grandfathered"]?.array.compactMap(\.string).contains(oldId) ?? false)
+        XCTAssertTrue(pins["grandfathered"]?[oldId] != nil)
         XCTAssertEqual(repo.vault?.vaults.first { $0.id == oldId }?.trust, .notYetSigned)
         XCTAssertEqual(repo.vault?.vaults.first { $0.id == own.row["id"] as? String }?.trust, .own)
         // Review H2: the signed vault the account never accepted isn't used: it waits for consent.
@@ -289,7 +295,8 @@ final class SignedSharingRepoTests: XCTestCase {
         let s = try shared(owner: alice, member: bob)
         let own = try personal(bob)
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: s.roster))
         let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
         let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try bobRow(s, by: alice)],
                                                      items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 1)],
@@ -319,10 +326,12 @@ final class SignedSharingRepoTests: XCTestCase {
         let alice = try person("alice@example.com")
         let s = try shared(owner: alice, member: bob)
         let own = try personal(bob)
-        // Bob accepted the vault on another device (its epoch in the account's pins).
+        // Bob accepted the vault, signed, on another device (its epoch and roster in the account's
+        // pins; accepted unsigned it would need consent for its first signature, round 5).
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: nil)
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: s.roster))
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
         let sharedItem = try item("Bank", s.key, vault: s.id, id: s.itemId)
         let good = try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)], items: [own.item, sharedItem], pinsSeq: 1)
         let wrongSig = try alice.signing.signShare(vaultId: s.id, recipientJson: bob.pub, role: "admin", keyEpoch: 0, sealedKey: s.sealedForBob)
@@ -403,6 +412,8 @@ final class SignedSharingRepoTests: XCTestCase {
         XCTAssertEqual(requests("DELETE", "/api/vaults/\(plainId)/invitation").count, 1)
         pins = try writtenPins(bob)
         XCTAssertNotNil(pins["left"]?[plainId])
+        // Round 5 M2 (`pins_decline`): at roster version 0, never a server-chosen one.
+        XCTAssertEqual(pins["left"]?[plainId]?["roster_version"]?.number, 0)
     }
 
     func testDecliningAVaultTheServerAddedLeavesIt() async throws {
@@ -412,18 +423,24 @@ final class SignedSharingRepoTests: XCTestCase {
         let own = try personal(bob)
         try rosterAnswer(s, times: 3)
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
         let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
                                                      items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 1)],
                                   memory: try memory(bob, pins: pins))
         XCTAssertEqual(repo.vault?.invitations.first?.consent, .added)
+        XCTAssertTrue(try shownInvitation(repo, s.id).canDecline, "signed, declinable")
         try await repo.declineInvitation(s.id)
-        XCTAssertNotNil(try writtenPins(bob)["left"]?[s.id])
+        // Round 5 M2: a vault among this sync's rows is never tombstoned (`pins_decline`); it is
+        // left on the server.
+        for write in requests("PUT", "/api/account/key-pins") {
+            let p = try bob.account.openKeyPins(sealed: write.body["key_pins"] as? String ?? "", seq: UInt64(write.body["seq"] as? Int ?? 0))
+            XCTAssertNil(try JSON.parse(p)["left"]?[s.id], "no tombstone for a current row")
+        }
         XCTAssertEqual(requests("DELETE", "/api/vaults/\(s.id)/members/\(bob.id)").count, 1)
         XCTAssertTrue(requests("DELETE", "/api/vaults/\(s.id)/invitation").isEmpty)
-        // Served again: refused (left), never back as a consent.
-        XCTAssertTrue(repo.vault?.invitations.isEmpty ?? false)
-        XCTAssertEqual(repo.vault?.refused.map(\.reason), [.admission("left")])
+        // Served again: asks again (nothing given up for good).
+        XCTAssertEqual(repo.vault?.invitations.first?.consent, .added)
+        XCTAssertTrue(repo.vault?.refused.isEmpty ?? false)
     }
 
     /// An unsigned share of Alice's vault to Bob (an app from before) at `epoch` with `key`.
@@ -442,8 +459,9 @@ final class SignedSharingRepoTests: XCTestCase {
         let first = try alice.account.newVaultKey(vaultId: vid).key
         let second = try alice.account.newVaultKey(vaultId: vid).key
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [vid], createdIdentity: true)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: vid, currentJson: try first.epochPinJson(vaultId: vid, keyEpoch: 0), rosterVersion: nil)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: SignedSharing.candidatesJson([(vid, try first.keyId(vaultId: vid))]), createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: vid, keyKind: "sealed", currentJson: try first.epochPinJson(vaultId: vid, keyEpoch: 0), rosterVersion: nil,
+                                        rosterHash: nil)
         let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try unsignedRow(vid, key: second, to: bob, epoch: 1)],
                                                      items: [own.item, try item("Old", second, vault: vid, id: try newId())], pinsSeq: 1)],
                                   memory: try memory(bob, pins: pins))
@@ -479,7 +497,7 @@ final class SignedSharingRepoTests: XCTestCase {
                                                      items: [own.item])])
         XCTAssertEqual(repo.sharingNotice, SharingText.trustMemoryMissing)
         let written = try writtenPins(bob)
-        XCTAssertEqual(written["grandfathered"]?.array.count, 0, "nothing grandfathered")
+        XCTAssertEqual(grandfatheredIds(written), [], "nothing grandfathered")
         XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
         let consent = try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == vid })
         XCTAssertEqual(consent.trust, .unsigned)
@@ -550,7 +568,7 @@ final class SignedSharingRepoTests: XCTestCase {
         ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true,"created":true}"#)
         let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
                                                      items: [own.item])])
-        XCTAssertEqual(try writtenPins(bob)["grandfathered"]?.array.count, 0, "nothing grandfathered")
+        XCTAssertEqual(grandfatheredIds(try writtenPins(bob)), [], "nothing grandfathered")
         XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
         XCTAssertEqual(repo.sharingNotice, SharingText.newDevice)
         let consent = try shownInvitation(repo, vid)
@@ -595,7 +613,7 @@ final class SignedSharingRepoTests: XCTestCase {
         ScriptedServer.syncBodies = [try syncBody(bob, identityRecord: put.body, vaults: [own.row, row], items: [own.item], pinsSeq: seq)]
         try await repo.sync()
         XCTAssertEqual(requests("PUT", "/api/account/identity").count, 1, "the same identity, uploaded once")
-        XCTAssertTrue(try writtenPins(bob)["grandfathered"]?.array.compactMap(\.string).contains(vid) ?? false)
+        XCTAssertTrue(try writtenPins(bob)["grandfathered"]?[vid] != nil)
         XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
         XCTAssertNil(repo.sharingNotice)
     }
@@ -663,8 +681,9 @@ final class SignedSharingRepoTests: XCTestCase {
         let s = try shared(owner: alice, member: bob)
         let own = try personal(bob)
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: s.roster))
         let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
         ScriptedServer.answer("GET /api/account/key-pins", 200, #"{"key_pins":null,"seq":3}"#)
         let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
@@ -698,8 +717,9 @@ final class SignedSharingRepoTests: XCTestCase {
         let s = try shared(owner: alice, member: bob)
         let own = try personal(bob)
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: s.roster))
         let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
         memory.failReads = true
         let body = try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
@@ -776,7 +796,7 @@ final class SignedSharingRepoTests: XCTestCase {
                                        "meta": try plainKey.encryptMeta(vaultId: plainId, metaJson: #"{"name":"Planted"}"#), "invited_by": by,
                                        "key_epoch": 0, "share": NSNull(), "member_roster": NSNull(), "member_roster_seq": 0]
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
         let memory = try memory(bob, pins: pins)
         let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], invitations: [unsigned], pinsSeq: 1)], memory: memory)
         memory.failReads = true
@@ -844,7 +864,14 @@ final class SignedSharingRepoTests: XCTestCase {
         XCTAssertNoThrow(try newKey.decryptItem(encrypted: EncryptedItem(id: s.itemId, vaultId: s.id, key: items[0]["key"] as? String ?? "",
                                                                          data: items[0]["data"] as? String ?? "")))
         XCTAssertEqual(memory.load("acc").rosters[s.id], roster)
-        XCTAssertTrue(repo.knownPeople.contains { $0.email == "bob@example.com" })
+        // A later review showed nobody to compare (round 5 Info): Bob isn't pinned with an email
+        // the user never saw.
+        XCTAssertFalse(repo.knownPeople.contains { $0.email == "bob@example.com" })
+        // The key this device gave the vault is recorded with the roster it signed (round 5).
+        let recorded = try writtenPins(alice)
+        XCTAssertEqual(recorded["epochs"]?[s.id]?["key_epoch"]?.number, 1)
+        XCTAssertEqual(recorded["epochs"]?[s.id]?["roster_version_max"]?.number, 2)
+        XCTAssertEqual(recorded["epochs"]?[s.id]?["roster_hash"]?.string, try rosterHash(rosterJson: roster))
     }
 
     func testMembersTheSignedRosterDoesntKnowStopTheReplacement() async throws {
@@ -1073,7 +1100,7 @@ final class SignedSharingRepoTests: XCTestCase {
         let puts = requests("PUT", "/api/account/identity")
         XCTAssertGreaterThanOrEqual(puts.count, 2, "tried again at the next sync")
         XCTAssertEqual(puts.first?.body["signing_key"] as? String, puts.last?.body["signing_key"] as? String, "the same identity")
-        XCTAssertTrue(try writtenPins(bob)["grandfathered"]?.array.compactMap(\.string).contains(vid) ?? false)
+        XCTAssertTrue(try writtenPins(bob)["grandfathered"]?[vid] != nil)
         XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
     }
 
@@ -1094,7 +1121,7 @@ final class SignedSharingRepoTests: XCTestCase {
         r.candidates = [vid]
         memory.put("acc", r)
         var other = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        other = try pinsGrandfather(pinsJson: other, vaultIds: [], createdIdentity: false)
+        other = try pinsGrandfather(pinsJson: other, vaultsJson: "[]", createdIdentity: false)
         ScriptedServer.answer("GET /api/account/key-pins", 200, try text(["key_pins": try bob.account.sealKeyPins(pinsJson: other, seq: 1), "seq": 1]))
         let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, row], items: [own.item], pinsSeq: 1)], memory: memory)
         let consent = try shownInvitation(repo, vid)
@@ -1130,9 +1157,9 @@ final class SignedSharingRepoTests: XCTestCase {
         try await repo.unlock(password: password, secretKey: nil)
         try await repo.sync()
         let pins = try writtenPins(bob)
-        let grandfathered = pins["grandfathered"]?.array.compactMap(\.string) ?? []
-        XCTAssertTrue(grandfathered.contains(oldId))
-        XCTAssertFalse(grandfathered.contains(plantedId))
+        // Round 5: grandfathered as {vault id: key id}.
+        XCTAssertNotNil(pins["grandfathered"]?[oldId]?.string)
+        XCTAssertNil(pins["grandfathered"]?[plantedId])
         let waiting = try shownInvitation(repo, plantedId)
         XCTAssertFalse(waiting.canDecline)
         XCTAssertEqual(repo.vault?.vaults.first { $0.id == oldId }?.trust, .notYetSigned)
@@ -1146,8 +1173,9 @@ final class SignedSharingRepoTests: XCTestCase {
         let vid = own.row["id"] as? String ?? ""
         let newer = try bob.account.newVaultKey(vaultId: vid).key
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: vid, currentJson: try newer.epochPinJson(vaultId: vid, keyEpoch: 1), rosterVersion: nil)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: vid, keyKind: "sealed", currentJson: try newer.epochPinJson(vaultId: vid, keyEpoch: 1), rosterVersion: nil,
+                                        rosterHash: nil)
         let memory = try memory(bob, pins: pins)
         memory.failReads = true
         ScriptedServer.answer("GET /api/account/key-pins", 200, try text(["key_pins": try bob.account.sealKeyPins(pinsJson: pins, seq: 1), "seq": 1]))
@@ -1173,7 +1201,7 @@ final class SignedSharingRepoTests: XCTestCase {
         let own = try personal(bob)
         let gone = try newId()
         var base = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        base = try pinsGrandfather(pinsJson: base, vaultIds: [], createdIdentity: true)
+        base = try pinsGrandfather(pinsJson: base, vaultsJson: "[]", createdIdentity: true)
         let mine = try pinsLeave(pinsJson: base, vaultId: gone, rosterVersion: 2, now: 1_700_000_000)
         let memory = try memory(bob, pins: mine)
         ScriptedServer.answer("GET /api/account/key-pins", 200, try text(["key_pins": try bob.account.sealKeyPins(pinsJson: base, seq: 2), "seq": 2]))
@@ -1192,9 +1220,10 @@ final class SignedSharingRepoTests: XCTestCase {
         let own = try personal(bob)
         let gone = try newId()
         var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
-        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
         pins = try pinSet(pinsJson: pins, identityJson: alice.pub, email: alice.email, verified: false, now: 1)
-        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1,
+                                        rosterHash: try rosterHash(rosterJson: s.roster))
         let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
         var r = memory.load("acc")
         r.tombstones = [gone: 4]
@@ -1235,4 +1264,214 @@ final class SignedSharingRepoTests: XCTestCase {
             XCTAssertEqual(errorMessage(error), SharingText.keyReplacementLimited(600))
         }
     }
+
+    // MARK: Round 5
+
+    /// A `/sync` answer's bundle with another `account_id`: never stored (iOS H); the account id an
+    /// unlock authenticated is kept with the account.
+    private func bundle(_ me: Person, accountId: String) throws -> String {
+        var b = json(me.created.bundleJson) as? [String: Any] ?? [:]
+        b["account_id"] = accountId
+        return try text(b)
+    }
+
+    func testABundleWithAnotherAccountIdIsNeverStoredUnlockedOrLocked() async throws {
+        let bob = try person("bob@example.com")
+        let mallory = try person("mallory@example.com")
+        let own = try personal(bob)
+        let swapped = try bundle(bob, accountId: mallory.id)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], bundle: swapped)])
+        XCTAssertEqual(repo.store.get().file.accounts["acc"]?.accountId, bob.id, "the id the unlock authenticated")
+        XCTAssertEqual(repo.store.get().file.accounts["acc"]?.bundle, bob.created.bundleJson, "the synced bundle wasn't stored")
+        // Locked: a background refresh with another account's bundle keeps nothing.
+        await repo.lockActive()
+        ScriptedServer.syncBodies = [try syncBody(bob, vaults: [own.row], items: [own.item], bundle: mallory.created.bundleJson)]
+        try await repo.refreshCacheLocked(accountId: "acc")
+        XCTAssertEqual(repo.store.get().file.accounts["acc"]?.bundle, bob.created.bundleJson)
+        // The checks behind it (pure).
+        XCTAssertTrue(VaultRepository.bundleMayBeStored(bob.created.bundleJson, account: bob.account, authenticatedId: bob.id))
+        XCTAssertFalse(VaultRepository.bundleMayBeStored(swapped, account: bob.account, authenticatedId: bob.id))
+        XCTAssertFalse(VaultRepository.bundleMayBeStored(mallory.created.bundleJson, account: bob.account, authenticatedId: nil))
+        XCTAssertFalse(VaultRepository.bundleMayBeStored(mallory.created.bundleJson, account: nil, authenticatedId: bob.id))
+        XCTAssertFalse(VaultRepository.bundleMayBeStored(bob.created.bundleJson, account: nil, authenticatedId: nil), "nothing before an unlock authenticated an id")
+    }
+
+    func testKeptSessionBytesOpenOnlyForTheAccountsOwnBundle() async throws {
+        // iOS H: Face ID / "Never" / the macOS timed unlock restore under an authenticated id, and
+        // only when the stored bundle is the account's own (`matches_bundle`).
+        let bob = try person("bob@example.com")
+        let mallory = try person("mallory@example.com")
+        let bytes = bob.account.toSessionBytes()
+        XCTAssertEqual(VaultRepository.restoreSession(bundle: bob.created.bundleJson, authenticatedId: bob.id, bytes: bytes)?.accountId, bob.id)
+        XCTAssertEqual(VaultRepository.restoreSession(bundle: bob.created.bundleJson, authenticatedId: nil, bytes: bytes)?.accountId, bob.id)
+        XCTAssertNil(VaultRepository.restoreSession(bundle: try bundle(bob, accountId: mallory.id), authenticatedId: nil, bytes: bytes),
+                     "a bundle relabelled with another id")
+        XCTAssertNil(VaultRepository.restoreSession(bundle: mallory.created.bundleJson, authenticatedId: nil, bytes: bytes), "another account's bundle")
+        XCTAssertNil(VaultRepository.restoreSession(bundle: bob.created.bundleJson, authenticatedId: mallory.id, bytes: bytes),
+                     "another id than the authenticated one")
+        // Timeout "Never" after a restart: a stored bundle the server swapped stays locked.
+        let store = SecureStore(directory: dir, role: .app)
+        store.load()
+        store.update { s in
+            var acc = AccountData(server: "https://fake.passauth.test", email: bob.email)
+            acc.bundle = try? self.bundle(bob, accountId: mallory.id)
+            s.file.accounts["acc"] = acc
+            s.file.activeId = "acc"
+            s.file.settings.vaultTimeout = .never
+            s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
+            s.secrets.persistedKeys["acc"] = bytes.base64EncodedString()
+        }
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        repo.sharingMemory = InMemorySharingMemory()
+        let restored = await repo.restorePersisted()
+        XCTAssertFalse(restored)
+        XCTAssertNil(repo.vault)
+    }
+
+    func testAnotherUsersMemoryIsUnreadableAndTheOfflineCopyNeverStandsInOnceMemoryExists() async throws {
+        // iOS H: a record of another user id on the same server is never taken for an empty one;
+        // a record of this account (even without `seen`) means the offline copy isn't the earlier
+        // copy, so a vault a background refresh put there isn't grandfathered.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let row = try unsignedRow(vid, key: try alice.account.newVaultKey(vaultId: vid).key, to: bob, epoch: 0)
+        let memory = InMemorySharingMemory()
+        var r = SharingMemoryRecord()
+        r.userId = bob.id
+        r.server = "https://fake.passauth.test"
+        memory.put("acc", r)
+        ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true,"created":true}"#)
+        let earlier = try syncBody(bob, identity: false, vaults: [own.row, row], items: [own.item])
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, row], items: [own.item])], memory: memory, earlier: earlier)
+        XCTAssertEqual(grandfatheredIds(try writtenPins(bob)), [], "nothing from the offline copy")
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
+        // Another user id on this server: unreadable, shared vaults refused, nothing written over it.
+        var other = SharingMemoryRecord()
+        other.userId = alice.id
+        other.server = "https://fake.passauth.test"
+        other.signed = ["x"]
+        XCTAssertTrue(other.owned(by: bob.id, server: "https://fake.passauth.test").unreadable)
+    }
+
+    func testASignInClearsAnotherAccountsMemoryUnderTheSameRecord() async throws {
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let memory = InMemorySharingMemory()
+        var r = SharingMemoryRecord()
+        r.userId = alice.id
+        r.server = "https://fake.passauth.test"
+        r.signed = ["x"]
+        memory.put("acc", r)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item])], memory: memory)
+        // Unlock (not a sign-in) keeps it: unreadable for Bob.
+        XCTAssertTrue(repo.loadMemory("acc", try XCTUnwrap(repo.sessions["acc"])).unreadable)
+        repo.finishSession("acc", account: bob.account, try JSON.parse(try text(["bundle": json(bob.created.bundleJson), "email": bob.email,
+                                                                                 "access_token": "A", "refresh_token": "R"])))
+        XCTAssertEqual(memory.load("acc").userId, "", "cleared by a sign-in with the master password")
+    }
+
+    func testDecliningAnInvitationForAHeldVaultTheServerLeftOutNeverTombstonesIt() async throws {
+        // iOS L: the server omits Bob's vault from this sync and lists an invitation under its id;
+        // on a fresh unlock (nothing shown yet) declining it must not give the vault up.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: true)
+        pins = try pinsRecordRotation(pinsJson: pins, vaultId: s.id, keyKind: "sealed", currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0),
+                                      rosterVersion: 1, rosterHash: try rosterHash(rosterJson: s.roster))
+        let by: [String: Any] = ["id": alice.id, "email": alice.email, "name": "Alice", "public_key": alice.account.publicKey()]
+        let dup: [String: Any] = ["vault_id": s.id, "role": "write", "wrapped_key": s.sealedForBob,
+                                  "meta": try s.key.encryptMeta(vaultId: s.id, metaJson: #"{"name":"Family"}"#), "invited_by": by,
+                                  "key_epoch": 0, "share": NSNull(), "member_roster": NSNull(), "member_roster_seq": 0]
+        let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
+        var r = memory.load("acc")
+        r.proven = true
+        memory.put("acc", r)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], invitations: [dup], pinsSeq: 1)], memory: memory)
+        let shown = try shownInvitation(repo, s.id)
+        XCTAssertTrue(shown.canDecline, "an unsigned invitation can only be declined")
+        try await repo.declineInvitation(s.id)
+        XCTAssertEqual(requests("DELETE", "/api/vaults/\(s.id)/invitation").count, 1)
+        for write in requests("PUT", "/api/account/key-pins") {
+            let p = try JSON.parse(try bob.account.openKeyPins(sealed: write.body["key_pins"] as? String ?? "", seq: UInt64(write.body["seq"] as? Int ?? 0)))
+            XCTAssertNil(p["left"]?[s.id], "a held vault is never tombstoned")
+            XCTAssertNotNil(p["epochs"]?[s.id])
+        }
+        XCTAssertTrue((memory.load("acc").tombstones ?? [:]).isEmpty)
+    }
+
+    func testANewerServerCopyDifferingOnlyInPeopleIsntWrittenBack() async throws {
+        // Web M1: with nothing unsent, a newer server copy wins for a person pinned with another
+        // identity (`pins_merge_last_known`): no write-back, no loop between two devices.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        var base = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        base = try pinsGrandfather(pinsJson: base, vaultsJson: "[]", createdIdentity: true)
+        let mine = try pinSet(pinsJson: base, identityJson: try alice.account.legacyIdentityJson(), email: alice.email, verified: true, now: 1)
+        let theirs = try pinSet(pinsJson: base, identityJson: alice.pub, email: alice.email, verified: false, now: 2)
+        let memory = try memory(bob, pins: mine)
+        ScriptedServer.answer("GET /api/account/key-pins", 200, try text(["key_pins": try bob.account.sealKeyPins(pinsJson: theirs, seq: 2), "seq": 2]))
+        _ = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], pinsSeq: 2)], memory: memory)
+        // Whatever this sync writes (its own vault's pin), Alice stays as the server copy has her:
+        // the device's stale, verified legacy pin never overwrites the newer decision.
+        let alicePin = try XCTUnwrap(try writtenPins(bob)["pins"]?.array.first { $0.str("user_id") == alice.id })
+        XCTAssertEqual(alicePin.str("identity"), alice.signing.identityHash())
+        XCTAssertEqual(alicePin["verified"]?.bool, false)
+        // The merge itself adds nothing to the server copy for people (no write-back loop).
+        XCTAssertTrue(VaultRepository.samePins(try pinsMergeLastKnown(serverJson: theirs, lastKnownJson: mine), theirs))
+    }
+
+    func testANewerServerCopyWithAnotherOwnIdentityPausesAndMergesNothing() async throws {
+        let bob = try person("bob@example.com")
+        let own = try personal(bob)
+        var base = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        base = try pinsGrandfather(pinsJson: base, vaultsJson: "[]", createdIdentity: true)
+        let fake = try person("fake@example.com")
+        var theirs = try pinsSetOwnIdentity(pinsJson: nil, hash: fake.signing.identityHash())
+        theirs = try pinsGrandfather(pinsJson: theirs, vaultsJson: "[]", createdIdentity: true)
+        let memory = try memory(bob, pins: base)
+        let before = memory.load("acc")
+        ScriptedServer.answer("GET /api/account/key-pins", 200, try text(["key_pins": try bob.account.sealKeyPins(pinsJson: theirs, seq: 2), "seq": 2]))
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], pinsSeq: 2)], memory: memory)
+        XCTAssertTrue(requests("PUT", "/api/account/key-pins").isEmpty, "nothing written")
+        let kept = memory.load("acc")
+        XCTAssertGreaterThanOrEqual(kept.pinsSeq, before.pinsSeq)
+        let opened = try JSON.parse(try bob.account.openKeyPins(sealed: try XCTUnwrap(kept.sealedPins), seq: UInt64(kept.pinsSeq)))
+        XCTAssertEqual(opened["own_identity"]?.string, bob.signing.identityHash(), "the device's copy stays, nothing merged")
+        XCTAssertEqual(repo.sharingNotice, SharingText.paused)
+    }
+
+    func testVaultsWaitingForConsentStayListedWhenASyncDoesntShowThem() async throws {
+        // Info: `missing` shrinks only for vaults settled (accepted, used, tombstoned).
+        let bob = try person("bob@example.com")
+        let own = try personal(bob)
+        let waiting = try newId()
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultsJson: "[]", createdIdentity: false)
+        let memory = try memory(bob, pins: pins)
+        var r = memory.load("acc")
+        r.missing = [waiting]
+        r.proven = true
+        memory.put("acc", r)
+        _ = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], pinsSeq: 1)], memory: memory)
+        XCTAssertEqual(memory.load("acc").missing, [waiting])
+    }
+
+    func testAnIdentityUploadAnswered404DoesntProveTheServerSigns() async throws {
+        // Info: `proven` only after an answer other than 404.
+        let bob = try person("bob@example.com")
+        let own = try personal(bob)
+        ScriptedServer.answer("PUT /api/account/identity", 404, #"{"error":"not_found","message":"x"}"#)
+        let memory = InMemorySharingMemory()
+        _ = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row], items: [own.item])], memory: memory)
+        XCTAssertEqual(requests("PUT", "/api/account/identity").count, 1)
+        XCTAssertFalse(memory.load("acc").proven)
+    }
+
 }

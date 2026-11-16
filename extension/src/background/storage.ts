@@ -288,11 +288,30 @@ const earlierKey = (id: string) => `earlier:${id}`;
  * storage so a worker restart doesn't count this session's own copy as an earlier one. Removed with the session keys.
  */
 export const earlierVaults = {
-  async get(id: string): Promise<string[] | null> {
+  /** `[{vault_id, key_id}]` as kept for this unlock; anything else (bare ids from before round 5): none. */
+  async get(id: string): Promise<{ vault_id: string; key_id: string }[] | null> {
     const v = (await chrome.storage.session.get(earlierKey(id)))[earlierKey(id)];
-    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
+    if (!Array.isArray(v)) return null;
+    return v.flatMap((x) => {
+      const c = x as { vault_id?: unknown; key_id?: unknown } | null;
+      return c && typeof c === "object" && typeof c.vault_id === "string" && typeof c.key_id === "string" ? [{ vault_id: c.vault_id, key_id: c.key_id }] : [];
+    });
   },
-  set: (id: string, ids: string[]) => chrome.storage.session.set({ [earlierKey(id)]: ids }),
+  set: (id: string, list: { vault_id: string; key_id: string }[]) => chrome.storage.session.set({ [earlierKey(id)]: list }),
+};
+
+const floorKey = (id: string) => `pinsFloor:${id}`;
+
+/**
+ * Per account, the highest key pins version this browser session opened or kept (chrome.storage.session, so it outlives
+ * a worker restart): while the trust memory can't be read, a server copy below it is never used (review round 5 L).
+ */
+export const pinsFloor = {
+  async get(id: string): Promise<number> {
+    const v = (await chrome.storage.session.get(floorKey(id)))[floorKey(id)];
+    return typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0;
+  },
+  set: (id: string, seq: number) => chrome.storage.session.set({ [floorKey(id)]: seq }),
 };
 
 /**

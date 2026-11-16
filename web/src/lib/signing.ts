@@ -480,8 +480,15 @@ export const KEY_REPLACEMENTS_LIMIT =
 export function refusedText(reason: string): string {
   if (reason === "paused") return SHARING_PAUSED;
   if (reason === "left") return VAULT_LEFT;
+  if (reason === "own_vault") return OWN_VAULT_INVITATION;
+  if (reason === "held") return HELD_INVITATION;
   return VAULT_REFUSED;
 }
+
+/** `own_vault`: an invitation for a vault this account holds with its own key (never re-sealed to its owner). */
+export const OWN_VAULT_INVITATION = "Your server offered one of your own vaults to you as an invitation. It isn't used. Tell your server's admin if you didn't expect this.";
+/** `held`: an invitation for a vault already in this account that isn't a signed key replacement it can accept. */
+export const HELD_INVITATION = "This invitation is for a vault that's already in your account, so it isn't used. Ask its owner, or your server's admin.";
 
 /** Someone's keys changed since they were pinned: whatever needed them stops. */
 export const keysChangedText = (email: string) => `${cleanText(email) || "This person"}'s keys changed. Compare their fingerprint with them before you continue.`;
@@ -512,6 +519,20 @@ export const replacedSignedText = (vault: string, who: string) =>
 /** `consent.own`: the account held this vault with its own key wrap. */
 export const ownVaultReplacedText = (vault: string) =>
   `"${cleanText(vault) || "This vault"}" was your own vault. Your server now says someone else gave you a new key for it. Accept only if you shared this vault and expected a key change.`;
+
+/**
+ * `consent.first_signed`: a vault the account already holds, signed for the first time at the same key. `who`: the
+ * signer's pinned email first, else "someone listed by your server as <email>".
+ */
+export const firstSignedText = (vault: string, who: string) =>
+  `"${cleanText(vault) || "This vault"}" is signed for the first time, by ${cleanText(who) || "someone on this server"}. Compare their fingerprint before you accept.`;
+
+/** `consent.held`: an invitation with a newer signed key for a vault the account already holds. */
+export const heldInvitationText = (vault: string, who: string) =>
+  `"${cleanText(vault) || "This vault"}" is already in your account. This invitation gives it a new key, signed by ${cleanText(who) || "someone on this server"}. Accept only if someone in this vault just replaced its key.`;
+
+/** Decline isn't offered (not `declinable`): the vault stays locked here until accepted. */
+export const NOT_NOW_HINT = "Not now? Leave it: it stays locked on this device, and you can accept it later.";
 
 /** A vault the server put in the account without an invitation it accepted. */
 export const consentText = (vault: string) => `Your server added "${cleanText(vault) || "a shared vault"}" to your account. Accept only if you expected it.`;
