@@ -47,10 +47,12 @@ const SERVER_TYPES = [
   "emergency.approved",
   "emergency.confirmed",
   "emergency.invited",
+  "emergency.reconfirm",
   "emergency.rejected",
   "emergency.removed",
   "emergency.requested",
   "emergency.updated",
+  "emergency.vaults_added",
   "emergency.viewed",
   "item.created",
   "item.deleted",
@@ -151,6 +153,26 @@ describe("attachments and emergency access", () => {
     expect(describeEvent(ev("emergency.updated", { actor: alex, target_user: meTarget, data: { wait_days: 3 } }), account).text).toBe(
       "Alex Morgan changed the waiting period for you to 3 days",
     );
+  });
+
+  it("tells the keys of an emergency access", () => {
+    expect(describeEvent(ev("emergency.confirmed", { target_user: alexTarget, data: { vaults: 2 } }), account)).toEqual({
+      text: "You confirmed alex@example.com as your emergency contact",
+      detail: "With a key to 2 personal vaults.",
+    });
+    expect(describeEvent(ev("emergency.confirmed", { actor: alex, target_user: meTarget, data: { vaults: 2 } }), account).detail).toBeUndefined();
+    expect(describeEvent(ev("emergency.vaults_added", { data: { vaults: 1 } }), account).text).toBe(
+      "You gave an emergency contact the key to 1 more personal vault",
+    );
+    expect(describeEvent(ev("emergency.reconfirm", { actor: null, target_user: meTarget }), account)).toEqual({
+      text: "Emergency access now uses a key to personal vaults only",
+      detail: "A contact confirmed before has to be confirmed again.",
+    });
+    const removed = describeEvent(ev("emergency.removed", { target_user: alexTarget, data: { by: "grantor", rotate_vaults: 2 } }), account);
+    expect(removed).toEqual({
+      text: "You removed alex@example.com as your emergency contact",
+      detail: "The keys of 2 personal vaults are to be changed.",
+    });
   });
 });
 

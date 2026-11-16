@@ -16,6 +16,10 @@
  * Invitations (servers with `vault_invitations`; `invitations.ts`): every /sync lists the vaults shared with the account
  * and not accepted yet. Their sealed keys are opened only to read the vault's name, then freed; accepting makes the vault
  * a membership and it arrives whole with the next sync.
+ *
+ * Emergency access (`emergency-client.ts`) wraps the keys of the account's personal vaults for its emergency contacts.
+ * After anything that can leave a personal vault without those wraps (unlocking, a new vault, a replaced key), the hook
+ * set with `onVaultKeysChange` runs once the vault shows the change.
  */
 import { useSyncExternalStore } from "react";
 import * as core from "../wasm/passauth_core";
@@ -24,6 +28,7 @@ import {
   UnreachableError,
   api,
   deviceInfo,
+  friendlyError,
   getTokens,
   hasErrorCode,
   hasFeature,
@@ -97,6 +102,8 @@ export interface State {
   invitations: Invitation[];
   /** What the account still has to change for the server's policies (`GET /account`, read after sign-in and unlock). */
   policyViolations: Violation[];
+  /** Emergency access: why PassAuth left the contacts' keys alone (the server's list of them looked rolled back). */
+  emergencyNotice: string | null;
 }
 
 const initial: State = {
@@ -112,6 +119,7 @@ const initial: State = {
   pendingRotations: [],
   invitations: [],
   policyViolations: [],
+  emergencyNotice: null,
 };
 let state: State = initial;
 let account: core.Account | null = null;
@@ -300,6 +308,7 @@ export async function continueAfterTwoStep(): Promise<void> {
   if (getState().status !== "unlocked") return;
   connectSocket();
   void refreshPolicyViolations().catch(() => {});
+  vaultKeysChanged();
 }
 
 // ------------------------------------------------------------- policies
@@ -691,7 +700,28 @@ async function openVault(): Promise<boolean> {
     throw e;
   }
   void refreshPolicyViolations().catch(() => {});
+  vaultKeysChanged();
   return true;
+}
+
+let afterVaultKeys: (() => Promise<void>) | null = null;
+
+/**
+ * `fn` runs (in the background, its failures ignored) after the vault opened, a vault was created and vault keys were
+ * replaced: when personal vaults may need new emergency-access wraps. One hook; null removes it.
+ */
+export function onVaultKeysChange(fn: (() => Promise<void>) | null) {
+  afterVaultKeys = fn;
+}
+
+function vaultKeysChanged() {
+  const fn = afterVaultKeys;
+  if (fn && account && state.status === "unlocked") void fn().catch(() => {});
+}
+
+/** Shown with the vault notices (emergency access); null hides it. Cleared when the vault locks. */
+export function setEmergencyNotice(text: string | null) {
+  if (state.emergencyNotice !== text) set({ emergencyNotice: text });
 }
 
 /** Unlock a locked session locally (the bundle is already cached). */
@@ -749,7 +779,7 @@ export async function reauth(password: string): Promise<string> {
 /** Lock this tab; `everywhere` also locks the vault in this browser's other tabs. */
 export function lock(everywhere = true) {
   dropKeys();
-  set({ status: "locked", vaults: [], items: [], revision: 0, warnings: [], invitations: [] });
+  set({ status: "locked", vaults: [], items: [], revision: 0, warnings: [], invitations: [], emergencyNotice: null });
   if (everywhere) channel?.postMessage({ type: "lock" });
 }
 
@@ -959,6 +989,16 @@ function materialize(snap: Snapshot) {
   before.forEach((v) => {
     if (!kept.has(v.key)) v.key.free();
   });
+  // A vault came or went, or a key was replaced (on another device too): personal vaults may need new
+  // emergency-access wraps. The first sync after unlocking runs the hook itself (`openVault`).
+  if (before.length && vaultsMoved(before, vaults)) vaultKeysChanged();
+}
+
+/** Whether two vault lists differ in their vaults or in a vault's key epoch. */
+function vaultsMoved(before: readonly Vault[], after: readonly Vault[]): boolean {
+  if (before.length !== after.length) return true;
+  const epochs = new Map(before.map((v) => [v.id, v.epoch]));
+  return after.some((v) => !epochs.has(v.id) || epochs.get(v.id) !== v.epoch);
 }
 
 /**
@@ -1519,6 +1559,7 @@ export async function createVault(name: string): Promise<string> {
   key.free();
   await api("/vaults", { body: { id, meta, wrapped_key: nv.wrapped } });
   await sync();
+  vaultKeysChanged();
   return id;
 }
 
@@ -1550,10 +1591,19 @@ export async function shareVault(vaultId: string, user: { user_id: string; publi
   if (typeof user.user_id !== "string" || typeof user.public_key !== "string" || !user.public_key) throw new Error(UNEXPECTED_RESPONSE);
   const r = await withCurrentKey(() => {
     const v = vaultFor(vaultId);
-    return api<{ status?: unknown } | null>(`/vaults/${vaultId}/members`, {
+    return api<{ status?: unknown; rotation_pending?: unknown } | null>(`/vaults/${vaultId}/members`, {
       body: { user_id: user.user_id, role, sealed_key: v.key.shareTo(vaultId, user.public_key), ...epochOf(v) },
     });
   });
+  if (r?.rotation_pending === true) {
+    // The vault was personal and wrapped for emergency contacts, who may hold its key: replace it now, for everyone
+    // in it (the new invitee too). If that fails, the vault notices keep asking for it.
+    try {
+      await rotateVaultKey(vaultId);
+    } catch (e) {
+      throw new Error(`Shared, but the vault's key wasn't replaced yet: ${friendlyError(e)} Finish it with "Replace vault key" in this vault's settings.`);
+    }
+  }
   return r?.status === "invited" || r?.status === "active" ? r.status : null;
 }
 
@@ -1626,6 +1676,8 @@ export async function removeMember(vaultId: string, userId: string) {
   }
   setPendingRotation(vaultId, false);
   await sync();
+  // Without its last other member the vault may be personal again.
+  vaultKeysChanged();
 }
 
 /** Replace a vault's key and re-encrypt its items (finishes a member removal). */
@@ -1633,6 +1685,27 @@ export async function rotateVaultKey(vaultId: string) {
   await sendRotation(vaultId, `/vaults/${vaultId}/rotate`);
   setPendingRotation(vaultId, false);
   await sync();
+  vaultKeysChanged();
+}
+
+/**
+ * Replace the keys of these vaults, one after the other (after an emergency contact who may have kept their keys was
+ * removed). Vaults this account no longer has or can't manage are skipped. The first failure stops it and is thrown;
+ * the server keeps asking for the rest (`rotation_pending`).
+ */
+export async function rotateVaultKeys(vaultIds: readonly string[]) {
+  await sync();
+  try {
+    for (const id of vaultIds) {
+      const v = state.vaults.find((x) => x.id === id);
+      if (!v || (v.role !== "owner" && v.role !== "admin")) continue;
+      await sendRotation(id, `/vaults/${id}/rotate`);
+      setPendingRotation(id, false);
+    }
+  } finally {
+    await sync().catch(() => {});
+    vaultKeysChanged();
+  }
 }
 
 /**

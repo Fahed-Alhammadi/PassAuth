@@ -1,4 +1,4 @@
-import { isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { friendlyError } from "../lib/api";
 import { WEAK_BITS } from "../lib/health";
 import { getDesktop } from "../lib/platform";
@@ -472,6 +472,74 @@ export function ActionRow({ icon, title, sub, done, onClick }: { icon: IconName;
         <Icon name={done ? "check" : "chevron"} size={done ? 18 : 16} />
       </span>
     </button>
+  );
+}
+
+/** Ask for the master password before a sensitive action (the action gets it, for a reauth token). */
+export function ConfirmPassword({
+  title,
+  subtitle,
+  icon = "lock",
+  children,
+  action,
+  busyAction = "Working…",
+  danger,
+  onConfirm,
+  onClose,
+}: {
+  title: string;
+  subtitle?: ReactNode;
+  icon?: IconName;
+  children?: ReactNode;
+  action: string;
+  busyAction?: string;
+  danger?: boolean;
+  onConfirm: (password: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const close = useCallback(() => {
+    if (!busy) onClose();
+  }, [busy, onClose]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    if (!password) return setError("Enter your master password to continue.");
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm(password);
+    } catch (err) {
+      setError(friendlyError(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={title} subtitle={subtitle} icon={icon} tone={danger ? "danger" : undefined} onClose={close}>
+      <form onSubmit={submit}>
+        {children}
+        <div className="field">
+          <label htmlFor="confirm-password">Master password</label>
+          <PasswordInput id="confirm-password" value={password} onChange={setPassword} autoFocus />
+          <span className="field-hint">Confirms that it's you making this change.</span>
+        </div>
+        <ErrorText error={error} />
+        <SheetActions
+          quiet={
+            <button type="button" className="btn btn-text" onClick={close} disabled={busy}>
+              Cancel
+            </button>
+          }
+        >
+          <button type="submit" className={`btn btn-block ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy}>
+            {busy ? busyAction : action}
+          </button>
+        </SheetActions>
+      </form>
+    </Modal>
   );
 }
 

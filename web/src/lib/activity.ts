@@ -417,8 +417,20 @@ export function describeEvent(e: ActivityEvent, ctx: DescribeContext): EventText
     }
     case "emergency.accepted":
       return { text: you ? `You accepted being ${possessive(T)} emergency contact` : `${S} accepted being ${possessive(T)} emergency contact` };
-    case "emergency.confirmed":
-      return { text: `${S} confirmed ${T} as ${you ? "your" : "their"} emergency contact` };
+    case "emergency.confirmed": {
+      const vaults = count(d.vaults);
+      return {
+        text: `${S} confirmed ${T} as ${you ? "your" : "their"} emergency contact`,
+        detail: vaults !== null && T !== "you" ? `With a key to ${plural(vaults, "personal vault")}.` : undefined,
+      };
+    }
+    case "emergency.vaults_added": {
+      const vaults = count(d.vaults);
+      return { text: `${S} gave an emergency contact the key to ${vaults !== null ? plural(vaults, "more personal vault") : "more personal vaults"}` };
+    }
+    case "emergency.reconfirm":
+      // Written by the server for both sides of an access: one sentence for either.
+      return { text: "Emergency access now uses a key to personal vaults only", detail: "A contact confirmed before has to be confirmed again." };
     case "emergency.updated": {
       const wait = count(d.wait_days);
       return { text: `${S} changed the waiting period for ${T}${wait ? ` to ${plural(wait, "day")}` : ""}` };
@@ -441,8 +453,13 @@ export function describeEvent(e: ActivityEvent, ctx: DescribeContext): EventText
       return { text: `${S} approved ${possessive(T)} emergency access`, tone: T === "you" ? undefined : "warn" };
     case "emergency.rejected":
       return { text: d.status === "approved" ? `${S} ended ${possessive(T)} emergency access` : `${S} rejected ${possessive(T)} emergency access request` };
-    case "emergency.removed":
-      return { text: d.by === "grantee" ? `${S} stopped being ${possessive(T)} emergency contact` : `${S} removed ${T} as ${you ? "your" : "their"} emergency contact` };
+    case "emergency.removed": {
+      const rotate = count(d.rotate_vaults);
+      return {
+        text: d.by === "grantee" ? `${S} stopped being ${possessive(T)} emergency contact` : `${S} removed ${T} as ${you ? "your" : "their"} emergency contact`,
+        detail: rotate ? `The keys of ${plural(rotate, "personal vault")} are to be changed.` : undefined,
+      };
+    }
     case "emergency.viewed": {
       const items = count(d.items);
       return {
@@ -649,6 +666,8 @@ export const EVENT_TYPES: { category: string; label: string; types: [type: strin
       ["emergency.invited", "Contact named"],
       ["emergency.accepted", "Contact accepted"],
       ["emergency.confirmed", "Contact confirmed"],
+      ["emergency.vaults_added", "Vault keys added for a contact"],
+      ["emergency.reconfirm", "Contact to confirm again"],
       ["emergency.updated", "Waiting period changed"],
       ["emergency.requested", "Access requested"],
       ["emergency.approved", "Access granted"],

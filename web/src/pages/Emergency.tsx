@@ -1,19 +1,26 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { ReadOnlyFiles } from "../components/Attachments";
-import { ConfirmDialog, ErrorText, Icon, Modal, SheetActions, SiteIcon, toast } from "../components/ui";
+import { StartNewListButton, UseServerListButton } from "../components/EmergencyRoster";
+import { ConfirmDialog, ConfirmPassword, ErrorText, Icon, Modal, PasswordInput, SheetActions, SiteIcon, toast } from "../components/ui";
 import { friendlyError, hasFeature, usePublicConfig } from "../lib/api";
 import { readAttachments } from "../lib/attachments";
 import {
   DEFAULT_WAIT_DAYS,
   MAX_WAIT_DAYS,
   MIN_WAIT_DAYS,
+  confirmMeaning,
   daysText,
   grantorActions,
   grantorStatus,
   granteeActions,
   granteeStatus,
+  hasKeys,
   personName,
+  reconfirmText,
+  removalText,
+  removedText,
+  v1Warning,
   validWait,
   type Grant,
 } from "../lib/emergency";
@@ -21,13 +28,19 @@ import {
   acceptGrant,
   approveGrant,
   changeWait,
+  confirmAgain,
   confirmContact,
   inviteContact,
   listGrants,
+  leaveGrant,
+  ROSTER_ROLLED_BACK,
+  ROSTER_UNREADABLE,
   openGrantorVault,
   rejectGrant,
-  removeGrant,
+  removeContact,
   requestAccess,
+  rosterState,
+  type RosterState,
   type GrantorEntry,
   type GrantorVault,
 } from "../lib/emergency-client";
@@ -38,13 +51,6 @@ import { ItemFields } from "./Vault";
 import "../styles/files.css";
 
 const formatWhen = (seconds: number) => new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-
-/**
- * What confirming a contact means, said before it is done: the contact gets the account key itself, which also opens
- * shared vaults and Sends, and nothing can take it back.
- */
-const fullTrust = (who: string) =>
-  `Confirming gives ${who} your account key for good. Once they get access (or at once, if your server is ever compromised) they can read everything in your account, shared vaults included, and removing them later can't take that back. Only add someone you trust completely.`;
 
 function safeFingerprint(publicKey: string): string | null {
   if (typeof publicKey !== "string" || !publicKey) return null;
@@ -59,9 +65,13 @@ type Lists = { asGrantor: Grant[]; asGrantee: Grant[] };
 
 /** Settings → Emergency access (`/settings/emergency`, where the server's emails link). */
 export function EmergencyTab() {
-  const enabled = hasFeature(usePublicConfig(), "emergency_access");
+  const config = usePublicConfig();
+  // Servers from before emergency keys took the account key itself: this app neither confirms nor views with them.
+  const outdated = hasFeature(config, "emergency_access") && !hasFeature(config, "emergency_vault_keys");
+  const enabled = hasFeature(config, "emergency_access") && !outdated;
   const [lists, setLists] = useState<Lists | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [roster, setRoster] = useState<RosterState | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +80,8 @@ export function EmergencyTab() {
     } catch (e) {
       setError(`Couldn't load your emergency contacts. ${friendlyError(e)}`);
     }
+    // Whether this device can trust the server's list of contacts (it never acts on one it can't).
+    setRoster(await rosterState().catch(() => null));
   }, []);
 
   useEffect(() => {
@@ -81,26 +93,50 @@ export function EmergencyTab() {
       <section className="card" aria-labelledby="ea-title">
         <h2 id="ea-title">Emergency access</h2>
         <p className="card-text">
-          Name someone you trust who can ask to view your own vaults if you can't, say after an accident. You're told at once and have the waiting period to
-          say no. After that they can view your vaults, not the ones you share, and can't change anything.
+          Name someone you trust who can ask to view your personal vaults if you can't, say after an accident. You're told at once and have the waiting
+          period to say no. After that they can view your personal vaults, not the ones you share and not your Sends, and can't change anything.
         </p>
         <p className="small muted">
-          The waiting period is a rule of your server, not of the encryption. Once someone has had access, they keep what they saw: if you stop trusting them,
-          end their access and change the passwords that matter.
+          The waiting period is a rule of your server, not of the encryption. Once someone has had access, they keep what they saw. If you stop trusting
+          them, remove them: PassAuth then changes the keys of your personal vaults, so they can't read anything you add afterwards, unless your server is
+          later compromised. Change the passwords that matter too.
         </p>
       </section>
-      {!enabled && (
+      {outdated ? (
         <div className="alert alert-info" role="note">
-          Emergency access is turned off on this server: nobody can be named, accept or ask for access while it's off. Ask the server's admin if you need it.
+          Your PassAuth server needs an update before emergency contacts can be confirmed or their vaults viewed. Ask the server's admin.
         </div>
+      ) : (
+        !enabled && (
+          <div className="alert alert-info" role="note">
+            Emergency access is turned off on this server: nobody can be named, accept or ask for access while it's off. Ask the server's admin if you need it.
+          </div>
+        )
       )}
       <ErrorText error={error} />
+      {roster?.problem && (
+        <div className="alert alert-warn small" role="alert">
+          <div className="stack-s">
+            <span>{roster.problem === "older" ? ROSTER_ROLLED_BACK : ROSTER_UNREADABLE}</span>
+            <div>
+              {roster.problem === "older" ? <UseServerListButton onDone={() => void load()} /> : <StartNewListButton onDone={() => void load()} />}
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="card" aria-labelledby="ea-contacts">
         <h2 id="ea-contacts">Your trusted contacts</h2>
         {lists && lists.asGrantor.length === 0 && <p className="card-text">You haven't named anyone yet.</p>}
         {lists?.asGrantor.map((g) => (
-          <ContactRow key={g.id} grant={g} reload={load} />
+          <ContactRow
+            key={g.id}
+            grant={g}
+            enabled={enabled}
+            unlisted={!!roster?.confirmAgain.has(g.id)}
+            removed={!!roster?.removed.has(g.id)}
+            reload={load}
+          />
         ))}
         {enabled && <AddContact onAdded={load} />}
       </section>
@@ -163,7 +199,7 @@ function AddContact({ onAdded }: { onAdded: () => Promise<void> }) {
         </button>
       </div>
       <span className="field-hint">They need an account on this server. They accept, then you confirm them by checking their fingerprint together.</span>
-      <p className="small muted">{fullTrust("a contact")}</p>
+      <p className="small muted">{confirmMeaning("your contact")}</p>
       <ErrorText error={error} />
     </form>
   );
@@ -192,9 +228,24 @@ function GrantRow({ grant: g, who, status, children }: { grant: Grant; who: stri
   );
 }
 
-/** Someone the account named (the account is the grantor). */
-function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<void> }) {
-  const [asking, setAsking] = useState<"confirm" | "approve" | "end" | "remove" | "wait" | null>(null);
+/**
+ * Someone the account named (the account is the grantor). `unlisted`: holds keys, but the roster doesn't list them
+ * ("Confirm again"); `removed`: the roster removed this access for good (only a new contact gets access again).
+ */
+function ContactRow({
+  grant: g,
+  enabled,
+  unlisted,
+  removed,
+  reload,
+}: {
+  grant: Grant;
+  enabled: boolean;
+  unlisted: boolean;
+  removed: boolean;
+  reload: () => Promise<void>;
+}) {
+  const [asking, setAsking] = useState<"confirm" | "again" | "approve" | "end" | "remove" | "wait" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const who = personName(g.grantee);
@@ -218,10 +269,31 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
 
   return (
     <GrantRow grant={g} who={email ? `${who} (${email})` : who} status={grantorStatus(g, formatWhen)}>
+      {g.v1Exposed && (
+        <div className="alert alert-warn small" role="note">
+          {v1Warning(who)}
+        </div>
+      )}
+      {removed && (
+        <div className="alert alert-warn small" role="note">
+          {removedText(who)}
+        </div>
+      )}
+      {unlisted && (
+        <p className="card-text">
+          Your list of emergency contacts doesn't have {who} (a change that didn't finish, or a new list), so PassAuth doesn't give them keys to new or changed
+          vaults. Confirm them again to put them back.
+        </p>
+      )}
       <div className="card-actions">
-        {actions.includes("confirm") && (
+        {enabled && unlisted && (
+          <button type="button" className="btn btn-primary" onClick={() => setAsking("again")}>
+            Confirm again…
+          </button>
+        )}
+        {enabled && !removed && actions.includes("confirm") && (
           <button type="button" className="btn btn-primary" onClick={() => setAsking("confirm")}>
-            Check and confirm…
+            {g.reconfirm ? "Check and confirm again…" : "Check and confirm…"}
           </button>
         )}
         {actions.includes("approve") && (
@@ -270,12 +342,13 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
             await reload();
           }}
         >
+          {g.reconfirm && <p className="card-text">{reconfirmText(who)}</p>}
           <p className="card-text">
-            Confirming lets {who} ask for access later: your vaults' key is locked so that only their account can open it. First make sure it's really their
-            account.
+            Confirming lets {who} ask for access later: a key to your personal vaults is locked so that only their account can open it. First make sure it's
+            really their account.
           </p>
           <div className="alert alert-warn small" role="note">
-            {fullTrust(who)}
+            {confirmMeaning(who, g.v1Exposed)}
           </div>
           {fp ? (
             <div className="field">
@@ -292,26 +365,61 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
           )}
         </ConfirmDialog>
       )}
-      {asking === "approve" && (
+      {asking === "again" && (
         <ConfirmDialog
-          title={`Give ${who} access now?`}
+          title={`Confirm ${who} again?`}
           subtitle={g.grantee.email}
           icon="lifebuoy"
           danger={false}
+          action="Confirm again"
+          busyAction="Confirming…"
+          disabled={!fp}
+          onClose={() => setAsking(null)}
+          onConfirm={async () => {
+            await confirmAgain(g);
+            setAsking(null);
+            toast(`${who} is back on your list of emergency contacts`);
+            await reload();
+          }}
+        >
+          <p className="card-text">
+            {who} gets keys to your new and changed personal vaults again. First make sure it's really their account: the key below is the one your server
+            names for them now.
+          </p>
+          {fp ? (
+            <div className="field">
+              <span>{who}'s key fingerprint</span>
+              <div className="fingerprint">{fp}</div>
+              <span className="field-hint">
+                Ask {who} to open Settings, then Account, and read you their fingerprint, in person or on a call. Confirm only if it matches exactly.
+              </span>
+            </div>
+          ) : (
+            <div className="alert alert-error small" role="note">
+              PassAuth can't show {who}'s fingerprint, so their account can't be checked. Remove them, then add them again.
+            </div>
+          )}
+        </ConfirmDialog>
+      )}
+      {asking === "approve" && (
+        <ConfirmPassword
+          title={`Give ${who} access now?`}
+          subtitle={g.grantee.email}
+          icon="lifebuoy"
           action="Approve access"
           busyAction="Approving…"
           onClose={() => setAsking(null)}
-          onConfirm={async () => {
-            await approveGrant(g.id);
+          onConfirm={async (password) => {
+            await approveGrant(g.id, password);
             setAsking(null);
             toast(`${who} can view your vaults now`);
             await reload();
           }}
         >
           <p className="card-text">
-            {who} can view your own vaults at once, without waiting. They keep what they see, even if you end their access later.
+            {who} can view your personal vaults at once, without waiting. They keep what they see, even if you end their access later.
           </p>
-        </ConfirmDialog>
+        </ConfirmPassword>
       )}
       {asking === "end" && (
         <ConfirmDialog
@@ -329,8 +437,8 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
           }}
         >
           <p className="card-text">
-            {who} can't view your vaults any more, but keeps whatever they already saw. If you no longer trust them, change the passwords that matter. They can
-            ask for access again.
+            {who} can't view your vaults any more, but keeps whatever they already saw. They can ask for access again. If you no longer trust them, remove them
+            instead: PassAuth then changes the keys of your personal vaults. Change the passwords that matter too.
           </p>
         </ConfirmDialog>
       )}
@@ -340,20 +448,23 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
           subtitle="Emergency contact"
           icon="lifebuoy"
           action="Remove contact"
-          busyAction="Removing…"
+          busyAction={hasKeys(g) ? "Removing and changing keys…" : "Removing…"}
           onClose={() => setAsking(null)}
           onConfirm={async () => {
-            await removeGrant(g.id);
+            const done = await removeContact(g);
             setAsking(null);
-            toast("Emergency contact removed");
+            // The row goes with the reload, so the outcome is a toast; the vault notices keep asking for any key left.
+            toast(
+              done.failed
+                ? `${who} was removed, but the keys of your personal vaults weren't changed yet. Finish it in Settings, under Vaults & sharing.`
+                : done.rotated
+                  ? "Emergency contact removed and vault keys changed"
+                  : "Emergency contact removed",
+            );
             await reload();
           }}
         >
-          <p className="card-text">
-            {who} can't ask for access any more.
-            {(g.status === "approved" || g.status === "rejected" || g.status === "requested") &&
-              " If they ever had access, they keep what they saw: change the passwords that matter if you no longer trust them."}
-          </p>
+          <p className="card-text">{removalText(g)}</p>
         </ConfirmDialog>
       )}
       {asking === "wait" && (
@@ -374,20 +485,24 @@ function ContactRow({ grant: g, reload }: { grant: Grant; reload: () => Promise<
 
 function WaitDialog({ grant: g, who, onClose, onSaved }: { grant: Grant; who: string; onClose: () => void; onSaved: () => Promise<void> }) {
   const [days, setDays] = useState(String(g.waitDays));
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const close = () => {
     if (!busy) onClose();
   };
+  // A shorter period lets the contact in sooner: it needs the master password, as approving does.
+  const shorter = validWait(Number(days)) && Number(days) < g.waitDays;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     const wait = Number(days);
     if (!validWait(wait)) return setError(`Choose a waiting period from ${MIN_WAIT_DAYS} to ${MAX_WAIT_DAYS} days.`);
+    if (shorter && !password) return setError("Enter your master password to shorten the waiting period.");
     setBusy(true);
     setError(null);
     try {
-      await changeWait(g.id, wait);
+      await changeWait(g.id, wait, shorter ? password : undefined);
       await onSaved();
     } catch (err) {
       setError(friendlyError(err));
@@ -416,6 +531,13 @@ function WaitDialog({ grant: g, who, onClose, onSaved }: { grant: Grant; who: st
             From {MIN_WAIT_DAYS} to {MAX_WAIT_DAYS} days.{g.status === "requested" && " A request already waiting follows the new period, counted from when they asked."}
           </span>
         </div>
+        {shorter && (
+          <div className="field">
+            <label htmlFor="ea-wait-password">Master password</label>
+            <PasswordInput id="ea-wait-password" value={password} onChange={setPassword} />
+            <span className="field-hint">A shorter waiting period lets {who} in sooner, so it needs your master password.</span>
+          </div>
+        )}
         <ErrorText error={error} />
         <SheetActions
           quiet={
@@ -518,7 +640,7 @@ function TrustingRow({ grant: g, enabled, reload }: { grant: Grant; enabled: boo
           busyAction="Removing…"
           onClose={() => setAsking(null)}
           onConfirm={async () => {
-            await removeGrant(g.id);
+            await leaveGrant(g.id);
             setAsking(null);
             toast(asking === "decline" ? "Invitation declined" : "You're no longer their emergency contact");
             await reload();

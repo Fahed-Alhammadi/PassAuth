@@ -5,7 +5,7 @@ import QRCode from "qrcode";
 import { SignInRequestsCard } from "../components/DeviceSignIn";
 import { KitActions } from "../components/KitActions";
 import { CodeField, MasterPasswordField, RecoveryCodesModal } from "../components/TwoStep";
-import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast, type IconName } from "../components/ui";
+import { ConfirmDialog, ConfirmPassword, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast } from "../components/ui";
 import { ATTACHMENT_QUOTA_EXCEEDED, ApiError, api, friendlyError, hasErrorCode, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { clientInfo, deviceKindInfo } from "../lib/clients";
 import { sharerName, sharerShortName, type Invitation } from "../lib/invitations";
@@ -213,74 +213,6 @@ export function SettingsPage() {
 }
 
 // ------------------------------------------------------- shared dialogs
-
-/** Ask for the master password before a sensitive action. */
-function ConfirmPassword({
-  title,
-  subtitle,
-  icon = "lock",
-  children,
-  action,
-  busyAction = "Working…",
-  danger,
-  onConfirm,
-  onClose,
-}: {
-  title: string;
-  subtitle?: ReactNode;
-  icon?: IconName;
-  children?: ReactNode;
-  action: string;
-  busyAction?: string;
-  danger?: boolean;
-  onConfirm: (password: string) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const close = useCallback(() => {
-    if (!busy) onClose();
-  }, [busy, onClose]);
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!password) return setError("Enter your master password to continue.");
-    setBusy(true);
-    setError(null);
-    try {
-      await onConfirm(password);
-    } catch (err) {
-      setError(friendly(err));
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Modal title={title} subtitle={subtitle} icon={icon} tone={danger ? "danger" : undefined} onClose={close}>
-      <form onSubmit={submit}>
-        {children}
-        <div className="field">
-          <label htmlFor="confirm-password">Master password</label>
-          <PasswordInput id="confirm-password" value={password} onChange={setPassword} autoFocus />
-          <span className="field-hint">Confirms that it's you making this change.</span>
-        </div>
-        <ErrorText error={error} />
-        <SheetActions
-          quiet={
-            <button type="button" className="btn btn-text" onClick={close} disabled={busy}>
-              Cancel
-            </button>
-          }
-        >
-          <button type="submit" className={`btn btn-block ${danger ? "btn-danger-solid" : "btn-primary"}`} disabled={busy}>
-            {busy ? busyAction : action}
-          </button>
-        </SheetActions>
-      </form>
-    </Modal>
-  );
-}
 
 /** A setting on one row: what it is at the leading edge, its control at the trailing edge. */
 function Setting({ title, children, control, as: Tag = "div" }: { title: ReactNode; children?: ReactNode; control: ReactNode; as?: "div" | "label" }) {
@@ -1715,8 +1647,8 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
         <div className="alert alert-warn stack-s" role="alert">
           <strong>Finish securing this vault</strong>
           <span>
-            Someone left or was removed, but the vault key wasn't replaced yet, so they could still read items added from now on. Replace the key to re-encrypt
-            every item for the remaining members.
+            Someone who had this vault's key left or was removed (a member, or an emergency contact), but the key wasn't replaced yet, so they could still read
+            items added from now on. Replace the key to re-encrypt every item for you and the remaining members. Earlier versions of its items are deleted.
           </span>
           <ErrorText error={secureError} />
           <div>

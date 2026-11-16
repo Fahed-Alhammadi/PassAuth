@@ -331,6 +331,9 @@ const CODE_TEXT = new Map<string, string>([
   ["sends_disabled", "Send is turned off on this server."],
   ["attachments_disabled", "Adding files is turned off on this server."],
   ["emergency_access_disabled", "Emergency access is turned off on this server."],
+  ["emergency_vaults_changed", "Your vaults changed while this was being saved. Try again."],
+  ["roster_changed", "Your emergency contacts changed on another device just now. Try again."],
+  ["update_required", "This version of PassAuth is too old for your server. Update PassAuth, then try again."],
   ["login_with_device_disabled", "Signing in with another device's approval is turned off on this server. Sign in with your master password."],
   ["upload_in_progress", "This file is being uploaded already. Wait a moment, then try again."],
 ]);

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { SignInRequestSheet } from "../components/DeviceSignIn";
+import { StartNewListButton, UseServerListButton } from "../components/EmergencyRoster";
 import { Wordmark } from "../components/Logo";
 import { Icon, toast, type IconName } from "../components/ui";
 import { api, friendlyError, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
@@ -8,6 +9,7 @@ import { keepDraftFor } from "../lib/drafts";
 import { invitationNotice, invitationsKey } from "../lib/invitations";
 import { getDesktop } from "../lib/platform";
 import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
+import { ROSTER_ROLLED_BACK, ROSTER_UNREADABLE } from "../lib/emergency-client";
 import { dismissWarnings, lock, logout, useVault } from "../lib/vault";
 import { kindOf, type ItemKind } from "../lib/types";
 
@@ -235,7 +237,7 @@ function writeSession(key: string, value: string) {
 
 /** Account and vault notices shown above the item list, in the page flow (never over the toolbar). */
 export function Notices() {
-  const { email, emailVerified, warnings, pendingRotations, vaults, invitations, policyViolations } = useVault();
+  const { email, emailVerified, warnings, pendingRotations, vaults, invitations, policyViolations, emergencyNotice } = useVault();
   const policies = usePolicies();
   const [hideVerify, setHideVerify] = useState(() => readSession(VERIFY_DISMISSED) === "1");
   const [invitesDismissed, setInvitesDismissed] = useState(() => readSession(INVITATIONS_DISMISSED));
@@ -348,11 +350,23 @@ export function Notices() {
         <div className="alert alert-warn small notice" role="alert">
           <div className="grow">
             <span>
-              Someone left or was removed from {rotating.map((v) => `"${v.name}"`).join(", ")}, but the vault key wasn't replaced yet, so they could still
-              read new items.
+              Someone who had the key of {rotating.map((v) => `"${v.name}"`).join(", ")} left or was removed (a member, or an emergency contact), but the key
+              wasn't replaced yet, so they could still read new items.
             </span>
             <div className="row">
               <Link to="/settings/vaults">Finish securing the vault</Link>
+            </div>
+          </div>
+        </div>
+      )}
+      {emergencyNotice && (
+        <div className="alert alert-warn small notice" role="alert">
+          <div className="grow">
+            <span>{emergencyNotice}</span>
+            <div className="row">
+              {emergencyNotice === ROSTER_ROLLED_BACK && <UseServerListButton />}
+              {emergencyNotice === ROSTER_UNREADABLE && <StartNewListButton />}
+              <Link to="/settings/emergency">Emergency access</Link>
             </div>
           </div>
         </div>
