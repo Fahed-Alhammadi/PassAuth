@@ -15,7 +15,7 @@ fi
 cargo build --release --locked -p passauth-core-wasm --target wasm32-unknown-unknown
 for out in "$@"; do
   mkdir -p "$out"
-  wasm-bindgen --target web --out-dir "$out" --out-name passauth_core \
+  wasm-bindgen --target web --remove-name-section --remove-producers-section --out-dir "$out" --out-name passauth_core \
     target/wasm32-unknown-unknown/release/passauth_core_wasm.wasm
   if command -v wasm-opt >/dev/null; then
     wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int \

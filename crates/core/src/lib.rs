@@ -9,8 +9,10 @@
 compile_error!("the `insecure-test-kdf` feature is for debug test builds only");
 
 pub mod crypto;
+pub mod device_login;
 pub mod error;
 pub mod export;
+pub mod file;
 pub mod generator;
 pub mod import;
 pub mod item;
@@ -18,6 +20,8 @@ pub mod kdf;
 pub mod keys;
 pub mod opaque;
 pub mod passkey;
+pub mod send;
+pub mod site;
 pub mod totp;
 
 pub use error::{Error, Result};

@@ -123,6 +123,22 @@ pub enum UrlMatch {
     Never,
 }
 
+impl UrlMatch {
+    /// The name items store ("default", "domain", "host", "starts_with", "exact", "regex",
+    /// "never").
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Domain => "domain",
+            Self::Host => "host",
+            Self::StartsWith => "starts_with",
+            Self::Exact => "exact",
+            Self::Regex => "regex",
+            Self::Never => "never",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoginUrl {

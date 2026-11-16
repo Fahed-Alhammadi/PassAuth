@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-const WORDLIST: &str = include_str!("eff_large_wordlist.txt");
+/// The EFF large wordlist: 7776 words, one per line (also the login phrase's, `device_login`).
+pub(crate) const WORDLIST: &str = include_str!("eff_large_wordlist.txt");
 const LOWER: &str = "abcdefghijklmnopqrstuvwxyz";
 const UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &str = "0123456789";

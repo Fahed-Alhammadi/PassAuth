@@ -1,0 +1,4239 @@
+{
+  "version": 2,
+  "about": "Golden vectors from the Rust core (crates/core/src/site, through its WASM build). Regenerate: node testdata/generate-vectors.mjs",
+  "publicSuffixList": "2026-10-31 73f8cc701c08",
+  "normalizeHost": [
+    {
+      "host": "www.example.com",
+      "expected": "www.example.com"
+    },
+    {
+      "host": "EXAMPLE.COM.",
+      "expected": "example.com"
+    },
+    {
+      "host": "BÜCHER.de",
+      "expected": "xn--bcher-kva.de"
+    },
+    {
+      "host": "straße.de",
+      "expected": "xn--strae-oqa.de"
+    },
+    {
+      "host": "xn--bcher-kva.de",
+      "expected": "xn--bcher-kva.de"
+    },
+    {
+      "host": "ａｂｃ.com",
+      "expected": "abc.com"
+    },
+    {
+      "host": "exa%41mple.com",
+      "expected": "exaample.com"
+    },
+    {
+      "host": "0x7f.1",
+      "expected": "127.0.0.1"
+    },
+    {
+      "host": "1.2.3",
+      "expected": "1.2.0.3"
+    },
+    {
+      "host": "192.168.1.10",
+      "expected": "192.168.1.10"
+    },
+    {
+      "host": "[::1]",
+      "expected": "[::1]"
+    },
+    {
+      "host": "[2001:DB8:0:0:0:0:0:1]",
+      "expected": "[2001:db8::1]"
+    },
+    {
+      "host": "[::ffff:1.2.3.4]",
+      "expected": "[::ffff:102:304]"
+    },
+    {
+      "host": "a..b",
+      "expected": "a..b"
+    },
+    {
+      "host": "example.com..",
+      "expected": "example.com."
+    },
+    {
+      "host": "::1",
+      "expected": null
+    },
+    {
+      "host": "a b.com",
+      "expected": null
+    },
+    {
+      "host": "192.168.1.256",
+      "expected": null
+    },
+    {
+      "host": "xn--abc",
+      "expected": null
+    },
+    {
+      "host": "",
+      "expected": null
+    },
+    {
+      "host": ".",
+      "expected": null
+    }
+  ],
+  "baseDomain": [
+    {
+      "host": "www.example.com",
+      "expected": "example.com"
+    },
+    {
+      "host": "example.com",
+      "expected": "example.com"
+    },
+    {
+      "host": "EXAMPLE.COM.",
+      "expected": "example.com"
+    },
+    {
+      "host": "a.b.c",
+      "expected": "b.c"
+    },
+    {
+      "host": "foo.bar.baz.qux.example.org",
+      "expected": "example.org"
+    },
+    {
+      "host": "login.example.co.uk",
+      "expected": "example.co.uk"
+    },
+    {
+      "host": "example.co.uk",
+      "expected": "example.co.uk"
+    },
+    {
+      "host": "co.uk",
+      "expected": "co.uk"
+    },
+    {
+      "host": "a.b.example.com.sa",
+      "expected": "example.com.sa"
+    },
+    {
+      "host": "shop.example.com.au",
+      "expected": "example.com.au"
+    },
+    {
+      "host": "home.duckdns.org",
+      "expected": "home.duckdns.org"
+    },
+    {
+      "host": "nas.home.duckdns.org",
+      "expected": "home.duckdns.org"
+    },
+    {
+      "host": "duckdns.org",
+      "expected": "duckdns.org"
+    },
+    {
+      "host": "evil.duckdns.org",
+      "expected": "evil.duckdns.org"
+    },
+    {
+      "host": "bucket.s3.amazonaws.com",
+      "expected": "bucket.s3.amazonaws.com"
+    },
+    {
+      "host": "x.bucket.s3.amazonaws.com",
+      "expected": "bucket.s3.amazonaws.com"
+    },
+    {
+      "host": "svc.up.railway.app",
+      "expected": "svc.up.railway.app"
+    },
+    {
+      "host": "a.b.svc.up.railway.app",
+      "expected": "svc.up.railway.app"
+    },
+    {
+      "host": "up.railway.app",
+      "expected": "up.railway.app"
+    },
+    {
+      "host": "user.github.io",
+      "expected": "user.github.io"
+    },
+    {
+      "host": "a.user.github.io",
+      "expected": "user.github.io"
+    },
+    {
+      "host": "github.io",
+      "expected": "github.io"
+    },
+    {
+      "host": "my.box.synology.me",
+      "expected": "box.synology.me"
+    },
+    {
+      "host": "app.fly.dev",
+      "expected": "app.fly.dev"
+    },
+    {
+      "host": "nas.myfritz.net",
+      "expected": "nas.myfritz.net"
+    },
+    {
+      "host": "x.nas.myfritz.net",
+      "expected": "nas.myfritz.net"
+    },
+    {
+      "host": "myfritz.net",
+      "expected": "myfritz.net"
+    },
+    {
+      "host": "home.myds.me",
+      "expected": "home.myds.me"
+    },
+    {
+      "host": "myds.me",
+      "expected": "myds.me"
+    },
+    {
+      "host": "a.dedyn.io",
+      "expected": "a.dedyn.io"
+    },
+    {
+      "host": "dedyn.io",
+      "expected": "dedyn.io"
+    },
+    {
+      "host": "app.cloudapp.net",
+      "expected": "app.cloudapp.net"
+    },
+    {
+      "host": "cloudapp.net",
+      "expected": "cloudapp.net"
+    },
+    {
+      "host": "ec2-1-2-3-4.us-east-2.compute.amazonaws.com",
+      "expected": "ec2-1-2-3-4.us-east-2.compute.amazonaws.com"
+    },
+    {
+      "host": "us-east-2.compute.amazonaws.com",
+      "expected": "us-east-2.compute.amazonaws.com"
+    },
+    {
+      "host": "x.eu-west-1.compute.amazonaws.com",
+      "expected": "x.eu-west-1.compute.amazonaws.com"
+    },
+    {
+      "host": "x.foo.ck",
+      "expected": "x.foo.ck"
+    },
+    {
+      "host": "www.ck",
+      "expected": "www.ck"
+    },
+    {
+      "host": "a.b.internal",
+      "expected": "b.internal"
+    },
+    {
+      "host": "localhost",
+      "expected": "localhost"
+    },
+    {
+      "host": "app.localhost",
+      "expected": "app.localhost"
+    },
+    {
+      "host": "192.168.1.10",
+      "expected": "192.168.1.10"
+    },
+    {
+      "host": "10.0.0.1",
+      "expected": "10.0.0.1"
+    },
+    {
+      "host": "[::1]",
+      "expected": "[::1]"
+    },
+    {
+      "host": "::1",
+      "expected": "::1"
+    },
+    {
+      "host": "[2001:db8::1]",
+      "expected": "[2001:db8::1]"
+    },
+    {
+      "host": "xn--bcher-kva.de",
+      "expected": "xn--bcher-kva.de"
+    },
+    {
+      "host": "shop.xn--bcher-kva.de",
+      "expected": "xn--bcher-kva.de"
+    },
+    {
+      "host": "BÜCHER.de",
+      "expected": "xn--bcher-kva.de"
+    },
+    {
+      "host": "pvt.k12.ma.us",
+      "expected": "pvt.k12.ma.us"
+    },
+    {
+      "host": "example.com..",
+      "expected": "example.com."
+    },
+    {
+      "host": "",
+      "expected": ""
+    }
+  ],
+  "publicSuffix": [
+    {
+      "host": "www.example.com",
+      "expected": "com"
+    },
+    {
+      "host": "example.com",
+      "expected": "com"
+    },
+    {
+      "host": "EXAMPLE.COM.",
+      "expected": "com"
+    },
+    {
+      "host": "a.b.c",
+      "expected": "c"
+    },
+    {
+      "host": "foo.bar.baz.qux.example.org",
+      "expected": "org"
+    },
+    {
+      "host": "login.example.co.uk",
+      "expected": "co.uk"
+    },
+    {
+      "host": "example.co.uk",
+      "expected": "co.uk"
+    },
+    {
+      "host": "co.uk",
+      "expected": "co.uk"
+    },
+    {
+      "host": "a.b.example.com.sa",
+      "expected": "com.sa"
+    },
+    {
+      "host": "shop.example.com.au",
+      "expected": "com.au"
+    },
+    {
+      "host": "home.duckdns.org",
+      "expected": "duckdns.org"
+    },
+    {
+      "host": "nas.home.duckdns.org",
+      "expected": "duckdns.org"
+    },
+    {
+      "host": "duckdns.org",
+      "expected": "duckdns.org"
+    },
+    {
+      "host": "evil.duckdns.org",
+      "expected": "duckdns.org"
+    },
+    {
+      "host": "bucket.s3.amazonaws.com",
+      "expected": "s3.amazonaws.com"
+    },
+    {
+      "host": "x.bucket.s3.amazonaws.com",
+      "expected": "s3.amazonaws.com"
+    },
+    {
+      "host": "svc.up.railway.app",
+      "expected": "up.railway.app"
+    },
+    {
+      "host": "a.b.svc.up.railway.app",
+      "expected": "up.railway.app"
+    },
+    {
+      "host": "up.railway.app",
+      "expected": "up.railway.app"
+    },
+    {
+      "host": "user.github.io",
+      "expected": "github.io"
+    },
+    {
+      "host": "a.user.github.io",
+      "expected": "github.io"
+    },
+    {
+      "host": "github.io",
+      "expected": "github.io"
+    },
+    {
+      "host": "my.box.synology.me",
+      "expected": "synology.me"
+    },
+    {
+      "host": "app.fly.dev",
+      "expected": "fly.dev"
+    },
+    {
+      "host": "nas.myfritz.net",
+      "expected": "myfritz.net"
+    },
+    {
+      "host": "x.nas.myfritz.net",
+      "expected": "myfritz.net"
+    },
+    {
+      "host": "myfritz.net",
+      "expected": "myfritz.net"
+    },
+    {
+      "host": "home.myds.me",
+      "expected": "myds.me"
+    },
+    {
+      "host": "myds.me",
+      "expected": "myds.me"
+    },
+    {
+      "host": "a.dedyn.io",
+      "expected": "dedyn.io"
+    },
+    {
+      "host": "dedyn.io",
+      "expected": "dedyn.io"
+    },
+    {
+      "host": "app.cloudapp.net",
+      "expected": "cloudapp.net"
+    },
+    {
+      "host": "cloudapp.net",
+      "expected": "cloudapp.net"
+    },
+    {
+      "host": "ec2-1-2-3-4.us-east-2.compute.amazonaws.com",
+      "expected": "us-east-2.compute.amazonaws.com"
+    },
+    {
+      "host": "us-east-2.compute.amazonaws.com",
+      "expected": "us-east-2.compute.amazonaws.com"
+    },
+    {
+      "host": "x.eu-west-1.compute.amazonaws.com",
+      "expected": "eu-west-1.compute.amazonaws.com"
+    },
+    {
+      "host": "x.foo.ck",
+      "expected": "foo.ck"
+    },
+    {
+      "host": "www.ck",
+      "expected": "ck"
+    },
+    {
+      "host": "a.b.internal",
+      "expected": "internal"
+    },
+    {
+      "host": "localhost",
+      "expected": "localhost"
+    },
+    {
+      "host": "app.localhost",
+      "expected": "localhost"
+    },
+    {
+      "host": "192.168.1.10",
+      "expected": ""
+    },
+    {
+      "host": "10.0.0.1",
+      "expected": ""
+    },
+    {
+      "host": "[::1]",
+      "expected": ""
+    },
+    {
+      "host": "::1",
+      "expected": ""
+    },
+    {
+      "host": "[2001:db8::1]",
+      "expected": ""
+    },
+    {
+      "host": "xn--bcher-kva.de",
+      "expected": "de"
+    },
+    {
+      "host": "shop.xn--bcher-kva.de",
+      "expected": "de"
+    },
+    {
+      "host": "BÜCHER.de",
+      "expected": "de"
+    },
+    {
+      "host": "pvt.k12.ma.us",
+      "expected": "pvt.k12.ma.us"
+    },
+    {
+      "host": "example.com..",
+      "expected": ""
+    },
+    {
+      "host": "",
+      "expected": ""
+    }
+  ],
+  "urlMatch": [
+    {
+      "page": "https://www.example.com/login",
+      "url": "https://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "subdomain of the saved site"
+    },
+    {
+      "page": "https://login.example.co.uk/",
+      "url": "https://www.example.co.uk/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "multi-label suffix"
+    },
+    {
+      "page": "https://evil.duckdns.org/",
+      "url": "https://home.duckdns.org/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "dynamic DNS names are separate sites"
+    },
+    {
+      "page": "https://nas.home.duckdns.org/",
+      "url": "https://home.duckdns.org",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "below a dynamic DNS name"
+    },
+    {
+      "page": "https://attacker.myfritz.net/",
+      "url": "https://nas.myfritz.net",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "names under myfritz.net are separate sites"
+    },
+    {
+      "page": "https://x.nas.myfritz.net/",
+      "url": "https://nas.myfritz.net",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "below a myfritz.net name"
+    },
+    {
+      "page": "https://evil.myds.me/",
+      "url": "https://home.myds.me",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "names under myds.me are separate sites"
+    },
+    {
+      "page": "https://b.dedyn.io/",
+      "url": "https://a.dedyn.io",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "names under dedyn.io are separate sites"
+    },
+    {
+      "page": "https://b.cloudapp.net/",
+      "url": "https://a.cloudapp.net",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "names under cloudapp.net are separate sites"
+    },
+    {
+      "page": "https://ec2-5-6-7-8.us-east-2.compute.amazonaws.com/",
+      "url": "https://ec2-1-2-3-4.us-east-2.compute.amazonaws.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "EC2 hosts are separate sites (wildcard rule)"
+    },
+    {
+      "page": "https://a.b.internal/",
+      "url": "https://c.b.internal",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "unknown top-level domain (implicit * rule)"
+    },
+    {
+      "page": "https://example.com:8443/x",
+      "url": "https://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "port ignored"
+    },
+    {
+      "page": "https://example.org/",
+      "url": "https://example.com/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "other site"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "https://example.com/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "scheme ignored by the match itself (see downgrade)"
+    },
+    {
+      "page": "https://192.168.1.10:8443/",
+      "url": "https://192.168.1.10",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "IP address is its own site"
+    },
+    {
+      "page": "https://192.168.1.11/",
+      "url": "https://192.168.1.10",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "other IP address"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "saved without a scheme = https"
+    },
+    {
+      "page": "https://EXAMPLE.com./",
+      "url": "https://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "trailing dot and case"
+    },
+    {
+      "page": "ftp://example.com/",
+      "url": "https://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "page not http(s)"
+    },
+    {
+      "page": "https://xn--bcher-kva.de/login",
+      "url": "https://bücher.de",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "punycode page, Unicode saved"
+    },
+    {
+      "page": "https://bücher.de/",
+      "url": "https://xn--bcher-kva.de",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "Unicode page, punycode saved"
+    },
+    {
+      "page": "https://BÜCHER.de/",
+      "url": "https://bücher.de/",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "Unicode host compared after IDNA mapping"
+    },
+    {
+      "page": "https://xn--strae-oqa.de/",
+      "url": "https://straße.de",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "UTS #46 keeps ß (no mapping to ss)"
+    },
+    {
+      "page": "https://strasse.de/",
+      "url": "https://straße.de",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "ss is another name"
+    },
+    {
+      "page": "https://[::1]:8080/",
+      "url": "http://[::1]:8080",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "IPv6"
+    },
+    {
+      "page": "http://localhost:3000/",
+      "url": "http://localhost:3000/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "localhost"
+    },
+    {
+      "page": "https://example.co.uk/",
+      "url": "https://other.co.uk/",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "different names under a multi-label suffix"
+    },
+    {
+      "page": "https://example.app/",
+      "url": "androidapp://com.example.app",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "an app login never matches a website"
+    },
+    {
+      "page": "https://com.example.app/",
+      "url": "androidapp://com.example.app",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "not even a host with the same labels"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "androidapp://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "nor the website of the same name"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "androidapp://example.com",
+      "match": "default",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "app address, default → domain"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "androidapp://example.com",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "app address, starts with"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "androidapp://example.com",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "app address, exact"
+    },
+    {
+      "page": "https://login.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → domain"
+    },
+    {
+      "page": "https://login.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "host",
+      "allowRegex": true,
+      "expected": false,
+      "note": "default → host"
+    },
+    {
+      "page": "https://www.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "host",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → host"
+    },
+    {
+      "page": "https://www.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "never",
+      "allowRegex": true,
+      "expected": false,
+      "note": "default → never"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "https://example.com/login",
+      "match": "default",
+      "defaultMatch": "exact",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → exact"
+    },
+    {
+      "page": "https://example.com/login?x=1",
+      "url": "https://example.com/login",
+      "match": "default",
+      "defaultMatch": "starts_with",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → starts with"
+    },
+    {
+      "page": "https://login.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "default",
+      "allowRegex": true,
+      "expected": true,
+      "note": "a default of default → domain"
+    },
+    {
+      "page": "https://login.example.com/",
+      "url": "https://www.example.com",
+      "match": "default",
+      "defaultMatch": "bogus",
+      "allowRegex": true,
+      "expected": true,
+      "note": "an unknown default → domain"
+    },
+    {
+      "page": "https://www.example.com/",
+      "url": "https://www.example.com",
+      "match": "bogus",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "an unknown match type never matches"
+    },
+    {
+      "page": "https://www.example.com/x",
+      "url": "https://www.example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "same host"
+    },
+    {
+      "page": "https://login.example.com/",
+      "url": "https://www.example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "other host, same site"
+    },
+    {
+      "page": "https://example.com:8443/",
+      "url": "https://example.com:8443/login",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "same port"
+    },
+    {
+      "page": "https://example.com:8443/",
+      "url": "https://example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "other port"
+    },
+    {
+      "page": "https://example.com:443/",
+      "url": "https://example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default port dropped"
+    },
+    {
+      "page": "http://example.com:80/",
+      "url": "http://example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default http port dropped"
+    },
+    {
+      "page": "https://example.com./",
+      "url": "https://example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "trailing dot is part of the host"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "https://example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "scheme ignored"
+    },
+    {
+      "page": "https://example.com/login/step2",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "below the saved path"
+    },
+    {
+      "page": "https://example.com/logout",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "other path"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "https://example.com",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "empty path = /"
+    },
+    {
+      "page": "https://example.com.evil.com/",
+      "url": "https://example.com",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "host prefix is not enough"
+    },
+    {
+      "page": "https://EXAMPLE.com/Login",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "paths are case-sensitive"
+    },
+    {
+      "page": "http://example.com/login",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "scheme differs"
+    },
+    {
+      "page": "https://example.com:443/login?next=1",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default port and query"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "same address"
+    },
+    {
+      "page": "https://example.com/login?x=1",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "query differs"
+    },
+    {
+      "page": "https://example.com",
+      "url": "https://example.com/",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "empty path = /"
+    },
+    {
+      "page": "https://Example.COM/login",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "host case"
+    },
+    {
+      "page": "https://example.com:443/login",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default port"
+    },
+    {
+      "page": "https://example.com/login#top",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "fragment differs"
+    },
+    {
+      "page": "https://example.com/a/../login",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "dot segments resolved"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "https://example.com/a/../login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "dot segments in the saved address resolved"
+    },
+    {
+      "page": "https://example.com/caf%C3%A9",
+      "url": "https://example.com/café",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "non-ASCII path percent-encoded"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "^https://example\\.com/",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "pattern matches"
+    },
+    {
+      "page": "https://evil.com/?https://example.com/",
+      "url": "example\\.com",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "query is not tested"
+    },
+    {
+      "page": "https://evil.com/#example.org",
+      "url": "example\\.org",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "fragment is not tested"
+    },
+    {
+      "page": "https://EXAMPLE.com/",
+      "url": "^https://example\\.com",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "case-insensitive"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "(a+)+$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a nested quantifier runs in linear time"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "[",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "invalid pattern"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "(?<=e)xample",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "look-around is refused"
+    },
+    {
+      "page": "https://example.com:8443/app",
+      "url": "^https://example\\.com:8443/app$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "port is part of the origin"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "^https://example\\.com/$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "path / included"
+    },
+    {
+      "page": "https://bücher.de/",
+      "url": "^https://xn--bcher-kva\\.de/",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "the origin is in punycode"
+    },
+    {
+      "page": "https://k.example/",
+      "url": "K",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "ASCII case folding: the Kelvin sign is not k"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "^https://example\\.com/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex (the user's own login)"
+    },
+    {
+      "page": "https://evil.example/https://bank.com",
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": false,
+      "note": "default → regex: a plain address is no pattern (phishing path)"
+    },
+    {
+      "page": "https://bankxcom.example/",
+      "url": "https://bank.com/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": false,
+      "note": "default → regex: a plain address is no pattern (dot as any character)"
+    },
+    {
+      "page": "https://www.bank.com/login",
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex: a plain address matches its site"
+    },
+    {
+      "page": "https://bank.com/x",
+      "url": "https://bank.com/login/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex: a plain address with a path matches its site"
+    },
+    {
+      "page": "https://bank.com/",
+      "url": "http://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex: a plain http address matches its site"
+    },
+    {
+      "page": "https://bank.com/",
+      "url": "https://BANK.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex: not as it serializes (capitals): still a pattern"
+    },
+    {
+      "page": "https://bankxcom.example/",
+      "url": "bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": true,
+      "note": "default → regex: no scheme: still a pattern (regexWarning names it)"
+    },
+    {
+      "page": "https://evil.example/https://bank.com",
+      "url": "https://bank.com",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "an explicit pattern stays a pattern (regexWarning names it)"
+    },
+    {
+      "page": "https://evil.example/androidapp://com.bank",
+      "url": "androidapp://com.bank",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": true,
+      "expected": false,
+      "note": "default → regex: an app address is no pattern either"
+    },
+    {
+      "page": "data:,@bank.com/",
+      "url": "https://bank.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a data: page is no website"
+    },
+    {
+      "page": "mailto:x@bank.com",
+      "url": "https://bank.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a mailto: address is no page"
+    },
+    {
+      "page": "javascript:alert(1)//@bank.com/",
+      "url": "https://bank.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a javascript: address is no page"
+    },
+    {
+      "page": "bank.com",
+      "url": "https://bank.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a page needs its scheme"
+    },
+    {
+      "page": "//bank.com/",
+      "url": "https://bank.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a scheme-relative page is no page"
+    },
+    {
+      "page": "bank.com/login",
+      "url": "^https://bank\\.com/",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "no pattern matches a page without a scheme"
+    },
+    {
+      "page": "https://bank.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "url": "^https://bank\\.com/a+$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "origin and path of 2048 bytes: tested"
+    },
+    {
+      "page": "https://bank.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "url": "^https://bank\\.com/a+$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "origin and path over 2048 bytes: no pattern matches"
+    },
+    {
+      "page": "https://bank.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "url": "^https://bank\\.com/",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "over 2048 bytes: not even a prefix pattern"
+    },
+    {
+      "page": "https://bank.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/evil",
+      "url": "^https://bank\\.com/a+$",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "a long path can't hide how it ends"
+    },
+    {
+      "page": "https://bank.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/evil",
+      "url": "https://bank.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": true,
+      "note": "other match types don't mind the length"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "https://example.com",
+      "match": "never",
+      "defaultMatch": "domain",
+      "allowRegex": true,
+      "expected": false,
+      "note": "never matches"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "^https://example\\.com/",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: a regular expression never matches"
+    },
+    {
+      "page": "https://example.com/",
+      "url": ".*",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: nor does a catch-all pattern"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "^https://example\\.com/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: default → regex by the user's setting"
+    },
+    {
+      "page": "https://www.example.com/login",
+      "url": "https://example.com",
+      "match": "domain",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: domain"
+    },
+    {
+      "page": "https://www.example.com/login",
+      "url": "https://example.com",
+      "match": "default",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: default → domain"
+    },
+    {
+      "page": "https://www.example.com/x",
+      "url": "https://www.example.com",
+      "match": "host",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: host"
+    },
+    {
+      "page": "https://example.com/login/step2",
+      "url": "https://example.com/login",
+      "match": "starts_with",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: starts with"
+    },
+    {
+      "page": "https://example.com/login",
+      "url": "https://example.com/login",
+      "match": "exact",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: exact"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "https://example.com",
+      "match": "never",
+      "defaultMatch": "domain",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: never"
+    },
+    {
+      "page": "https://www.bank.com/login",
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": false,
+      "expected": true,
+      "note": "shared vault: default → regex: a plain address matches its site"
+    },
+    {
+      "page": "https://evil.example/https://bank.com",
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: default → regex: a plain address is no pattern"
+    },
+    {
+      "page": "https://bankxcom.example/",
+      "url": "bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "allowRegex": false,
+      "expected": false,
+      "note": "shared vault: default → regex: a pattern never counts"
+    }
+  ],
+  "resolveMatch": [
+    {
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "domain"
+    },
+    {
+      "url": "https://bank.com/login/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "domain"
+    },
+    {
+      "url": "http://bank.com/a?b#c",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "domain"
+    },
+    {
+      "url": "https://BANK.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "regex"
+    },
+    {
+      "url": "bank.com",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "regex"
+    },
+    {
+      "url": "^https://bank\\.com/",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "regex"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "regex",
+      "defaultMatch": "domain",
+      "expected": "regex"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "default",
+      "expected": "domain"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "bogus",
+      "expected": "domain"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "default",
+      "defaultMatch": "host",
+      "expected": "host"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "exact",
+      "defaultMatch": "regex",
+      "expected": "exact"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "never",
+      "defaultMatch": "regex",
+      "expected": "never"
+    },
+    {
+      "url": "https://bank.com",
+      "match": "bogus",
+      "defaultMatch": "regex",
+      "expected": "never"
+    },
+    {
+      "url": "androidapp://com.bank",
+      "match": "default",
+      "defaultMatch": "regex",
+      "expected": "domain"
+    }
+  ],
+  "downgrade": [
+    {
+      "page": "http://example.com/",
+      "url": "https://example.com",
+      "match": "domain",
+      "expected": true,
+      "note": "https login on an http page"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "http://example.com",
+      "match": "domain",
+      "expected": false,
+      "note": "upgrade is fine"
+    },
+    {
+      "page": "http://localhost:8080/",
+      "url": "https://localhost:8080",
+      "match": "domain",
+      "expected": false,
+      "note": "localhost is exempt"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "http://example.com",
+      "match": "domain",
+      "expected": false,
+      "note": "both http"
+    },
+    {
+      "page": "http://192.168.1.10/",
+      "url": "https://192.168.1.10",
+      "match": "host",
+      "expected": true,
+      "note": "LAN address is not exempt"
+    },
+    {
+      "page": "HTTP://EXAMPLE.com/",
+      "url": "https://example.com",
+      "match": "domain",
+      "expected": true,
+      "note": "scheme case"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "example.com",
+      "match": "domain",
+      "expected": true,
+      "note": "saved without a scheme = https"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "androidapp://example.com",
+      "match": "domain",
+      "expected": false,
+      "note": "an app address is not https"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "^https://example\\.com",
+      "match": "regex",
+      "expected": true,
+      "note": "regex naming https"
+    },
+    {
+      "page": "http://example.com/",
+      "url": "example\\.com",
+      "match": "regex",
+      "expected": false,
+      "note": "regex without a scheme"
+    },
+    {
+      "page": "http://localhost/x",
+      "url": "^https://localhost",
+      "match": "regex",
+      "expected": false,
+      "note": "regex, localhost exempt"
+    },
+    {
+      "page": "http://localhostx/",
+      "url": "^https://",
+      "match": "regex",
+      "expected": true,
+      "note": "regex, only localhost itself is exempt"
+    },
+    {
+      "page": "https://example.com/",
+      "url": "^https://",
+      "match": "regex",
+      "expected": false,
+      "note": "https page"
+    },
+    {
+      "page": "HTTP://example.com/",
+      "url": "^HTTPS://example\\.com",
+      "match": "regex",
+      "expected": true,
+      "note": "regex, case-insensitive"
+    },
+    {
+      "page": "bank.com",
+      "url": "https://bank.com",
+      "match": "domain",
+      "expected": false,
+      "note": "a page without a scheme is no http page"
+    },
+    {
+      "page": "data:,@bank.com/",
+      "url": "https://bank.com",
+      "match": "domain",
+      "expected": false,
+      "note": "a data: page"
+    }
+  ],
+  "regexError": [
+    {
+      "pattern": "(a+)+",
+      "expected": null
+    },
+    {
+      "pattern": "(.*a){10}",
+      "expected": null
+    },
+    {
+      "pattern": "(x*)*y",
+      "expected": null
+    },
+    {
+      "pattern": "(a|ab)*c",
+      "expected": null
+    },
+    {
+      "pattern": "(.|.)*X",
+      "expected": null
+    },
+    {
+      "pattern": "(a?){30}",
+      "expected": null
+    },
+    {
+      "pattern": "(a{2,3}){4}",
+      "expected": null
+    },
+    {
+      "pattern": "(a{2}){4}",
+      "expected": null
+    },
+    {
+      "pattern": "(?<n>a+)+",
+      "expected": null
+    },
+    {
+      "pattern": "(?:a|b)+",
+      "expected": null
+    },
+    {
+      "pattern": "a*b*c*d*e",
+      "expected": null
+    },
+    {
+      "pattern": "a*b*c*d",
+      "expected": null
+    },
+    {
+      "pattern": "(?:ab)+",
+      "expected": null
+    },
+    {
+      "pattern": "(ab)+",
+      "expected": null
+    },
+    {
+      "pattern": "a+b+",
+      "expected": null
+    },
+    {
+      "pattern": "(ab){2}",
+      "expected": null
+    },
+    {
+      "pattern": "(a+){1}",
+      "expected": null
+    },
+    {
+      "pattern": "[(a+)+]",
+      "expected": null
+    },
+    {
+      "pattern": "\\(a+\\)+",
+      "expected": null
+    },
+    {
+      "pattern": "x{,3}",
+      "expected": "Expected decimal number, but found no digits."
+    },
+    {
+      "pattern": "x{}",
+      "expected": "Expected decimal number, but found no digits."
+    },
+    {
+      "pattern": "a{2,}b{3,}c*d+",
+      "expected": null
+    },
+    {
+      "pattern": "^https://example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://(www\\.)?example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://[a-z]+\\.example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "(?<=a)b+",
+      "expected": "Look-around is not supported."
+    },
+    {
+      "pattern": "(?<!a)b+",
+      "expected": "Look-around is not supported."
+    },
+    {
+      "pattern": "(a)\\1",
+      "expected": "Backreferences are not supported."
+    },
+    {
+      "pattern": "[",
+      "expected": "Found unclosed character class."
+    },
+    {
+      "pattern": "\\p{L}",
+      "expected": "Unicode character classes are not supported."
+    },
+    {
+      "pattern": "[^à-ü]+$",
+      "expected": null
+    },
+    {
+      "pattern": "a{1000}{1000}",
+      "expected": "Compiled regex exceeded size limit."
+    },
+    {
+      "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": null
+    },
+    {
+      "pattern": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "expected": "The pattern is longer than 300 characters."
+    }
+  ],
+  "regexWarning": [
+    {
+      "pattern": "^https://example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https?://example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^http(s)?://example\\.com/login$",
+      "expected": null
+    },
+    {
+      "pattern": "^HTTPS://EXAMPLE\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://example\\.com$",
+      "expected": null
+    },
+    {
+      "pattern": "^https://example\\.com:8443/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://example\\.com(/.*)?$",
+      "expected": null
+    },
+    {
+      "pattern": "^https://example\\.com(?::\\d+)?/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://(www\\.)?example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://([a-z0-9-]+\\.)*example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://[^/]+\\.example\\.co\\.uk/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://(www|login)\\.example\\.com/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://192\\.168\\.1\\.10:8443/",
+      "expected": null
+    },
+    {
+      "pattern": "^https://a\\.example/|^https://b\\.example/",
+      "expected": null
+    },
+    {
+      "pattern": "example\\.com",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "https://example\\.com/",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": ".*",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "(?i)^https://example\\.com/",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^ftp://example\\.com/",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://example\\.com/|evil",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://example.com/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://example\\.com",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://example\\.com/?",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://example\\.com\\b",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://.*\\.example\\.com/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://[^.]+\\.example\\.com/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://[a-z]+example\\.com/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://([a-z]+\\.)*com/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://[^/]+\\.co\\.uk/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "^https://[a-z]+/",
+      "expected": "The pattern doesn't pin the website's host, so other websites can match it. Write the host with \\. for each dot and end it with /, : or $, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "bank.com",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "https://bank.com",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "https://BANK.com",
+      "expected": "The pattern isn't tied to the start of the address, so any website whose address contains matching text matches it. Start it with ^https:// and the website's host, for example ^https://example\\.com/"
+    },
+    {
+      "pattern": "(",
+      "expected": null
+    },
+    {
+      "pattern": "(?<=a)b",
+      "expected": null
+    }
+  ],
+  "savePlan": [
+    {
+      "name": "no password: nothing",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: same user name already has the password",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: another login with that user name has the password",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "alex",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: own login with the user name is updated",
+      "candidates": [
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": " ALEX ",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "b"
+          },
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: only the user name was saved",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: user names compare trimmed, without case",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "Alex@Example.com ",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "  alex@example.COM",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: passwords compare exactly",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "PW",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: the first own login with the user name",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "one",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "alex",
+          "password": "two",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "three",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: shared login with the user name is offered, not selected",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "b"
+          },
+          {
+            "id": "s",
+            "vault": "Team"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: own login selected, shared one offered after the own ones",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old2",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          },
+          {
+            "id": "s",
+            "vault": "Team"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: shared login already has the password",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "new",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: own login differs, shared one has the password",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "new",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: view-only login with the user name is never offered",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "old",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    },
+    {
+      "name": "rule 1: view-only login with the password counts as saved",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "pw",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1: view-only login with the user name, own login without one: new login",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "old",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: shared login with the user name, own login without one: new login",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "b"
+          },
+          {
+            "id": "s",
+            "vault": "Team"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: two shared logins with the user name, both offered",
+      "candidates": [
+        {
+          "id": "s1",
+          "name": "Login s1",
+          "username": "alex",
+          "password": "a",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "s2",
+          "name": "Login s2",
+          "username": "alex",
+          "password": "b",
+          "writable": true,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "s1",
+            "vault": "Team"
+          },
+          {
+            "id": "s2",
+            "vault": "Family"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: a shared vault without a name is labelled",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": false,
+          "vault": ""
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "s",
+            "vault": "Shared vault"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: view-only and shared logins with the user name",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "z",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        },
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "y",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "s",
+            "vault": "Team"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1: everything at once",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "y",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "z",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          },
+          {
+            "id": "s",
+            "vault": "Team"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: own login without a user name",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "alex",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: whitespace is no user name",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "   ",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: own login without a user name has the password",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: shared login without a user name never counts",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "",
+          "password": "x",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "only",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: shared login without a user name has the password",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "",
+          "password": "new",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 1, no user name typed: own login wins over a shared one",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "",
+          "password": "x",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "same",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: own login without a user name gets it",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: even when the password is the same",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: the one with the typed password",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "one",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "",
+          "password": "two",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "two",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "b",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: else the first",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "one",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "",
+          "password": "two",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "three",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: shared login without a user name is never completed",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "",
+          "password": "x",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    },
+    {
+      "name": "rule 2: own login wins over a shared one that has the password",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "",
+          "password": "new",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: view-only login without a user name is never completed",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "",
+          "password": "pw",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "",
+          "password": "two",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "update",
+        "reason": "blank",
+        "target": "b",
+        "targets": [
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: no login without a user name: new login",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: the same password under another user name is another account",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "sam",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 2: nothing saved for the site",
+      "candidates": [],
+      "typedUser": "alex",
+      "password": "pw",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    },
+    {
+      "name": "rule 3: the password is already saved",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "pw",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 3: the password is saved in a view-only vault",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "pw",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 3: the password is saved in a shared vault",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "pw",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "",
+      "password": "pw",
+      "expected": {
+        "action": "none"
+      }
+    },
+    {
+      "name": "rule 3: exactly one own login",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "only",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 3: one own login and a view-only one",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "sam",
+          "password": "x",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "only",
+        "target": "b",
+        "targets": [
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 3: one own login and a shared one",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "sam",
+          "password": "x",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "old",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "update",
+        "reason": "only",
+        "target": "a",
+        "targets": [
+          {
+            "id": "a"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 3: two own logins: new login",
+      "candidates": [
+        {
+          "id": "a",
+          "name": "Login a",
+          "username": "alex",
+          "password": "a",
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Login b",
+          "username": "sam",
+          "password": "b",
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": [
+          {
+            "id": "a"
+          },
+          {
+            "id": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rule 3: a shared login is never the only login",
+      "candidates": [
+        {
+          "id": "s",
+          "name": "Login s",
+          "username": "alex",
+          "password": "x",
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    },
+    {
+      "name": "rule 3: a view-only login is never the only login",
+      "candidates": [
+        {
+          "id": "r",
+          "name": "Login r",
+          "username": "alex",
+          "password": "old",
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "typedUser": "",
+      "password": "new",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    },
+    {
+      "name": "rule 3: nothing saved for the site",
+      "candidates": [],
+      "typedUser": "",
+      "password": "pw",
+      "expected": {
+        "action": "create",
+        "targets": []
+      }
+    }
+  ],
+  "passkeyTargets": [
+    {
+      "name": "own login for the exact host is preselected",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Example",
+          "username": "alex@example.com",
+          "urls": [
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "login.example.com",
+      "rpId": "example.com",
+      "userName": "alex@example.com",
+      "displayName": "Alex",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "a"
+    },
+    {
+      "name": "shared login for the exact host: listed with its vault, never preferred",
+      "logins": [
+        {
+          "id": "s",
+          "name": "Example",
+          "username": "alex@example.com",
+          "urls": [
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        }
+      ],
+      "host": "login.example.com",
+      "rpId": "example.com",
+      "userName": "alex@example.com",
+      "displayName": "Alex",
+      "expected": [
+        {
+          "id": "s",
+          "preferred": false,
+          "vault": "Team"
+        }
+      ],
+      "expectedDefault": "new"
+    },
+    {
+      "name": "own logins first, then by exact host, user name, name",
+      "logins": [
+        {
+          "id": "s",
+          "name": "AAA shared",
+          "username": "alex@example.com",
+          "urls": [
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "b",
+          "name": "Bravo",
+          "username": "sam",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "c",
+          "name": "Charlie",
+          "username": "alex",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "d",
+          "name": "Delta",
+          "username": "someone",
+          "urls": [
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "e",
+          "name": "Echo",
+          "username": "alex@example.com",
+          "urls": [
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "login.example.com",
+      "rpId": "example.com",
+      "userName": "alex@example.com",
+      "displayName": "Alex",
+      "expected": [
+        {
+          "id": "e",
+          "preferred": true
+        },
+        {
+          "id": "d",
+          "preferred": true
+        },
+        {
+          "id": "c",
+          "preferred": false
+        },
+        {
+          "id": "b",
+          "preferred": false
+        },
+        {
+          "id": "s",
+          "preferred": false,
+          "vault": "Team"
+        }
+      ],
+      "expectedDefault": "e"
+    },
+    {
+      "name": "RP ID host, subdomains of it; never a sibling outside it or another site",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Apex",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Sibling",
+          "username": "x",
+          "urls": [
+            "https://bazarr.example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "c",
+          "name": "Other site",
+          "username": "x",
+          "urls": [
+            "https://example.org"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "d",
+          "name": "Lookalike",
+          "username": "x",
+          "urls": [
+            "https://notexample.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "e",
+          "name": "Parent",
+          "username": "x",
+          "urls": [
+            "https://com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "cloudy.example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": false
+        },
+        {
+          "id": "b",
+          "preferred": false
+        }
+      ],
+      "expectedDefault": "new"
+    },
+    {
+      "name": "view-only logins are never targets",
+      "logins": [
+        {
+          "id": "r",
+          "name": "Example",
+          "username": "alex",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": false,
+          "personal": false,
+          "vault": "Family"
+        },
+        {
+          "id": "a",
+          "name": "Mine",
+          "username": "alex",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "alex",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "a"
+    },
+    {
+      "name": "display name matches a user name",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Alpha",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Bravo",
+          "username": "Alex Morgan",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "Alex Morgan",
+      "expected": [
+        {
+          "id": "b",
+          "preferred": true
+        },
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "b"
+    },
+    {
+      "name": "typed user name matches the local part of a saved address",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Alpha",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Bravo",
+          "username": "alex@mail.example",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "alex",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "b",
+          "preferred": true
+        },
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "b"
+    },
+    {
+      "name": "website saved without a scheme, with a port, trailing dot or in capitals",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Alpha",
+          "username": "x",
+          "urls": [
+            "example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Bravo",
+          "username": "x",
+          "urls": [
+            "https://EXAMPLE.com:8443/login"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "c",
+          "name": "Charlie",
+          "username": "x",
+          "urls": [
+            "https://example.com."
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": true
+        },
+        {
+          "id": "b",
+          "preferred": true
+        },
+        {
+          "id": "c",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "a"
+    },
+    {
+      "name": "several websites: any one of them counts",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Alpha",
+          "username": "x",
+          "urls": [
+            "https://example.org",
+            "https://login.example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "login.example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "a"
+    },
+    {
+      "name": "Unicode and punycode name the same host",
+      "logins": [
+        {
+          "id": "a",
+          "name": "Bücher",
+          "username": "x",
+          "urls": [
+            "https://bücher.de"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "xn--bcher-kva.de",
+      "rpId": "xn--bcher-kva.de",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "a"
+    },
+    {
+      "name": "names sort without regard to case",
+      "logins": [
+        {
+          "id": "a",
+          "name": "bravo",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "b",
+          "name": "Alpha",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        },
+        {
+          "id": "c",
+          "name": "alpha",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "c",
+          "preferred": true
+        },
+        {
+          "id": "b",
+          "preferred": true
+        },
+        {
+          "id": "a",
+          "preferred": true
+        }
+      ],
+      "expectedDefault": "c"
+    },
+    {
+      "name": "no logins: new login",
+      "logins": [],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "alex",
+      "displayName": "Alex",
+      "expected": [],
+      "expectedDefault": "new"
+    },
+    {
+      "name": "only shared logins: nothing preferred",
+      "logins": [
+        {
+          "id": "s",
+          "name": "Shared",
+          "username": "alex",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": false,
+          "vault": "Team"
+        },
+        {
+          "id": "t",
+          "name": "Team two",
+          "username": "x",
+          "urls": [
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": false,
+          "vault": "Family"
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "alex",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "s",
+          "preferred": false,
+          "vault": "Team"
+        },
+        {
+          "id": "t",
+          "preferred": false,
+          "vault": "Family"
+        }
+      ],
+      "expectedDefault": "new"
+    },
+    {
+      "name": "an app website is not a website",
+      "logins": [
+        {
+          "id": "a",
+          "name": "App",
+          "username": "x",
+          "urls": [
+            "androidapp://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [],
+      "expectedDefault": "new"
+    },
+    {
+      "name": "an app website next to a real one",
+      "logins": [
+        {
+          "id": "a",
+          "name": "App",
+          "username": "x",
+          "urls": [
+            "androidapp://login.example.com",
+            "https://example.com"
+          ],
+          "writable": true,
+          "personal": true
+        }
+      ],
+      "host": "login.example.com",
+      "rpId": "example.com",
+      "userName": "",
+      "displayName": "",
+      "expected": [
+        {
+          "id": "a",
+          "preferred": false
+        }
+      ],
+      "expectedDefault": "new"
+    }
+  ],
+  "rpId": [
+    {
+      "origin": "https://login.example.com",
+      "requested": null,
+      "expected": "login.example.com",
+      "note": "defaults to the origin's host"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "example.com",
+      "expected": "example.com",
+      "note": "registrable parent"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "login.example.com",
+      "expected": "login.example.com",
+      "note": "the host itself"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "EXAMPLE.com",
+      "expected": "example.com",
+      "note": "canonical lower case"
+    },
+    {
+      "origin": "https://login.example.com:8443",
+      "requested": "example.com",
+      "expected": "example.com",
+      "note": "port ignored"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "other.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "another site"
+    },
+    {
+      "origin": "https://example.com",
+      "requested": "ample.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "not a label suffix"
+    },
+    {
+      "origin": "https://evil-example.com",
+      "requested": "example.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "not a label suffix"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "single-label public suffix"
+    },
+    {
+      "origin": "https://a.example.co.uk",
+      "requested": "co.uk",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "multi-label public suffix"
+    },
+    {
+      "origin": "https://a.example.co.uk",
+      "requested": "example.co.uk",
+      "expected": "example.co.uk",
+      "note": "registrable under a multi-label suffix"
+    },
+    {
+      "origin": "https://home.duckdns.org",
+      "requested": "duckdns.org",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "dynamic DNS suffix"
+    },
+    {
+      "origin": "https://home.duckdns.org",
+      "requested": "home.duckdns.org",
+      "expected": "home.duckdns.org",
+      "note": "dynamic DNS name"
+    },
+    {
+      "origin": "https://nas.myfritz.net",
+      "requested": "myfritz.net",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "myfritz.net is a public suffix"
+    },
+    {
+      "origin": "https://x.nas.myfritz.net",
+      "requested": "nas.myfritz.net",
+      "expected": "nas.myfritz.net",
+      "note": "a name under myfritz.net"
+    },
+    {
+      "origin": "https://home.myds.me",
+      "requested": "myds.me",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "myds.me is a public suffix"
+    },
+    {
+      "origin": "https://a.dedyn.io",
+      "requested": "dedyn.io",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "dedyn.io is a public suffix"
+    },
+    {
+      "origin": "https://app.cloudapp.net",
+      "requested": "cloudapp.net",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "cloudapp.net is a public suffix"
+    },
+    {
+      "origin": "https://ec2-1-2-3-4.us-east-2.compute.amazonaws.com",
+      "requested": "us-east-2.compute.amazonaws.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "EC2 region (wildcard rule)"
+    },
+    {
+      "origin": "https://ec2-1-2-3-4.us-east-2.compute.amazonaws.com",
+      "requested": "compute.amazonaws.com",
+      "expected": "compute.amazonaws.com",
+      "note": "above the EC2 regions"
+    },
+    {
+      "origin": "https://x.foo.ck",
+      "requested": "foo.ck",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The RP ID is not a registrable domain suffix of the origin.",
+      "note": "wildcard rule *.ck"
+    },
+    {
+      "origin": "https://a.b.internal",
+      "requested": "b.internal",
+      "expected": "b.internal",
+      "note": "unknown top-level domain"
+    },
+    {
+      "origin": "http://example.com",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "WebAuthn requires a secure (https) origin.",
+      "note": "plain http"
+    },
+    {
+      "origin": "http://localhost:8080",
+      "requested": null,
+      "expected": "localhost",
+      "note": "localhost over http"
+    },
+    {
+      "origin": "http://localhost:8080",
+      "requested": "localhost",
+      "expected": "localhost",
+      "note": "localhost"
+    },
+    {
+      "origin": "http://app.localhost",
+      "requested": "localhost",
+      "expected": "localhost",
+      "note": "subdomain of localhost"
+    },
+    {
+      "origin": "https://192.168.1.10",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The origin's host is not a valid domain.",
+      "note": "IP address origin"
+    },
+    {
+      "origin": "https://[::1]",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "The origin's host is not a valid domain.",
+      "note": "IPv6 origin"
+    },
+    {
+      "origin": "https://Login.example.com",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid origin.",
+      "note": "origin not in canonical form"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "example.com.",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "trailing dot"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "empty"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "exa mple.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "whitespace"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "example.com:443",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "port in the RP ID"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "*.example.com",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "wildcard"
+    },
+    {
+      "origin": "https://login.example.com",
+      "requested": "1.2.3.4",
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid RP ID.",
+      "note": "IP address RP ID"
+    },
+    {
+      "origin": "https://login.example.com/",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid origin.",
+      "note": "origin with a path"
+    },
+    {
+      "origin": "android:apk-key-hash:abc",
+      "requested": null,
+      "expected": null,
+      "error": "SecurityError",
+      "message": "Invalid origin.",
+      "note": "an app's origin is not a web origin"
+    },
+    {
+      "origin": "https://xn--bcher-kva.de",
+      "requested": "bücher.de",
+      "expected": "xn--bcher-kva.de",
+      "note": "Unicode RP ID is punycoded"
+    },
+    {
+      "origin": "https://login.xn--bcher-kva.de",
+      "requested": "xn--bcher-kva.de",
+      "expected": "xn--bcher-kva.de",
+      "note": "punycode parent"
+    },
+    {
+      "origin": "https://xn--strae-oqa.de",
+      "requested": "straße.de",
+      "expected": "xn--strae-oqa.de",
+      "note": "UTS #46 keeps ß"
+    }
+  ],
+  "loginPhraseChoices": [
+    {
+      "publicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "count": 2,
+      "expected": [
+        "could regulator babied luckiness pavement",
+        "lung spout ashen sudoku gloating"
+      ]
+    },
+    {
+      "publicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "count": 3,
+      "expected": [
+        "could regulator babied luckiness pavement",
+        "rejoicing chomp tribune rarity renter",
+        "lung spout ashen sudoku gloating"
+      ]
+    },
+    {
+      "publicKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "count": 5,
+      "expected": [
+        "lung spout ashen sudoku gloating",
+        "could regulator babied luckiness pavement",
+        "rejoicing chomp tribune rarity renter",
+        "urchin provoking quickstep finicky surgical",
+        "repent handsfree lid shush puzzling"
+      ]
+    },
+    {
+      "publicKey": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+      "count": 2,
+      "expected": [
+        "endless consoling bacterium ramp splashy",
+        "casket thwarting commodity blasphemy ramp"
+      ]
+    },
+    {
+      "publicKey": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+      "count": 3,
+      "expected": [
+        "casket thwarting commodity blasphemy ramp",
+        "endless consoling bacterium ramp splashy",
+        "driveway smokeless relapse domain nicotine"
+      ]
+    },
+    {
+      "publicKey": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+      "count": 5,
+      "expected": [
+        "endless consoling bacterium ramp splashy",
+        "driveway smokeless relapse domain nicotine",
+        "casket thwarting commodity blasphemy ramp",
+        "vagrantly kosher hunter lubricant luckless",
+        "violet tasty second hut proud"
+      ]
+    },
+    {
+      "publicKey": "__________________________________________8",
+      "count": 2,
+      "expected": [
+        "unmixable primarily overture december basil",
+        "granddad hate dangle spectrum dexterous"
+      ]
+    },
+    {
+      "publicKey": "__________________________________________8",
+      "count": 3,
+      "expected": [
+        "unmixable primarily overture december basil",
+        "granddad hate dangle spectrum dexterous",
+        "consensus onboard flattered amnesty denatured"
+      ]
+    },
+    {
+      "publicKey": "__________________________________________8",
+      "count": 5,
+      "expected": [
+        "unmixable primarily overture december basil",
+        "granddad hate dangle spectrum dexterous",
+        "consensus onboard flattered amnesty denatured",
+        "skating sixteen comfy trapdoor secrecy",
+        "trench wavy rippling sufferer certified"
+      ]
+    }
+  ]
+}

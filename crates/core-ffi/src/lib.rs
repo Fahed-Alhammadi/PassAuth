@@ -1,20 +1,28 @@
 //! Kotlin and Swift bindings (UniFFI) for the native PassAuth apps.
 //!
 //! Mirrors `passauth-core-wasm`: keys stay in Rust objects (`MasterKeys`,
-//! `Account`, `VaultKey`) and the apps only hold handles. Items, bundles and
+//! `Account`, `VaultKey`, `GrantorKey`) and the apps only hold handles (send and
+//! attachment keys are base64url strings: they go into a link and into the
+//! encrypted item anyway). Items, bundles and
 //! KDF parameters cross the boundary as JSON in the same shape as the server
 //! API and the web vault, so all clients read and write the same data.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use passauth_core::crypto::{KeyPair, SymmetricKey, fingerprint as key_fingerprint, random_bytes};
+use passauth_core::file::{self, FileKey};
 use passauth_core::item::{EncryptedItem as CoreEncrypted, Item, b64, unb64};
 use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
-use passauth_core::keys::{self, AccountBundle, NewAccount as CoreNew, UnlockedAccount};
-use passauth_core::{Error, export, generator, import, opaque, passkey, totp};
+use passauth_core::keys::{
+    self, AccountBundle, GrantorKey as CoreGrantorKey, NewAccount as CoreNew, UnlockedAccount,
+};
+use passauth_core::send::{self, SendField, SendKey};
+use passauth_core::{Error, device_login, export, generator, import, opaque, passkey, site, totp};
 
 uniffi::setup_scaffolding!();
 
+/// The core's errors. Each variant's message is its code in snake_case (`decrypt_failed`,
+/// `weak_kdf`…), the same string the WASM build throws; `Invalid` carries a description.
 #[derive(Debug, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum CoreError {
@@ -22,16 +30,34 @@ pub enum CoreError {
     DecryptFailed,
     /// The import file is password protected.
     PasswordRequired,
+    /// KDF parameters below the core's floor (a server asking for a cheap key).
+    WeakKdf,
+    /// KDF parameters above the core's ceiling, or a Send salt above the visitor ceiling.
+    KdfTooStrong,
+    /// Sign-in from another device: the picked words aren't the request key's own.
+    PhraseMismatch,
+    /// Sign-in from another device: not the approving app's code.
+    WrongCode,
+    /// Sign-in from another device: three wrong codes; start a new request.
+    TooManyWrongCodes,
+    /// Sign-in from another device: the code hasn't been confirmed yet.
+    NotConfirmed,
     Invalid(String),
 }
 
 impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DecryptFailed => f.write_str("decrypt_failed"),
-            Self::PasswordRequired => f.write_str("password_required"),
-            Self::Invalid(m) => f.write_str(m),
-        }
+        f.write_str(match self {
+            Self::DecryptFailed => "decrypt_failed",
+            Self::PasswordRequired => "password_required",
+            Self::WeakKdf => "weak_kdf",
+            Self::KdfTooStrong => "kdf_too_strong",
+            Self::PhraseMismatch => "phrase_mismatch",
+            Self::WrongCode => "wrong_code",
+            Self::TooManyWrongCodes => "too_many_wrong_codes",
+            Self::NotConfirmed => "not_confirmed",
+            Self::Invalid(m) => m,
+        })
     }
 }
 
@@ -42,6 +68,12 @@ impl From<Error> for CoreError {
         match e {
             Error::Decrypt => Self::DecryptFailed,
             Error::PasswordRequired => Self::PasswordRequired,
+            Error::WeakKdf => Self::WeakKdf,
+            Error::KdfTooStrong => Self::KdfTooStrong,
+            Error::PhraseMismatch => Self::PhraseMismatch,
+            Error::WrongCode => Self::WrongCode,
+            Error::TooManyWrongCodes => Self::TooManyWrongCodes,
+            Error::NotConfirmed => Self::NotConfirmed,
             other => Self::Invalid(other.to_string()),
         }
     }
@@ -130,6 +162,270 @@ impl Account {
             with_secret_key,
             existing_secret_key.as_deref(),
         )?)
+    }
+
+    /// `rewrap` following a server's KDF policy: memory = max(128 MiB,
+    /// `min_memory_mib`), passes = max(3, `min_iterations`) — the policy's
+    /// `min_kdf_memory_mib` / `min_kdf_iterations`, or `None`. A minimum outside
+    /// 64–1024 MiB or 3–20 passes fails. Also fixes a `kdf` policy violation.
+    pub fn rewrap_with_kdf(
+        &self,
+        bundle_json: String,
+        new_password: String,
+        with_secret_key: bool,
+        existing_secret_key: Option<String>,
+        min_memory_mib: Option<u32>,
+        min_iterations: Option<u32>,
+    ) -> R<NewAccount> {
+        let bundle: AccountBundle = json_in(&bundle_json)?;
+        let kdf = KdfParams::with_minimums(min_memory_mib, min_iterations)?;
+        NewAccount::try_from(bundle.rewrap_with_kdf(
+            &self.0,
+            &new_password,
+            with_secret_key,
+            existing_secret_key.as_deref(),
+            kdf,
+        )?)
+    }
+
+    /// Wrap a Send's key (from `send_new_key`) for this account: the Send's `owner_key`.
+    pub fn wrap_send_key(&self, key: String) -> R<String> {
+        Ok(self.0.wrap_send_key(&SendKey::from_b64(&key)?)?)
+    }
+
+    /// The send key (base64url, for the link's fragment) from a Send's `owner_key`.
+    pub fn unwrap_send_key(&self, wrapped: String) -> R<String> {
+        Ok(self.0.unwrap_send_key(&wrapped)?.to_b64())
+    }
+
+    /// Emergency access: this account's key sealed to a trusted contact's public
+    /// key (check their fingerprint first) — the grant's `sealed_key`. Confirming means
+    /// trusting the contact with the whole account, for good.
+    pub fn seal_account_key_for(&self, recipient_public_key: String) -> R<String> {
+        Ok(self.0.seal_account_key_for(&recipient_public_key)?)
+    }
+
+    /// Approve a sign-in request from another device, after the user picked, among
+    /// `login_phrase_choices(requester_public_key, n)`, `chosen_phrase` as the words the
+    /// new device shows. `sealed` is the request's `sealed_key` (this account's key, and the
+    /// Secret Key when `secret_key` is given, sealed to the request's public key); show
+    /// `code` (6 digits) for the user to enter on the new device. `PhraseMismatch` unless
+    /// `chosen_phrase` is exactly `login_phrase(requester_public_key)`; fails for a
+    /// malformed or low-order key.
+    pub fn approve_login_request(
+        &self,
+        requester_public_key: String,
+        request_id: String,
+        chosen_phrase: String,
+        secret_key: Option<String>,
+    ) -> R<LoginApproval> {
+        let approval = self.0.approve_login_request(
+            &requester_public_key,
+            &request_id,
+            &chosen_phrase,
+            secret_key.as_deref(),
+        )?;
+        Ok(LoginApproval {
+            sealed: approval.sealed,
+            code: approval.code,
+        })
+    }
+
+    /// The `proof` for approving request `request_id`: its `challenge`, opened with this
+    /// account's private key (base64url).
+    pub fn open_login_challenge(&self, challenge: String, request_id: String) -> R<String> {
+        Ok(self.0.open_login_challenge(&challenge, &request_id)?)
+    }
+}
+
+/// A new device's key pair for one sign-in request (its private half never leaves Rust).
+#[derive(uniffi::Object)]
+pub struct LoginRequestKey(device_login::LoginRequestKey);
+
+#[uniffi::export]
+impl LoginRequestKey {
+    #[uniffi::constructor]
+    pub fn generate() -> R<Arc<Self>> {
+        Ok(Arc::new(Self(device_login::LoginRequestKey::generate()?)))
+    }
+
+    /// The request's `public_key` (base64url).
+    pub fn public_key(&self) -> String {
+        self.0.public_key()
+    }
+
+    /// The words this device shows (`login_phrase` of its own public key).
+    pub fn phrase(&self) -> String {
+        self.0.phrase()
+    }
+
+    /// Open the approved request's `sealed_key` for account `account_id` (the sign-in's
+    /// `user_id`). Fails if it was sealed to another key, account or request, or changed.
+    /// What opens is usable only after `confirm(code)`.
+    pub fn open(
+        &self,
+        sealed: String,
+        account_id: String,
+        request_id: String,
+    ) -> R<Arc<ApprovedLogin>> {
+        let approved = self.0.open(&sealed, &account_id, &request_id)?;
+        Ok(Arc::new(ApprovedLogin {
+            account_id,
+            state: Mutex::new(approved),
+        }))
+    }
+}
+
+/// `Account.approve_login_request`'s answer.
+#[derive(uniffi::Record)]
+pub struct LoginApproval {
+    /// The request's `sealed_key` (base64url) for the server.
+    pub sealed: String,
+    /// The 6-digit code to show: the new device can't use the approval without it.
+    pub code: String,
+}
+
+/// An approved sign-in: the Account Key (it stays in Rust) and maybe the Secret Key, both
+/// held back until `confirm` accepted the code the approving app shows.
+#[derive(uniffi::Object)]
+pub struct ApprovedLogin {
+    account_id: String,
+    /// `confirm` changes it (a counter, then confirmed or refused).
+    state: Mutex<device_login::ApprovedLogin>,
+}
+
+impl ApprovedLogin {
+    fn state(&self) -> R<std::sync::MutexGuard<'_, device_login::ApprovedLogin>> {
+        self.state
+            .lock()
+            .map_err(|_| CoreError::Invalid("sign-in unusable after a panic".into()))
+    }
+}
+
+#[uniffi::export]
+impl ApprovedLogin {
+    pub fn account_id(&self) -> String {
+        self.account_id.clone()
+    }
+
+    /// Check the code the approving app shows (6 digits; spaces and hyphens are ignored).
+    /// `WrongCode` (see `attempts_left`), `TooManyWrongCodes` on the third wrong code and
+    /// for good after it (start a new request), `Invalid` for anything but 6 digits (not
+    /// counted).
+    pub fn confirm(&self, code: String) -> R<()> {
+        Ok(self.state()?.confirm(&code)?)
+    }
+
+    /// Whether `confirm` accepted the code.
+    pub fn is_confirmed(&self) -> bool {
+        self.state.lock().is_ok_and(|s| s.is_confirmed())
+    }
+
+    /// Wrong codes `confirm` still takes (0 once refused).
+    pub fn attempts_left(&self) -> u32 {
+        self.state.lock().map_or(0, |s| s.attempts_left())
+    }
+
+    /// The Secret Key (`PA1-…`) when the approving app included it; keep it like one the
+    /// user typed, for unlocking with the master password later. `NotConfirmed` until
+    /// `confirm` accepted the code.
+    pub fn secret_key(&self) -> R<Option<String>> {
+        Ok(self.state()?.secret_key()?)
+    }
+
+    /// Unlock the account bundle (JSON) the sign-in returned, without the master password.
+    /// `NotConfirmed` until `confirm` accepted the code.
+    pub fn unlock(&self, bundle_json: String) -> R<Arc<Account>> {
+        let bundle: AccountBundle = json_in(&bundle_json)?;
+        Ok(Arc::new(Account(self.state()?.unlock(&bundle)?)))
+    }
+}
+
+/// Emergency access: a grantor's account key, opened by their contact. It only
+/// opens the grantor's own vault keys; the key itself never leaves Rust. The sealed box
+/// is anonymous, so a server could hand out one of its own making: show what it opens
+/// read-only and never autofill it.
+#[derive(uniffi::Object)]
+pub struct GrantorKey(CoreGrantorKey);
+
+#[uniffi::export]
+impl GrantorKey {
+    pub fn account_id(&self) -> String {
+        self.0.account_id().to_owned()
+    }
+
+    /// `kind` must be "account": a grantor's vault keys wrapped by their account key.
+    pub fn open_vault_key(
+        &self,
+        vault_id: String,
+        wrapped: String,
+        kind: String,
+    ) -> R<Arc<VaultKey>> {
+        if kind != "account" {
+            return Err(CoreError::Invalid(
+                "only the grantor's own vaults (key_kind \"account\") can be opened".into(),
+            ));
+        }
+        Ok(Arc::new(VaultKey(
+            self.0.open_vault_key(&vault_id, &wrapped)?,
+        )))
+    }
+}
+
+fn stream_lock<T>(m: &Mutex<T>) -> R<std::sync::MutexGuard<'_, T>> {
+    m.lock()
+        .map_err(|_| CoreError::Invalid("file stream unusable after a panic".into()))
+}
+
+/// Encrypts one attachment file in pieces. The file is every output of `push` and
+/// `finish`, concatenated in order.
+#[derive(uniffi::Object)]
+pub struct FileEncryptor(Mutex<file::FileEncryptor>);
+
+#[uniffi::export]
+impl FileEncryptor {
+    /// `key` from `file_new_key`; the item's id and the attachment's id as stored.
+    #[uniffi::constructor]
+    pub fn new(key: String, item_id: String, attachment_id: String) -> R<Arc<Self>> {
+        let key = FileKey::from_b64(&key)?;
+        let enc = file::FileEncryptor::new(&key, &item_id, &attachment_id)?;
+        Ok(Arc::new(Self(Mutex::new(enc))))
+    }
+
+    /// More plaintext (any size). Returns the ciphertext ready so far (may be empty).
+    pub fn push(&self, chunk: Vec<u8>) -> R<Vec<u8>> {
+        Ok(stream_lock(&self.0)?.push(&chunk)?)
+    }
+
+    /// The rest of the ciphertext. The encryptor can't be used afterwards.
+    pub fn finish(&self) -> R<Vec<u8>> {
+        Ok(stream_lock(&self.0)?.finish()?)
+    }
+}
+
+/// Decrypts one attachment file in pieces. Each output of `push` is authenticated
+/// plaintext, in order; only a successful `finish` means the file is complete: on
+/// any error (`DecryptFailed`), discard everything written so far.
+#[derive(uniffi::Object)]
+pub struct FileDecryptor(Mutex<file::FileDecryptor>);
+
+#[uniffi::export]
+impl FileDecryptor {
+    #[uniffi::constructor]
+    pub fn new(key: String, item_id: String, attachment_id: String) -> R<Arc<Self>> {
+        let key = FileKey::from_b64(&key)?;
+        let dec = file::FileDecryptor::new(&key, &item_id, &attachment_id)?;
+        Ok(Arc::new(Self(Mutex::new(dec))))
+    }
+
+    /// More ciphertext (any size). Returns the plaintext ready so far (may be empty).
+    pub fn push(&self, chunk: Vec<u8>) -> R<Vec<u8>> {
+        Ok(stream_lock(&self.0)?.push(&chunk)?)
+    }
+
+    /// The last piece of plaintext; `DecryptFailed` if the file was cut short.
+    pub fn finish(&self) -> R<Vec<u8>> {
+        Ok(stream_lock(&self.0)?.finish()?)
     }
 }
 
@@ -265,6 +561,26 @@ pub struct PasskeyAssertion {
 
 // --------------------------------------------------------------- functions
 
+/// The words both screens show for a sign-in request's public key (base64url): five
+/// words of the EFF large wordlist. Work it out from the key you hold, never take the
+/// server's `fingerprint_phrase`.
+#[uniffi::export]
+pub fn login_phrase(public_key: String) -> R<String> {
+    Ok(device_login::login_phrase(&public_key)?)
+}
+
+/// `count` (2–5) phrases for the approving app to offer, in random order: exactly one is
+/// `login_phrase(public_key)`, the others are decoys sharing no word with it at the same
+/// position. Offer them with "none of these"; pass the one the user picks to
+/// `Account.approve_login_request`.
+#[uniffi::export]
+pub fn login_phrase_choices(public_key: String, count: u32) -> R<Vec<String>> {
+    Ok(device_login::login_phrase_choices(
+        &public_key,
+        count as usize,
+    )?)
+}
+
 /// Restore an unlocked account from [`Account::to_session_bytes`].
 #[uniffi::export]
 pub fn account_from_session_bytes(account_id: String, bytes: Vec<u8>) -> R<Arc<Account>> {
@@ -291,6 +607,123 @@ pub fn create_account(
         &password,
         with_secret_key,
     )?)
+}
+
+/// `create_account` following a server's KDF policy: memory = max(128 MiB,
+/// `min_memory_mib`), passes = max(3, `min_iterations`) — `/api/config`
+/// `policies.min_kdf_memory_mib` / `min_kdf_iterations`, or `None`. A minimum
+/// outside 64–1024 MiB or 3–20 passes fails.
+#[uniffi::export]
+pub fn create_account_with_kdf(
+    account_id: String,
+    password: String,
+    with_secret_key: bool,
+    min_memory_mib: Option<u32>,
+    min_iterations: Option<u32>,
+) -> R<NewAccount> {
+    let kdf = KdfParams::with_minimums(min_memory_mib, min_iterations)?;
+    NewAccount::try_from(AccountBundle::create_with_kdf(
+        &account_id,
+        &password,
+        with_secret_key,
+        kdf,
+    )?)
+}
+
+/// Emergency access, the contact's side: open the `sealed_key` that the grantor
+/// (`grantor_account_id`, the grant's `grantor.id`) sealed to `account`.
+/// `DecryptFailed` if it isn't for this account or that grantor.
+#[uniffi::export]
+pub fn open_sealed_account_key(
+    account: Arc<Account>,
+    grantor_account_id: String,
+    sealed: String,
+) -> R<Arc<GrantorKey>> {
+    Ok(Arc::new(GrantorKey(
+        account
+            .0
+            .open_sealed_account_key(&grantor_account_id, &sealed)?,
+    )))
+}
+
+/// A new random send key: base64url of 32 bytes, for the link's fragment
+/// (`/send/<id>#<key>`). Keep it only there and wrapped (`Account.wrap_send_key`).
+#[uniffi::export]
+pub fn send_new_key() -> R<String> {
+    Ok(SendKey::generate()?.to_b64())
+}
+
+/// Encrypt a Send's `field` ("name" or "data"); returns the string the API takes.
+#[uniffi::export]
+pub fn send_encrypt(key: String, field: String, plaintext: String) -> R<String> {
+    let key = SendKey::from_b64(&key)?;
+    Ok(key.encrypt(SendField::parse(&field)?, plaintext.as_bytes())?)
+}
+
+/// Decrypt a Send's `field`; needs no account. `DecryptFailed` for a wrong key,
+/// the other field or tampered data.
+#[uniffi::export]
+pub fn send_decrypt(key: String, field: String, ciphertext: String) -> R<String> {
+    let key = SendKey::from_b64(&key)?;
+    let bytes = key.decrypt(SendField::parse(&field)?, &ciphertext)?;
+    String::from_utf8(bytes).map_err(|_| CoreError::Invalid("send text is not UTF-8".into()))
+}
+
+/// A new `access_salt` for a Send's password (Argon2id parameters + random salt).
+#[uniffi::export]
+pub fn send_password_salt() -> R<String> {
+    Ok(send::new_password_salt()?)
+}
+
+/// The `access_verifier` for `password` and a Send's `access_salt` (owner when
+/// setting the password, visitor when opening). Runs Argon2id (128 MiB by default);
+/// `WeakKdf` / `KdfTooStrong` for a salt outside 64–256 MiB, 3–6 passes, 1–4 lanes.
+#[uniffi::export]
+pub fn send_password_verifier(password: String, salt: String) -> R<String> {
+    Ok(send::password_verifier(&password, &salt)?)
+}
+
+/// A new random attachment key (base64url of 32 bytes) for the item's attachment list.
+#[uniffi::export]
+pub fn file_new_key() -> R<String> {
+    Ok(FileKey::generate()?.to_b64())
+}
+
+/// The encrypted size of a file of `plain_length` bytes: the `size` for
+/// `POST /items/{id}/attachments` and for the server's attachment size limit.
+#[uniffi::export]
+pub fn file_encrypted_size(plain_length: u64) -> R<u64> {
+    Ok(file::encrypted_size(plain_length)?)
+}
+
+/// The file size behind an encrypted size (fails for a size no file encrypts to).
+#[uniffi::export]
+pub fn file_plain_size(encrypted_length: u64) -> R<u64> {
+    Ok(file::plain_size(encrypted_length)?)
+}
+
+/// Encrypt a whole (small) file at once; use `FileEncryptor` for large ones.
+#[uniffi::export]
+pub fn file_encrypt(
+    key: String,
+    item_id: String,
+    attachment_id: String,
+    plaintext: Vec<u8>,
+) -> R<Vec<u8>> {
+    let key = FileKey::from_b64(&key)?;
+    Ok(file::encrypt(&key, &item_id, &attachment_id, &plaintext)?)
+}
+
+/// Decrypt a whole (small) file at once; `DecryptFailed` unless it is whole and authentic.
+#[uniffi::export]
+pub fn file_decrypt(
+    key: String,
+    item_id: String,
+    attachment_id: String,
+    ciphertext: Vec<u8>,
+) -> R<Vec<u8>> {
+    let key = FileKey::from_b64(&key)?;
+    Ok(file::decrypt(&key, &item_id, &attachment_id, &ciphertext)?)
 }
 
 /// Derive master keys from what prelogin returned (`kdf_json` is its `kdf` object).
@@ -471,6 +904,363 @@ pub fn sha256(data: Vec<u8>) -> Vec<u8> {
     passkey::sha256(&data)
 }
 
+// ------------------------------------------------------------------ sites (passauth_core::site)
+
+/// A saved website for [`match_urls`].
+#[derive(uniffi::Record)]
+pub struct SavedUrl {
+    pub url: String,
+    /// "default", "domain", "host", "starts_with", "exact", "regex" or "never".
+    pub match_type: String,
+    /// The login is in the user's own vault (regular expressions count only then).
+    pub allow_regex: bool,
+}
+
+/// A login that matches the page, for [`plan_save`].
+#[derive(uniffi::Record)]
+pub struct SaveCandidate {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    pub password: String,
+    /// In a vault the user can edit.
+    pub writable: bool,
+    /// In the user's own vault, not one somebody shared with them.
+    pub personal: bool,
+    /// Name of the vault, shown when it is a shared one.
+    #[uniffi(default)]
+    pub vault: Option<String>,
+}
+
+/// A login offered under "Save in"; `vault` is set for one in a shared vault.
+#[derive(uniffi::Record)]
+pub struct SaveTarget {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    #[uniffi(default)]
+    pub vault: Option<String>,
+}
+
+/// Which rule chose the login to update. Never apply an `Only` update without a prompt.
+#[derive(uniffi::Enum)]
+pub enum SaveReason {
+    Same,
+    Blank,
+    Only,
+}
+
+/// What the save prompt offers ([`plan_save`]).
+#[derive(uniffi::Enum)]
+pub enum SavePlan {
+    /// Nothing to offer: no password, or it is already saved.
+    None,
+    /// A new login, preselected; `targets` may be picked instead.
+    Create { targets: Vec<SaveTarget> },
+    /// Update `target` (always one of the user's own logins), preselected.
+    Update {
+        reason: SaveReason,
+        target: String,
+        targets: Vec<SaveTarget>,
+    },
+}
+
+/// A login for [`passkey_save_targets`]: `urls` are its websites as saved.
+#[derive(uniffi::Record)]
+pub struct PasskeyLogin {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    pub urls: Vec<String>,
+    pub writable: bool,
+    pub personal: bool,
+    #[uniffi(default)]
+    pub vault: Option<String>,
+}
+
+/// A "Save in" choice for a new passkey; `preferred`: preselect it.
+#[derive(uniffi::Record)]
+pub struct PasskeyTarget {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    pub preferred: bool,
+    #[uniffi(default)]
+    pub vault: Option<String>,
+}
+
+/// A refused WebAuthn origin or RP ID: always a `SecurityError`; the message is the one the
+/// page should see.
+#[derive(Debug, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum RpIdError {
+    InvalidOrigin,
+    InsecureOrigin,
+    OriginNotDomain,
+    InvalidRpId,
+    NotRegistrableSuffix,
+}
+
+impl std::fmt::Display for RpIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(site::RpIdError::from(self).message())
+    }
+}
+
+impl std::error::Error for RpIdError {}
+
+impl From<&RpIdError> for site::RpIdError {
+    fn from(e: &RpIdError) -> Self {
+        match e {
+            RpIdError::InvalidOrigin => Self::InvalidOrigin,
+            RpIdError::InsecureOrigin => Self::InsecureOrigin,
+            RpIdError::OriginNotDomain => Self::OriginNotDomain,
+            RpIdError::InvalidRpId => Self::InvalidRpId,
+            RpIdError::NotRegistrableSuffix => Self::NotRegistrableSuffix,
+        }
+    }
+}
+
+impl From<site::RpIdError> for RpIdError {
+    fn from(e: site::RpIdError) -> Self {
+        match e {
+            site::RpIdError::InvalidOrigin => Self::InvalidOrigin,
+            site::RpIdError::InsecureOrigin => Self::InsecureOrigin,
+            site::RpIdError::OriginNotDomain => Self::OriginNotDomain,
+            site::RpIdError::InvalidRpId => Self::InvalidRpId,
+            site::RpIdError::NotRegistrableSuffix => Self::NotRegistrableSuffix,
+        }
+    }
+}
+
+fn site_target(t: site::SaveTarget) -> SaveTarget {
+    SaveTarget {
+        id: t.id,
+        name: t.name,
+        username: t.username,
+        vault: t.vault,
+    }
+}
+
+/// The user's "default match detection" setting; anything unknown counts as "domain".
+fn default_match(s: &str) -> site::UrlMatch {
+    site::parse_url_match(s).unwrap_or(site::UrlMatch::Domain)
+}
+
+/// Canonical host: IDNA to ASCII, lower case, IPv4/IPv6 normalised (IPv6 in brackets), no
+/// trailing dot; `None` when it isn't a valid host.
+#[uniffi::export]
+pub fn normalize_host(host: String) -> Option<String> {
+    site::normalize_host(&host)
+}
+
+/// Public suffix by the full list ("co.uk", "myfritz.net", "com"); "" for IP addresses and
+/// invalid hosts.
+#[uniffi::export]
+pub fn public_suffix(host: String) -> String {
+    site::public_suffix(&host)
+}
+
+/// Registrable domain ("example.co.uk", "nas.myfritz.net"); `None` for a public suffix itself,
+/// IP addresses and invalid hosts.
+#[uniffi::export]
+pub fn registrable_domain(host: String) -> Option<String> {
+    site::registrable_domain(&host)
+}
+
+/// The site "domain" matching compares: the registrable domain, else the host itself.
+#[uniffi::export]
+pub fn base_domain(host: String) -> String {
+    site::base_domain(&host)
+}
+
+#[uniffi::export]
+pub fn is_public_suffix(host: String) -> bool {
+    site::is_public_suffix(&host)
+}
+
+/// "<date> <commit>" of the embedded Public Suffix List.
+#[uniffi::export]
+pub fn public_suffix_list_version() -> String {
+    site::public_suffix_list_version()
+}
+
+/// Does the page match the saved website? `page` must be an absolute http(s) address. An
+/// unknown `match_type` never matches; an unknown `default_match` counts as "domain" (with
+/// "regex", "default" treats a plain address as "domain"); `allow_regex` is false for a
+/// login in a shared vault.
+#[uniffi::export]
+pub fn matches_url(
+    page: String,
+    url: String,
+    match_type: String,
+    default_match: String,
+    allow_regex: bool,
+) -> bool {
+    site::parse_url_match(&match_type).is_some_and(|m| {
+        site::matches_url(
+            &page,
+            &url,
+            m,
+            self::default_match(&default_match),
+            allow_regex,
+        )
+    })
+}
+
+/// What a saved website is matched as: `match_type` resolved with `default_match` (an unknown
+/// one counts as "domain"; with "regex", "default" keeps a plain address as "domain"), never
+/// "default"; "never" for an unknown `match_type`. An entry runs as a pattern exactly when
+/// this is "regex": show `regex_error` and `regex_warning` for those.
+#[uniffi::export]
+pub fn resolve_match(url: String, match_type: String, default_match: String) -> String {
+    site::parse_url_match(&match_type)
+        .map_or(site::UrlMatch::Never, |m| {
+            site::resolve_match(&url, m, self::default_match(&default_match))
+        })
+        .as_str()
+        .to_owned()
+}
+
+/// [`matches_url`] for many saved websites against one page: one result per entry.
+#[uniffi::export]
+pub fn match_urls(page: String, default_match: String, urls: Vec<SavedUrl>) -> Vec<bool> {
+    let page = site::Page::parse(&page);
+    let fallback = self::default_match(&default_match);
+    urls.iter()
+        .map(|u| match (&page, site::parse_url_match(&u.match_type)) {
+            (Some(p), Some(m)) => p.matches(&u.url, m, fallback, u.allow_regex),
+            _ => false,
+        })
+        .collect()
+}
+
+/// True when filling would send a secret saved for an https site to an http page.
+#[uniffi::export]
+pub fn downgrade(page: String, url: String, match_type: String) -> bool {
+    let m = site::parse_url_match(&match_type).unwrap_or(site::UrlMatch::Domain);
+    site::downgrade(&page, &url, m)
+}
+
+/// Why a website pattern is refused (too long, too large, unsupported syntax such as
+/// look-around), or `None` when it is evaluated.
+#[uniffi::export]
+pub fn regex_error(pattern: String) -> Option<String> {
+    site::regex_error(&pattern)
+}
+
+/// Why an explicit website pattern can also match other websites (a warning for the item
+/// editor: not anchored as `^https://<host>/`), or `None` when it pins its website or is
+/// refused (`regex_error` says why then).
+#[uniffi::export]
+pub fn regex_warning(pattern: String) -> Option<String> {
+    site::regex_warning(&pattern)
+}
+
+/// The save rule (docs/ARCHITECTURE.md "Save rule").
+#[uniffi::export]
+pub fn plan_save(candidates: Vec<SaveCandidate>, typed_user: String, password: String) -> SavePlan {
+    let candidates: Vec<site::SaveCandidate> = candidates
+        .into_iter()
+        .map(|c| site::SaveCandidate {
+            id: c.id,
+            name: c.name,
+            username: c.username,
+            password: c.password,
+            writable: c.writable,
+            personal: c.personal,
+            vault: c.vault,
+        })
+        .collect();
+    let targets = |t: Vec<site::SaveTarget>| t.into_iter().map(site_target).collect();
+    match site::plan_save(&candidates, &typed_user, &password) {
+        site::SavePlan::None => SavePlan::None,
+        site::SavePlan::Create { targets: t } => SavePlan::Create {
+            targets: targets(t),
+        },
+        site::SavePlan::Update {
+            reason,
+            target,
+            targets: t,
+        } => SavePlan::Update {
+            reason: match reason {
+                site::SaveReason::Same => SaveReason::Same,
+                site::SaveReason::Blank => SaveReason::Blank,
+                site::SaveReason::Only => SaveReason::Only,
+            },
+            target,
+            targets: targets(t),
+        },
+    }
+}
+
+/// The prompt's answer if the save offered it ("new" or one of `targets`), else `None`.
+#[uniffi::export]
+pub fn chosen_save_target(targets: Vec<SaveTarget>, answer: String) -> Option<String> {
+    let targets: Vec<site::SaveTarget> = targets
+        .into_iter()
+        .map(|t| site::SaveTarget {
+            id: t.id,
+            name: t.name,
+            username: t.username,
+            vault: t.vault,
+        })
+        .collect();
+    site::chosen_target(&targets, &answer)
+}
+
+/// Logins a new passkey can be saved in, best first.
+#[uniffi::export]
+pub fn passkey_save_targets(
+    logins: Vec<PasskeyLogin>,
+    host: String,
+    rp_id: String,
+    user_name: String,
+    display_name: String,
+) -> Vec<PasskeyTarget> {
+    let logins: Vec<site::PasskeyLogin> = logins
+        .into_iter()
+        .map(|l| site::PasskeyLogin {
+            id: l.id,
+            name: l.name,
+            username: l.username,
+            urls: l.urls,
+            writable: l.writable,
+            personal: l.personal,
+            vault: l.vault,
+        })
+        .collect();
+    site::passkey_save_targets(&logins, &host, &rp_id, &user_name, &display_name)
+        .into_iter()
+        .map(|t| PasskeyTarget {
+            id: t.id,
+            name: t.name,
+            username: t.username,
+            preferred: t.preferred,
+            vault: t.vault,
+        })
+        .collect()
+}
+
+/// The preselected "Save in" choice: the first preferred target's id, else "new".
+#[uniffi::export]
+pub fn passkey_default_target(targets: Vec<PasskeyTarget>) -> String {
+    targets
+        .into_iter()
+        .find(|t| t.preferred)
+        .map_or_else(|| site::NEW_LOGIN.to_owned(), |t| t.id)
+}
+
+/// The RP ID for a WebAuthn request from `origin` (the requested one if allowed, else the
+/// origin's host).
+#[uniffi::export]
+pub fn effective_rp_id(
+    requested_rp_id: Option<String>,
+    origin: String,
+) -> Result<String, RpIdError> {
+    Ok(site::effective_rp_id(requested_rp_id.as_deref(), &origin)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +1315,465 @@ mod tests {
             totp_code("not base32!".into(), 0),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    /// An account without running the KDF (debug-build Argon2id is slow).
+    fn quick_account(id: &str) -> Arc<Account> {
+        account_from_session_bytes(id.into(), random_bytes::<64>().unwrap().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn send_through_ffi_types() {
+        let key = send_new_key().unwrap();
+        let name = send_encrypt(key.clone(), "name".into(), "Door code".into()).unwrap();
+        let data = send_encrypt(key.clone(), "data".into(), "4711 ✓".into()).unwrap();
+        assert_eq!(
+            send_decrypt(key.clone(), "name".into(), name.clone()).unwrap(),
+            "Door code"
+        );
+        assert_eq!(
+            send_decrypt(key.clone(), "data".into(), data.clone()).unwrap(),
+            "4711 ✓"
+        );
+        assert!(matches!(
+            send_decrypt(key.clone(), "data".into(), name),
+            Err(CoreError::DecryptFailed)
+        ));
+        assert!(matches!(
+            send_encrypt(key.clone(), "text".into(), "x".into()),
+            Err(CoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            send_decrypt("short".into(), "data".into(), data),
+            Err(CoreError::Invalid(_))
+        ));
+        let owner = quick_account("owner");
+        let wrapped = owner.wrap_send_key(key.clone()).unwrap();
+        assert_eq!(owner.unwrap_send_key(wrapped.clone()).unwrap(), key);
+        assert!(matches!(
+            quick_account("other").unwrap_send_key(wrapped),
+            Err(CoreError::DecryptFailed)
+        ));
+        let salt = send_password_salt().unwrap();
+        assert!(salt.starts_with("sendpw-v1$"));
+        assert!(send_password_verifier("pw".into(), "nonsense".into()).is_err());
+    }
+
+    #[test]
+    fn files_through_ffi_types() {
+        let key = file_new_key().unwrap();
+        let plain: Vec<u8> = (0..200_000u32).map(|i| (i % 253) as u8).collect();
+        let enc = FileEncryptor::new(key.clone(), "item".into(), "att".into()).unwrap();
+        let mut ct = Vec::new();
+        for piece in plain.chunks(30_000) {
+            ct.extend(enc.push(piece.to_vec()).unwrap());
+        }
+        ct.extend(enc.finish().unwrap());
+        assert!(enc.push(vec![1]).is_err());
+        assert_eq!(
+            ct.len() as u64,
+            file_encrypted_size(plain.len() as u64).unwrap()
+        );
+        assert_eq!(
+            file_plain_size(ct.len() as u64).unwrap(),
+            plain.len() as u64
+        );
+        let dec = FileDecryptor::new(key.clone(), "item".into(), "att".into()).unwrap();
+        let mut out = Vec::new();
+        for piece in ct.chunks(50_001) {
+            out.extend(dec.push(piece.to_vec()).unwrap());
+        }
+        out.extend(dec.finish().unwrap());
+        assert_eq!(out, plain);
+        assert_eq!(
+            file_decrypt(key.clone(), "item".into(), "att".into(), ct.clone()).unwrap(),
+            plain
+        );
+        let one_shot =
+            file_encrypt(key.clone(), "item".into(), "att".into(), plain.clone()).unwrap();
+        assert_eq!(one_shot.len(), ct.len());
+        // Another attachment's id, or cut short.
+        assert!(matches!(
+            file_decrypt(key.clone(), "item".into(), "att2".into(), ct.clone()),
+            Err(CoreError::DecryptFailed)
+        ));
+        let dec = FileDecryptor::new(key, "item".into(), "att".into()).unwrap();
+        dec.push(ct[..ct.len() - 1].to_vec()).unwrap();
+        assert!(matches!(dec.finish(), Err(CoreError::DecryptFailed)));
+        assert!(FileEncryptor::new("bad".into(), "item".into(), "att".into()).is_err());
+    }
+
+    #[test]
+    fn emergency_access_through_ffi_types() {
+        let grantor = quick_account("grantor-1");
+        let contact = quick_account("contact-1");
+        let vk = grantor.new_vault_key("v1".into()).unwrap();
+        let item = r#"{"name":"Bank","notes":"PIN 1234"}"#;
+        let enc = vk
+            .key
+            .encrypt_item(item.into(), "i1".into(), "v1".into())
+            .unwrap();
+        let sealed = grantor.seal_account_key_for(contact.public_key()).unwrap();
+        let gk =
+            open_sealed_account_key(contact.clone(), "grantor-1".into(), sealed.clone()).unwrap();
+        assert_eq!(gk.account_id(), "grantor-1");
+        let opened = gk
+            .open_vault_key("v1".into(), vk.wrapped.clone(), "account".into())
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&opened.decrypt_item(enc).unwrap()).unwrap();
+        assert_eq!(json["notes"], "PIN 1234");
+        assert!(
+            gk.open_vault_key("v1".into(), vk.wrapped.clone(), "sealed".into())
+                .is_err()
+        );
+        assert!(matches!(
+            open_sealed_account_key(contact, "grantor-2".into(), sealed.clone()),
+            Err(CoreError::DecryptFailed)
+        ));
+        assert!(matches!(
+            open_sealed_account_key(quick_account("x"), "grantor-1".into(), sealed),
+            Err(CoreError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn kdf_minimums_are_checked_before_deriving() {
+        for (m, t) in [
+            (Some(32), None),
+            (Some(4096), None),
+            (None, Some(2)),
+            (None, Some(50)),
+        ] {
+            assert!(create_account_with_kdf("a".into(), "pw".into(), false, m, t).is_err());
+            assert!(
+                quick_account("a")
+                    .rewrap_with_kdf("{}".into(), "pw".into(), false, None, m, t)
+                    .is_err()
+            );
+        }
+        // Too weak and too strong are told apart (review I7).
+        assert!(matches!(
+            create_account_with_kdf("a".into(), "pw".into(), false, Some(32), None),
+            Err(CoreError::WeakKdf)
+        ));
+        assert!(matches!(
+            create_account_with_kdf("a".into(), "pw".into(), false, None, Some(50)),
+            Err(CoreError::KdfTooStrong)
+        ));
+        assert_eq!(CoreError::KdfTooStrong.to_string(), "kdf_too_strong");
+        let salt = |m: u32, t: u32| format!("sendpw-v1$m={m},t={t},p=1${}", b64(&[7; 16]));
+        assert!(matches!(
+            send_password_verifier("pw".into(), salt(1024 * 1024, 3)),
+            Err(CoreError::KdfTooStrong)
+        ));
+        assert!(matches!(
+            send_password_verifier("pw".into(), salt(65536, 7)),
+            Err(CoreError::KdfTooStrong)
+        ));
+    }
+
+    #[test]
+    fn device_login_through_ffi_types() {
+        let n = create_account(
+            new_id().unwrap(),
+            "correct horse battery staple".into(),
+            true,
+        )
+        .unwrap();
+        let sk = n.secret_key.clone().unwrap();
+        let account_id = n.account.0.account_id.clone();
+        let request = LoginRequestKey::generate().unwrap();
+        assert_eq!(
+            login_phrase(request.public_key()).unwrap(),
+            request.phrase()
+        );
+        assert!(login_phrase("short".into()).is_err());
+        let choices = login_phrase_choices(request.public_key(), 3).unwrap();
+        assert_eq!(choices.len(), 3);
+        assert_eq!(
+            choices.iter().filter(|c| **c == request.phrase()).count(),
+            1
+        );
+        assert!(login_phrase_choices(request.public_key(), 6).is_err());
+        // Fixed per key (a request seen twice shows the same list).
+        assert_eq!(
+            login_phrase_choices(request.public_key(), 3).unwrap(),
+            choices
+        );
+        assert_eq!(
+            login_phrase_choices("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8".into(), 2).unwrap(),
+            [
+                "could regulator babied luckiness pavement",
+                "lung spout ashen sudoku gloating"
+            ]
+        );
+
+        // A decoy, or another key's words, seal nothing.
+        let decoy = choices.iter().find(|c| **c != request.phrase()).unwrap();
+        assert!(matches!(
+            n.account.approve_login_request(
+                request.public_key(),
+                "req-1".into(),
+                decoy.clone(),
+                None
+            ),
+            Err(CoreError::PhraseMismatch)
+        ));
+        let approval = n
+            .account
+            .approve_login_request(
+                request.public_key(),
+                "req-1".into(),
+                request.phrase(),
+                Some(sk.clone()),
+            )
+            .unwrap();
+        assert_eq!(approval.code.len(), 6);
+        let approved = request
+            .open(approval.sealed.clone(), account_id.clone(), "req-1".into())
+            .unwrap();
+        assert_eq!(approved.account_id(), account_id);
+        // Nothing before the code; a wrong one costs an attempt.
+        assert!(matches!(
+            approved.secret_key(),
+            Err(CoreError::NotConfirmed)
+        ));
+        assert!(matches!(
+            approved.unlock(n.bundle_json.clone()),
+            Err(CoreError::NotConfirmed)
+        ));
+        let wrong = format!(
+            "{:06}",
+            (approval.code.parse::<u32>().unwrap() + 1) % 1_000_000
+        );
+        assert!(matches!(
+            approved.confirm(wrong.clone()),
+            Err(CoreError::WrongCode)
+        ));
+        assert_eq!(approved.attempts_left(), 2);
+        assert!(matches!(
+            approved.confirm("12ab56".into()),
+            Err(CoreError::Invalid(_))
+        ));
+        assert!(!approved.is_confirmed());
+        approved
+            .confirm(format!("{} {}", &approval.code[..3], &approval.code[3..]))
+            .unwrap();
+        assert!(approved.is_confirmed());
+        assert_eq!(approved.secret_key().unwrap(), Some(sk));
+        let unlocked = approved.unlock(n.bundle_json.clone()).unwrap();
+        assert_eq!(unlocked.public_key(), n.account.public_key());
+        assert!(matches!(
+            request.open(approval.sealed.clone(), account_id.clone(), "req-2".into()),
+            Err(CoreError::DecryptFailed)
+        ));
+        // Three wrong codes refuse a fresh handle for good.
+        let again = request
+            .open(approval.sealed, account_id, "req-1".into())
+            .unwrap();
+        assert!(matches!(
+            again.confirm(wrong.clone()),
+            Err(CoreError::WrongCode)
+        ));
+        assert!(matches!(
+            again.confirm(wrong.clone()),
+            Err(CoreError::WrongCode)
+        ));
+        assert!(matches!(
+            again.confirm(wrong),
+            Err(CoreError::TooManyWrongCodes)
+        ));
+        assert!(matches!(
+            again.confirm(approval.code.clone()),
+            Err(CoreError::TooManyWrongCodes)
+        ));
+        assert!(matches!(
+            again.unlock(n.bundle_json.clone()),
+            Err(CoreError::NotConfirmed)
+        ));
+        let zero = b64(&[0; 32]);
+        assert!(matches!(
+            n.account.approve_login_request(
+                zero.clone(),
+                "req-1".into(),
+                login_phrase(zero).unwrap(),
+                None
+            ),
+            Err(CoreError::Invalid(_))
+        ));
+
+        // The challenge as the server seals it.
+        let pk: [u8; 32] = unb64(&n.account.public_key()).unwrap().try_into().unwrap();
+        let challenge = b64(&passauth_core::crypto::seal_to(
+            &pk,
+            &[7; 32],
+            b"passauth/login-with-device/challenge/v1:req-1",
+        )
+        .unwrap());
+        assert_eq!(
+            n.account
+                .open_login_challenge(challenge.clone(), "req-1".into())
+                .unwrap(),
+            b64(&[7; 32])
+        );
+        assert!(matches!(
+            n.account.open_login_challenge(challenge, "req-2".into()),
+            Err(CoreError::DecryptFailed)
+        ));
+    }
+
+    #[test]
+    fn sites_through_ffi_types() {
+        assert_eq!(base_domain("a.nas.myfritz.net".into()), "nas.myfritz.net");
+        assert_eq!(registrable_domain("myfritz.net".into()), None);
+        assert_eq!(
+            normalize_host("BÜCHER.de.".into()).as_deref(),
+            Some("xn--bcher-kva.de")
+        );
+        assert!(public_suffix_list_version().starts_with("20"));
+
+        let saved = |url: &str, match_type: &str, allow_regex| SavedUrl {
+            url: url.into(),
+            match_type: match_type.into(),
+            allow_regex,
+        };
+        let urls = vec![
+            saved("https://example.com", "default", true),
+            saved("https://attacker.myfritz.net", "domain", true),
+            saved(r"^https://www\.example\.com/", "regex", true),
+            saved(r"^https://www\.example\.com/", "regex", false),
+            saved("https://www.example.com", "unknown", true),
+        ];
+        let page = "https://www.example.com/login".to_string();
+        assert_eq!(
+            match_urls(page.clone(), "domain".into(), urls),
+            [true, false, true, false, false]
+        );
+        assert!(!matches_url(
+            page.clone(),
+            "https://example.com".into(),
+            "default".into(),
+            "host".into(),
+            true
+        ));
+        assert!(matches_url(
+            page,
+            "https://example.com".into(),
+            "default".into(),
+            "bogus".into(),
+            true
+        ));
+        assert!(downgrade(
+            "http://example.com/".into(),
+            "example.com".into(),
+            "domain".into()
+        ));
+        assert!(regex_error("(?=x)".into()).is_some());
+        assert!(regex_warning(r"example\.com".into()).is_some());
+        assert_eq!(
+            resolve_match(
+                "https://example.com".into(),
+                "default".into(),
+                "regex".into()
+            ),
+            "domain"
+        );
+        assert_eq!(
+            resolve_match("example.com".into(), "default".into(), "regex".into()),
+            "regex"
+        );
+        assert_eq!(
+            resolve_match("x".into(), "bogus".into(), "regex".into()),
+            "never"
+        );
+        assert_eq!(regex_warning(r"^https://example\.com/".into()), None);
+        // "default" with the regex setting keeps a plain address to its site (review M2).
+        assert!(!matches_url(
+            "https://evil.example/https://example.com".into(),
+            "https://example.com".into(),
+            "default".into(),
+            "regex".into(),
+            true
+        ));
+        assert!(!matches_url(
+            "example.com".into(),
+            "https://example.com".into(),
+            "domain".into(),
+            "domain".into(),
+            true
+        ));
+
+        let candidate = |id: &str, username: &str, personal| SaveCandidate {
+            id: id.into(),
+            name: id.into(),
+            username: username.into(),
+            password: "old".into(),
+            writable: true,
+            personal,
+            vault: (!personal).then(|| "Team".into()),
+        };
+        let plan = plan_save(
+            vec![candidate("s", "alex", false), candidate("a", "alex", true)],
+            "alex".into(),
+            "new".into(),
+        );
+        let SavePlan::Update {
+            reason: SaveReason::Same,
+            target,
+            targets,
+        } = plan
+        else {
+            panic!("expected an update");
+        };
+        assert_eq!(target, "a");
+        assert_eq!(
+            targets.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["a", "s"]
+        );
+        assert_eq!(targets[1].vault.as_deref(), Some("Team"));
+        assert_eq!(
+            chosen_save_target(targets, "s".into()).as_deref(),
+            Some("s")
+        );
+        assert!(matches!(
+            plan_save(vec![], "alex".into(), String::new()),
+            SavePlan::None
+        ));
+
+        let login = PasskeyLogin {
+            id: "a".into(),
+            name: "Example".into(),
+            username: "alex".into(),
+            urls: vec!["https://login.example.com".into()],
+            writable: true,
+            personal: true,
+            vault: None,
+        };
+        let targets = passkey_save_targets(
+            vec![login],
+            "login.example.com".into(),
+            "example.com".into(),
+            "alex".into(),
+            String::new(),
+        );
+        assert!(targets[0].preferred);
+        assert_eq!(passkey_default_target(targets), "a");
+
+        assert_eq!(
+            effective_rp_id(
+                Some("example.com".into()),
+                "https://login.example.com".into()
+            )
+            .unwrap(),
+            "example.com"
+        );
+        let err = effective_rp_id(Some("myfritz.net".into()), "https://nas.myfritz.net".into())
+            .unwrap_err();
+        assert!(matches!(err, RpIdError::NotRegistrableSuffix));
+        assert_eq!(
+            err.to_string(),
+            "The RP ID is not a registrable domain suffix of the origin."
+        );
     }
 }

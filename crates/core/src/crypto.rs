@@ -10,7 +10,7 @@ use chacha20poly1305::{
 };
 use hkdf::Hkdf;
 use sha2::Sha256;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{Error, Result};
@@ -143,21 +143,25 @@ impl KeyPair {
         }
         let (epk, ct) = sealed.split_at(32);
         let epk: [u8; 32] = epk.try_into().expect("checked length");
-        let key = sealed_box_key(
-            &self.secret,
-            &PublicKey::from(epk),
-            &epk,
-            &self.public_bytes(),
-        );
+        let shared = self.secret.diffie_hellman(&PublicKey::from(epk));
+        let key = sealed_box_key(&shared, &epk, &self.public_bytes());
         key.decrypt(ct, aad)
     }
 }
 
 /// Encrypt to a recipient's X25519 public key (ephemeral-static ECDH + HKDF + AEAD).
+///
+/// Refuses a low-order "public key" (all-zero shared secret): the box would be
+/// sealed under a key anyone can compute, so a server handing out such a key
+/// would read everything sealed to it.
 pub fn seal_to(recipient: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     let eph = StaticSecret::from(random_bytes::<32>()?);
     let epk = PublicKey::from(&eph).to_bytes();
-    let key = sealed_box_key(&eph, &PublicKey::from(*recipient), &epk, recipient);
+    let shared = eph.diffie_hellman(&PublicKey::from(*recipient));
+    if !shared.was_contributory() {
+        return Err(Error::Malformed("invalid public key"));
+    }
+    let key = sealed_box_key(&shared, &epk, recipient);
     let ct = key.encrypt(plaintext, aad)?;
     let mut out = Vec::with_capacity(32 + ct.len());
     out.extend_from_slice(&epk);
@@ -165,13 +169,7 @@ pub fn seal_to(recipient: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<Vec
     Ok(out)
 }
 
-fn sealed_box_key(
-    secret: &StaticSecret,
-    peer: &PublicKey,
-    epk: &[u8; 32],
-    recipient: &[u8; 32],
-) -> SymmetricKey {
-    let shared = secret.diffie_hellman(peer);
+fn sealed_box_key(shared: &SharedSecret, epk: &[u8; 32], recipient: &[u8; 32]) -> SymmetricKey {
     let mut salt = [0u8; 64];
     salt[..32].copy_from_slice(epk);
     salt[32..].copy_from_slice(recipient);
@@ -228,6 +226,22 @@ mod tests {
         assert_eq!(kp.open(&sealed, b"share:v1").unwrap(), b"vault key");
         assert!(other.open(&sealed, b"share:v1").is_err());
         assert!(kp.open(&sealed, b"share:v2").is_err());
+    }
+
+    #[test]
+    fn sealing_to_a_low_order_point_is_refused() {
+        // u = 0 and points of order 8: every secret gives an all-zero shared secret.
+        let order8 = |h: &str| -> [u8; 32] { hex::decode(h).unwrap().try_into().unwrap() };
+        for bad in [
+            [0u8; 32],
+            order8("5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157"),
+            order8("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800"),
+        ] {
+            assert!(matches!(
+                seal_to(&bad, b"vault key", b"share:v1"),
+                Err(Error::Malformed(_))
+            ));
+        }
     }
 
     #[test]
