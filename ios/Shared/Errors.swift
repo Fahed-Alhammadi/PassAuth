@@ -12,15 +12,18 @@ public struct ApiError: Error, LocalizedError, Sendable {
     /// The server's id for the request (the body's `request_id`, else `x-request-id`), when it
     /// looks like one (`ApiError.requestIdPattern`): names the request in the server's log.
     public let requestId: String?
+    /// The answer's other fields (`members_changed`: `unknown`, `identity_changed`, …); nil when none.
+    public let fields: JSON?
     /// The app's wording, also wherever an error is shown through `localizedDescription`.
     public var errorDescription: String? { errorMessage(self) }
 
-    public init(status: Int, code: String, message: String, retryAfter: Int? = nil, requestId: String? = nil) {
+    public init(status: Int, code: String, message: String, retryAfter: Int? = nil, requestId: String? = nil, fields: JSON? = nil) {
         self.status = status
         self.code = code
         self.message = message
         self.retryAfter = retryAfter
         self.requestId = requestId.flatMap(Self.validRequestId)
+        self.fields = fields
     }
 
     /// A request id worth showing: what servers make (letters, digits, `-_.:`, at most 64),
@@ -144,6 +147,14 @@ let apiCodeText: [String: String] = [
     "attachments_disabled": "Files are turned off on this server.",
     "sends_disabled": "Send is turned off on this server.",
     "emergency_access_disabled": "Emergency access is turned off on this server.",
+    // Signed sharing.
+    "update_required": "This vault's members are signed. Update PassAuth to change them.",
+    "members_changed": "The vault's members changed meanwhile, so the key wasn't changed. Check them and try again.",
+    "member_roster_changed": "The vault's members changed meanwhile, so the key wasn't changed. Check them and try again.",
+    "signing_identity_required": SharingText.needsIdentity,
+    "bad_signature": "Your server didn't accept the signature, so nothing was changed.",
+    "identity_exists": "This account already has a signing key.",
+    "key_pins_changed": "Your list of known keys changed on another device. Try again.",
     // Made by the app itself (`ApiClient`): an answer that isn't a PassAuth server's.
     "not_passauth": "That address doesn't look like a PassAuth server.",
 ]
@@ -240,6 +251,11 @@ public func errorMessage(_ error: Error) -> String {
         case .WrongCode: return "That code doesn't match."
         case .TooManyWrongCodes: return DeviceLogin.tooManyCodes
         case .NotConfirmed: return DeviceLogin.codePrompt
+        // Signed sharing: something didn't verify (the views say what it was about).
+        case .BadSignature, .IdentityMismatch, .Rollback, .RosterForked, .RosterUnauthorized:
+            return "PassAuth couldn't verify the keys your server sent, so nothing was changed."
+        case .TooLarge: return "The list of known keys is too large to save."
+        case .ReviewMismatch: return "The vault's members changed after you checked them. Check them again."
         case .PasswordRequired(let m), .Invalid(let m): return "Something went wrong: \(m)"
         }
     }

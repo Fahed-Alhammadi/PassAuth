@@ -261,12 +261,16 @@ public struct PublicConfig: Equatable, Sendable {
     /// The server's API version (`api`, a whole number; API 2 servers and later); nil from older
     /// servers, which send none.
     public var api: Int?
+    /// `limits` as sent (Send and attachment sizes, …; nil from servers without it). Read through
+    /// the feature's own rules (`SendRules.limits`, `AttachmentList.limitMb`).
+    public var limits: JSON?
 
-    public init(signupsAllowed: Bool? = nil, features: [String] = [], policies: Policies = Policies(), api: Int? = nil) {
+    public init(signupsAllowed: Bool? = nil, features: [String] = [], policies: Policies = Policies(), api: Int? = nil, limits: JSON? = nil) {
         self.signupsAllowed = signupsAllowed
         self.features = features
         self.policies = policies
         self.api = api
+        self.limits = limits
     }
 
     /// nil for an answer that isn't PassAuth's config.
@@ -280,6 +284,7 @@ public struct PublicConfig: Equatable, Sendable {
         case .double(let x)? where x.isFinite && x == x.rounded() && x >= 0 && x < 1_000_000: api = Int(x)
         default: api = nil
         }
+        if case .object? = j["limits"] { limits = j["limits"] } else { limits = nil }
     }
 }
 

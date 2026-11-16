@@ -72,7 +72,7 @@ public enum JSON: Sendable, Equatable, Codable {
     public var int: Int64 {
         switch self {
         case .int(let i): return i
-        case .double(let d): return Int64(d)
+        case .double(let d): return JSON.wholeInt64(d) ?? 0
         case .string(let s): return Int64(s) ?? 0
         default: return 0
         }
@@ -81,6 +81,23 @@ public enum JSON: Sendable, Equatable, Codable {
     public var array: [JSON] {
         if case .array(let a) = self { return a }
         return []
+    }
+
+    /// `d` rounded toward zero as an Int64, or nil when it is not finite or not within ±9e18.
+    /// `Int64(_:)` traps on NaN, infinities and values out of range, and a server or a crafted item
+    /// can send any JSON number (1e300): every JSON double becomes a whole number through this.
+    public static func wholeInt64(_ d: Double) -> Int64? {
+        guard d.isFinite, d > -9e18, d < 9e18 else { return nil }
+        return Int64(d.rounded(.towardZero))
+    }
+
+    /// This value as a whole number (an int, or a double that `wholeInt64` accepts), else nil.
+    public var number: Int64? {
+        switch self {
+        case .int(let n): n
+        case .double(let d): JSON.wholeInt64(d)
+        default: nil
+        }
     }
 
     /// `obj.str("key")`: the string at `key`, or "".

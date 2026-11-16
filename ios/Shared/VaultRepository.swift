@@ -68,6 +68,89 @@ public struct Entry: Identifiable, Sendable {
 
 public enum Role: String, Sendable { case owner, admin, write, read }
 
+/// What `rotateVaultKeys` did: the vaults given a new key, the shared ones it left (a server
+/// without signed sharing: this app only seals keys to other members with signatures), and the
+/// ones waiting for the user to confirm that people the signed member list names are gone.
+public struct KeyReplacement: Equatable, Sendable {
+    public struct Shared: Equatable, Sendable {
+        public var id: String
+        public var name: String
+
+        public init(id: String, name: String) {
+            self.id = id
+            self.name = name
+        }
+    }
+    /// A vault whose signed member list names people the server no longer lists (they left,
+    /// declined or were removed): its key is replaced only once the user confirms.
+    public struct Confirm: Equatable, Sendable {
+        public var id: String
+        public var name: String
+        /// Their emails as this device knows them, else "a former member".
+        public var people: [String]
+        /// Their user ids (what the confirmation covers).
+        public var userIds: [String]
+
+        public init(id: String, name: String, people: [String], userIds: [String] = []) {
+            self.id = id
+            self.name = name
+            self.people = people
+            self.userIds = userIds
+        }
+    }
+    /// A shared vault without a trusted (signed) member list: its key is replaced only after the
+    /// user checked every member in the review and confirmed it (version 1 of its roster).
+    public struct Review: Equatable, Sendable, Identifiable {
+        public var id: String
+        public var name: String
+        public var review: MemberReview
+
+        public init(id: String, name: String, review: MemberReview) {
+            self.id = id
+            self.name = name
+            self.review = review
+        }
+    }
+    public var rotated: [String] = []
+    public var shared: [Shared] = []
+    public var confirm: [Confirm] = []
+    public var review: [Review] = []
+
+    public init(rotated: [String] = [], shared: [Shared] = [], confirm: [Confirm] = [], review: [Review] = []) {
+        self.rotated = rotated
+        self.shared = shared
+        self.confirm = confirm
+        self.review = review
+    }
+
+    /// The confirmations as `rotateVaultKeys(confirmed:)` takes them: per vault, the user ids
+    /// shown (a confirmation for one vault doesn't carry over to another).
+    public var confirmedIds: [String: Set<String>] {
+        Dictionary(confirm.map { ($0.id, Set($0.userIds)) }, uniquingKeysWith: { a, b in a.union(b) })
+    }
+
+    /// "bob@example.com is no longer a member of Family. Replace its key without them?", or nil.
+    public var confirmText: String? {
+        guard !confirm.isEmpty else { return nil }
+        return confirm.map { c in
+            let name = c.name.isEmpty ? "a vault" : c.name
+            var who = c.people.joined(separator: ", ")
+            // "a former member" opens the sentence: capitalised (emails are left as they are).
+            if who.hasPrefix(SharingText.unknownMember) { who = "A" + who.dropFirst() }
+            return "\(who) \(c.people.count == 1 ? "is" : "are") no longer \(c.people.count == 1 ? "a member" : "members") of \(name)."
+        }.joined(separator: " ") + " Replace the " + (confirm.count == 1 ? "key" : "keys") + " without them?"
+    }
+
+    /// "Family is shared, so its key can only be replaced in the web vault or the desktop app.", or nil.
+    public var sharedText: String? {
+        guard !shared.isEmpty else { return nil }
+        let names = shared.map { $0.name.isEmpty ? "A vault" : $0.name }.joined(separator: ", ")
+        return shared.count == 1
+            ? "\(names) is shared, so replace its key in the web vault or the desktop app."
+            : "\(names) are shared, so replace their keys in the web vault or the desktop app."
+    }
+}
+
 public struct VaultInfo: Identifiable, Equatable, Sendable {
     public static let accountKeyKind = "account"
 
@@ -81,13 +164,17 @@ public struct VaultInfo: Identifiable, Equatable, Sendable {
     /// every key replacement); nil from older servers. Writes encrypted under that key carry it
     /// (`key_epoch`), so the server refuses them once the key was replaced.
     public let keyEpoch: Int64?
+    /// What signed sharing's checks found (`notChecked` on servers without it).
+    public let trust: VaultTrust
 
-    public init(id: String, name: String, role: Role, keyKind: String = VaultInfo.accountKeyKind, keyEpoch: Int64? = nil) {
+    public init(id: String, name: String, role: Role, keyKind: String = VaultInfo.accountKeyKind, keyEpoch: Int64? = nil,
+                trust: VaultTrust = .notChecked) {
         self.id = id
         self.name = name
         self.role = role
         self.keyKind = keyKind
         self.keyEpoch = keyEpoch
+        self.trust = trust
     }
 
     public var personal: Bool { keyKind == Self.accountKeyKind }
@@ -111,6 +198,9 @@ public struct VaultData: Sendable {
     /// Vaults shared with the account and waiting for an answer (the app only; the AutoFill
     /// extensions ignore invitations).
     public var invitations: [Invitation] = []
+    /// Shared vaults signed sharing's checks refused: not in `vaults`, their items nowhere (no
+    /// fill, save, passkey or display); the app says why.
+    public var refused: [RefusedVault] = []
 
     public init() {}
 
@@ -152,12 +242,35 @@ struct OpenedVault: Sendable {
     var headers: [String: SyncVault]
     /// Vault names read from invitations, by sealed key and encrypted name (nil: can't be opened).
     var names: [String: String?] = [:]
+    /// Signed sharing: the key pins and device memory after the checks (nil when they didn't run).
+    var sharing: SharingOutputs?
 }
 
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
 final class Session {
     let accountId: String
     let account: Account
+    /// Signed sharing: the account's signing identity as opened while unlocked (nil: none yet, or
+    /// the record didn't open), the server's record it was opened from, whether sharing is paused
+    /// (`identity_mismatch`), whether this unlock already tried to make one, made one, and found
+    /// the account's trust memory missing.
+    var openedSigning: SigningIdentity?
+    var signingRecord: JSON?
+    var signingPaused = false
+    var identityTried = false
+    var identityCreated = false
+    /// The vault ids of the account's offline copy on this device when this unlock started
+    /// (grandfathering rule 1; nil: none), read once (`earlierCopyRead`) before this session
+    /// stores a copy of its own.
+    var earlierCopy: Set<String>?
+    var earlierCopyRead = false
+    /// The identity this device signs with: none while paused.
+    var signing: SigningIdentity? { signingPaused ? nil : openedSigning }
+    /// The account id the core authenticated (the unlocked account's own id): "me" for signed
+    /// sharing and emergency access, never `/sync` `user.id`.
+    lazy var meId: String = {
+        (try? account.legacyIdentityJson()).flatMap { try? JSON.parse($0) }?.str("user_id") ?? ""
+    }()
     init(accountId: String, account: Account) {
         self.accountId = accountId
         self.account = account
@@ -199,7 +312,7 @@ public final class VaultRepository {
     @ObservationIgnored let lock = AsyncLock()
     @ObservationIgnored var sessions: [String: Session] = [:]
     private var sessionIds: Set<String> = []
-    @ObservationIgnored private var vaultKeys: [String: VaultKey] = [:]
+    @ObservationIgnored var vaultKeys: [String: VaultKey] = [:]
     /// The vault headers `vaultKeys` were opened from (a changed header opens the key again).
     @ObservationIgnored private var vaultHeaders: [String: SyncVault] = [:]
     /// The active account's copy behind `vault` (ciphertext, cursor, vault numbers): the base of
@@ -224,6 +337,21 @@ public final class VaultRepository {
     private var twoStepGated: Set<String> = []
     /// `policy_violations` per account (`GET /account` after sign-in and unlock; memory only).
     private var violations: [String: [PolicyViolation]] = [:]
+    /// Signed sharing: what this device remembers per account (its key pins version, the rosters
+    /// it trusted); the Keychain, or memory in tests.
+    @ObservationIgnored public var sharingMemory: SharingMemory = KeychainSharingMemory()
+    /// Invitations' roster chains fetched for their checks, by vault, with the latest roster they end at.
+    @ObservationIgnored var invitationChains: [String: (latest: String, chain: [String])] = [:]
+    /// Signed sharing: tombstones of vaults declined on the server whose key pins write failed,
+    /// by account (vault id → trusted roster version), written at the next sync.
+    @ObservationIgnored var pendingTombstones: [String: [String: UInt64]] = [:]
+    /// Signed sharing: the emails a version-1 member review showed, kept with its digest, by
+    /// vault: people seen for the first time are pinned with these, not a later members answer's.
+    @ObservationIgnored var reviewedEmails: [String: [String: [String: String]]] = [:]
+    /// Signed sharing notice for the active account (sharing paused, an older list of known keys); nil: none.
+    public internal(set) var sharingNotice: String?
+    /// The active account's key pins, as people (Settings → People you share with).
+    public internal(set) var knownPeople: [PinnedPerson] = []
 
     /// The app itself, not an AutoFill extension: it opens invitations to show their vault's name
     /// and follows the server's policies (config, the account's violations, the vault timeout
@@ -243,6 +371,11 @@ public final class VaultRepository {
 
     /// The active account's decrypted vault; nil while locked.
     public private(set) var vault: VaultData?
+
+    /// Emergency access (the app only): the client, made once (`emergency`), and the vault notice
+    /// about the contact list the server sent (nil: none). Cleared when the vault closes.
+    @ObservationIgnored var emergencyClient: EmergencyClient?
+    public internal(set) var emergencyNotice: String?
 
     /// Called whenever the decrypted vault is dropped (lock, log out, switching or adding an
     /// account): what the app derived from it for this session (password health) goes too.
@@ -666,8 +799,12 @@ public final class VaultRepository {
         vaultKeys = [:]
         vaultHeaders = [:]
         invitationNames = [:]
+        invitationChains = [:]
         copy = nil
         vault = nil
+        emergencyNotice = nil
+        sharingNotice = nil
+        knownPeople = []
         onVaultClosed?()
     }
 
@@ -747,6 +884,7 @@ public final class VaultRepository {
     }
 
     private func removeAccount(_ id: String) async {
+        sharingMemory.clear(id)
         store.update { s in
             s.file.accounts[id] = nil
             s.secrets.tokens[id] = nil
@@ -832,6 +970,31 @@ public final class VaultRepository {
         try await syncQueue.run { try await self.lock.run { try await self.syncLocked() } }
     }
 
+    /// The active account's server's `/api/config` `features` as last asked (empty when never).
+    public var cachedFeatures: [String] { store.get().active?.features ?? [] }
+
+    /// The active account's user id: the account id the core authenticated when unlocking (the
+    /// server's `user.id` must be the same, else its copy isn't used); "" while locked.
+    public var currentUserId: String {
+        guard vault != nil, let session = sessions[activeId] else { return "" }
+        return session.meId
+    }
+
+    /// The copy behind the shown vault when it is `id`'s.
+    func copyOf(_ id: String) -> SyncSnapshot? {
+        guard let c = copy, c.account == id else { return nil }
+        return c.snapshot
+    }
+
+    /// The active account's vaults the server marked for a new key (`rotation_pending`: someone
+    /// who may hold the key left, or an emergency contact who held it was removed) and that this
+    /// account can replace (owner or admin).
+    public var pendingRotations: [VaultInfo] {
+        guard let v = vault, let c = copy, c.account == activeId else { return [] }
+        let marked = Set(c.snapshot.vaults.filter { ($0.rotationPending ?? 0) != 0 }.map(\.id))
+        return v.vaults.filter { marked.contains($0.id) && ($0.role == .owner || $0.role == .admin) }
+    }
+
     /// Where the open copy is (revision and vault numbers); nil while locked.
     public var syncPosition: SyncPosition? {
         guard let v = vault else { return nil }
@@ -859,13 +1022,7 @@ public final class VaultRepository {
     }
 
     /// A whole number in a server answer (nil when absent or not a number).
-    nonisolated static func number(_ j: JSON?) -> Int64? {
-        switch j {
-        case .int(let n)?: n
-        case .double(let d)?: Int64(d)
-        default: nil
-        }
-    }
+    nonisolated static func number(_ j: JSON?) -> Int64? { j?.number }
 
 
     /// Fetch and decrypt the active account's vault. With `fallbackToCache` an unreachable
@@ -925,11 +1082,31 @@ public final class VaultRepository {
     /// Decrypt `snapshot` (only what changed since the copy shown now) and show it. `.synced`:
     /// fresh from the server, stored as the offline copy with the time of the sync, the profile
     /// name and the bundle; `.localChange`: this device's write applied to the copy, stored too.
-    private func show(_ id: String, _ session: Session, _ snapshot: SyncSnapshot, offline: Bool, store mode: CopyStore) async throws {
+    ///
+    /// Signed sharing: the signing identity, key pins and newer member rosters are made ready
+    /// first (`sharingInputs`; with the server only for a copy fresh from it), every vault and
+    /// invitation is checked while decrypting, and afterwards the device memory is saved and the
+    /// key pins written when they changed (`finishSharing`).
+    private func show(_ id: String, _ session: Session, _ given: SyncSnapshot, offline: Bool, store mode: CopyStore) async throws {
         let account = session.account
+        var fresh = given
+        if !session.earlierCopyRead {
+            // Grandfathering rule 1: what this device had before this session stores its own copy.
+            if mode == .none {
+                session.earlierCopyRead = true
+                if let listed = given.user?["id"]?.string, !listed.isEmpty, listed != session.meId {} else {
+                    session.earlierCopy = Set(given.vaults.map(\.id))
+                }
+            } else {
+                _ = await earlierCopy(id, session)
+            }
+        }
+        let sharing = try await sharingInputs(id, session, &fresh, network: mode != .none)
+        let snapshot = fresh
+        guard sessions[id] === session, activeId == id else { return }
         let previous: OpenedVault? = copy?.account == id ? vault.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
         let invitations = isApp
-        let opened = try await core { Self.open(account, snapshot, previous: previous, invitations: invitations) }
+        let opened = try await core { Self.open(account, snapshot, previous: previous, invitations: invitations, sharing: sharing) }
         guard sessions[id] === session, activeId == id else { return }
         if mode != .none {
             let data = try await core { try snapshot.encoded() }
@@ -943,6 +1120,7 @@ public final class VaultRepository {
             }
         }
         guard sessions[id] === session, activeId == id else { return }
+        let before = vault.map { Self.keyShape($0.vaults) }
         vaultKeys = opened.keys
         vaultHeaders = opened.headers
         invitationNames = opened.names
@@ -951,11 +1129,21 @@ public final class VaultRepository {
         v.offline = offline
         vault = v
         refreshIdentities()
+        if let out = opened.sharing { await finishSharing(id, session, out, network: mode != .none) }
+        // A vault came or went, or a key was replaced (here or on another device): personal vaults
+        // may need new emergency-access wraps. The first sync after unlocking runs it from `afterOpen`.
+        if let before, before != Self.keyShape(v.vaults) { vaultKeysChanged() }
+    }
+
+    /// What decides which vaults get emergency-access wraps: each vault's id, key epoch, role and
+    /// key kind (a vault becoming the user's own, or shared, changes whether it is personal).
+    nonisolated static func keyShape(_ vaults: [VaultInfo]) -> [String] {
+        vaults.map { "\($0.id):\($0.keyEpoch ?? -1):\($0.role.rawValue):\($0.keyKind)" }
     }
 
     /// The account's copy after asking the server: since the copy's cursor when the server does
     /// delta sync, else everything. The base is the copy shown now, or the one on the device.
-    private func fetchSnapshot(_ id: String) async throws -> SyncSnapshot {
+    func fetchSnapshot(_ id: String) async throws -> SyncSnapshot {
         let base: SyncSnapshot? = if let c = copy, c.account == id { c.snapshot } else { await readSnapshot(id) }
         let delta = await deltaSyncEnabled(id)
         let api = self.api
@@ -965,7 +1153,7 @@ public final class VaultRepository {
     }
 
     /// The account's copy on this device (nil if missing or unreadable), read and decoded off the main thread.
-    private func readSnapshot(_ id: String) async -> SyncSnapshot? {
+    func readSnapshot(_ id: String) async -> SyncSnapshot? {
         guard let data = await store.readCacheInBackground(id) else { return nil }
         return await Task.detached(priority: .userInitiated) { SyncSnapshot.decode(data) }.value
     }
@@ -1072,6 +1260,7 @@ public final class VaultRepository {
     func afterOpen() {
         guard isApp else { return }
         Task { @MainActor [weak self] in await self?.refreshPolicies() }
+        vaultKeysChanged()
     }
 
     /// The server's policies (`/api/config`, kept with the account), the vault timeout lowered to
@@ -1187,8 +1376,16 @@ public final class VaultRepository {
     /// `invitations` (the app only): each invitation's sealed key is opened just to read the
     /// vault's name and dropped at once (`Invitation.open`; a name already read from the same
     /// sealed key and encrypted name is reused); one that can't be opened has no name.
-    nonisolated static func open(_ account: Account, _ snap: SyncSnapshot, previous: OpenedVault?, invitations: Bool = false) -> OpenedVault {
+    ///
+    /// `sharing` (signed sharing on): every vault is checked (`SignedSharing.checkVault`); one that
+    /// fails is left out with its items and listed in `refused`, never used. Invitations are
+    /// checked too (`SignedSharing.checkInvitation`).
+    nonisolated static func open(_ account: Account, _ snap: SyncSnapshot, previous: OpenedVault?, invitations: Bool = false,
+                                 sharing: SharingInputs? = nil) -> OpenedVault {
         var keys: [String: VaultKey] = [:]
+        var outputs = sharing.map { SharingOutputs(pins: $0.pins, pinsChanged: $0.pinsChanged, memory: $0.memory, keep: $0.keep, holdPins: $0.holdPins,
+                                                      notice: $0.notice) }
+        var consent: [Invitation] = []
         var headers: [String: SyncVault] = [:]
         var kept = Set<String>()
         var out = VaultData()
@@ -1201,14 +1398,60 @@ public final class VaultRepository {
                 kept.insert(v.id)
                 if old.meta == v.meta { name = oldNames[v.id] }
             } else {
-                guard let k = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind) else { continue }
+                // An `account` wrap opens with the row's key epoch (an epoch-bound wrap only for
+                // it; a legacy one only where the key pins allow it).
+                let legacy = sharing.map { _ in (try? pinsLegacyWrapAllowed(pinsJson: outputs?.pins, vaultId: v.id)) ?? true } ?? true
+                guard let k = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
+                                                        keyEpoch: UInt64(max(0, v.keyEpoch ?? 0)), legacyAllowed: legacy) else { continue }
                 key = k
             }
             let n = name ?? ((try? key.decryptMeta(vaultId: v.id, meta: v.meta)).flatMap { try? JSON.parse($0) }?.str("name") ?? "")
+            var trust = VaultTrust.notChecked
+            let role = v.role
+            if let s = sharing, var o = outputs {
+                if let reason = s.unavailable, v.keyKind != VaultInfo.accountKeyKind, !v.keyKind.isEmpty {
+                    // Nothing to check a shared vault against now (the key pins or the memory).
+                    out.refused.append(RefusedVault(id: v.id, name: n.isEmpty ? nil : n, reason: .admission(reason)))
+                    continue
+                }
+                let check = SignedSharing.checkVault(v, key: key, me: s.me, pins: o.pins, remembered: o.memory.rosters[v.id],
+                                                     newer: s.fetched[v.id], tooLarge: s.tooLarge.contains(v.id),
+                                                     seenSigned: o.memory.signed.contains(v.id), now: s.now)
+                switch check {
+                case .refused(let reason):
+                    out.refused.append(RefusedVault(id: v.id, name: n.isEmpty ? nil : n, reason: reason))
+                    continue
+                case .consent(let acceptance, let rejoin, let replaced, let signer):
+                    // Never opened beyond its name: shown like an invitation (the app only).
+                    let shownName = ShownText.clean(n, limit: 64)
+                    var inv = Invitation(vaultId: v.id, role: v.role, name: shownName.isEmpty ? "Shared vault" : shownName,
+                                         invitedBy: signer.map { SyncInvitation.Sharer(id: $0.userId, email: $0.email, name: $0.name) },
+                                         trust: signer.map { .signed($0) } ?? .unsigned)
+                    inv.consent = replaced ? .replaced : rejoin ? .rejoin : .added
+                    // Unsigned: accepted only when its key was replaced by an app from before, or
+                    // while the account's trust memory is missing or this device had no earlier
+                    // copy of it (then labelled "Not yet signed"). Then Decline isn't offered: a
+                    // server can't push the user into leaving vaults they really are in.
+                    let waiting = o.memory.missing?.contains(v.id) ?? false
+                    inv.acceptance = signer != nil || replaced || waiting ? acceptance : nil
+                    inv.declineHidden = waiting
+                    consent.append(inv)
+                    continue
+                case .ok(let t, let roster, let pins):
+                    trust = t
+                    if pins != o.pins {
+                        o.pins = pins
+                        o.pinsChanged = true
+                    }
+                    if let roster, o.memory.rosters[v.id] != roster { o.memory.rosters[v.id] = roster }
+                    if case .signed = t, !o.memory.signed.contains(v.id) { o.memory.signed.append(v.id) }
+                }
+                outputs = o
+            }
             keys[v.id] = key
             headers[v.id] = v
-            out.vaults.append(VaultInfo(id: v.id, name: n.isEmpty ? "Vault" : n, role: Role(rawValue: v.role) ?? .read,
-                                        keyKind: v.keyKind.isEmpty ? VaultInfo.accountKeyKind : v.keyKind, keyEpoch: v.keyEpoch))
+            out.vaults.append(VaultInfo(id: v.id, name: n.isEmpty ? "Vault" : n, role: Role(rawValue: role) ?? .read,
+                                        keyKind: v.keyKind.isEmpty ? VaultInfo.accountKeyKind : v.keyKind, keyEpoch: v.keyEpoch, trust: trust))
         }
         var before: [String: Entry] = [:]
         if let p = previous {
@@ -1230,16 +1473,34 @@ public final class VaultRepository {
         out.entries.sort { $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending }
         out.trash.sort { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
         out.revision = snap.revision
+        if var o = outputs, let m = o.memory.missing {
+            // The consent states last while a vault they cover still waits for the user.
+            let waiting = Set(consent.map(\.vaultId))
+            o.memory.missing = m.filter { waiting.contains($0) }
+            outputs = o
+        }
         var names: [String: String?] = [:]
         if invitations {
             let opened = Invitation.open(snap.invitations, previous: previous?.names ?? [:]) { inv in
-                let key = try account.openVaultKey(vaultId: inv.vaultId, wrapped: inv.wrappedKey, kind: "sealed")
+                let key = try account.openVaultKey(vaultId: inv.vaultId, wrapped: inv.wrappedKey, kind: "sealed", keyEpoch: 0, legacyAllowed: false)
                 return Invitation.name(fromMeta: try key.decryptMeta(vaultId: inv.vaultId, meta: inv.meta))
             }
             out.invitations = opened.invitations
             names = opened.names
+            if let s = sharing, let o = outputs {
+                out.invitations = zip(snap.invitations, opened.invitations).map { inv, shown in
+                    var shown = shown
+                    let key = try? account.openVaultKey(vaultId: inv.vaultId, wrapped: inv.wrappedKey, kind: "sealed", keyEpoch: 0, legacyAllowed: false)
+                    let checked = SignedSharing.checkInvitation(inv, key: key, me: s.me, pins: o.pins, remembered: o.memory.rosters[inv.vaultId],
+                                                                newer: s.fetched[inv.vaultId], tooLarge: s.tooLarge.contains(inv.vaultId))
+                    shown.trust = checked.0
+                    shown.acceptance = checked.1
+                    return shown
+                }
+                out.invitations += consent
+            }
         }
-        return OpenedVault(data: out, keys: keys, headers: headers, names: names)
+        return OpenedVault(data: out, keys: keys, headers: headers, names: names, sharing: outputs)
     }
 
     // MARK: Items
@@ -1429,6 +1690,164 @@ public final class VaultRepository {
         (vault?.vaults ?? []).filter { $0.id != entry.vaultId && $0.role != .read }
     }
 
+    // MARK: Vault key replacement
+
+    /// Replace the keys of these vaults, one after the other (after an emergency contact who may
+    /// have kept their keys was removed, or a vault the server marked): a new key wrapped with this
+    /// account's own key, every item of the vault (trash included, each with its revision) and its
+    /// name re-encrypted with it, in one `POST /vaults/{id}/rotate`. Built only from the copy the
+    /// sync at its start verified.
+    ///
+    /// Signed sharing (`rotateSigned`): a vault with other members is replaced too, the new key
+    /// sealed and signed for each of them, with the vault's next signed member roster, after a
+    /// member review: the server's member list must match the trusted roster (else it stops,
+    /// naming who differs); people the roster names but the server no longer lists are dropped
+    /// only once the user confirmed them by user id (`confirmed`; else the vault is listed in
+    /// `confirm`); a shared vault without a trusted roster is never replaced automatically: it is
+    /// listed in `review` and replaced only with the digest of the review the user confirmed
+    /// (`reviewed`). `personalOnly` (emergency access): only vaults the same members answer shows
+    /// as personal; others are listed in `shared`. Without signed sharing (older servers) only
+    /// vaults whose members are this account alone, as before: a shared one is listed in `shared`.
+    ///
+    /// Vaults it no longer has or can't manage are skipped. The first other failure stops it and is
+    /// thrown (the server keeps asking for the rest, `rotation_pending`).
+    @discardableResult
+    public func rotateVaultKeys(_ vaultIds: [String], confirmed: [String: Set<String>] = [:], reviewed: [String: String] = [:],
+                                personalOnly: Bool = false) async throws -> KeyReplacement {
+        try await lock.run {
+            defer { vaultKeysChanged() }
+            try await syncLocked()
+            var done = KeyReplacement()
+            for vid in vaultIds {
+                switch try await rotateLocked(vid, confirmed: confirmed[vid] ?? [], reviewed: reviewed[vid], personalOnly: personalOnly) {
+                case .rotated: done.rotated.append(vid)
+                case .shared(let name): done.shared.append(KeyReplacement.Shared(id: vid, name: name))
+                case .confirm(let name, let people):
+                    done.confirm.append(KeyReplacement.Confirm(id: vid, name: name, people: people.map { $0.email ?? SharingText.unknownMember },
+                                                               userIds: people.map(\.userId)))
+                case .review(let name, let review): done.review.append(KeyReplacement.Review(id: vid, name: name, review: review))
+                case .skipped: break
+                }
+            }
+            try? await syncLocked()
+            return done
+        }
+    }
+
+    enum RotationOutcome: Equatable {
+        case rotated, skipped, shared(String)
+        case confirm(String, [MemberReview.MissingPerson])
+        case review(String, MemberReview)
+    }
+
+    /// How often a key replacement is tried again when an item changed meanwhile (`revision_conflict`).
+    nonisolated static let rotationAttempts = 3
+
+    private func rotateLocked(_ vid: String, confirmed: Set<String>, reviewed: String?, personalOnly: Bool) async throws -> RotationOutcome {
+        var attempt = 1
+        var membersRetried = false
+        while true {
+            do {
+                return try await rotateOnce(vid, confirmed: confirmed, reviewed: reviewed, personalOnly: personalOnly)
+            } catch let e as ApiError where e.status == 409 && e.hasCode("revision_conflict") {
+                // An item of the vault was saved after the sync the replacement was built from:
+                // nothing was changed. Sync and build it again from the newer items.
+                guard attempt < Self.rotationAttempts else { throw e }
+                attempt += 1
+                try await syncLocked()
+            } catch let e as MembersChanged {
+                // Signed sharing: the members (or their roster, or the key) changed after the list
+                // it was built from. Sync and check again once; then say who differs.
+                guard !membersRetried else { throw UserError(e.text) }
+                membersRetried = true
+                try await syncLocked()
+            }
+        }
+    }
+
+    private func rotateOnce(_ vid: String, confirmed: Set<String>, reviewed: String?, personalOnly: Bool) async throws -> RotationOutcome {
+        let id = activeId
+        guard let session = sessions[id], let v = try? requireVault(), let info = v.vaults.first(where: { $0.id == vid }),
+              info.role == .owner || info.role == .admin, let oldKey = vaultKeys[vid], let c = copy, c.account == id else { return .skipped }
+        let me = session.meId
+        let rows = c.snapshot.items.filter { $0.vaultId == vid }
+        // One members answer decides everything below (personal or not, who gets the key).
+        let answer = try await api.call(id, "/vaults/\(Self.pathPart(vid))/members")
+        guard let members = Self.memberRows(answer), EmergencyClient.readMembers(answer) != nil else {
+            throw UserError("The server sent an unexpected response. Try again.")
+        }
+        // Locked or switched meanwhile: nothing is sent for another session.
+        guard activeId == id, sessions[id] === session else { return .skipped }
+        if signedSharingOn(id, c.snapshot) {
+            return try await rotateSigned(id, session, info, row: c.snapshot.vaults.first { $0.id == vid }, oldKey: oldKey, rows: rows,
+                                          answer: answer, members: members, confirmed: confirmed, reviewed: reviewed, personalOnly: personalOnly)
+        }
+        if members.map(\.userId) != [me] { return .shared(info.name) }
+        if personalOnly && (info.keyKind != VaultInfo.accountKeyKind || info.role != .owner) { return .shared(info.name) }
+        return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows)
+    }
+
+    /// A vault whose members are this account alone: a new key wrapped for it only (no roster,
+    /// sealed to nobody).
+    func rotatePlain(_ id: String, _ session: Session, _ info: VaultInfo, oldKey: VaultKey, rows: [SyncItem]) async throws -> RotationOutcome {
+        let vid = info.id
+        let me = session.meId
+        let account = session.account
+        let name = info.name
+        let made: (wrapped: String, items: [JSON], meta: String) = try await core {
+            let nv = try account.newVaultKey(vaultId: vid)
+            let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
+            return (nv.wrapped, items, meta)
+        }
+        var body: [String: JSON] = [
+            "keys": [["user_id": .string(me), "wrapped_key": .string(made.wrapped), "key_kind": .string(VaultInfo.accountKeyKind)]],
+            "items": .array(made.items),
+            "meta": .string(made.meta),
+        ]
+        if let e = info.keyEpoch { body["key_epoch"] = .int(e) }
+        try await postRotation(id, vid, body)
+        try await syncLocked()
+        return .rotated
+    }
+
+    /// `POST /vaults/{id}/rotate`; another device's key replacement in between (409
+    /// `vault_key_changed`, nothing changed) is said in the app's words.
+    func postRotation(_ id: String, _ vid: String, _ body: [String: JSON]) async throws {
+        do {
+            _ = try await api.call(id, "/vaults/\(Self.pathPart(vid))/rotate", body: .object(body))
+        } catch let e as ApiError where e.status == 409 && e.hasCode("vault_key_changed") {
+            try? await syncLocked()
+            throw UserError("Someone else replaced this vault's key just now. If the vault still asks for a new key, replace it again.")
+        }
+    }
+
+    /// Every item of a vault re-encrypted with `newKey` (each with the revision it was read at: an
+    /// item saved meanwhile is refused with 409, not overwritten) and the vault's name.
+    nonisolated static func reencrypt(_ rows: [SyncItem], vid: String, name: String, oldKey: VaultKey, newKey: VaultKey) throws -> ([JSON], String) {
+        var items: [JSON] = []
+        for r in rows {
+            guard let key = r.itemKey, let data = r.data else { throw UserError("Some items in this vault can't be read here yet, so its key can't be replaced. Try again after a sync.") }
+            let json: String
+            do {
+                json = try oldKey.decryptItem(encrypted: EncryptedItem(id: r.id, vaultId: vid, key: key, data: data))
+            } catch {
+                throw UserError("Some items in \(name) can't be decrypted, so its key can't be replaced yet.")
+            }
+            let enc = try newKey.encryptItem(itemJson: json, id: r.id, vaultId: vid)
+            items.append(Self.body(enc, keyEpoch: nil, revision: r.revision))
+        }
+        let meta = try newKey.encryptMeta(vaultId: vid, metaJson: (["name": .string(name)] as JSON).text)
+        return (items, meta)
+    }
+
+    /// After unlocking, a change to the vaults or a key replacement: add the emergency-access wraps
+    /// the server asks for (the app only; in the background, failures ignored).
+    func vaultKeysChanged() {
+        guard isApp, vault != nil else { return }
+        let client = emergency
+        Task { @MainActor in try? await client.fill() }
+    }
+
     // MARK: Re-authentication, account
 
     /// A fresh proof of the master password from the server: an OPAQUE login with
@@ -1527,7 +1946,8 @@ public final class VaultRepository {
     /// of the core's export functions.
     public func itemsJsonForExport() throws -> (json: String, count: Int) {
         guard let v = vault else { throw UserError("Your vault is locked.") }
-        return ("[" + v.entries.map { ItemCodec.encode($0.item) }.joined(separator: ",") + "]", v.entries.count)
+        // Files aren't exported: their keys stay out of the file (`AttachmentList.strip`).
+        return ("[" + v.entries.map { ItemCodec.encode(AttachmentList.strip($0.item)) }.joined(separator: ",") + "]", v.entries.count)
     }
 
     /// Live sync's "logout" message: check the session (an ended one signs the account out

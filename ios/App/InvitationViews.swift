@@ -39,6 +39,7 @@ enum InvitationAnswer: Identifiable {
 struct InvitationsPage: View {
     @Environment(AppModel.self) private var model
     @State private var answering: InvitationAnswer?
+    @State private var trusting: SignerInfo?
 
     var body: some View {
         let list = model.repo.vault?.invitations ?? []
@@ -54,7 +55,7 @@ struct InvitationsPage: View {
                 .paRow()
             }
             ForEach(list) { inv in
-                InvitationSection(invitation: inv) { answering = $0 }
+                InvitationSection(invitation: inv, answer: { answering = $0 }, trustNewKey: { trusting = $0 })
             }
         }
         .paList()
@@ -67,6 +68,9 @@ struct InvitationsPage: View {
         .sheet(item: $answering) { a in
             InvitationSheet(answer: a)
         }
+        .sheet(isPresented: Binding(get: { trusting != nil }, set: { if !$0 { trusting = nil } })) {
+            if let s = trusting { TrustNewKeySheet(signer: s) }
+        }
     }
 }
 
@@ -75,6 +79,7 @@ struct InvitationsPage: View {
 private struct InvitationSection: View {
     let invitation: Invitation
     let answer: (InvitationAnswer) -> Void
+    let trustNewKey: (SignerInfo) -> Void
 
     var body: some View {
         let inv = invitation
@@ -97,8 +102,19 @@ private struct InvitationSection: View {
             }
             .padding(.vertical, 2)
             .accessibilityElement(children: .combine)
+            if let consent = inv.consent {
+                // Signed sharing: not an invitation, a vault the server lists for the account that
+                // it never accepted.
+                Text(consentText(consent, inv.name))
+                    .font(.subheadline).foregroundStyle(Color.paInk).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("invitation.consent.\(inv.vaultId)")
+            }
             if inv.name == nil {
                 WarningNote(text: InvitationText.cantOpen(inv), identifier: "invitation.cantOpen")
+            } else if inv.trust != nil {
+                // Signed sharing: who signed it (their identity fingerprint, computed here), or why
+                // it can only be declined.
+                InvitationTrustView(invitation: inv, trustNewKey: trustNewKey)
             } else if let fp {
                 FingerprintRow(label: InvitationText.fingerprintLabel(inv), fingerprint: fp)
                 Text(InvitationText.checkHint(inv)).font(.footnote).foregroundStyle(Color.paMuted)
@@ -106,13 +122,15 @@ private struct InvitationSection: View {
             } else {
                 WarningNote(text: InvitationText.noFingerprint(inv), identifier: "invitation.noFingerprint")
             }
-            if inv.name != nil {
+            if inv.canAccept {
                 Button("Accept…") { answer(.accept(inv)) }
                     .fontWeight(.semibold)
                     .accessibilityIdentifier("invitation.accept.\(inv.vaultId)")
             }
-            Button("Decline…", role: .destructive) { answer(.decline(inv)) }
-                .accessibilityIdentifier("invitation.decline.\(inv.vaultId)")
+            if inv.consent != .replaced && !inv.declineHidden {
+                Button("Decline…", role: .destructive) { answer(.decline(inv)) }
+                    .accessibilityIdentifier("invitation.decline.\(inv.vaultId)")
+            }
         }
         .paRow()
     }
@@ -160,14 +178,20 @@ private struct InvitationSheet: View {
                 Section {
                     PromptHeader(symbol: "person.2.fill",
                                  title: accepting ? InvitationText.acceptTitle(inv.name ?? "") : InvitationText.declineTitle,
-                                 subtitle: accepting ? "Shared by \(InvitationText.sharer(inv))" : (inv.name ?? "From \(InvitationText.sharer(inv))"))
+                                 subtitle: accepting ? "Shared by \(InvitationText.sharerHeading(inv))" : (inv.name ?? InvitationText.from(inv)))
                         .promptPlainRow()
                 }
                 Section {
+                    if let consent = inv.consent {
+                        Text(consentText(consent, inv.name))
+                            .foregroundStyle(Color.paInk).fixedSize(horizontal: false, vertical: true)
+                    }
                     Text(accepting ? InvitationText.acceptBody(inv) : InvitationText.declineBody)
                         .foregroundStyle(Color.paInk)
                         .fixedSize(horizontal: false, vertical: true)
-                    if accepting, let fp {
+                    if accepting, inv.trust != nil {
+                        InvitationTrustView(invitation: inv, trustNewKey: { _ in })
+                    } else if accepting, let fp {
                         FingerprintRow(label: InvitationText.fingerprintLabel(inv), fingerprint: fp)
                         Text(InvitationText.acceptCheck(inv)).font(.footnote).foregroundStyle(Color.paMuted)
                             .fixedSize(horizontal: false, vertical: true)
@@ -193,6 +217,20 @@ private struct InvitationSheet: View {
             }
         }
         .interactiveDismissDisabled(busy)
+        // The entry changed after it was shown (another key, signer or member list, or gone):
+        // this sheet's decision no longer applies, so it closes; the list shows the new state.
+        .onChange(of: current) { _, now in
+            guard !busy else { return }
+            if now.map({ Invitation.sameDecision(answer.invitation, $0) }) != true {
+                model.notify(InvitationText.changed)
+                dismiss()
+            }
+        }
+    }
+
+    /// The entry as the repository lists it now.
+    private var current: Invitation? {
+        model.repo.vault?.invitations.first { $0.vaultId == answer.invitation.vaultId }
     }
 
     private func confirm() {
@@ -204,7 +242,7 @@ private struct InvitationSheet: View {
         Task {
             do {
                 if accept {
-                    try await model.repo.acceptInvitation(inv.vaultId)
+                    try await model.repo.acceptInvitation(inv)
                     model.notify(InvitationText.joined(inv.name ?? "the vault"))
                 } else {
                     try await model.repo.declineInvitation(inv.vaultId)
@@ -219,11 +257,20 @@ private struct InvitationSheet: View {
     }
 }
 
+/// What the app says about a vault the server added (signed sharing's consent).
+func consentText(_ c: Invitation.Consent, _ name: String?) -> String {
+    switch c {
+    case .added: SharingText.consent(name)
+    case .rejoin: SharingText.rejoin(name)
+    case .replaced: SharingText.replaced(name)
+    }
+}
+
 // MARK: Notices in the vault list
 
 /// What the vault list's notices open.
 enum VaultNoticeTarget: String, Identifiable {
-    case invitations, twoStep, changePassword
+    case invitations, twoStep, changePassword, sharedVaults
     var id: String { rawValue }
 }
 
@@ -244,6 +291,20 @@ struct VaultNotices: View {
                     target = .invitations
                 } dismiss: {
                     model.dismissedInvitations[s.activeId] = invitationsKey
+                }
+            }
+            .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+        }
+        // Signed sharing: shared vaults that aren't used, or a problem with the account's keys.
+        let refused = model.repo.vault?.refused ?? []
+        let sharingText = SharingText.refusedNotice(refused) ?? model.repo.sharingNotice
+        let sharingKey = refused.map(\.id).sorted().joined(separator: ",") + (model.repo.sharingNotice ?? "")
+        if let sharingText, model.dismissedSharing[s.activeId] != sharingKey {
+            Section {
+                NoticeRow(symbol: "exclamationmark.shield", text: sharingText, action: "Details", identifier: "notice.sharing") {
+                    target = .sharedVaults
+                } dismiss: {
+                    model.dismissedSharing[s.activeId] = sharingKey
                 }
             }
             .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
@@ -319,6 +380,7 @@ struct VaultNoticeSheet: View {
                 case .invitations: InvitationsPage()
                 case .twoStep: TwoStepPage()
                 case .changePassword: ChangePasswordPage()
+                case .sharedVaults: SharedVaultsPage()
                 }
             }
             .toolbar {

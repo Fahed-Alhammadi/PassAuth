@@ -47,6 +47,13 @@ struct ItemView: View {
                         }
                         .labelStyle(TightLabel())
                         .font(.caption).foregroundStyle(Color.paMuted)
+                        // Signed sharing: who signed the shared vault's key ("Not yet signed" for a share from before).
+                        if let info = v.vaults.first(where: { $0.id == entry.vaultId }), let label = trustLabel(info) {
+                            Label(label, systemImage: info.trust == .notYetSigned ? "seal" : "checkmark.seal")
+                                .labelStyle(TightLabel())
+                                .font(.caption).foregroundStyle(Color.paMuted)
+                                .accessibilityIdentifier("item.vaultTrust")
+                        }
                     }
                     Spacer(minLength: 0)
                     if i.favorite { Image(systemName: "star.fill").foregroundStyle(Color.paAccent).accessibilityLabel("Favorite") }
@@ -121,6 +128,7 @@ struct ItemView: View {
                         .contextMenu { Button { model.copy(i.notes, "Notes") } label: { Label("Copy", systemImage: "doc.on.doc") } }
                 }
             }
+            AttachmentsSection(entry: entry, canWrite: canWrite && !trashed)
             Section("Item history") {
                 VStack(alignment: .leading, spacing: 3) {
                     if i.updatedAt > 0 { Text("Last edited \(formatDate(i.updatedAt))") }

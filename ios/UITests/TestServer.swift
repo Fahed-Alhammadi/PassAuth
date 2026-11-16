@@ -151,7 +151,8 @@ final class TestServer {
         var keys: [String: VaultKey] = [:]
         for v in sync["vaults"] as? [[String: Any]] ?? [] {
             let id = v["id"] as! String
-            keys[id] = try s.account.openVaultKey(vaultId: id, wrapped: v["wrapped_key"] as! String, kind: v["key_kind"] as! String)
+            keys[id] = try s.account.openVaultKey(vaultId: id, wrapped: v["wrapped_key"] as! String, kind: v["key_kind"] as! String,
+                                         keyEpoch: UInt64(v["key_epoch"] as? Int ?? 0), legacyAllowed: true)
         }
         for row in sync["items"] as? [[String: Any]] ?? [] where row["deleted_at"] == nil || row["deleted_at"] is NSNull {
             let vaultId = row["vault_id"] as! String
@@ -173,7 +174,8 @@ final class TestServer {
         let sync = try await call("GET", "/sync", session: s)
         guard let v = (sync["vaults"] as? [[String: Any]])?.first(where: { $0["role"] as? String == "owner" }) else { throw Failure(description: "no vault") }
         let vaultId = v["id"] as! String
-        let key = try s.account.openVaultKey(vaultId: vaultId, wrapped: v["wrapped_key"] as! String, kind: v["key_kind"] as! String)
+        let key = try s.account.openVaultKey(vaultId: vaultId, wrapped: v["wrapped_key"] as! String, kind: v["key_kind"] as! String,
+                                         keyEpoch: UInt64(v["key_epoch"] as? Int ?? 0), legacyAllowed: true)
         let json = String(decoding: try JSONSerialization.data(withJSONObject: item), as: UTF8.self)
         let enc = try key.encryptItem(itemJson: json, id: try newId(), vaultId: vaultId)
         try await call("POST", "/items", ["id": enc.id, "vault_id": enc.vaultId, "key": enc.key, "data": enc.data], session: s)

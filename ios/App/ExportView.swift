@@ -37,6 +37,10 @@ struct ExportPage: View {
         Section {
             Text("Exports the \(count) item\(count == 1 ? "" : "s") in all vaults of \(model.state.email). You choose where the file is saved.")
                 .foregroundStyle(Color.paInk)
+            if AttachmentList.any(model.repo.vault?.entries.map(\.item) ?? []) {
+                Text("Attached files aren't included. Download the ones you need from their items.")
+                    .font(.footnote).foregroundStyle(Color.paMuted)
+            }
             Picker("File format", selection: $format) {
                 ForEach(ExportFormat.allCases) { Text($0.label).tag($0) }
             }

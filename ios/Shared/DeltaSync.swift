@@ -23,9 +23,17 @@ public struct SyncVault: Codable, Equatable, Sendable {
     public var keyEpoch: Int64?
     /// Goes up with every write into the vault (delta sync); nil from older servers.
     public var seq: Int64?
+    /// Signed sharing: `{signature, signer, signer_deleted}` of a sealed key, `null` when not
+    /// signed (read with `ShareRecord.read`; kept as sent so the copy can be checked again).
+    public var share: JSON?
+    /// Signed sharing: the vault's latest member roster (JSON text as its signer's app made it)
+    /// and its version (0 = none); nil from older servers.
+    public var memberRoster: String?
+    public var memberRosterSeq: Int64?
 
     public init(id: String, meta: String = "", role: String = "owner", wrappedKey: String = "", keyKind: String = "account",
-                rotationPending: Int64? = nil, keyEpoch: Int64? = nil, seq: Int64? = nil) {
+                rotationPending: Int64? = nil, keyEpoch: Int64? = nil, seq: Int64? = nil, share: JSON? = nil,
+                memberRoster: String? = nil, memberRosterSeq: Int64? = nil) {
         self.id = id
         self.meta = meta
         self.role = role
@@ -34,11 +42,15 @@ public struct SyncVault: Codable, Equatable, Sendable {
         self.rotationPending = rotationPending
         self.keyEpoch = keyEpoch
         self.seq = seq
+        self.share = share
+        self.memberRoster = memberRoster
+        self.memberRosterSeq = memberRosterSeq
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, meta, role, seq
+        case id, meta, role, seq, share
         case wrappedKey = "wrapped_key", keyKind = "key_kind", rotationPending = "rotation_pending", keyEpoch = "key_epoch"
+        case memberRoster = "member_roster", memberRosterSeq = "member_roster_seq"
     }
 
     /// The same vault key as `other` describes (wrapping, kind and epoch): an opened key can be kept.
@@ -419,13 +431,7 @@ public enum DeltaSync {
     /// `{"<vault>": seq}` of `/sync/revision` and live sync messages; nil when absent (older servers).
     public static func vaultNumbers(_ j: JSON?) -> [String: Int64]? {
         guard case .object(let o)? = j else { return nil }
-        return o.compactMapValues { v in
-            switch v {
-            case .int(let n): n
-            case .double(let d): Int64(d)
-            default: nil
-            }
-        }
+        return o.compactMapValues { $0.number }
     }
 
     /// `GET /sync/revision`: the account's revision and (delta sync) each vault's number.

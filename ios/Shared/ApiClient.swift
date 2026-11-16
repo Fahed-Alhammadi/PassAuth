@@ -8,6 +8,20 @@ private final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     }
 }
 
+/// Upload progress of one transfer (and no redirects, as for every request).
+private final class TransferProgress: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    let report: @Sendable (Double) -> Void
+    init(_ report: @escaping @Sendable (Double) -> Void) { self.report = report }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        if totalBytesExpectedToSend > 0 { report(Double(totalBytesSent) / Double(totalBytesExpectedToSend)) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        nil
+    }
+}
+
 /// HTTP client for PassAuth servers: bearer auth, refresh-token rotation on 401 and
 /// per-account pinning (a request always uses the server and tokens of the account it was
 /// started for, even if the user switches accounts meanwhile).
@@ -121,6 +135,105 @@ public final class ApiClient {
         }
     }
 
+    // MARK: File transfers (attachments)
+
+    /// Attachment uploads and downloads: an idle limit like other requests, but no 60-second cap
+    /// on the whole transfer (the server allows 60 s plus the size at 32 KiB/s).
+    private lazy var transferSession: URLSession = {
+        let config = session.configuration
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 6 * 3600
+        return URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
+    }()
+
+    /// A signed-in request through `perform`, renewing the session once after a 401 (as `callData`).
+    private func authorized<T>(_ accountId: String, _ path: String, method: String, headers: [String: String] = [:],
+                               perform: (URLRequest) async throws -> (T, HTTPURLResponse)) async throws -> (T, HTTPURLResponse) {
+        var usedAccess = ""
+        func request() throws -> URLRequest {
+            let s = store.get()
+            guard let a = s.file.accounts[accountId], !a.server.isEmpty, let url = URL(string: a.server + "/api" + path) else {
+                throw UserError("Set your PassAuth server address first.")
+            }
+            var req = URLRequest(url: url)
+            req.httpMethod = method
+            req.setValue(Self.clientHeader, forHTTPHeaderField: Self.clientHeaderName)
+            if let t = s.tokens(accountId) {
+                usedAccess = t.access
+                req.setValue("Bearer \(t.access)", forHTTPHeaderField: "Authorization")
+            }
+            for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+            return req
+        }
+        func send() async throws -> (T, HTTPURLResponse) {
+            do {
+                return try await perform(try request())
+            } catch let e as UserError {
+                throw e
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let e as URLError where e.code == .cancelled {
+                throw CancellationError()
+            } catch {
+                throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+            }
+        }
+        var (value, res) = try await send()
+        if res.statusCode == 401 {
+            switch await refresh(accountId, rejected: usedAccess) {
+            case .refreshed:
+                (value, res) = try await send()
+            case .unavailable:
+                throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+            case .rejected:
+                store.update { $0.secrets.tokens[accountId] = nil }
+                onSessionLost?(accountId)
+                throw ApiError(status: 401, code: "unauthorized", message: "Your session ended. Sign in again.")
+            }
+        }
+        return (value, res)
+    }
+
+    /// `PUT` the file at `file` (streamed from disk) to `path`; `progress` hears the fraction sent.
+    /// A 409 `already_uploaded` (an earlier try landed) counts as done.
+    public func uploadFile(_ accountId: String, _ path: String, file: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
+        let session = transferSession
+        let (data, res) = try await authorized(accountId, path, method: "PUT") { req in
+            var r = req
+            r.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            let (data, res) = try await session.upload(for: r, fromFile: file, delegate: TransferProgress(progress))
+            guard let http = res as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            return (data, http)
+        }
+        if res.statusCode == 409, (try? JSON.parse(data))?["error"]?.string == "already_uploaded" { return }
+        _ = try check(data, res)
+    }
+
+    /// `GET` `path` into a new file inside `directory`: the file for a success, else the status
+    /// (404: gone) or the server's error.
+    public func downloadFile(_ accountId: String, _ path: String, into directory: URL) async throws -> (file: URL?, status: Int) {
+        let session = transferSession
+        let (url, res) = try await authorized(accountId, path, method: "GET") { req in
+            let (url, res) = try await session.download(for: req, delegate: TransferProgress { _ in })
+            guard let http = res as? HTTPURLResponse else {
+                try? FileManager.default.removeItem(at: url)
+                throw URLError(.badServerResponse)
+            }
+            return (url, http)
+        }
+        if (200..<300).contains(res.statusCode) {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let target = directory.appendingPathComponent(UUID().uuidString.lowercased())
+            try FileManager.default.moveItem(at: url, to: target)
+            return (target, res.statusCode)
+        }
+        let body = (try? Data(contentsOf: url)) ?? Data()
+        try? FileManager.default.removeItem(at: url)
+        if res.statusCode == 404 { return (nil, 404) }
+        _ = try check(body.count > 64 * 1024 ? Data() : body, res)
+        return (nil, res.statusCode)
+    }
+
     /// A request to a server URL directly (server setup check).
     public func get(_ url: URL) async throws -> (Data, HTTPURLResponse) {
         try await execute(URLRequest(url: url))
@@ -208,7 +321,8 @@ public final class ApiClient {
             code: j?["error"]?.string ?? "error",
             message: j?["message"]?.string ?? "",
             retryAfter: retryAfter,
-            requestId: requestId
+            requestId: requestId,
+            fields: j
         )
     }
 }

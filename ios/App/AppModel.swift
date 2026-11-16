@@ -19,6 +19,10 @@ final class AppModel {
     let permissions: PermissionCenter
     /// Password health of the unlocked vault (Settings → Password health, notes on item pages).
     let health: HealthSession
+    /// Attachment uploads in progress (item pages).
+    let uploads = AttachmentUploads()
+    /// Attachment downloads in progress (stopped when the vault closes).
+    let downloads = AttachmentDownloads()
     /// UI tests that aren't about it skip the first-launch permissions screen.
     let skipPermissionsIntro: Bool
 
@@ -37,6 +41,8 @@ final class AppModel {
     /// the notice again.
     var dismissedInvitations: [String: String] = [:]
     var dismissedViolations: [String: String] = [:]
+    /// The signed sharing notice (refused shared vaults, a problem with the account's keys).
+    var dismissedSharing: [String: String] = [:]
 
     /// otpauth:// and apple-otpauth:// links (QR codes from the Camera, Set Up Codes In, links in Safari).
     func open(_ url: URL) {
@@ -84,6 +90,18 @@ final class AppModel {
         #endif
         backgroundRefresh = BackgroundRefresh(repo: repo)
         BackgroundRefresh.current = backgroundRefresh
+        // Attachment files left by an earlier run (a download being shared, an upload's encrypted copy).
+        AttachmentTransfer.cleanUp()
+        // Locked or signed out: uploads and downloads stop, a share sheet (a decrypted file, a Send
+        // link) closes, and decrypted files go (after what password health clears).
+        let healthClosed = repo.onVaultClosed
+        repo.onVaultClosed = { [uploads, downloads] in
+            healthClosed?()
+            uploads.cancelAll()
+            downloads.cancelAll()
+            ShareSheet.dismissAll()
+            AttachmentTransfer.cleanUp()
+        }
     }
 
     var state: AppState { repo.state }

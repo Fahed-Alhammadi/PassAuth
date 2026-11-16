@@ -118,6 +118,8 @@ final class ContractTests: XCTestCase {
         let wrapped: String
         let itemId: String
         let item: Item
+        /// The account id: also its user id on the server ("me").
+        var accountId: String { (try? JSON.parse(created.account.legacyIdentityJson()))?.str("user_id") ?? "" }
     }
 
     private func fixture() throws -> Fixture {
@@ -447,8 +449,89 @@ final class ContractTests: XCTestCase {
     private func answer(_ f: Fixture, _ o: [String: Any]) throws -> Data {
         var o = o
         o["bundle"] = try JSONSerialization.jsonObject(with: Data(f.created.bundleJson.utf8))
-        o["user"] = ["id": "u1", "email": "a@example.com", "name": "Alex", "email_verified": true]
+        o["user"] = ["id": f.accountId, "email": "a@example.com", "name": "Alex", "email_verified": true]
         return try JSONSerialization.data(withJSONObject: o)
+    }
+
+    // MARK: Vault key replacement
+
+    /// Two vaults this account owns: `f.vaultId` (personal: members = this account) and a shared
+    /// one (another member too), each with one item.
+    private func twoVaults(_ f: Fixture) throws -> (sharedId: String, body: Data) {
+        let sharedId = try newId()
+        let sk = try f.created.account.newVaultKey(vaultId: sharedId)
+        let sharedItem = try sk.key.encryptItem(itemJson: ItemCodec.encode(named("Shared note")), id: try newId(), vaultId: sharedId)
+        let body = try answer(f, [
+            "revision": 5,
+            "vaults": [try vaultRow(f, epoch: 1, seq: 3),
+                       ["id": sharedId, "wrapped_key": sk.wrapped, "key_kind": "account", "role": "owner", "rotation_pending": 1, "key_epoch": 1, "seq": 2,
+                        "meta": try sk.key.encryptMeta(vaultId: sharedId, metaJson: #"{"name":"Family"}"#)]],
+            "items": [try itemRow(f, id: f.itemId, item: f.item, revision: 3),
+                      ["id": sharedItem.id, "vault_id": sharedId, "item_key": sharedItem.key, "data": sharedItem.data, "revision": 4, "deleted_at": NSNull(),
+                       "created_at": 1_700_000_000, "updated_at": 1_700_000_000]],
+        ])
+        return (sharedId, body)
+    }
+
+    private func members(_ ids: [String]) -> String {
+        let rows = ids.map { #"{"user_id":"\#($0)","email":"\#($0)@example.com","name":"\#($0)","role":"owner","public_key":"pk-\#($0)"}"# }
+        return #"{"members":[\#(rows.joined(separator: ","))]}"#
+    }
+
+    private func rotations() -> [ScriptedServer.Request] {
+        ScriptedServer.recorded().filter { $0.method == "POST" && $0.path.hasSuffix("/rotate") }
+    }
+
+    /// A shared vault in the list is left for the web vault or the desktop app, and the personal
+    /// vault after it still gets its new key; the result says which is which.
+    func testKeyReplacementSkipsASharedVaultAndGoesOn() async throws {
+        let f = try fixture()
+        let two = try twoVaults(f)
+        ScriptedServer.syncBodies = [two.body]
+        let repo = try await repo(f)
+        ScriptedServer.answer("GET /api/vaults/\(two.sharedId)/members", 200, members([f.accountId, "u2"]))
+        ScriptedServer.answer("GET /api/vaults/\(f.vaultId)/members", 200, members([f.accountId]))
+        let done = try await repo.rotateVaultKeys([two.sharedId, f.vaultId])
+        XCTAssertEqual(done.rotated, [f.vaultId])
+        XCTAssertEqual(done.shared, [KeyReplacement.Shared(id: two.sharedId, name: "Family")])
+        XCTAssertEqual(done.sharedText, "Family is shared, so replace its key in the web vault or the desktop app.")
+        XCTAssertEqual(rotations().map(\.path), ["/api/vaults/\(f.vaultId)/rotate"])
+    }
+
+    /// Each re-encrypted item carries the revision it was read at; an item saved meanwhile (409
+    /// `revision_conflict`) means sync and build it again, a bounded number of times.
+    func testKeyReplacementSendsRevisionsAndRetriesAfterAConflict() async throws {
+        let f = try fixture()
+        let two = try twoVaults(f)
+        ScriptedServer.syncBodies = [two.body]
+        let repo = try await repo(f)
+        let conflict = #"{"error":"revision_conflict","message":"item changed"}"#
+        ScriptedServer.answer("GET /api/vaults/\(f.vaultId)/members", 200, members([f.accountId]))
+        ScriptedServer.answer("GET /api/vaults/\(f.vaultId)/members", 200, members([f.accountId]))
+        ScriptedServer.answer("POST /api/vaults/\(f.vaultId)/rotate", 409, conflict)
+        let done = try await repo.rotateVaultKeys([f.vaultId])
+        XCTAssertEqual(done.rotated, [f.vaultId])
+        let sent = rotations()
+        XCTAssertEqual(sent.count, 2)
+        for r in sent {
+            let items = try XCTUnwrap(r.body["items"] as? [[String: Any]])
+            XCTAssertEqual(items.map { ($0["revision"] as? NSNumber)?.int64Value }, [3])
+        }
+
+        // Conflicts every time: given up after `rotationAttempts`, the error thrown.
+        ScriptedServer.reset()
+        ScriptedServer.syncBodies = [two.body]
+        for _ in 0..<5 {
+            ScriptedServer.answer("GET /api/vaults/\(f.vaultId)/members", 200, members([f.accountId]))
+            ScriptedServer.answer("POST /api/vaults/\(f.vaultId)/rotate", 409, conflict)
+        }
+        do {
+            try await repo.rotateVaultKeys([f.vaultId])
+            XCTFail("expected the conflict")
+        } catch let e as ApiError {
+            XCTAssertTrue(e.hasCode("revision_conflict"))
+        }
+        XCTAssertEqual(rotations().count, 3)
     }
 
     private func syncRequests() -> [ScriptedServer.Request] {
@@ -708,32 +791,46 @@ final class ContractTests: XCTestCase {
     /// declined invitation that is already gone is fine; an accepted one is reported.
     func testAcceptAndDeclineThenSync() async throws {
         let f = try fixture()
-        ScriptedServer.syncBodies = [try syncBody(f, key: f.key, wrapped: f.wrapped, epoch: 1)]
+        // An invitation this account can open (accepting passes on the entry as shown).
+        let vid = try newId()
+        let k = try f.created.account.newVaultKey(vaultId: vid).key
+        let inv: [String: Any] = ["vault_id": vid, "role": "write",
+                                  "wrapped_key": try k.shareTo(vaultId: vid, recipientPublicKey: f.created.account.publicKey()),
+                                  "meta": try k.encryptMeta(vaultId: vid, metaJson: #"{"name":"Team"}"#),
+                                  "invited_by": ["id": "u2", "email": "alex@example.com", "name": "Alex", "public_key": f.created.account.publicKey()],
+                                  "invited_at": 1_762_000_000]
+        let body = try answer(f, ["revision": 5, "vaults": [try vaultRow(f, seq: 3)],
+                                  "items": [try itemRow(f, id: f.itemId, item: f.item, revision: 3)], "invitations": [inv]])
+        ScriptedServer.syncBodies = [body]
         let repo = try await repo(f)
+        repo.isApp = true
+        try await repo.sync()
+        let shown = try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == vid })
+        XCTAssertTrue(shown.canAccept)
 
         ScriptedServer.reset()
-        ScriptedServer.syncBodies = [try syncBody(f, key: f.key, wrapped: f.wrapped, epoch: 1)]
-        ScriptedServer.answer("POST /api/vaults/V9/invitation/accept", 200, #"{"revision":6,"vault_seq":2,"status":"active"}"#)
-        try await repo.acceptInvitation("V9")
-        XCTAssertEqual(calls(), ["POST /api/vaults/V9/invitation/accept", "GET /api/sync"])
+        ScriptedServer.syncBodies = [body]
+        ScriptedServer.answer("POST /api/vaults/\(vid)/invitation/accept", 200, #"{"revision":6,"vault_seq":2,"status":"active"}"#)
+        try await repo.acceptInvitation(shown)
+        XCTAssertEqual(calls(), ["POST /api/vaults/\(vid)/invitation/accept", "GET /api/sync"])
 
         ScriptedServer.reset()
-        ScriptedServer.syncBodies = [try syncBody(f, key: f.key, wrapped: f.wrapped, epoch: 1)]
-        ScriptedServer.answer("POST /api/vaults/V9/invitation/accept", 404, #"{"error":"not_found","message":"not found"}"#)
+        ScriptedServer.syncBodies = [body]
+        ScriptedServer.answer("POST /api/vaults/\(vid)/invitation/accept", 404, #"{"error":"not_found","message":"not found"}"#)
         do {
-            try await repo.acceptInvitation("V9")
+            try await repo.acceptInvitation(shown)
             XCTFail("expected the error")
         } catch {
             XCTAssertEqual(errorMessage(error), "This invitation is no longer open. The person who shared the vault may have cancelled it.")
         }
-        XCTAssertEqual(calls(), ["POST /api/vaults/V9/invitation/accept", "GET /api/sync"], "the list is refreshed")
+        XCTAssertEqual(calls(), ["POST /api/vaults/\(vid)/invitation/accept", "GET /api/sync"], "the list is refreshed")
 
         for status in [200, 404] {
             ScriptedServer.reset()
-            ScriptedServer.syncBodies = [try syncBody(f, key: f.key, wrapped: f.wrapped, epoch: 1)]
-            ScriptedServer.answer("DELETE /api/vaults/V9/invitation", status, status == 200 ? #"{"revision":7}"# : #"{"error":"not_found","message":"not found"}"#)
-            try await repo.declineInvitation("V9")
-            XCTAssertEqual(calls(), ["DELETE /api/vaults/V9/invitation", "GET /api/sync"], "\(status)")
+            ScriptedServer.syncBodies = [body]
+            ScriptedServer.answer("DELETE /api/vaults/\(vid)/invitation", status, status == 200 ? #"{"revision":7}"# : #"{"error":"not_found","message":"not found"}"#)
+            try await repo.declineInvitation(vid)
+            XCTAssertEqual(calls(), ["DELETE /api/vaults/\(vid)/invitation", "GET /api/sync"], "\(status)")
         }
     }
 

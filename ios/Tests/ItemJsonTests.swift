@@ -19,6 +19,63 @@ final class ItemJsonTests: XCTestCase {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
     }
 
+    /// Fields a newer app adds inside a login, website, passkey, card, identity, SSH key, custom
+    /// field or password history entry survive decode → edit → encode here.
+    func testUnknownNestedFieldsSurviveAnEdit() throws {
+        let json = #"""
+        {"format":2,"name":"All","notes":"","favorite":false,"folder":null,"tags":[],
+         "login":{"username":"u","password":"p","urls":[{"url":"https://a.example","match":"host","label":"Work"}],"totp":null,
+           "passkeys":[{"credential_id":"Y3JlZA","rp_id":"a.example","rp_name":"A","user_handle":"dQ","user_name":"u","user_display_name":"U",
+             "algorithm":-7,"private_key":"cGs","counter":0,"discoverable":true,"created_at":1,"backup_state":true}],
+           "autofill_on_load":{"enabled":true}},
+         "card":{"cardholder_name":"A","brand":"","number":"4111","exp_month":"","exp_year":"","code":"","pin":"1234"},
+         "identity":{"title":"","first_name":"Ann","middle_name":"","last_name":"","company":"","email":"","phone":"","address1":"","address2":"",
+           "city":"","state":"","postal_code":"","country":"","username":"","ssn":"","passport_number":"","license_number":"","birthday":"2000-01-01"},
+         "ssh_key":{"private_key":"k","public_key":"p","fingerprint":"f","comment":"laptop"},
+         "fields":[{"name":"PIN","value":"1","type":"hidden","linked_to":"password"}],
+         "password_history":[{"password":"old","changed_at":5,"changed_by":"web"}],
+         "attachments":{"v":2,"list":[]},
+         "created_at":1,"updated_at":2,"color":"blue"}
+        """#
+        var item = try ItemCodec.decode(json)
+        XCTAssertEqual(item.login?.urls[0].extra["label"], "Work")
+        XCTAssertEqual(item.card?.extra["pin"], "1234")
+        XCTAssertNil(item.attachments)
+        XCTAssertEqual(AttachmentList.read(item), [])
+        // An edit to known fields, everywhere.
+        item.name = "Edited"
+        item.login?.password = "p2"
+        item.login?.urls[0].url = "https://b.example"
+        item.login?.passkeys[0].counter = 9
+        item.card?.number = "4242"
+        item.identity?.firstName = "Bea"
+        item.sshKey?.fingerprint = "g"
+        item.fields[0].value = "2"
+        item.passwordHistory[0].password = "older"
+        let out = try object(ItemCodec.encode(item))
+        let login = try XCTUnwrap(out["login"] as? NSDictionary)
+        XCTAssertEqual((login["urls"] as? [NSDictionary])?.first?["label"] as? String, "Work")
+        XCTAssertEqual((login["urls"] as? [NSDictionary])?.first?["url"] as? String, "https://b.example")
+        XCTAssertEqual((login["passkeys"] as? [NSDictionary])?.first?["backup_state"] as? Bool, true)
+        XCTAssertEqual((login["passkeys"] as? [NSDictionary])?.first?["counter"] as? Int, 9)
+        XCTAssertEqual((login["autofill_on_load"] as? NSDictionary)?["enabled"] as? Bool, true)
+        XCTAssertEqual((out["card"] as? NSDictionary)?["pin"] as? String, "1234")
+        XCTAssertEqual((out["identity"] as? NSDictionary)?["birthday"] as? String, "2000-01-01")
+        XCTAssertEqual((out["ssh_key"] as? NSDictionary)?["comment"] as? String, "laptop")
+        XCTAssertEqual((out["fields"] as? [NSDictionary])?.first?["linked_to"] as? String, "password")
+        XCTAssertEqual((out["password_history"] as? [NSDictionary])?.first?["changed_by"] as? String, "web")
+        XCTAssertEqual((out["attachments"] as? NSDictionary)?["v"] as? Int, 2)
+        XCTAssertEqual(out["color"] as? String, "blue")
+        // Unchanged, it comes back exactly as written.
+        XCTAssertEqual(try object(json), try object(ItemCodec.encode(try ItemCodec.decode(json))))
+        // A known key is never written twice from `extra`.
+        var odd = try ItemCodec.decode(json)
+        odd.card?.extra["number"] = "0000"
+        XCTAssertEqual((try object(ItemCodec.encode(odd))["card"] as? NSDictionary)?["number"] as? String, "4111")
+        // An export leaves an attachments value of any shape out.
+        XCTAssertNil(try object(ItemCodec.encode(AttachmentList.strip(item)))["attachments"])
+    }
+
     func testRoundTripKeepsEveryField() throws {
         let item = try ItemCodec.decode(full)
         XCTAssertEqual(try object(full), try object(ItemCodec.encode(item)))

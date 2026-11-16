@@ -1,0 +1,998 @@
+import Foundation
+import PassAuthCore
+@testable import PassAuthKit
+import XCTest
+
+/// Signed sharing through the repository against the scripted server (`ScriptedServer` in
+/// ContractTests.swift): the signing identity made, uploaded and remembered at unlock (paused when
+/// the server lists another or none after one was remembered), "me" from the core (a copy of
+/// another account refused), grandfathering only at the identity's creation and only unsigned
+/// shares, a vault the account never accepted held for consent, signed shared vaults checked on
+/// sync, invitations accepted only when signed (pins written on accepting, a tombstone on
+/// declining), and key replacement only after the member review: members the roster doesn't
+/// know stop it, people who left need a confirmation per user id, a vault without a signed
+/// roster is never sealed to anyone the user didn't review (review C1), and emergency access
+/// replaces only what the same members answer shows as personal.
+@MainActor
+final class SignedSharingRepoTests: XCTestCase {
+    private var dir: URL!
+    private let password = "correct horse battery staple"
+
+    override func setUp() async throws {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("pa-signed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        ScriptedServer.reset()
+    }
+
+    override func tearDown() async throws {
+        SecureStore.wipeAll(directory: dir)
+        try? FileManager.default.removeItem(at: dir)
+        ScriptedServer.reset()
+    }
+
+    /// An account: its id (also its server user id), its keys and signing identity.
+    private struct Person {
+        let id: String
+        let email: String
+        let created: NewAccount
+        let signing: SigningIdentity
+        let record: String
+        var account: Account { created.account }
+        var pub: String { (try? signing.publicIdentityJson()) ?? "" }
+
+        /// A member row of `GET /vaults/{id}/members`.
+        func row(_ role: String, kind: String) -> [String: Any] {
+            var o = (try? JSONSerialization.jsonObject(with: Data(pub.utf8))) as? [String: Any] ?? [:]
+            o["email"] = email
+            o["name"] = email
+            o["role"] = role
+            o["status"] = "active"
+            o["key_kind"] = kind
+            return o
+        }
+    }
+
+    private func person(_ email: String) throws -> Person {
+        let id = try newId()
+        let created = try createAccount(accountId: id, password: password, withSecretKey: false)
+        let made = try created.account.newSigningIdentity()
+        return Person(id: id, email: email, created: created, signing: made.identity, record: made.recordJson)
+    }
+
+    private func json(_ s: String) -> Any { (try? JSONSerialization.jsonObject(with: Data(s.utf8))) ?? NSNull() }
+    private func text(_ o: Any) throws -> String { String(data: try JSONSerialization.data(withJSONObject: o), encoding: .utf8) ?? "" }
+
+    private func member(_ p: Person, _ role: String) -> JSON { SharingIdentity.memberJson(p.pub, role: role) ?? .null }
+
+    /// A shared vault: Alice owns it, Bob may edit; its key, the share to Bob signed by Alice, roster v1.
+    private struct Shared {
+        let id: String
+        let key: VaultKey
+        let wrappedForOwner: String
+        let sealedForBob: String
+        let signature: String
+        let roster: String
+        let itemId: String
+    }
+
+    /// `legacy`: shared with Bob before he had a signing identity (his app makes one later).
+    private func shared(owner: Person, member bob: Person, legacy: Bool = false) throws -> Shared {
+        let id = try newId()
+        let made = try owner.account.newVaultKey(vaultId: id)
+        let to = legacy ? try bob.account.legacyIdentityJson() : bob.pub
+        let share = try owner.signing.sealAndSignShare(vaultKey: made.key, vaultId: id, recipientJson: to, role: "write", keyEpoch: 0)
+        let roster = try SignedSharingTests.signRoster(owner.signing, key: made.key, vault: id, previous: nil, epoch: 0,
+                                                       members: [member(owner, "owner"), SharingIdentity.memberJson(to, role: "write") ?? .null])
+        return Shared(id: id, key: made.key, wrappedForOwner: made.wrapped, sealedForBob: share.sealedKey, signature: share.signature, roster: roster,
+                      itemId: try newId())
+    }
+
+    private func item(_ name: String, _ key: VaultKey, vault: String, id: String, revision: Int64 = 3) throws -> [String: Any] {
+        var i = Item.empty(.login, now: 1_700_000_000)
+        i.name = name
+        i.login?.urls = [LoginUrl(url: "https://\(name.lowercased())-site.com", match: .default)]
+        let enc = try key.encryptItem(itemJson: ItemCodec.encode(i), id: id, vaultId: vault)
+        return ["id": id, "vault_id": vault, "item_key": enc.key, "data": enc.data, "revision": revision, "deleted_at": NSNull(),
+                "created_at": 1_700_000_000, "updated_at": 1_700_000_000]
+    }
+
+    private func shareJSON(_ signature: String, by signer: Person) -> [String: Any] {
+        var s = json(signer.pub) as? [String: Any] ?? [:]
+        s["email"] = signer.email
+        s["name"] = "Alice"
+        return ["signature": signature, "signer": s, "signer_deleted": false]
+    }
+
+    /// A `/sync` answer for `me` with these vaults, items and invitations.
+    private func syncBody(_ me: Person, identity: Bool = true, identityRecord: Any? = nil, userId: String? = nil, vaults: [[String: Any]],
+                          items: [[String: Any]], invitations: [[String: Any]] = [], pinsSeq: Int64 = 0) throws -> Data {
+        var user: [String: Any] = ["id": userId ?? me.id, "email": me.email, "name": "Me", "email_verified": true, "key_pins_seq": pinsSeq]
+        user["identity"] = identity ? (identityRecord ?? json(me.record)) : NSNull()
+        return try JSONSerialization.data(withJSONObject: [
+            "revision": 5, "user": user, "bundle": json(me.created.bundleJson),
+            "vaults": vaults, "items": items, "invitations": invitations,
+        ] as [String: Any])
+    }
+
+    /// The account's own vault (one login).
+    private func personal(_ me: Person) throws -> (row: [String: Any], item: [String: Any]) {
+        let id = try newId()
+        let made = try me.account.newVaultKey(vaultId: id)
+        return (["id": id, "wrapped_key": made.wrapped, "key_kind": "account", "role": "owner", "key_epoch": 0, "seq": 1,
+                 "meta": try made.key.encryptMeta(vaultId: id, metaJson: #"{"name":"Personal"}"#), "share": NSNull(), "member_roster": NSNull(),
+                 "member_roster_seq": 0],
+                try item("Mine", made.key, vault: id, id: try newId()))
+    }
+
+    /// Bob's row for Alice's vault.
+    private func bobRow(_ s: Shared, by alice: Person, signature: String? = nil, name: String = "Family") throws -> [String: Any] {
+        ["id": s.id, "wrapped_key": s.sealedForBob, "key_kind": "sealed", "role": "write", "key_epoch": 0, "seq": 1,
+         "meta": try s.key.encryptMeta(vaultId: s.id, metaJson: "{\"name\":\"\(name)\"}"),
+         "share": shareJSON(signature ?? s.signature, by: alice), "member_roster": s.roster, "member_roster_seq": 1]
+    }
+
+    private func rosterAnswer(_ s: Shared, times: Int = 1) throws {
+        for _ in 0..<times {
+            ScriptedServer.answer("GET /api/vaults/\(s.id)/rosters", 200, try text(["rosters": [s.roster], "latest": 1, "more": false]))
+        }
+    }
+
+    /// The device memory of an account whose key pins (`pins`, version 1, on the server too) were
+    /// written before.
+    private func memory(_ me: Person, pins: String, rosters: [String: String] = [:]) throws -> InMemorySharingMemory {
+        let m = InMemorySharingMemory()
+        var r = SharingMemoryRecord()
+        r.pinsSeq = 1
+        r.sealedPins = try me.account.sealKeyPins(pinsJson: pins, seq: 1)
+        r.rosters = rosters
+        m.put("acc", r)
+        return m
+    }
+
+    /// `earlier`: the account's offline copy on this device from an earlier session (a `/sync`
+    /// answer); then the unlock shows it first and syncs after (awaited here). `features` nil and
+    /// `config: false`: the server's features were never read (and can't be now).
+    private func repo(_ me: Person, _ bodies: [Data], memory: InMemorySharingMemory = InMemorySharingMemory(), earlier: Data? = nil,
+                      features: [String]? = [signedSharingFeature], config: Bool = true) async throws -> VaultRepository {
+        let store = SecureStore(directory: dir, role: .app)
+        store.load()
+        store.update { s in
+            var acc = AccountData(server: "https://fake.passauth.test", email: me.email)
+            acc.bundle = me.created.bundleJson
+            acc.features = features
+            acc.featuresAt = features == nil ? nil : Date().timeIntervalSince1970
+            s.file.accounts["acc"] = acc
+            s.file.activeId = "acc"
+            s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
+        }
+        if let earlier { store.writeCache("acc", try XCTUnwrap(SyncSnapshot.decode(earlier)).encoded()) }
+        ScriptedServer.syncBodies = bodies
+        for _ in 0..<40 {
+            if config {
+                ScriptedServer.answer("GET /api/config", 200, #"{"api":2,"features":["signed_sharing"]}"#)
+            } else {
+                ScriptedServer.answer("GET /api/config", 503, #"{"error":"unavailable","message":"down"}"#)
+            }
+        }
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        repo.sharingMemory = memory
+        repo.isApp = true
+        try await repo.unlock(password: password, secretKey: nil)
+        if earlier != nil { try await repo.sync() }
+        return repo
+    }
+
+    /// The entry the app shows now for `vaultId` (what an Accept tap passes on).
+    private func shownInvitation(_ repo: VaultRepository, _ vaultId: String) throws -> Invitation {
+        try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == vaultId }, "no invitation for \(vaultId)")
+    }
+
+    private func requests(_ method: String, _ path: String) -> [ScriptedServer.Request] {
+        ScriptedServer.recorded().filter { $0.method == method && $0.path == path }
+    }
+
+    /// The key pins the app wrote last, opened.
+    private func writtenPins(_ me: Person) throws -> JSON {
+        let put = try XCTUnwrap(requests("PUT", "/api/account/key-pins").last, "key pins written")
+        let seq = UInt64(put.body["seq"] as? Int ?? 0)
+        return try JSON.parse(try me.account.openKeyPins(sealed: put.body["key_pins"] as? String ?? "", seq: seq))
+    }
+
+    // MARK: Unlock and sync
+
+    func testUnlockMakesTheIdentityRemembersItAndGrandfathersOnlyUnsignedShares() async throws {
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let s = try shared(owner: alice, member: bob, legacy: true)
+        // A share from before signed sharing, present at the account's first signed sync.
+        let oldId = try newId()
+        let oldKey = try alice.account.newVaultKey(vaultId: oldId).key
+        let unsigned: [String: Any] = ["id": oldId, "wrapped_key": try oldKey.shareTo(vaultId: oldId, recipientPublicKey: bob.account.publicKey()),
+                                       "key_kind": "sealed", "role": "read", "key_epoch": 0, "seq": 1,
+                                       "meta": try oldKey.encryptMeta(vaultId: oldId, metaJson: #"{"name":"Old"}"#), "share": NSNull(),
+                                       "member_roster": NSNull(), "member_roster_seq": 0]
+        try rosterAnswer(s, times: 3)
+        let memory = InMemorySharingMemory()
+        ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true,"created":true}"#)
+        // This device's copy from an earlier session had the old share (rule 1).
+        let earlier = try syncBody(bob, identity: false, vaults: [own.row, unsigned], items: [own.item])
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, unsigned, try bobRow(s, by: alice)],
+                                                     items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)])], memory: memory,
+                                  earlier: earlier)
+        let put = try XCTUnwrap(requests("PUT", "/api/account/identity").first, "identity uploaded")
+        XCTAssertEqual((put.body["signing_key"] as? String)?.count, 43)
+        XCTAssertEqual((put.body["x25519_signature"] as? String)?.count, 86)
+        let fp = try XCTUnwrap(repo.ownIdentityFingerprint)
+        let opened = try bob.account.openSigningIdentity(recordJson: try text(put.body))
+        XCTAssertEqual(opened.fingerprint(), fp)
+        // The key pins remember the own identity; only the unsigned share is grandfathered.
+        let pins = try writtenPins(bob)
+        XCTAssertEqual(pins["own_identity"]?.string, opened.identityHash())
+        XCTAssertTrue(pins["grandfathered"]?.array.compactMap(\.string).contains(oldId) ?? false)
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == oldId }?.trust, .notYetSigned)
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == own.row["id"] as? String }?.trust, .own)
+        // Review H2: the signed vault the account never accepted isn't used: it waits for consent.
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == s.id })
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
+        let consent = try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == s.id },
+                                    "invitations \(String(describing: repo.vault?.invitations)) refused \(String(describing: repo.vault?.refused))")
+        XCTAssertEqual(consent.consent, .added)
+        XCTAssertEqual(consent.name, "Family")
+        XCTAssertTrue(consent.canAccept)
+        XCTAssertNil(memory.load("acc").rosters[s.id], "nothing remembered before the user accepts")
+        // Accepting: nothing asked of the server (it already lists it), the pins written, the vault used.
+        try await repo.acceptInvitation(try shownInvitation(repo, s.id))
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/invitation/accept").isEmpty)
+        let after = try writtenPins(bob)
+        XCTAssertNotNil(after["epochs"]?[s.id])
+        XCTAssertEqual(after["pins"]?.array.map { $0.str("user_id") }, [alice.id])
+        XCTAssertEqual(memory.load("acc").rosters[s.id], s.roster)
+        guard case .signed(let signer)? = repo.vault?.vaults.first(where: { $0.id == s.id })?.trust else {
+            return XCTFail("\(String(describing: repo.vault?.vaults))")
+        }
+        XCTAssertEqual(signer.pinnedEmail, "alice@example.com")
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name).sorted(), ["Bank", "Mine", ])
+    }
+
+    func testAnIdentityThatIsntTheAccountsPausesSharing() async throws {
+        let me = try person("bob@example.com")
+        let other = try person("mallory@example.com")
+        let own = try personal(me)
+        var body = try JSONSerialization.jsonObject(with: try syncBody(me, vaults: [own.row], items: [own.item])) as? [String: Any] ?? [:]
+        var user = body["user"] as? [String: Any] ?? [:]
+        user["identity"] = json(other.record)
+        body["user"] = user
+        let repo = try await repo(me, [try JSONSerialization.data(withJSONObject: body)])
+        XCTAssertNil(repo.ownIdentityFingerprint)
+        XCTAssertEqual(repo.sharingNotice, SharingText.paused)
+        XCTAssertTrue(requests("PUT", "/api/account/identity").isEmpty, "nothing replaces the listed identity")
+        XCTAssertEqual(repo.vault?.vaults.count, 1, "the account's own vault stays usable")
+    }
+
+    func testAnIdentityTheServerStopsListingPausesInsteadOfMakingANewOne() async throws {
+        // Review L4: the key pins remember Bob's identity; the server now lists none.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try bobRow(s, by: alice)],
+                                                     items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 1)],
+                                  memory: memory)
+        XCTAssertTrue(requests("PUT", "/api/account/identity").isEmpty, "no new identity over the remembered one")
+        XCTAssertEqual(repo.sharingNotice, SharingText.paused)
+        XCTAssertNil(repo.ownIdentityFingerprint)
+        // Paused: every shared vault refused.
+        XCTAssertEqual(repo.vault?.refused.map(\.reason), [.paused])
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
+    }
+
+    func testACopyOfAnotherAccountIsRefused() async throws {
+        // Review L3: "me" is the account the core unlocked, never the server's `user.id`.
+        let bob = try person("bob@example.com")
+        let own = try personal(bob)
+        do {
+            let repo = try await repo(bob, [try syncBody(bob, userId: try newId(), vaults: [own.row], items: [own.item])])
+            XCTAssertTrue(repo.vault?.entries.isEmpty ?? true, "another account's copy shown")
+        } catch {
+            XCTAssertEqual(errorMessage(error), SharingText.wrongAccount)
+        }
+    }
+
+    func testASignedSharedVaultIsUsedAndAForgedOneLeftOut() async throws {
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        // Bob accepted the vault on another device (its epoch in the account's pins).
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: nil)
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        let sharedItem = try item("Bank", s.key, vault: s.id, id: s.itemId)
+        let good = try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)], items: [own.item, sharedItem], pinsSeq: 1)
+        let wrongSig = try alice.signing.signShare(vaultId: s.id, recipientJson: bob.pub, role: "admin", keyEpoch: 0, sealedKey: s.sealedForBob)
+        let forged = try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice, signature: wrongSig)], items: [own.item, sharedItem], pinsSeq: 2)
+        try rosterAnswer(s)
+        let memory = try memory(bob, pins: pins)
+        let repo = try await repo(bob, [good, forged], memory: memory)
+
+        let family = try XCTUnwrap(repo.vault?.vaults.first { $0.id == s.id })
+        guard case .signed(let signer) = family.trust else { return XCTFail("\(family.trust)") }
+        XCTAssertEqual(signer.email, "alice@example.com")
+        XCTAssertEqual(signer.fingerprint, alice.signing.fingerprint())
+        XCTAssertEqual(signer.pin, .new)
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name).sorted(), ["Bank", "Mine"])
+        XCTAssertEqual(repo.loginsFor("https://bank-site.com").count, 1)
+        XCTAssertEqual(requests("GET", "/api/vaults/\(s.id)/rosters").first?.query, "after=0")
+        XCTAssertEqual(memory.load("acc").rosters[s.id], s.roster)
+        XCTAssertEqual(memory.load("acc").signed, [s.id])
+        XCTAssertEqual(repo.knownPeople.map(\.email), ["alice@example.com"])
+        let written = try writtenPins(bob)
+        XCTAssertEqual(written["pins"]?.array.map { $0.str("user_id") }, [alice.id])
+        XCTAssertNotNil(written["epochs"]?[s.id]?["signed_since"]?.number)
+
+        // The next sync brings a share that doesn't verify: the vault and its items go from
+        // everything (list, AutoFill, save targets) and the app says why.
+        try await repo.sync()
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == s.id })
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
+        XCTAssertEqual(repo.vault?.refused, [RefusedVault(id: s.id, name: "Family", reason: .unverified)])
+        XCTAssertEqual(repo.loginsFor("https://bank-site.com").count, 0)
+        let ownId = own.row["id"] as? String ?? ""
+        XCTAssertEqual(repo.vault?.writable.map(\.id) ?? [], [ownId])
+        XCTAssertEqual(requests("GET", "/api/vaults/\(s.id)/rosters").count, 1, "the remembered roster is the server's: nothing fetched")
+    }
+
+    func testInvitationsNeedASignatureAndWritePinsOnAcceptAndATombstoneOnDecline() async throws {
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        let meta = try s.key.encryptMeta(vaultId: s.id, metaJson: #"{"name":"Family"}"#)
+        let by: [String: Any] = ["id": alice.id, "email": alice.email, "name": "Alice", "public_key": alice.account.publicKey()]
+        let signed: [String: Any] = ["vault_id": s.id, "role": "write", "wrapped_key": s.sealedForBob, "meta": meta, "invited_by": by,
+                                     "invited_at": 1_700_000_000, "key_epoch": 0, "share": shareJSON(s.signature, by: alice),
+                                     "member_roster": s.roster, "member_roster_seq": 1]
+        let plainId = try newId()
+        let plainKey = try alice.account.newVaultKey(vaultId: plainId).key
+        let unsigned: [String: Any] = ["vault_id": plainId, "role": "read", "wrapped_key": try plainKey.shareTo(vaultId: plainId, recipientPublicKey: bob.account.publicKey()),
+                                       "meta": try plainKey.encryptMeta(vaultId: plainId, metaJson: #"{"name":"Planted"}"#), "invited_by": by,
+                                       "key_epoch": 0, "share": NSNull(), "member_roster": NSNull(), "member_roster_seq": 0]
+        try rosterAnswer(s)
+        let memory = InMemorySharingMemory()
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], invitations: [signed, unsigned])], memory: memory)
+        let list = try XCTUnwrap(repo.vault?.invitations)
+        XCTAssertEqual(list.count, 2)
+        guard case .signed(let signer)? = list[0].trust else { return XCTFail("\(String(describing: list[0].trust))") }
+        XCTAssertEqual(signer.fingerprint, alice.signing.fingerprint())
+        XCTAssertTrue(list[0].canAccept)
+        XCTAssertEqual(list[1].trust, .unsigned)
+        XCTAssertFalse(list[1].canAccept)
+        XCTAssertTrue(repo.knownPeople.isEmpty, "the signer isn't pinned before the user accepts")
+        do {
+            try await repo.acceptInvitation(try shownInvitation(repo, plainId))
+            XCTFail("an unsigned invitation was accepted")
+        } catch {
+            XCTAssertEqual(errorMessage(error), InvitationText.cantAcceptUnverified)
+        }
+        XCTAssertTrue(requests("POST", "/api/vaults/\(plainId)/invitation/accept").isEmpty)
+        // Accepting the signed one pins its signer and the vault's epoch, and remembers its roster.
+        try await repo.acceptInvitation(try shownInvitation(repo, s.id))
+        XCTAssertEqual(requests("POST", "/api/vaults/\(s.id)/invitation/accept").count, 1)
+        XCTAssertEqual(memory.load("acc").rosters[s.id], s.roster)
+        var pins = try writtenPins(bob)
+        XCTAssertEqual(pins["pins"]?.array.map { $0.str("user_id") }, [alice.id])
+        XCTAssertNotNil(pins["epochs"]?[s.id])
+        // Declining the other one tombstones it (review L3).
+        try await repo.declineInvitation(plainId)
+        XCTAssertEqual(requests("DELETE", "/api/vaults/\(plainId)/invitation").count, 1)
+        pins = try writtenPins(bob)
+        XCTAssertNotNil(pins["left"]?[plainId])
+    }
+
+    func testDecliningAVaultTheServerAddedLeavesIt() async throws {
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        try rosterAnswer(s, times: 3)
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
+                                                     items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 1)],
+                                  memory: try memory(bob, pins: pins))
+        XCTAssertEqual(repo.vault?.invitations.first?.consent, .added)
+        try await repo.declineInvitation(s.id)
+        XCTAssertNotNil(try writtenPins(bob)["left"]?[s.id])
+        XCTAssertEqual(requests("DELETE", "/api/vaults/\(s.id)/members/\(bob.id)").count, 1)
+        XCTAssertTrue(requests("DELETE", "/api/vaults/\(s.id)/invitation").isEmpty)
+        // Served again: refused (left), never back as a consent.
+        XCTAssertTrue(repo.vault?.invitations.isEmpty ?? false)
+        XCTAssertEqual(repo.vault?.refused.map(\.reason), [.admission("left")])
+    }
+
+    /// An unsigned share of Alice's vault to Bob (an app from before) at `epoch` with `key`.
+    private func unsignedRow(_ id: String, key: VaultKey, to bob: Person, epoch: Int) throws -> [String: Any] {
+        ["id": id, "wrapped_key": try key.shareTo(vaultId: id, recipientPublicKey: bob.account.publicKey()), "key_kind": "sealed", "role": "read",
+         "key_epoch": epoch, "seq": 1, "meta": try key.encryptMeta(vaultId: id, metaJson: #"{"name":"Old"}"#), "share": NSNull(),
+         "member_roster": NSNull(), "member_roster_seq": 0]
+    }
+
+    func testAnUnsignedKeyReplacementOfAnAcceptedVaultAsksFirst() async throws {
+        // Round 3 M2: the server can't swap in a key of its own on a vault never seen signed.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let first = try alice.account.newVaultKey(vaultId: vid).key
+        let second = try alice.account.newVaultKey(vaultId: vid).key
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [vid], createdIdentity: true)
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: vid, currentJson: try first.epochPinJson(vaultId: vid, keyEpoch: 0), rosterVersion: nil)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try unsignedRow(vid, key: second, to: bob, epoch: 1)],
+                                                     items: [own.item, try item("Old", second, vault: vid, id: try newId())], pinsSeq: 1)],
+                                  memory: try memory(bob, pins: pins))
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid }, "the replaced key isn't used before the user says so")
+        let consent = try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == vid })
+        XCTAssertEqual(consent.consent, .replaced)
+        XCTAssertTrue(consent.canAccept)
+        // "Not now" keeps it locked: nothing written, nothing asked of the server.
+        let writes = requests("PUT", "/api/account/key-pins").count
+        try await repo.declineInvitation(vid)
+        XCTAssertEqual(requests("PUT", "/api/account/key-pins").count, writes)
+        XCTAssertTrue(requests("DELETE", "/api/vaults/\(vid)/members/\(bob.id)").isEmpty)
+        // Accepting pins the new key; then it is used, still "Not yet signed".
+        try await repo.acceptInvitation(try shownInvitation(repo, vid))
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
+    }
+
+    func testMissingTrustMemoryAsksForEverySharedVault() async throws {
+        // Round 3 M3: the account has an identity but the server returns no key pins.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let key = try alice.account.newVaultKey(vaultId: vid).key
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
+                                                     items: [own.item])])
+        XCTAssertEqual(repo.sharingNotice, SharingText.trustMemoryMissing)
+        let written = try writtenPins(bob)
+        XCTAssertEqual(written["grandfathered"]?.array.count, 0, "nothing grandfathered")
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
+        let consent = try XCTUnwrap(repo.vault?.invitations.first { $0.vaultId == vid })
+        XCTAssertEqual(consent.trust, .unsigned)
+        XCTAssertTrue(consent.canAccept, "unsigned vaults can be accepted in this state")
+        try await repo.acceptInvitation(try shownInvitation(repo, vid))
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
+    }
+
+
+    // MARK: Final review fixes (M-A, M-B, L-A…L-F)
+
+    /// A signed invitation of `s` (or of another key `key` for the same vault) to Bob.
+    private func signedInvitation(_ s: Shared, by alice: Person, sealed: String? = nil, signature: String? = nil, roster: String? = nil,
+                                  key: VaultKey? = nil) throws -> [String: Any] {
+        let by: [String: Any] = ["id": alice.id, "email": alice.email, "name": "Alice", "public_key": alice.account.publicKey()]
+        return ["vault_id": s.id, "role": "write", "wrapped_key": sealed ?? s.sealedForBob,
+                "meta": try (key ?? s.key).encryptMeta(vaultId: s.id, metaJson: #"{"name":"Family"}"#), "invited_by": by,
+                "invited_at": 1_700_000_000, "key_epoch": 0, "share": shareJSON(signature ?? s.signature, by: alice),
+                "member_roster": roster ?? s.roster, "member_roster_seq": 1]
+    }
+
+    func testAcceptingIsBoundToTheInvitationAsShown() async throws {
+        // M-A: the user saw invitation A; the server then lists B (another key and member list for
+        // the same vault). Accepting A accepts nothing, and nothing is asked of the server.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        let keyB = try alice.account.newVaultKey(vaultId: s.id).key
+        let shareB = try alice.signing.sealAndSignShare(vaultKey: keyB, vaultId: s.id, recipientJson: bob.pub, role: "write", keyEpoch: 0)
+        let rosterB = try SignedSharingTests.signRoster(alice.signing, key: keyB, vault: s.id, previous: nil, epoch: 0,
+                                                        members: [member(alice, "owner"), member(bob, "write")])
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/rosters", 200, try text(["rosters": [s.roster], "latest": 1, "more": false]))
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/rosters", 200, try text(["rosters": [rosterB], "latest": 1, "more": false]))
+        let a = try syncBody(bob, vaults: [own.row], items: [own.item], invitations: [try signedInvitation(s, by: alice)])
+        let b = try syncBody(bob, vaults: [own.row], items: [own.item],
+                             invitations: [try signedInvitation(s, by: alice, sealed: shareB.sealedKey, signature: shareB.signature, roster: rosterB, key: keyB)])
+        let repo = try await repo(bob, [a, b])
+        let shownA = try shownInvitation(repo, s.id)
+        XCTAssertTrue(shownA.canAccept)
+        try await repo.sync()
+        let current = try shownInvitation(repo, s.id)
+        XCTAssertTrue(current.canAccept)
+        XCTAssertFalse(Invitation.sameDecision(shownA, current))
+        let pinWrites = requests("PUT", "/api/account/key-pins").count
+        do {
+            try await repo.acceptInvitation(shownA)
+            XCTFail("an invitation other than the one shown was accepted")
+        } catch {
+            XCTAssertEqual(errorMessage(error), InvitationText.changed)
+        }
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/invitation/accept").isEmpty, "nothing asked of the server")
+        XCTAssertEqual(requests("PUT", "/api/account/key-pins").count, pinWrites, "nothing pinned")
+        // The invitation as it is shown now can be accepted.
+        XCTAssertTrue(Invitation.sameDecision(current, try shownInvitation(repo, s.id)))
+        try await repo.acceptInvitation(current)
+        XCTAssertEqual(requests("POST", "/api/vaults/\(s.id)/invitation/accept").count, 1)
+    }
+
+    func testAFreshDeviceGrandfathersNothingAndAsksForEachUnsignedVault() async throws {
+        // Rule 1: no offline copy from an earlier session (a fresh install): a server answering
+        // `created: true` gets a consent prompt, never a silently used vault.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let key = try alice.account.newVaultKey(vaultId: vid).key
+        ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true,"created":true}"#)
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
+                                                     items: [own.item])])
+        XCTAssertEqual(try writtenPins(bob)["grandfathered"]?.array.count, 0, "nothing grandfathered")
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
+        XCTAssertEqual(repo.sharingNotice, SharingText.newDevice)
+        let consent = try shownInvitation(repo, vid)
+        XCTAssertEqual(consent.trust, .unsigned)
+        XCTAssertTrue(consent.canAccept, "accepted by the key shown")
+        XCTAssertTrue(consent.declineHidden, "a server can't push the user into leaving it")
+        try await repo.declineInvitation(vid)
+        XCTAssertTrue(requests("DELETE", "/api/vaults/\(vid)/members/\(bob.id)").isEmpty)
+        try await repo.acceptInvitation(consent)
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
+        XCTAssertNotEqual(repo.sharingNotice, SharingText.newDevice, "nothing waits any more")
+    }
+
+    func testAnUploadAnswerWithoutCreatedGrandfathersOnlyOnceTheListedIdentityIsTheKeptOne() async throws {
+        // M-B / L-A: `created` missing is not `true`: nothing grandfathered then. The identity's
+        // hash was kept before the upload; the next sync lists a record that opens to it: made here.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let key = try alice.account.newVaultKey(vaultId: vid).key
+        let row = try unsignedRow(vid, key: key, to: bob, epoch: 0)
+        ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true}"#)
+        let memory = InMemorySharingMemory()
+        let body = try syncBody(bob, identity: false, vaults: [own.row, row], items: [own.item])
+        let repo = try await repo(bob, [body], memory: memory, earlier: body)
+        let put = try XCTUnwrap(requests("PUT", "/api/account/identity").first)
+        for write in requests("PUT", "/api/account/key-pins") {
+            let pins = try bob.account.openKeyPins(sealed: write.body["key_pins"] as? String ?? "", seq: UInt64(write.body["seq"] as? Int ?? 0))
+            XCTAssertNil(KeyPinsReader.field(pins, "grandfathered"), "nothing grandfathered")
+            XCTAssertNil(KeyPinsReader.field(pins, "own_identity"), "no identity remembered")
+        }
+        let kept = try XCTUnwrap(memory.load("acc").pendingIdentity)
+        XCTAssertEqual(try bob.account.openSigningIdentity(recordJson: try text(put.body)).identityHash(), kept)
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
+        let seq = Int64(requests("PUT", "/api/account/key-pins").last?.body["seq"] as? Int ?? 0)
+        ScriptedServer.syncBodies = [try syncBody(bob, identityRecord: put.body, vaults: [own.row, row], items: [own.item], pinsSeq: seq)]
+        try await repo.sync()
+        XCTAssertEqual(requests("PUT", "/api/account/identity").count, 1, "the same identity, uploaded once")
+        XCTAssertTrue(try writtenPins(bob)["grandfathered"]?.array.compactMap(\.string).contains(vid) ?? false)
+        XCTAssertEqual(repo.vault?.vaults.first { $0.id == vid }?.trust, .notYetSigned)
+        XCTAssertNil(repo.sharingNotice)
+    }
+
+    func testAnUploadTriedAgainSendsTheIdentityKeptBefore() async throws {
+        // L-A: the first upload's answer was lost (a network error); the next unlock sends the same record.
+        let bob = try person("bob@example.com")
+        let own = try personal(bob)
+        let memory = InMemorySharingMemory()
+        ScriptedServer.answer("PUT /api/account/identity", 502, #"{"error":"bad_gateway","message":"x"}"#)
+        _ = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row], items: [own.item])], memory: memory)
+        let first = try XCTUnwrap(requests("PUT", "/api/account/identity").first)
+        ScriptedServer.answer("PUT /api/account/identity", 200, #"{"ok":true,"created":true}"#)
+        let again = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row], items: [own.item])], memory: memory)
+        try await again.sync()
+        let puts = requests("PUT", "/api/account/identity")
+        XCTAssertEqual(puts.count, 2)
+        XCTAssertEqual(puts[1].body["signing_key"] as? String, first.body["signing_key"] as? String)
+        XCTAssertNotNil(again.ownIdentityFingerprint)
+    }
+
+    func testAnIdentityAnotherDeviceMadeMeanwhileGrandfathersNothingThatSync() async throws {
+        // Rule 3: on 409 `identity_exists` the stored identity is opened; grandfathering waits.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let key = try alice.account.newVaultKey(vaultId: vid).key
+        let row = try unsignedRow(vid, key: key, to: bob, epoch: 0)
+        ScriptedServer.answer("PUT /api/account/identity", 409, #"{"error":"identity_exists","message":"x"}"#)
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, row], items: [own.item]),
+                                        try syncBody(bob, vaults: [own.row, row], items: [own.item])])
+        XCTAssertNotNil(repo.ownIdentityFingerprint, "the stored identity is used")
+        for put in requests("PUT", "/api/account/key-pins") {
+            let pins = try JSON.parse(try bob.account.openKeyPins(sealed: put.body["key_pins"] as? String ?? "", seq: UInt64(put.body["seq"] as? Int ?? 0)))
+            XCTAssertNil(KeyPinsReader.field(pins.text, "grandfathered"), "nothing grandfathered on that sync")
+        }
+        XCTAssertNotEqual(repo.sharingNotice, SharingText.trustMemoryMissing)
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid })
+    }
+
+    func testUnknownServerFeaturesRunTheChecksButKeepNothing() async throws {
+        // Rule 4: the server's config was never read: the checks run, nothing that keeps them on
+        // for good is stored (no memory, no key pins, no identity).
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let vid = try newId()
+        let key = try alice.account.newVaultKey(vaultId: vid).key
+        let memory = InMemorySharingMemory()
+        let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
+                                                     items: [own.item])], memory: memory, features: nil, config: false)
+        XCTAssertNil(repo.vault?.vaults.first { $0.id == vid }, "checked")
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
+        XCTAssertTrue(memory.load("acc").isEmpty, "nothing kept")
+        XCTAssertTrue(requests("PUT", "/api/account/key-pins").isEmpty)
+        XCTAssertTrue(requests("PUT", "/api/account/identity").isEmpty)
+        XCTAssertFalse(repo.signedSharingOn("acc"), "not sticky")
+    }
+
+    func testANewerListOfKnownKeysTheServerWithholdsKeepsTheDevicesOwn() async throws {
+        // L-B: the server lists version 3 but sends none: like a rollback.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
+        ScriptedServer.answer("GET /api/account/key-pins", 200, #"{"key_pins":null,"seq":3}"#)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
+                                                     items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 3)],
+                                  memory: memory)
+        XCTAssertEqual(repo.sharingNotice, SharingText.pinsWithheld)
+        XCTAssertNotNil(repo.vault?.vaults.first { $0.id == s.id }, "the device's own list is used")
+        XCTAssertEqual(memory.load("acc").serverBase, 1, "still on the version this device opened")
+        XCTAssertTrue(requests("PUT", "/api/account/key-pins").isEmpty, "nothing written over a version it can't see")
+    }
+
+    func testADeviceWithoutItsOwnListWaitsForTheServersOne() async throws {
+        // L-B: no list on the device, the server lists one but doesn't give it: shared vaults wait.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        ScriptedServer.answer("GET /api/account/key-pins", 200, #"{"key_pins":null,"seq":2}"#)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
+                                                     items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 2)])
+        XCTAssertEqual(repo.vault?.refused.map(\.reason), [.admission("pins_unavailable")])
+        XCTAssertEqual(repo.sharingNotice, SharingText.pinsUnavailable)
+        XCTAssertTrue(repo.vault?.invitations.isEmpty ?? false, "not a consent either")
+        XCTAssertTrue(requests("PUT", "/api/account/key-pins").isEmpty, "nothing grandfathered or written")
+    }
+
+    func testAMemoryTheKeychainCantReadIsNeitherEmptyNorOverwritten() async throws {
+        // L-C: a failed read is "unknown": shared vaults refused, nothing grandfathered or written.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let own = try personal(bob)
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        pins = try pinsSetEpoch(pinsJson: pins, vaultId: s.id, currentJson: try s.key.epochPinJson(vaultId: s.id, keyEpoch: 0), rosterVersion: 1)
+        let memory = try memory(bob, pins: pins, rosters: [s.id: s.roster])
+        memory.failReads = true
+        let body = try syncBody(bob, vaults: [own.row, try bobRow(s, by: alice)],
+                                items: [own.item, try item("Bank", s.key, vault: s.id, id: s.itemId)], pinsSeq: 1)
+        let repo = try await repo(bob, [body], memory: memory)
+        XCTAssertEqual(repo.vault?.refused.map(\.reason), [.admission("memory_unreadable")])
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
+        XCTAssertEqual(repo.sharingNotice, SharingText.memoryUnreadable)
+        XCTAssertTrue(requests("PUT", "/api/account/key-pins").isEmpty)
+        XCTAssertTrue(requests("PUT", "/api/account/identity").isEmpty)
+        XCTAssertTrue(repo.hasSignedHistory(s.id), "unknown counts as signed")
+        memory.failReads = false
+        let kept = memory.load("acc")
+        XCTAssertEqual(kept.pinsSeq, 1)
+        XCTAssertEqual(kept.rosters[s.id], s.roster, "nothing written over it")
+        try await repo.sync()
+        XCTAssertNotNil(repo.vault?.vaults.first { $0.id == s.id }, "readable again: used")
+    }
+
+    func testUnsentKeyPinsOfTheOtherProcessAreMergedNotLost() throws {
+        // L-D: the AutoFill extension kept an unsent change (Alice pinned); the app then wrote the
+        // server's next version (Carol pinned). Saving merges both instead of dropping one.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let carol = try person("carol@example.com")
+        let now: Int64 = 1_700_000_000
+        let withAlice = try pinSet(pinsJson: nil, identityJson: alice.pub, email: alice.email, verified: false, now: now)
+        let withCarol = try pinSet(pinsJson: nil, identityJson: carol.pub, email: carol.email, verified: false, now: now)
+        let memory = InMemorySharingMemory()
+        var theirs = SharingMemoryRecord()
+        theirs.pinsSeq = 2
+        theirs.sealedPins = try bob.account.sealKeyPins(pinsJson: withAlice, seq: 2)
+        theirs.uploaded = false
+        memory.put("acc", theirs)
+        var ours = SharingMemoryRecord()
+        ours.pinsSeq = 2
+        ours.sealedPins = try bob.account.sealKeyPins(pinsJson: withCarol, seq: 2)
+        ours.uploaded = true
+        XCTAssertTrue(memory.save("acc", ours, resolve: VaultRepository.pinsResolver(bob.account)))
+        let stored = memory.load("acc")
+        XCTAssertFalse(stored.uploaded, "the merge still has to reach the server")
+        XCTAssertEqual(stored.pinsSeq, 3)
+        let opened = try JSON.parse(try bob.account.openKeyPins(sealed: try XCTUnwrap(stored.sealedPins), seq: 3))
+        XCTAssertEqual(Set(opened["pins"]?.array.map { $0.str("user_id") } ?? []), [alice.id, carol.id])
+        // Both unsent: merged too.
+        var mine = SharingMemoryRecord()
+        mine.pinsSeq = 2
+        mine.sealedPins = try bob.account.sealKeyPins(pinsJson: withAlice, seq: 2)
+        mine.uploaded = false
+        let other = InMemorySharingMemory()
+        var theirs2 = SharingMemoryRecord()
+        theirs2.pinsSeq = 2
+        theirs2.sealedPins = try bob.account.sealKeyPins(pinsJson: withCarol, seq: 2)
+        theirs2.uploaded = false
+        other.put("acc", theirs2)
+        other.save("acc", mine, resolve: VaultRepository.pinsResolver(bob.account))
+        let both = other.load("acc")
+        let opened2 = try JSON.parse(try bob.account.openKeyPins(sealed: try XCTUnwrap(both.sealedPins), seq: UInt64(both.pinsSeq)))
+        XCTAssertEqual(Set(opened2["pins"]?.array.map { $0.str("user_id") } ?? []), [alice.id, carol.id])
+        XCTAssertFalse(both.uploaded)
+    }
+
+    func testATombstoneWhoseWriteFailedIsWrittenAtTheNextSync() async throws {
+        // Info: the server took the decline but the key pins couldn't be kept: retried.
+        let bob = try person("bob@example.com")
+        let alice = try person("alice@example.com")
+        let own = try personal(bob)
+        let plainId = try newId()
+        let plainKey = try alice.account.newVaultKey(vaultId: plainId).key
+        let by: [String: Any] = ["id": alice.id, "email": alice.email, "name": "Alice", "public_key": alice.account.publicKey()]
+        let unsigned: [String: Any] = ["vault_id": plainId, "role": "read", "wrapped_key": try plainKey.shareTo(vaultId: plainId, recipientPublicKey: bob.account.publicKey()),
+                                       "meta": try plainKey.encryptMeta(vaultId: plainId, metaJson: #"{"name":"Planted"}"#), "invited_by": by,
+                                       "key_epoch": 0, "share": NSNull(), "member_roster": NSNull(), "member_roster_seq": 0]
+        var pins = try pinsSetOwnIdentity(pinsJson: nil, hash: bob.signing.identityHash())
+        pins = try pinsGrandfather(pinsJson: pins, vaultIds: [], createdIdentity: true)
+        let memory = try memory(bob, pins: pins)
+        let repo = try await repo(bob, [try syncBody(bob, vaults: [own.row], items: [own.item], invitations: [unsigned], pinsSeq: 1)], memory: memory)
+        memory.failReads = true
+        let writes = requests("PUT", "/api/account/key-pins").count
+        try await repo.declineInvitation(plainId)
+        XCTAssertEqual(requests("DELETE", "/api/vaults/\(plainId)/invitation").count, 1)
+        XCTAssertEqual(requests("PUT", "/api/account/key-pins").count, writes)
+        XCTAssertNil(try? writtenPins(bob)["left"]?[plainId])
+        memory.failReads = false
+        try await repo.sync()
+        XCTAssertNotNil(try writtenPins(bob)["left"]?[plainId], "the tombstone is written now")
+    }
+
+    // MARK: Key replacement
+
+    /// Alice (the app's account) owns a vault shared with Bob, with roster v1 the device trusts.
+    private func ownerWorld() async throws -> (alice: Person, bob: Person, s: Shared, repo: VaultRepository, memory: InMemorySharingMemory) {
+        let alice = try person("alice@example.com")
+        let bob = try person("bob@example.com")
+        let s = try shared(owner: alice, member: bob)
+        let row: [String: Any] = ["id": s.id, "wrapped_key": s.wrappedForOwner, "key_kind": "account", "role": "owner", "key_epoch": 0, "seq": 1,
+                                  "rotation_pending": 1, "meta": try s.key.encryptMeta(vaultId: s.id, metaJson: #"{"name":"Family"}"#),
+                                  "share": NSNull(), "member_roster": s.roster, "member_roster_seq": 1]
+        let memory = InMemorySharingMemory()
+        var m = SharingMemoryRecord()
+        m.rosters[s.id] = s.roster
+        memory.put("acc", m)
+        let repo = try await repo(alice, [try syncBody(alice, vaults: [row], items: [try item("Bank", s.key, vault: s.id, id: s.itemId, revision: 9)])],
+                                  memory: memory)
+        XCTAssertEqual(repo.vault?.vaults.first?.trust, .own)
+        return (alice, bob, s, repo, memory)
+    }
+
+    private func membersAnswer(_ rows: [[String: Any]], _ s: Shared?, seq: Int = 1, epoch: Int = 0) throws -> String {
+        try text(["members": rows, "key_epoch": epoch, "member_roster": s.map { $0.roster as Any } ?? NSNull(), "member_roster_seq": s == nil ? 0 : seq])
+    }
+
+    func testReplacingASharedVaultsKeySealsAndSignsForEveryMember() async throws {
+        let (alice, bob, s, repo, memory) = try await ownerWorld()
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), bob.row("write", kind: "sealed")], s))
+        let done = try await repo.rotateVaultKeys([s.id])
+        XCTAssertEqual(done.rotated, [s.id])
+        XCTAssertTrue(done.shared.isEmpty)
+        let post = try XCTUnwrap(requests("POST", "/api/vaults/\(s.id)/rotate").first)
+        XCTAssertEqual(post.body["key_epoch"] as? Int, 0)
+        let keys = try XCTUnwrap(post.body["keys"] as? [[String: Any]])
+        XCTAssertEqual(Set(keys.compactMap { $0["user_id"] as? String }), [alice.id, bob.id])
+        let mine = try XCTUnwrap(keys.first { $0["user_id"] as? String == alice.id })
+        XCTAssertEqual(mine["key_kind"] as? String, "account")
+        XCTAssertNil(mine["signature"])
+        let his = try XCTUnwrap(keys.first { $0["user_id"] as? String == bob.id })
+        let sealed = try XCTUnwrap(his["wrapped_key"] as? String)
+        // Bob's app: the new key opens, the share verifies at the new epoch, the roster follows v1
+        // and commits to the key.
+        _ = try verifyShare(vaultId: s.id, recipientJson: bob.pub, role: "write", keyEpoch: 1, sealedKey: sealed, signerJson: alice.pub,
+                            signature: his["signature"] as? String ?? "")
+        let newKey = try bob.account.openVaultKey(vaultId: s.id, wrapped: sealed, kind: "sealed", keyEpoch: 1, legacyAllowed: false)
+        let roster = try XCTUnwrap(post.body["roster"] as? String)
+        XCTAssertEqual(try verifyRosterChain(vaultId: s.id, trusted: s.roster, newer: [roster], latest: roster), roster)
+        XCTAssertTrue(try newKey.matchesRoster(vaultId: s.id, rosterJson: roster))
+        XCTAssertEqual(try rosterMemberRole(rosterJson: roster, identityJson: bob.pub), "write")
+        XCTAssertEqual(SignedSharing.rosterVersion(roster), 2)
+        let items = try XCTUnwrap(post.body["items"] as? [[String: Any]])
+        XCTAssertEqual(items.map { ($0["revision"] as? NSNumber)?.int64Value }, [9])
+        XCTAssertNoThrow(try newKey.decryptItem(encrypted: EncryptedItem(id: s.itemId, vaultId: s.id, key: items[0]["key"] as? String ?? "",
+                                                                         data: items[0]["data"] as? String ?? "")))
+        XCTAssertEqual(memory.load("acc").rosters[s.id], roster)
+        XCTAssertTrue(repo.knownPeople.contains { $0.email == "bob@example.com" })
+    }
+
+    func testMembersTheSignedRosterDoesntKnowStopTheReplacement() async throws {
+        let (alice, bob, s, repo, _) = try await ownerWorld()
+        let carol = try person("carol@example.com")
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200,
+                              try membersAnswer([alice.row("owner", kind: "account"), bob.row("write", kind: "sealed"), carol.row("admin", kind: "sealed")], s))
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("the key was replaced for a member the roster doesn't list")
+        } catch {
+            XCTAssertEqual(errorMessage(error), SharingText.membersDiffer(["carol@example.com"]))
+        }
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), bob.row("admin", kind: "sealed")], s))
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("expected a stop")
+        } catch {
+            XCTAssertEqual(errorMessage(error), SharingText.membersDiffer(["bob@example.com"]))
+        }
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/rotate").isEmpty)
+    }
+
+    func testPeopleWhoLeftAreDroppedOnlyAfterTheUserConfirmsThemByUserId() async throws {
+        // Review L2: the confirmation covers user ids, not the vault.
+        let (alice, bob, s, repo, _) = try await ownerWorld()
+        for _ in 0..<3 {
+            ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account")], s))
+        }
+        let first = try await repo.rotateVaultKeys([s.id])
+        XCTAssertEqual(first.confirm.map(\.userIds), [[bob.id]])
+        XCTAssertEqual(first.confirm.first?.people, [SharingText.unknownMember])
+        XCTAssertTrue(first.rotated.isEmpty)
+        // Confirming someone else (or the vault as a whole) doesn't drop Bob.
+        let wrong = try await repo.rotateVaultKeys([s.id], confirmed: [s.id: [alice.id]])
+        XCTAssertEqual(wrong.confirm.count, 1)
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/rotate").isEmpty)
+        let second = try await repo.rotateVaultKeys([s.id], confirmed: first.confirmedIds)
+        XCTAssertEqual(second.rotated, [s.id])
+        let post = try XCTUnwrap(requests("POST", "/api/vaults/\(s.id)/rotate").first)
+        XCTAssertEqual((post.body["keys"] as? [[String: Any]])?.count, 1)
+        let roster = try XCTUnwrap(post.body["roster"] as? String)
+        XCTAssertEqual(SignedSharing.rosterMembers(roster), [alice.id])
+        XCTAssertEqual(try verifyRosterChain(vaultId: s.id, trusted: s.roster, newer: [roster], latest: roster), roster)
+    }
+
+    func testTheServerRefusingTheMembersIsRetriedOnceThenNamed() async throws {
+        let (alice, bob, s, repo, _) = try await ownerWorld()
+        let carol = try person("carol@example.com")
+        for _ in 0..<2 {
+            ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), bob.row("write", kind: "sealed")], s))
+            ScriptedServer.answer("POST /api/vaults/\(s.id)/rotate", 409,
+                                  try text(["error": "members_changed", "message": "x", "key_epoch": 0, "unknown": [carol.id], "identity_changed": [],
+                                            "role_changed": [], "missing": []]))
+        }
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("expected members_changed")
+        } catch {
+            XCTAssertEqual(errorMessage(error), SharingText.membersDiffer([SharingText.unknownMember]))
+        }
+        XCTAssertEqual(requests("POST", "/api/vaults/\(s.id)/rotate").count, 2)
+        // A member the server names: their pinned email first, not the one the server lists now.
+        try await repo.updatePins("acc", try XCTUnwrap(repo.sessions["acc"])) { p in
+            try pinSet(pinsJson: p, identityJson: bob.pub, email: "bob@example.com", verified: false, now: 1)
+        }
+        var renamed = bob.row("write", kind: "sealed")
+        renamed["email"] = "bob@elsewhere.example"
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), renamed], s))
+        ScriptedServer.answer("POST /api/vaults/\(s.id)/rotate", 409,
+                              try text(["error": "members_changed", "message": "x", "key_epoch": 0, "unknown": [], "identity_changed": [bob.id],
+                                        "role_changed": [], "missing": []]))
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), renamed], s))
+        ScriptedServer.answer("POST /api/vaults/\(s.id)/rotate", 409,
+                              try text(["error": "members_changed", "message": "x", "key_epoch": 0, "unknown": [], "identity_changed": [bob.id],
+                                        "role_changed": [], "missing": []]))
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("expected members_changed")
+        } catch {
+            XCTAssertEqual(errorMessage(error), SharingText.membersDiffer(["bob@example.com"]))
+        }
+    }
+
+    func testAMembersAnswerForAnotherStateThanTheVerifiedOneStops() async throws {
+        // Review L1: the version and base epoch come from the verified state, not the server's numbers.
+        let (alice, bob, s, repo, _) = try await ownerWorld()
+        for _ in 0..<2 {
+            ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200,
+                                  try membersAnswer([alice.row("owner", kind: "account"), bob.row("write", kind: "sealed")], s, seq: 4))
+        }
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("rotated on the server's roster number")
+        } catch {}
+        for _ in 0..<2 {
+            ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200,
+                                  try membersAnswer([alice.row("owner", kind: "account"), bob.row("write", kind: "sealed")], s, epoch: 3))
+        }
+        do {
+            try await repo.rotateVaultKeys([s.id])
+            XCTFail("rotated on the server's key epoch")
+        } catch {}
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/rotate").isEmpty)
+    }
+
+    /// Alice's vault without a signed roster that the server says Mallory is a member of.
+    private func unsignedOwnerWorld() async throws -> (alice: Person, mallory: Person, vaultId: String, repo: VaultRepository) {
+        let alice = try person("alice@example.com")
+        let mallory = try person("mallory@example.com")
+        let own = try personal(alice)
+        var row = own.row
+        row["rotation_pending"] = 1
+        let repo = try await repo(alice, [try syncBody(alice, vaults: [row], items: [own.item])])
+        return (alice, mallory, row["id"] as? String ?? "", repo)
+    }
+
+    func testAVaultWithoutASignedRosterIsNeverSealedToMembersNobodyReviewed() async throws {
+        // Review C1 / H4: no trusted roster, and the server lists an extra member.
+        let (alice, mallory, vid, repo) = try await unsignedOwnerWorld()
+        let rows = [alice.row("owner", kind: "account"), mallory.row("write", kind: "sealed")]
+        for _ in 0..<2 { ScriptedServer.answer("GET /api/vaults/\(vid)/members", 200, try membersAnswer(rows, nil)) }
+        let done = try await repo.rotateVaultKeys([vid])
+        XCTAssertTrue(done.rotated.isEmpty)
+        let review = try XCTUnwrap(done.review.first)
+        XCTAssertTrue(review.review.first)
+        XCTAssertEqual(review.review.members.map(\.userId).sorted(), [alice.id, mallory.id].sorted())
+        let shown = try XCTUnwrap(review.review.members.first { $0.userId == mallory.id })
+        XCTAssertEqual(shown.pin, "new")
+        XCTAssertEqual(shown.fingerprint, mallory.signing.fingerprint())
+        XCTAssertEqual(shown.shownEmail, "mallory@example.com")
+        XCTAssertTrue(requests("POST", "/api/vaults/\(vid)/rotate").isEmpty, "nothing sealed without the review")
+        // Emergency access (personal only): the same answer shows a shared vault: left alone.
+        let personal = try await repo.rotateVaultKeys([vid], personalOnly: true)
+        XCTAssertEqual(personal.shared.map(\.id), [vid])
+        XCTAssertTrue(requests("POST", "/api/vaults/\(vid)/rotate").isEmpty)
+        // The server adds Eve after the review: the confirmed digest no longer matches, shown again.
+        let eve = try person("eve@example.com")
+        ScriptedServer.answer("GET /api/vaults/\(vid)/members", 200, try membersAnswer(rows + [eve.row("read", kind: "sealed")], nil))
+        let stale = try await repo.rotateVaultKeys([vid], reviewed: [vid: review.review.digest])
+        XCTAssertEqual(stale.review.first?.review.members.count, 3)
+        XCTAssertTrue(requests("POST", "/api/vaults/\(vid)/rotate").isEmpty)
+        // The members the user confirmed: version 1, sealed and signed for exactly them. The server
+        // now lists another email for Mallory: she is pinned with the one the review showed (L-F).
+        var relabelled = mallory.row("write", kind: "sealed")
+        relabelled["email"] = "mallory@evil.example"
+        ScriptedServer.answer("GET /api/vaults/\(vid)/members", 200, try membersAnswer([alice.row("owner", kind: "account"), relabelled], nil))
+        let confirmed = try await repo.rotateVaultKeys([vid], reviewed: [vid: review.review.digest])
+        XCTAssertEqual(confirmed.rotated, [vid])
+        let post = try XCTUnwrap(requests("POST", "/api/vaults/\(vid)/rotate").first)
+        let roster = try XCTUnwrap(post.body["roster"] as? String)
+        XCTAssertEqual(SignedSharing.rosterVersion(roster), 1)
+        XCTAssertEqual(try verifyRosterChain(vaultId: vid, trusted: nil, newer: [roster], latest: roster), roster)
+        XCTAssertEqual(Set((post.body["keys"] as? [[String: Any]])?.compactMap { $0["user_id"] as? String } ?? []), [alice.id, mallory.id])
+        XCTAssertEqual(repo.knownPeople.map(\.email), ["mallory@example.com"], "pinned with the email the review showed")
+    }
+
+    func testAVaultOnlyTheUserIsInIsReplacedWithoutARoster() async throws {
+        let (alice, _, vid, repo) = try await unsignedOwnerWorld()
+        ScriptedServer.answer("GET /api/vaults/\(vid)/members", 200, try membersAnswer([alice.row("owner", kind: "account")], nil))
+        let done = try await repo.rotateVaultKeys([vid], personalOnly: true)
+        XCTAssertEqual(done.rotated, [vid])
+        let post = try XCTUnwrap(requests("POST", "/api/vaults/\(vid)/rotate").first)
+        XCTAssertNil(post.body["roster"], "no automatic version 1")
+        XCTAssertEqual((post.body["keys"] as? [[String: Any]])?.count, 1)
+    }
+
+    func testEmergencyAccessLeavesASignedVaultOnlyTheUserIsIn() async throws {
+        // Review M4: Alice's vault was shared before (a trusted roster listing Bob), Bob left.
+        let (alice, _, s, repo, _) = try await ownerWorld()
+        ScriptedServer.answer("GET /api/vaults/\(s.id)/members", 200, try membersAnswer([alice.row("owner", kind: "account")], s))
+        XCTAssertTrue(repo.hasSignedHistory(s.id))
+        let done = try await repo.rotateVaultKeys([s.id], personalOnly: true)
+        XCTAssertEqual(done.shared.map(\.id), [s.id])
+        XCTAssertTrue(requests("POST", "/api/vaults/\(s.id)/rotate").isEmpty)
+    }
+}

@@ -106,12 +106,50 @@ struct SettingsTab: View {
                         .accessibilityIdentifier("settings.invitations")
                         .paRow()
                     }
+                    // Signed sharing: the shared vaults and who signed them (only while there are any).
+                    if let v = model.repo.vault, v.vaults.contains(where: { !$0.personal }) || !v.refused.isEmpty {
+                        NavigationLink {
+                            SharedVaultsPage()
+                        } label: {
+                            HStack {
+                                Label { Text(SharingText.sharedVaultsTitle).foregroundStyle(Color.paInk) } icon: { Image(systemName: "person.2").foregroundStyle(Color.paAccent) }
+                                if !v.refused.isEmpty {
+                                    Spacer()
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.paDanger)
+                                        .accessibilityLabel("Needs attention")
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("settings.sharedVaults")
+                        .paRow()
+                    }
                     NavigationLink {
                         HealthView()
                     } label: {
                         Label { Text("Password health").foregroundStyle(Color.paInk) } icon: { Image(systemName: "checkmark.shield").foregroundStyle(Color.paAccent) }
                     }
                     .accessibilityIdentifier("settings.health")
+                    .paRow()
+                    NavigationLink {
+                        SendsPage()
+                    } label: {
+                        Label { Text("Send").foregroundStyle(Color.paInk) } icon: { Image(systemName: "paperplane").foregroundStyle(Color.paAccent) }
+                    }
+                    .accessibilityIdentifier("settings.send")
+                    .paRow()
+                    NavigationLink {
+                        EmergencyPage()
+                    } label: {
+                        HStack {
+                            Label { Text("Emergency access").foregroundStyle(Color.paInk) } icon: { Image(systemName: "lifepreserver").foregroundStyle(Color.paAccent) }
+                            if model.repo.emergencyNotice != nil {
+                                Spacer()
+                                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.paDanger)
+                                    .accessibilityLabel("Needs attention")
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("settings.emergency")
                     .paRow()
                 }
                 Section {
@@ -189,6 +227,7 @@ private struct AccountPage: View {
             LabeledContent("Server", value: hostOf(s.server))
         }
         .paRow()
+        SigningIdentitySection()
         Section {
             ForEach(s.accounts) { a in
                 Button {

@@ -41,12 +41,7 @@ public enum LiveSyncProtocol {
             guard let origin = j["origin"]?.string else { return nil }
             return .hello(origin: origin)
         case "sync":
-            let revision: Int64
-            switch j["revision"] {
-            case .int(let n)?: revision = n
-            case .double(let d)?: revision = Int64(d)
-            default: return nil
-            }
+            guard let revision = j["revision"]?.number else { return nil }
             return .sync(revision: revision, vaults: DeltaSync.vaultNumbers(j["vaults"]), origin: j["origin"]?.string)
         case "logout": return .logout
         case "auth_request":

@@ -310,7 +310,11 @@ struct EditView: View {
         if var l = c.login {
             l.urls = l.urls.compactMap { u in
                 let t = u.url.trimmingCharacters(in: .whitespacesAndNewlines)
-                return t.isEmpty ? nil : LoginUrl(url: t, match: u.match)
+                guard !t.isEmpty else { return nil }
+                // The entry itself, so fields a newer app added to it are kept.
+                var kept = u
+                kept.url = t
+                return kept
             }
             let t = l.totp?.trimmingCharacters(in: .whitespacesAndNewlines)
             l.totp = (t?.isEmpty ?? true) ? nil : OtpAuth.normalize(t!)
@@ -341,11 +345,13 @@ struct EditView: View {
                         guard let fresh = model.repo.vault?.get(entry.id) else { throw UserError("This item was deleted on another device.") }
                         base = fresh
                     }
-                    try await model.repo.updateItem(base, clean)
+                    // The editor never changes the file list: the item as last synced keeps its files
+                    // (an overwrite too), as in the web vault.
+                    try await model.repo.updateItem(base, AttachmentList.withAttachments(of: base.item, clean))
                     model.notify("Changes saved.")
                     onSaved(entry.id)
                 } else {
-                    let id = try await model.repo.createItem(clean, vaultId: vaultId, id: newItemId)
+                    let id = try await model.repo.createItem(AttachmentList.set(clean, []), vaultId: vaultId, id: newItemId)
                     model.notify("Item saved.")
                     onSaved(id)
                 }

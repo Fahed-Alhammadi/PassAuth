@@ -150,6 +150,20 @@ targets:
         group: Tests/Shared
       - path: ../../ios/Tests/ErrorTextTests.swift
         group: Tests/Shared
+      # Send, attachments and emergency access logic (ios/Shared, compiled for macOS too).
+      - path: ../../ios/Tests/SendsTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/AttachmentsTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/EmergencyTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/EmergencyClientTests.swift
+        group: Tests/Shared
+      # Signed sharing: the checks this device runs and the golden vectors' signedSharing section.
+      - path: ../../ios/Tests/SignedSharingTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/SignedSharingVectorTests.swift
+        group: Tests/Shared
       # Golden vectors shared with the other clients.
       - path: ../../testdata/vectors.json
         buildPhase: resources
