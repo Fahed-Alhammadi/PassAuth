@@ -877,8 +877,24 @@ function signedSharingVectors(core) {
       ...r.members.flatMap((m) => [text(m.user_id), field(unb64(m.identity)), text(m.role)]),
       text(r.signer.user_id), field(identityHash(r.signer)),
     ]);
-  const memberListDigest = (entries) =>
-    b64(sha256(canon("passauth/member-list/v1", [text(vaultId), num(entries.length), ...entries.flatMap((m) => [text(m.user_id), field(unb64(m.identity)), text(m.role)])])));
+  // What a review shows, bound to the version, "first" and the previous roster's hash (an empty
+  // field without one): ["passauth/member-list/v2", vault id, version, first (1/0), previous
+  // roster hash, count, members…].
+  const memberListDigest = (entries, previous) => {
+    const prev = previous ? JSON.parse(rosters[previous]) : null;
+    return b64(
+      sha256(
+        canon("passauth/member-list/v2", [
+          text(vaultId),
+          num(prev ? prev.version + 1 : 1),
+          num(prev ? 0 : 1),
+          field(prev ? unb64(rosterHashes[previous]) : Buffer.alloc(0)),
+          num(entries.length),
+          ...entries.flatMap((m) => [text(m.user_id), field(unb64(m.identity)), text(m.role)]),
+        ]),
+      ),
+    );
+  };
   const buildRoster = (signer, version, keyEpoch, members, raw = rawKey, entries = entriesOf(members)) => {
     const r = { format: 1, vault_id: vaultId, version, key_epoch: keyEpoch, key_commitment: commitmentOf(raw, keyEpoch), members: entries, signer: full(signer), signature: "" };
     r.signature = b64(sign(null, rosterBytes(r), edKeys[signer]));
@@ -916,7 +932,7 @@ function signedSharingVectors(core) {
     if (!rogue) {
       const inputs = members.map(([n, role, inLegacy]) => ({ ...who(n, inLegacy), role }));
       const review = core.rosterReview(vaultId, previous ? rosters[previous] : null, full(signer), inputs, null);
-      must(review.digest === memberListDigest(r.members) && review.version === version, `roster ${name}'s review differs`);
+      must(review.digest === memberListDigest(r.members, previous) && review.version === version, `roster ${name}'s review differs`);
       const json = signers[signer].signRoster(vaultKey, vaultId, previous ? rosters[previous] : null, keyEpoch, inputs, review.digest);
       must(json === built.json, `roster ${name} differs from the one built here`);
       must(vaultKey.matchesRoster(vaultId, json) && !vaultKey.matchesRoster(`${vaultId}0`, json), "the vault key doesn't match its roster");
@@ -1005,16 +1021,43 @@ function signedSharingVectors(core) {
     ["dave", false, "ＢＯＢ@example.com"],
     ["dave", false, "bob@ｅｘａｍｐｌｅ.com"],
   ].map(([name, isLegacy, email]) => ({ identity: [name, isLegacy], email, expected: core.pinCheck(pins, who(name, isLegacy), email) }));
-  // Emails as pins compare them: trimmed, NFKC, lower case, IDNA ASCII domain. Checked here with
-  // String.prototype.normalize and node:url's domainToASCII (UTS #46), independently of the core.
+  // Emails as pins compare them: invisible characters removed (Cf, Cc, Zl, Zp and the Hangul
+  // fillers; JavaScript's trim would strip U+FEFF but not U+200B, so they are removed explicitly
+  // here and in the core), NFKC, lower case, NFKC, removed again, trimmed; the domain without
+  // trailing dots in IDNA ASCII; when there is no domain or IDNA refuses it, non-ASCII characters
+  // (and "\") written as \u{hex}. Checked here with String.prototype.normalize, Unicode property
+  // escapes and node:url's domainToASCII (UTS #46 as the URL Standard), independently of the core.
+  const INVISIBLE = /[\p{Cf}\p{Cc}\p{Zl}\p{Zp}\u115F\u1160\u3164\uFFA0]/gu;
+  const stripInvisible = (s) => s.replace(INVISIBLE, "");
+  const escapeNonAscii = (s) => Array.from(s, (c) => (c.codePointAt(0) < 0x80 && c !== "\\" ? c : `\\u{${c.codePointAt(0).toString(16)}}`)).join("");
   const normalizeEmail = (e) => {
-    const l = e.trim().normalize("NFKC").toLowerCase().normalize("NFKC").trim();
+    const l = stripInvisible(stripInvisible(e).normalize("NFKC").toLowerCase().normalize("NFKC")).trim();
     const at = l.lastIndexOf("@");
-    if (at < 0 || at === l.length - 1) return l;
-    const ascii = domainToASCII(l.slice(at + 1));
-    return ascii ? `${l.slice(0, at + 1)}${ascii}` : l;
+    const domain = at < 0 ? "" : l.slice(at + 1).replace(/\.+$/, "");
+    const ascii = domain ? domainToASCII(domain) : "";
+    return ascii ? `${l.slice(0, at + 1)}${ascii}` : escapeNonAscii(l);
   };
-  const emailCases = [" Bob@Example.COM ", "ＢＯＢ@ｅｘａｍｐｌｅ.com", "erin@Bücher.example", "erin@xn--bcher-kva.example", "ﬁona@EXAMPLE.org", "no-at-sign", "x@"].map((email) => {
+  const emailCases = [
+    " Bob@Example.COM ",
+    "ＢＯＢ@ｅｘａｍｐｌｅ.com",
+    "erin@Bücher.example",
+    "erin@xn--bcher-kva.example",
+    "ﬁona@EXAMPLE.org",
+    "no-at-sign",
+    "x@",
+    // Review round 4 M3: invisible characters, a byte order mark, a trailing dot, a tag
+    // character after a look-alike domain, a Hangul filler, a refused domain, a backslash.
+    "ali\u200Bce@example.com",
+    "\uFEFFalice@example.com",
+    "alice@example.com.",
+    "alice@example.com\u200B",
+    "alice@ex\u0430mple.com\u{E0001}",
+    "al\u202Eice@exam\u3164ple.com",
+    "alice\u2028@example.com",
+    "al\u0456ce@b\u00FC cher.example",
+    "a\\b@",
+    "x@.",
+  ].map((email) => {
     const expected = core.normalizeEmail(email);
     must(expected === normalizeEmail(email), `email ${email} normalized differently`);
     return { email, expected };
@@ -1035,7 +1078,7 @@ function signedSharingVectors(core) {
     const inputs = members.map(([n, role, isLegacy, email]) => ({ ...who(n, isLegacy), role, ...(email ? { email } : {}) }));
     const expected = core.rosterReview(vaultId, previous ? rosters[previous] : null, full(signer), inputs, pins);
     // A blocked review has no digest (nothing can be signed from it).
-    const digest = expected.blocked ? "" : memberListDigest(expected.members.map((m) => ({ user_id: m.user_id, identity: m.identity, role: m.role })));
+    const digest = expected.blocked ? "" : memberListDigest(expected.members.map((m) => ({ user_id: m.user_id, identity: m.identity, role: m.role })), previous);
     must(expected.digest === digest, `review ${name}'s digest differs`);
     return { name, previous, signer, members, expected };
   });
@@ -1085,6 +1128,9 @@ function signedSharingVectors(core) {
   const keyPinsUnsigned = core.pinsSetEpoch(keyPinsGrandfathered, vaultId, ep(k1, 1), null);
   const keyPinsRosterMax = core.pinsObserve(keyPinsWithEpoch, { vault_id: vaultId, key_kind: "sealed", key: ep(k1, 1), roster_version: 3, roster_hash: rosterHashes.v3, signed_share: true, paused: false }).pins;
   must(keyPinsRosterMax.epochs[vaultId].roster_hash === rosterHashes.v3, "the trusted roster's hash wasn't pinned");
+  // The account's own vault (pinned from an `account` row: marked `own`).
+  const keyPinsOwn = core.pinsObserve(null, { vault_id: vaultId, key_kind: "account", key: ep(k1, 1), roster_version: null, signed_share: false, paused: false }).pins;
+  must(keyPinsOwn.epochs[vaultId].own === true, "an own vault wasn't marked");
   const pinSets = {
     none: null,
     withEpoch: keyPinsWithEpoch,
@@ -1094,6 +1140,7 @@ function signedSharingVectors(core) {
     withheld: keyPinsWithheld,
     unsigned: keyPinsUnsigned,
     rosterMax: keyPinsRosterMax,
+    own: keyPinsOwn,
   };
 
   // Admission of vault rows: [pins, key_kind, key (k, epoch) or null, roster version, signed share,
@@ -1136,14 +1183,31 @@ function signedSharingVectors(core) {
     ["rosterMax", "sealed", [1, 1], 2, true, false, "v2"],
     ["rosterMax", "sealed", [1, 1], 4, true, false, "v4-upgrade"],
     ["rosterMax", "account", [1, 1], 3, false, false, "v3-dave"],
+    // Review round 4 (puppet signer): a new key on a vault never seen signed needs consent even
+    // when signed (its roster may start at a version 1 a server-made account signed); the own
+    // vault served as sealed with a new key: consent with `own`.
+    ["grandfathered", "sealed", [2, 2], 1, true, false, "v1"],
+    ["own", "account", [1, 1], null, false, false],
+    ["own", "sealed", [2, 2], 1, true, false, "v1"],
+    ["own", "sealed", [2, 2], null, false, false],
+    ["withEpoch", "account", [1, 1], 2, false, false, "v2"],
+    // A chain fetched from version 1 must contain the roster the pins remember at their highest
+    // version (v3) with its hash: another roster there (v3-dave, as a chain re-signed by a
+    // server-made account would have) → roster_forked; the real one, or a chain from a
+    // remembered roster after it → ok.
+    ["rosterMax", "sealed", [1, 1], 4, true, false, "v4-upgrade", [[1, "v1"], [2, "v2"], [3, "v3-dave"], [4, "v4-upgrade"]]],
+    ["rosterMax", "sealed", [1, 1], 4, true, false, "v4-upgrade", [[1, "v1"], [2, "v2"], [3, "v3"], [4, "v4-upgrade"]]],
+    ["rosterMax", "sealed", [1, 1], 4, true, false, "v4-upgrade", [[4, "v4-upgrade"]]],
   ];
   const keyOf = (n) => (n === 1 ? k1 : k2);
-  const observationOf = ([, kind, key, rosterVersion, signedShare, paused, roster]) => ({
+  const observationOf = ([, kind, key, rosterVersion, signedShare, paused, roster, chain]) => ({
     vault_id: vaultId,
     key_kind: kind,
     key: key ? ep(keyOf(key[0]), key[1]) : null,
     roster_version: rosterVersion,
     ...(roster ? { roster_hash: rosterHashes[roster] } : {}),
+    // The rosters verified this time ([version, roster name]…): `chain_hashes`.
+    ...(chain ? { chain_hashes: Object.fromEntries(chain.map(([v, n]) => [String(v), rosterHashes[n]])) } : {}),
     signed_share: signedShare,
     paused,
   });
@@ -1177,6 +1241,63 @@ function signedSharingVectors(core) {
   const rejoined = outcome(() => core.pinsSetEpoch(keyPinsLeft, vaultId, ep(k2, 2), 4));
   must(rejoined.expected && !rejoined.expected.left[vaultId], "a re-share didn't clear the tombstone");
   must(outcome(() => core.pinsSetEpoch(keyPinsLeft, vaultId, ep(k2, 2), 3)).error === "rollback", "a tombstone was cleared without a newer roster");
+  must(admissionCases.find((c) => c.pins === "unsigned" && c.observation.signed_share && c.observation.key.key_epoch === 2).expected.replaced === true, "a signed new key on a vault never seen signed was used");
+
+  // Accepting a consent or invitation (`pinsAccept`): the row is checked, its roster version and
+  // hash remembered; refusals throw.
+  const acceptInputs = [
+    ["none", ["", "sealed", [1, 1], 2, true, false, "v2"]],
+    ["left", ["", "sealed", [2, 2], 4, true, false, "v4-upgrade"]],
+    ["left", ["", "sealed", [2, 2], 3, true, false, "v3"]],
+    ["rosterMax", ["", "sealed", [1, 1], 3, true, false, "v3-dave"]],
+    ["unsigned", ["", "sealed", [2, 2], 2, true, false, "v2"]],
+    ["own", ["", "sealed", [2, 2], 1, true, false, "v1"]],
+    ["rosterMax", ["", "sealed", [1, 1], 4, true, false, "v4-upgrade", [[1, "v1"], [2, "v2"], [3, "v3-dave"], [4, "v4-upgrade"]]]],
+  ];
+  const acceptCases = acceptInputs.map(([set, input]) => ({ pins: set, observation: observationOf(input), ...outcome(() => core.pinsAccept(pinSets[set], observationOf(input))) }));
+  must(acceptCases[0].expected.epochs[vaultId].roster_hash === rosterHashes.v2, "pinsAccept didn't remember the roster hash");
+  must(acceptCases[1].expected.epochs[vaultId].rejoined_at === 4 && !acceptCases[1].expected.left[vaultId], "a re-join wasn't marked");
+  must(acceptCases[2].error === "rollback" && acceptCases[3].error === "roster_forked" && acceptCases[6].error === "roster_forked", "pinsAccept accepted a refused row");
+  must(admissionCases.at(-3).expected.reason === "roster_forked" && admissionCases.at(-2).expected.status === "ok", "a chain without the pinned roster was accepted");
+
+  // Merging key pins (review round 4): retired keys never come back, tombstones beat stale pins
+  // and keep what they knew. Made-up ids: [n; 32] keys, [n; 12] retired ids.
+  const fakeId = (n, len = 32) => b64(Buffer.alloc(len, n));
+  const fakePin = (epoch, id, retired = [], roster = null) => ({
+    key_epoch: epoch,
+    key_id: fakeId(id),
+    retired: retired.map((r) => fakeId(r, 12)),
+    signed_since: roster,
+    ...(roster === null ? {} : { roster_version_max: roster }),
+  });
+  const pinsOf = (p) => ({ version: 0, pins: [], epochs: { [vaultId]: p } });
+  const leftOf = (p, version, at) => core.pinsLeave(pinsOf(p), vaultId, version, at);
+  const leftAt3 = leftOf(fakePin(1, 1, [], 3), 3, 10);
+  const mergeInputs = [
+    ["same epoch, the other side retired the key", pinsOf(fakePin(3, 2, [1])), pinsOf(fakePin(3, 3, [1, 2]))],
+    ["same epoch, reversed", pinsOf(fakePin(3, 3, [1, 2])), pinsOf(fakePin(3, 2, [1]))],
+    ["a retired key relabelled higher", pinsOf(fakePin(4, 2, [1])), pinsOf(fakePin(3, 3, [1, 2]))],
+    ["a retired key relabelled higher, reversed", pinsOf(fakePin(3, 3, [1, 2])), pinsOf(fakePin(4, 2, [1]))],
+    ["a fork at the same epoch", pinsOf(fakePin(3, 2, [1])), pinsOf(fakePin(3, 3, [1]))],
+    ["both keys retired by the other side", pinsOf(fakePin(3, 2, [3])), pinsOf(fakePin(4, 3, [2]))],
+    ["a stale pin and a leave", pinsOf(fakePin(1, 1, [], 1)), leftOf(fakePin(1, 1), 0, 100)],
+    ["a tombstone keeps the newer key", pinsOf(fakePin(2, 2, [1], 1)), leftOf(fakePin(1, 1, [], 1), 1, 100)],
+    ["a re-join beats its tombstone", leftAt3, core.pinsSetEpoch(leftAt3, vaultId, fakePin(2, 2), 4)],
+    ["two tombstones", leftOf(fakePin(2, 2, [1], 2), 2, 50), leftOf(fakePin(3, 3, [], 5), 0, 40)],
+  ];
+  const mergeCases = mergeInputs.map(([name, base, ours]) => ({ name, base, ours, expected: core.mergePins(base, ours) }));
+  const merged = Object.fromEntries(mergeCases.map((c) => [c.name, c.expected]));
+  for (const name of ["same epoch, the other side retired the key", "same epoch, reversed", "a retired key relabelled higher", "a retired key relabelled higher, reversed"]) {
+    const p = merged[name].epochs[vaultId];
+    must(p.key_id === fakeId(3) && p.retired.includes(fakeId(2, 12)), `merge "${name}" un-retired a key`);
+  }
+  must(merged["a fork at the same epoch"].epochs[vaultId].key_id === fakeId(2), "a fork didn't keep the base's key");
+  must(!merged["a stale pin and a leave"].epochs[vaultId] && merged["a stale pin and a leave"].left[vaultId].roster_version === 1, "a stale pin undid a leave");
+  must(merged["a tombstone keeps the newer key"].left[vaultId].pin.key_epoch === 2, "a tombstone forgot a newer key");
+  must(merged["a re-join beats its tombstone"].epochs[vaultId].rejoined_at === 4 && !merged["a re-join beats its tombstone"].left[vaultId], "a re-join lost to its tombstone");
+  const twoTombs = merged["two tombstones"].left[vaultId];
+  must(twoTombs.roster_version === 5 && twoTombs.left_at === 50 && twoTombs.pin.key_epoch === 3, "two tombstones merged wrongly");
+
   const legacyWraps = Object.entries(pinSets).map(([set, p]) => ({ pins: set, expected: core.pinsLegacyWrapAllowed(p, vaultId) }));
 
   // The account's own identity, remembered once.
@@ -1223,7 +1344,10 @@ function signedSharingVectors(core) {
     keyPinsWithheld,
     keyPinsUnsigned,
     keyPinsRosterMax,
+    keyPinsOwn,
     admissions: admissionCases,
+    accepts: acceptCases,
+    merges: mergeCases,
     observations,
     emails: emailCases,
     legacyWraps,

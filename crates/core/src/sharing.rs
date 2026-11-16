@@ -58,7 +58,7 @@ const SHARE_TAG: &[u8] = b"passauth/share/v1";
 const ROSTER_TAG: &[u8] = b"passauth/member-roster/v1";
 const COMMITMENT_TAG: &[u8] = b"passauth/vault-key-commitment/v1";
 const KEY_ID_TAG: &[u8] = b"passauth/vault-key-id/v1";
-const MEMBER_LIST_TAG: &[u8] = b"passauth/member-list/v1";
+const MEMBER_LIST_TAG: &[u8] = b"passauth/member-list/v2";
 const ROSTER_HASH_TAG: &[u8] = b"passauth/member-roster-hash/v1";
 const SIGNING_KEY_AAD: &str = "passauth/signing-key/v1/";
 const KEY_PINS_AAD: &str = "passauth/key-pins/v1/";
@@ -78,6 +78,14 @@ pub const MAX_KEY_PINS_JSON: usize = 190 * 1024;
 pub const MAX_PIN_EMAIL: usize = 320;
 /// Retired key ids kept per vault (the oldest go first).
 pub const MAX_RETIRED_KEY_IDS: usize = 1024;
+/// Retired key ids kept in a tombstone's pin (the newest; review round 4 L5). A re-join
+/// also needs a share signature and a roster chain that bind the key to its epoch.
+pub const MAX_TOMBSTONE_RETIRED_KEY_IDS: usize = 64;
+/// Retired key ids the key pins keep for all accepted vaults together (review round 4
+/// L5: an admin replacing the keys of many vaults could otherwise grow the pins past
+/// [`MAX_KEY_PINS_JSON`]). Beyond it the longest lists lose their oldest ids first,
+/// never below [`MAX_TOMBSTONE_RETIRED_KEY_IDS`] per vault.
+pub const MAX_TOTAL_RETIRED_KEY_IDS: usize = 4096;
 /// Bytes of a retired key id kept in the pins: the first 12 of the 32-byte [`key_id`]
 /// (96 bits; a server can't make a key with a chosen id, and only members' apps replace
 /// keys, so a collision would need ~2^96 work). Full 32-byte ids from before are read too.
@@ -218,7 +226,9 @@ pub fn xeddsa_sign(secret: &[u8; 32], message: &[u8], z: &[u8; 64]) -> [u8; 64] 
     h.update(big_a.as_bytes());
     h.update(message);
     let h = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
-    let s = h * *a + *r;
+    // `h·a` would reveal `a` with the signature's `s`: wiped too (review round 4 I4).
+    let ha = Zeroizing::new(h * *a);
+    let s = *ha + *r;
     let mut out = [0u8; 64];
     out[..32].copy_from_slice(big_r.as_bytes());
     out[32..].copy_from_slice(s.as_bytes());
@@ -474,7 +484,8 @@ impl UnlockedAccount {
             &ed.verifying_key().to_bytes(),
         );
         let secret = Zeroizing::new(self.keypair.secret_bytes());
-        let x25519_signature = b64(&xeddsa_sign(&secret, &statement, &random_bytes::<64>()?));
+        let z = Zeroizing::new(random_bytes::<64>()?);
+        let x25519_signature = b64(&xeddsa_sign(&secret, &statement, &z));
         let identity = SigningIdentity {
             user_id: self.account_id.clone(),
             public_key,
@@ -693,7 +704,7 @@ impl SigningIdentity {
             }
         }
         let entries = roster_entries(previous, &me, members)?;
-        if !same(&member_list_digest(vault_id, &entries)?, reviewed) {
+        if !same(&member_list_digest(vault_id, previous, &entries)?, reviewed) {
             return Err(Error::ReviewMismatch);
         }
         let version = previous.map_or(1, |p| p.version.saturating_add(1));
@@ -1080,13 +1091,29 @@ fn roster_entries(
     Ok(entries.into_values().collect())
 }
 
-/// SHA-256 (base64url) of `["passauth/member-list/v1", vault id, member count (u64),
-/// then per member: user id, identity hash (32), role]` in the roster's order: what a
-/// review showed, so the list signed can be compared with it.
-pub fn member_list_digest(vault_id: &str, members: &[RosterMember]) -> Result<String> {
+/// SHA-256 (base64url) of `["passauth/member-list/v2", vault id, version (u64), first
+/// (u64: 1 without a previous roster, else 0), the previous roster's hash (32;
+/// [`SignedRoster::hash`]) or an empty field, member count (u64), then per member: user
+/// id, identity hash (32), role]` in the roster's order: what a review showed, so the
+/// list signed can be compared with it. The version, `first` and the previous roster are
+/// bound (review round 4 I3): a review made after one roster can't approve a signing
+/// after another (or a version 1).
+pub fn member_list_digest(
+    vault_id: &str,
+    previous: Option<&SignedRoster>,
+    members: &[RosterMember],
+) -> Result<String> {
     check_id(vault_id)?;
+    let version = previous.map_or(1, |p| p.version.saturating_add(1));
+    let previous_hash = previous.map(SignedRoster::hash).transpose()?;
     let mut c = Canon::new(MEMBER_LIST_TAG)
         .text(vault_id)
+        .number(version)
+        .number(u64::from(previous.is_none()))
+        .field(&match &previous_hash {
+            Some(h) => key32(h, "roster hash length")?.to_vec(),
+            None => Vec::new(),
+        })
         .number(members.len() as u64);
     for m in members {
         check_id(&m.user_id)?;
@@ -1526,7 +1553,7 @@ pub fn roster_review(
         digest: if blocked {
             String::new()
         } else {
-            member_list_digest(vault_id, &entries)?
+            member_list_digest(vault_id, previous, &entries)?
         },
     })
 }
@@ -1602,6 +1629,18 @@ pub struct EpochPin {
     /// version is `roster_forked`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster_hash: Option<String>,
+    /// Set when accepting the vault cleared a tombstone (the account had left it): the
+    /// roster version accepted then. In [`KeyPins::merge`] a pin beats a tombstone only
+    /// when this is above the tombstone's roster version (review round 4 M2); a pin
+    /// without it (a stale copy from before the leave) is folded into the tombstone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejoined_at: Option<u64>,
+    /// The account holds (or held) the vault with its own `account` key wrap. A `sealed`
+    /// row with a new key for it while the vault has no signed history needs consent
+    /// with a warning ([`Admission::Consent`] `own`): a personal vault never silently
+    /// turns into one whose key someone else sealed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
 }
 
 impl EpochPin {
@@ -1614,6 +1653,8 @@ impl EpochPin {
             signed_since: None,
             roster_version_max: None,
             roster_hash: None,
+            rejoined_at: None,
+            own: false,
         })
     }
 
@@ -1678,12 +1719,15 @@ fn is_retired_as(retired: &str, key_id: &str) -> bool {
 }
 
 /// A retired list from `ids` (oldest first, retired or full key ids): each in the short
-/// form once (its newest place kept), without the key `current`, at most
+/// form once (its newest place kept), without the key `current` (if given), at most
 /// [`MAX_RETIRED_KEY_IDS`] (the oldest dropped).
-fn retired_list<'a>(ids: impl IntoIterator<Item = &'a String>, current: &str) -> Vec<String> {
+fn retired_list<'a>(
+    ids: impl IntoIterator<Item = &'a String>,
+    current: Option<&str>,
+) -> Vec<String> {
     let all: Vec<[u8; RETIRED_KEY_ID_BYTES]> =
         ids.into_iter().filter_map(|i| short_id(i)).collect();
-    let current = short_id(current);
+    let current = current.and_then(short_id);
     let mut seen = BTreeSet::new();
     let mut out: Vec<String> = all
         .into_iter()
@@ -1848,12 +1892,23 @@ pub struct VaultObservation {
     /// Optional; without it only the version is compared.
     #[serde(default)]
     pub roster_hash: Option<String>,
+    /// The rosters this device verified for the vault in this check, as `{"<version>":
+    /// "<rosterHash>"}`: the trusted roster the chain started from (if any) and every
+    /// newer one [`verify_roster_chain`] checked (at most [`MAX_ROSTER_CHAIN`] + 1).
+    /// **Send it whenever a chain was fetched** (also an invitation's chain from version
+    /// 1): if it covers the highest roster version the key pins remember for the vault
+    /// (`roster_version_max`, also a tombstone's), that roster must have the pinned hash,
+    /// else `roster_forked` — so a chain re-signed from version 1 by an account the
+    /// server made up can't replace a history this account saw signed. `None`: no chain
+    /// fetched (only the roster this device already trusted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_hashes: Option<BTreeMap<String, String>>,
     /// The row is sealed and its share verified (`verifyShare`, signer an owner or
     /// admin of the trusted roster, signer pin not `changed`).
-    #[serde(default)]
+    /// Required (no default: a missing field fails closed, review round 4 I2).
     pub signed_share: bool,
     /// Sharing is paused on this device (`identity_mismatch`).
-    #[serde(default)]
+    /// Required (no default).
     pub paused: bool,
 }
 
@@ -1871,10 +1926,18 @@ pub enum Admission {
         pin: bool,
     },
     /// A sealed vault this account never accepted (or left, and was re-shared with a
-    /// newer roster: `rejoin`; or whose key was replaced without a signature, by an app
-    /// from before: `replaced`): don't open it; show it as an invitation needing the
-    /// user's consent. Accepting = [`KeyPins::set_epoch`].
-    Consent { rejoin: bool, replaced: bool },
+    /// newer roster: `rejoin`; or whose key was replaced while the vault has no signed
+    /// history — without a signature, by an app from before, or signed for the first
+    /// time, possibly by an account the server made up: `replaced`): don't open it;
+    /// show it as an invitation needing the user's consent. `own`: the account held this
+    /// vault with its own key wrap before (show "This was your own vault…": a personal
+    /// vault turned into one whose key someone else sealed). Accepting =
+    /// [`KeyPins::accept`].
+    Consent {
+        rejoin: bool,
+        replaced: bool,
+        own: bool,
+    },
     /// Never use it; show why.
     Refused { reason: RefuseReason },
 }
@@ -1918,21 +1981,62 @@ pub struct Observed {
     pub changed: bool,
 }
 
-/// An email as pins compare it (and as apps may show it): trimmed, NFKC, lower case,
-/// the domain in IDNA ASCII (punycode) form; a domain IDNA refuses stays as it is.
+/// Characters that change how an email looks without being seen (review round 4 M3): the
+/// general categories Cf (format: zero-width spaces and joiners, bidi controls, the byte
+/// order mark U+FEFF, tags), Cc (controls), Zl and Zp (line and paragraph separators), and
+/// the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0. The same set the web vault strips
+/// from names it shows (`web/src/lib/text.ts`).
+fn invisible(c: char) -> bool {
+    use icu_properties::CodePointMapData;
+    use icu_properties::props::GeneralCategory as Gc;
+    matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
+        || matches!(
+            CodePointMapData::<Gc>::new().get(c),
+            Gc::Format | Gc::Control | Gc::LineSeparator | Gc::ParagraphSeparator
+        )
+}
+
+fn strip_invisible(s: &str) -> String {
+    s.chars().filter(|c| !invisible(*c)).collect()
+}
+
+/// `s` with every character outside ASCII, and the backslash, written as `\u{hex}`.
+fn escape_non_ascii(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() && c != '\\' {
+            out.push(c);
+        } else {
+            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        }
+    }
+    out
+}
+
+/// An email as pins compare it (and as apps show it): invisible characters removed
+/// ([`invisible`]: format, control and separator characters, Hangul fillers), NFKC, lower
+/// case, NFKC again, invisible characters removed again, trimmed; then the domain (after
+/// the last `@`) without trailing dots, in IDNA ASCII (punycode) form (UTS #46 as the URL
+/// Standard's "domain to ASCII", forbidden domain code points refused). When there is no
+/// domain or IDNA refuses it, the whole address with every non-ASCII character (and `\`)
+/// written as `\u{hex}`: it can't pass for an ASCII address. Local parts are compared
+/// as they are after this (no confusable skeleton: a look-alike local part is a new
+/// identity, shown with its fingerprint).
 pub fn normalize_email(email: &str) -> String {
     let nfkc = icu_normalizer::ComposingNormalizerBorrowed::new_nfkc();
-    let lower = nfkc
-        .normalize(&nfkc.normalize(email.trim()).to_lowercase())
-        .trim()
-        .to_owned();
-    match lower.rsplit_once('@') {
-        Some((local, domain)) if !domain.is_empty() => match idna::domain_to_ascii(domain) {
-            Ok(ascii) if !ascii.is_empty() => format!("{local}@{ascii}"),
-            _ => lower,
-        },
-        _ => lower,
+    let folded = nfkc.normalize(&strip_invisible(email)).to_lowercase();
+    let lower = strip_invisible(&nfkc.normalize(&folded)).trim().to_owned();
+    if let Some((local, domain)) = lower.rsplit_once('@') {
+        let domain = domain.trim_end_matches('.');
+        if !domain.is_empty()
+            && let Ok(ascii) =
+                idna::domain_to_ascii_cow(domain.as_bytes(), idna::AsciiDenyList::URL)
+            && !ascii.is_empty()
+        {
+            return format!("{local}@{ascii}");
+        }
     }
+    escape_non_ascii(&lower)
 }
 
 fn check_email(email: &str) -> Result<()> {
@@ -1942,24 +2046,49 @@ fn check_email(email: &str) -> Result<()> {
     Ok(())
 }
 
-/// The epoch pin worth keeping of two for the same vault: the higher epoch's, with
-/// both retired lists (and the lower's key if it differs), the earlier `signed_since`
-/// and the higher trusted roster (at the same version `base`'s hash, else the one
-/// known). At the same epoch `base`'s key stays (a conflicting key then shows as
-/// `conflict`, a conflicting roster hash as `roster_forked`).
+/// Whether `pin`'s retired list names the key `key_id`.
+fn retires(pin: &EpochPin, key_id: &str) -> bool {
+    pin.retired.iter().any(|r| is_retired_as(r, key_id))
+}
+
+/// The epoch pin worth keeping of two for the same vault (review round 4 H1: retired ids
+/// only ever grow). `R` = both retired lists. A key either side retired (in `R`) never
+/// wins: the other side's pin does, whatever the epochs. Else the higher epoch's key wins
+/// (at the same epoch `base`'s: a different key at the same epoch is a fork, which then
+/// shows as `conflict` wherever the other key is served). The losing key is retired when
+/// it was superseded (a lower epoch, or retired by either side), never at a same-epoch
+/// conflict. If both keys are retired (only a server mixing histories gets there), the
+/// higher epoch's stays pinned *and* retired, so neither is accepted until a newer key
+/// comes. Also: the earlier `signed_since`, the higher trusted roster (at the same
+/// version `base`'s hash, else the one known), the higher `rejoined_at`, `own` from
+/// either.
 fn merge_epoch(base: &EpochPin, other: &EpochPin) -> EpochPin {
-    let (mut high, low) = if other.key_epoch > base.key_epoch {
-        (other.clone(), base)
-    } else {
-        (base.clone(), other)
+    let dead = |p: &EpochPin| retires(base, &p.key_id) || retires(other, &p.key_id);
+    let (base_dead, other_dead) = (dead(base), dead(other));
+    let other_first = match (base_dead, other_dead) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => other.key_epoch > base.key_epoch,
     };
-    let mut ids: Vec<&String> = low.retired.iter().collect();
-    if low.key_epoch < high.key_epoch {
-        ids.push(&low.key_id);
+    let (win, lose) = if other_first {
+        (other, base)
+    } else {
+        (base, other)
+    };
+    let both_dead = base_dead && other_dead;
+    let superseded =
+        !same(&win.key_id, &lose.key_id) && (lose.key_epoch < win.key_epoch || dead(lose));
+    let mut ids: Vec<&String> = lose.retired.iter().collect();
+    if superseded {
+        ids.push(&lose.key_id);
     }
-    ids.extend(high.retired.iter());
-    high.retired = retired_list(ids, &high.key_id);
-    high.signed_since = match (base.signed_since, other.signed_since) {
+    ids.extend(win.retired.iter());
+    if both_dead {
+        ids.push(&win.key_id);
+    }
+    let mut out = win.clone();
+    out.retired = retired_list(ids, (!both_dead).then_some(win.key_id.as_str()));
+    out.signed_since = match (base.signed_since, other.signed_since) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
@@ -1974,9 +2103,54 @@ fn merge_epoch(base: &EpochPin, other: &EpochPin) -> EpochPin {
         (Some(a), _) => (Some(a), base.roster_hash.clone()),
         (None, b) => (b, other.roster_hash.clone()),
     };
-    high.roster_version_max = max;
-    high.roster_hash = hash;
-    high
+    out.roster_version_max = max;
+    out.roster_hash = hash;
+    out.rejoined_at = base.rejoined_at.max(other.rejoined_at);
+    out.own = base.own || other.own;
+    out
+}
+
+/// Two pins of one vault, either missing: [`merge_epoch`] when both are there.
+fn merge_opt_epoch(base: Option<&EpochPin>, other: Option<&EpochPin>) -> Option<EpochPin> {
+    match (base, other) {
+        (Some(a), Some(b)) => Some(merge_epoch(a, b)),
+        (a, b) => a.or(b).cloned(),
+    }
+}
+
+impl Tombstone {
+    /// Fold an epoch pin the tombstone wins over into it (review round 4 L4): its key
+    /// knowledge goes into the tombstone's pin, its highest trusted roster into the
+    /// tombstone's version (a re-join must then come with a newer one).
+    fn absorb(&mut self, pin: &EpochPin) {
+        self.pin = merge_opt_epoch(self.pin.as_ref(), Some(pin));
+        self.roster_version = self.roster_version.max(pin.roster_floor().unwrap_or(0));
+    }
+
+    /// Two tombstones of one vault: the higher roster version, both pins merged, the
+    /// later time.
+    fn merged(&self, other: &Tombstone) -> Tombstone {
+        Tombstone {
+            pin: merge_opt_epoch(self.pin.as_ref(), other.pin.as_ref()),
+            roster_version: self.roster_version.max(other.roster_version),
+            left_at: self.left_at.max(other.left_at),
+        }
+    }
+
+    /// Keep only what a re-join check needs: the key, the newest
+    /// [`MAX_TOMBSTONE_RETIRED_KEY_IDS`] retired ids, the roster versions and the highest
+    /// roster's hash (a re-join's chain must contain it: [`VaultObservation::chain_hashes`])
+    /// (review round 4 L5).
+    fn compact(&mut self) {
+        if let Some(p) = &mut self.pin {
+            let extra = p
+                .retired
+                .len()
+                .saturating_sub(MAX_TOMBSTONE_RETIRED_KEY_IDS);
+            p.retired.drain(..extra);
+            p.rejoined_at = None;
+        }
+    }
 }
 
 impl KeyPins {
@@ -2047,23 +2221,59 @@ impl KeyPins {
     /// `roster_version` if not yet. Either way the highest trusted roster version is
     /// raised to `roster_version`. Older or conflicting keys are never pinned. Clears
     /// the vault's tombstone when the re-share qualifies ([`Error::Rollback`] when it
-    /// doesn't: see [`admit`](Self::admit)).
+    /// doesn't: see [`admit`](Self::admit)), marking the pin re-joined. Prefer
+    /// [`accept`](Self::accept) (consents, invitations), which also checks the row and
+    /// remembers the roster's hash.
     pub fn set_epoch(
         &self,
         vault_id: &str,
         current: &EpochPin,
         roster_version: Option<u64>,
     ) -> Result<KeyPins> {
-        self.accept(vault_id, current, roster_version, None)
+        self.accept_key(vault_id, current, roster_version, None, false)
     }
 
-    /// [`set_epoch`](Self::set_epoch), also remembering the trusted roster's hash.
-    fn accept(
+    /// Accept a vault row the user agreed to (an invitation, a consent prompt) or that
+    /// [`admit`](Self::admit) said to pin (review round 4 I1): `admit` must not refuse it
+    /// (refusals become errors: `left`, `older`, `conflict` and `downgraded`
+    /// [`Error::Rollback`], `roster_forked` [`Error::RosterForked`], `paused`
+    /// [`Error::IdentityMismatch`], `missing_epoch` malformed); then its key is pinned as
+    /// [`set_epoch`](Self::set_epoch) does, with the observation's roster version *and*
+    /// hash, and an `account` row marks the pin `own`.
+    pub fn accept(&self, o: &VaultObservation) -> Result<KeyPins> {
+        if let Admission::Refused { reason } = self.admit(o)? {
+            return Err(match reason {
+                RefuseReason::RosterForked => Error::RosterForked,
+                RefuseReason::Paused => Error::IdentityMismatch,
+                RefuseReason::MissingEpoch => Error::Malformed("the vault row has no key epoch"),
+                RefuseReason::Left
+                | RefuseReason::Older
+                | RefuseReason::Conflict
+                | RefuseReason::Downgraded => Error::Rollback,
+            });
+        }
+        let key = o
+            .key
+            .as_ref()
+            .ok_or(Error::Malformed("the vault row has no key epoch"))?;
+        self.accept_key(
+            &o.vault_id,
+            key,
+            o.roster_version,
+            o.roster_hash.as_deref(),
+            o.key_kind == "account",
+        )
+    }
+
+    /// [`set_epoch`](Self::set_epoch), also remembering the trusted roster's hash and
+    /// (`own`) that the row was the account's own wrap.
+    fn accept_key(
         &self,
         vault_id: &str,
         current: &EpochPin,
         roster_version: Option<u64>,
         roster_hash: Option<&str>,
+        own: bool,
     ) -> Result<KeyPins> {
         check_id(vault_id)?;
         current.check()?;
@@ -2089,13 +2299,15 @@ impl KeyPins {
                 EpochPin {
                     key_epoch: current.key_epoch,
                     key_id: current.key_id.clone(),
-                    retired: retired_list(previous, &current.key_id),
+                    retired: retired_list(previous, Some(&current.key_id)),
                     signed_since: match (&tomb, &old) {
                         (None, Some(o)) => o.signed_since.or(roster_version),
                         _ => roster_version,
                     },
                     roster_version_max: old.as_ref().and_then(|o| o.roster_version_max),
                     roster_hash: old.as_ref().and_then(|o| o.roster_hash.clone()),
+                    rejoined_at: old.as_ref().and_then(|o| o.rejoined_at),
+                    own: old.as_ref().is_some_and(|o| o.own),
                 }
             }
             EpochStatus::Same => {
@@ -2108,9 +2320,45 @@ impl KeyPins {
             _ => return Ok(out),
         };
         pin.raise_roster(roster_version, roster_hash);
+        pin.own |= own;
+        if tomb.is_some() {
+            // rejoin_ok: a roster version above the tombstone's.
+            pin.rejoined_at = roster_version;
+        }
         out.epochs.insert(vault_id.to_owned(), pin);
         out.left.remove(vault_id);
+        out.compact();
         Ok(out)
+    }
+
+    /// Keep the retired key ids within their budget (review round 4 L5): tombstones keep
+    /// [`MAX_TOMBSTONE_RETIRED_KEY_IDS`] each; accepted vaults together keep
+    /// [`MAX_TOTAL_RETIRED_KEY_IDS`] (the longest lists lose their oldest ids first, none
+    /// below [`MAX_TOMBSTONE_RETIRED_KEY_IDS`]).
+    fn compact(&mut self) {
+        for t in self.left.values_mut() {
+            t.compact();
+        }
+        let total: usize = self.epochs.values().map(|p| p.retired.len()).sum();
+        if total <= MAX_TOTAL_RETIRED_KEY_IDS {
+            return;
+        }
+        // The highest per-vault cap (not below the floor) that fits the budget.
+        let kept =
+            |cap: usize| -> usize { self.epochs.values().map(|p| p.retired.len().min(cap)).sum() };
+        let (mut low, mut high) = (MAX_TOMBSTONE_RETIRED_KEY_IDS, MAX_RETIRED_KEY_IDS);
+        while low < high {
+            let mid = (low + high).div_ceil(2);
+            if kept(mid) <= MAX_TOTAL_RETIRED_KEY_IDS {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        for p in self.epochs.values_mut() {
+            let extra = p.retired.len().saturating_sub(low);
+            p.retired.drain(..extra);
+        }
     }
 
     /// Whether an `account` wrap of `vault_id` may be in the v1 format (associated data
@@ -2151,6 +2399,7 @@ impl KeyPins {
                 left_at: now,
             },
         );
+        out.compact();
         Ok(out)
     }
 
@@ -2213,8 +2462,10 @@ impl KeyPins {
     /// same version with another hash `roster_forked`); a sealed row with a share but no
     /// roster, or without a share where a roster is trusted or the pin says signed →
     /// `downgraded`; an `account` row → ok (own); a sealed row → ok when pinned, or
-    /// grandfathered and unsigned, else `consent`; a pinned sealed row whose key changed
-    /// without a signature → `consent` (`replaced`). `ok` says whether to `pin`.
+    /// grandfathered and unsigned, else `consent`; a pinned sealed row with a new key while
+    /// the pin has no signed history (no `signed_since`, no trusted roster), signed or
+    /// not → `consent` (`replaced`; `own` when the account held it with its own wrap).
+    /// `ok` says whether to `pin` (also an `account` row whose pin isn't marked `own`).
     pub fn admit(&self, o: &VaultObservation) -> Result<Admission> {
         check_id(&o.vault_id)?;
         let sealed = match o.key_kind.as_str() {
@@ -2233,11 +2484,19 @@ impl KeyPins {
         if sealed && o.paused {
             return refuse(RefuseReason::Paused);
         }
+        let remembered = match self.left.get(&o.vault_id) {
+            Some(t) => t.pin.as_ref(),
+            None => self.epochs.get(&o.vault_id),
+        };
+        if !chain_matches(remembered, o)? {
+            return refuse(RefuseReason::RosterForked);
+        }
         if let Some(t) = self.left.get(&o.vault_id) {
             return if sealed && o.signed_share && rejoin_ok(t, key, o.roster_version) {
                 Ok(Admission::Consent {
                     rejoin: true,
                     replaced: false,
+                    own: false,
                 })
             } else {
                 refuse(RefuseReason::Left)
@@ -2260,6 +2519,7 @@ impl KeyPins {
             return refuse(RefuseReason::RosterForked);
         }
         let pin = matches!(status, EpochStatus::New | EpochStatus::Newer)
+            || (!sealed && pinned.is_some_and(|p| !p.own))
             || o.roster_version.is_some_and(|v| {
                 pinned.is_some_and(|p| {
                     p.signed_since.is_none()
@@ -2293,14 +2553,22 @@ impl KeyPins {
             return Ok(Admission::Consent {
                 rejoin: false,
                 replaced: false,
+                own: false,
             });
         }
-        if status == EpochStatus::Newer && unsigned {
-            // A new key nobody signed: a server-chosen key unless the user expected it
-            // (an app from before replaced it).
+        if status == EpochStatus::Newer
+            && (unsigned || pinned.is_some_and(|p| p.roster_floor().is_none()))
+        {
+            // A new key on a vault never seen signed: nobody this account trusts vouches
+            // for it. Unsigned, it is a server-chosen key unless the user expected it (an
+            // app from before replaced it); signed, the roster chain may start at a
+            // version 1 signed by an account the server made up (review round 4,
+            // puppet signer). The first signed key replacement of an old vault therefore
+            // needs one confirmation.
             return Ok(Admission::Consent {
                 rejoin: false,
                 replaced: true,
+                own: pinned.is_some_and(|p| p.own),
             });
         }
         Ok(Admission::Ok {
@@ -2321,9 +2589,13 @@ impl KeyPins {
     pub fn observe(&self, o: &VaultObservation) -> Result<Observed> {
         let admission = self.admit(o)?;
         let pins = match (&admission, &o.key) {
-            (Admission::Ok { pin: true, .. }, Some(key)) => {
-                self.accept(&o.vault_id, key, o.roster_version, o.roster_hash.as_deref())?
-            }
+            (Admission::Ok { pin: true, .. }, Some(key)) => self.accept_key(
+                &o.vault_id,
+                key,
+                o.roster_version,
+                o.roster_hash.as_deref(),
+                o.key_kind == "account",
+            )?,
             _ => self.clone(),
         };
         Ok(Observed {
@@ -2403,19 +2675,19 @@ impl KeyPins {
         Ok(out)
     }
 
-    /// Merge this device's pins (`ours`, its changes since it read the server's) into
-    /// `self` (the server's newest, read after a `key_pins_changed`): pins only one has
-    /// are kept; for the same identity, verified if either is and first seen at the
-    /// earlier time; for different identities, `ours` wins (this device's newer
-    /// decision). Epoch pins: the higher per vault, retired ids of both, the earlier
-    /// `signed_since` (at the same epoch `self`'s key, so a conflict surfaces).
-    /// Tombstones: both (the higher roster version per vault); a vault with both a
-    /// tombstone and an epoch pin keeps the pin only if it was re-joined with a newer
-    /// roster (`signed_since` above the tombstone's version and above the tombstoned
-    /// pin's own: a stale pin from before the leave is not a re-join). Own identity:
-    /// `self`'s, else `ours`. Grandfathered ids: the union when both wrote a list (only
-    /// the unlock that created the identity writes a non-empty one), else the one
-    /// written. The version is the higher one.
+    /// Merge this device's pins (`ours`: its own last-known pins) into `self` (the
+    /// server's newest): pins only one has are kept; for the same identity, verified if
+    /// either is and first seen at the earlier time; for different identities, `ours`
+    /// wins (this device's newer decision). Epoch pins: [`merge_epoch`] per vault
+    /// (retired ids only grow; a retired key never comes back). Tombstones: both, merged
+    /// per vault (higher roster version, merged pins, later time). A vault with both a
+    /// tombstone and an epoch pin keeps the pin only if it was re-joined after that
+    /// tombstone (`rejoined_at` above the tombstone's roster version; a stale pin from
+    /// before the leave isn't); else the pin is folded into the tombstone (its keys and
+    /// its highest roster). Own identity: `self`'s, else `ours`. Grandfathered ids: the
+    /// union when both wrote a list (only the unlock that created the identity writes a
+    /// non-empty one), else the one written. The version is the higher one. Apps merge
+    /// whenever they read a newer server copy, not only with unsent changes.
     pub fn merge(&self, ours: &KeyPins) -> Result<KeyPins> {
         self.check()?;
         ours.check()?;
@@ -2438,12 +2710,11 @@ impl KeyPins {
             out.epochs.insert(vault.clone(), merged);
         }
         for (vault, t) in &ours.left {
-            match out.left.get(vault) {
-                Some(o) if o.roster_version >= t.roster_version => {}
-                _ => {
-                    out.left.insert(vault.clone(), t.clone());
-                }
-            }
+            let merged = match out.left.get(vault) {
+                Some(o) => o.merged(t),
+                None => t.clone(),
+            };
+            out.left.insert(vault.clone(), merged);
         }
         let both: Vec<String> = out
             .left
@@ -2452,19 +2723,19 @@ impl KeyPins {
             .cloned()
             .collect();
         for vault in both {
-            let tomb = &out.left[&vault];
-            let rejoined = out.epochs[&vault].signed_since.is_some_and(|s| {
-                s > tomb.roster_version
-                    && tomb
-                        .pin
-                        .as_ref()
-                        .and_then(EpochPin::roster_floor)
-                        .is_none_or(|known| s > known)
-            });
-            if rejoined {
-                out.left.remove(&vault);
+            let tomb = out.left.remove(&vault).expect("listed above");
+            let pin = out.epochs.remove(&vault).expect("listed above");
+            if pin.rejoined_at.is_some_and(|r| r > tomb.roster_version) {
+                // Re-joined after this tombstone: keep what the tombstone knew too.
+                let pin = match &tomb.pin {
+                    Some(t) => merge_epoch(&pin, t),
+                    None => pin,
+                };
+                out.epochs.insert(vault, pin);
             } else {
-                out.epochs.remove(&vault);
+                let mut tomb = tomb;
+                tomb.absorb(&pin);
+                out.left.insert(vault, tomb);
             }
         }
         if out.own_identity.is_none() {
@@ -2479,7 +2750,58 @@ impl KeyPins {
         };
         out.version = self.version.max(ours.version);
         out.pins.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        out.compact();
         Ok(out)
+    }
+}
+
+/// [`VaultObservation::chain_hashes`] against the roster the pin remembers: well formed
+/// (versions as decimal numbers from 1, 32-byte hashes, at most [`MAX_ROSTER_CHAIN`] + 1,
+/// the observation's own `roster_hash` the one listed for its `roster_version`), and when
+/// the chain reaches the pinned `roster_version_max` it lists that version with the pinned
+/// `roster_hash` (`false`: another roster there, a fork). A chain that skips the pinned
+/// version inside its range is malformed.
+fn chain_matches(pin: Option<&EpochPin>, o: &VaultObservation) -> Result<bool> {
+    let Some(chain) = &o.chain_hashes else {
+        return Ok(true);
+    };
+    if chain.len() > MAX_ROSTER_CHAIN + 1 {
+        return Err(Error::TooLarge);
+    }
+    let mut hashes = BTreeMap::new();
+    for (version, hash) in chain {
+        let v = version
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v >= 1 && v.to_string() == *version)
+            .ok_or(Error::Malformed(
+                "chain_hashes versions are roster versions",
+            ))?;
+        key32(hash, "roster hash length")?;
+        hashes.insert(v, hash.as_str());
+    }
+    if let (Some(v), Some(h)) = (o.roster_version, &o.roster_hash)
+        && hashes.get(&v).is_some_and(|listed| !same(listed, h))
+    {
+        return Err(Error::Malformed(
+            "chain_hashes lists another hash for the trusted roster",
+        ));
+    }
+    let Some((m, pinned)) = pin.and_then(|p| p.roster_version_max.zip(p.roster_hash.as_deref()))
+    else {
+        return Ok(true);
+    };
+    match hashes.get(&m) {
+        Some(h) => Ok(same(h, pinned)),
+        None => {
+            let (first, last) = (hashes.keys().next(), hashes.keys().next_back());
+            if first.is_some_and(|f| *f < m) && last.is_some_and(|l| *l > m) {
+                return Err(Error::Malformed(
+                    "chain_hashes skips the pinned roster version",
+                ));
+            }
+            Ok(true)
+        }
     }
 }
 
@@ -3301,7 +3623,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             review.digest,
-            member_list_digest(VAULT, &v1.members).unwrap()
+            member_list_digest(VAULT, None, &v1.members).unwrap()
         );
         // Bob's keys changed against the pins: blocked; against the roster too.
         let changed = inputs(&[(&a, "owner"), (&fake_b, "write"), (&c, "read")]);
@@ -3503,6 +3825,7 @@ mod tests {
             key_kind: kind.into(),
             key,
             roster_version: roster,
+            chain_hashes: None,
             signed_share: signed,
             paused: false,
             roster_hash: None,
@@ -3532,7 +3855,8 @@ mod tests {
                 .unwrap(),
             Admission::Consent {
                 rejoin: false,
-                replaced: false
+                replaced: false,
+                own: false
             }
         );
         assert_eq!(
@@ -3540,7 +3864,8 @@ mod tests {
                 .unwrap(),
             Admission::Consent {
                 rejoin: false,
-                replaced: false
+                replaced: false,
+                own: false
             }
         );
         // …unless it was there at the first signed sync.
@@ -3639,7 +3964,8 @@ mod tests {
                 .unwrap(),
             Admission::Consent {
                 rejoin: true,
-                replaced: false
+                replaced: false,
+                own: false
             }
         );
         assert_eq!(
@@ -3647,7 +3973,8 @@ mod tests {
                 .unwrap(),
             Admission::Consent {
                 rejoin: true,
-                replaced: false
+                replaced: false,
+                own: false
             }
         );
         let back = left.set_epoch("v", &pin(&k3, 2), Some(3)).unwrap();
@@ -3926,6 +4253,7 @@ mod tests {
         let consent = Admission::Consent {
             rejoin: false,
             replaced: true,
+            own: false,
         };
         assert_eq!(pins.admit(&replaced).unwrap(), consent);
         let o = pins.observe(&replaced).unwrap();
@@ -3940,9 +4268,18 @@ mod tests {
                 pin: false
             }
         ));
-        // A signed replacement and the account's own key replacements stay automatic.
-        assert!(matches!(
+        // A signed replacement of a vault never seen signed needs consent too (round 4:
+        // its roster may start at a version 1 a server-made account signed); once the
+        // vault has signed history, signed replacements are automatic.
+        assert_eq!(
             pins.admit(&obs("sealed", Some(pin(&k2, 1)), Some(1), true))
+                .unwrap(),
+            consent
+        );
+        let signed = pins.set_epoch("v", &pin(&k1, 0), Some(1)).unwrap();
+        assert!(matches!(
+            signed
+                .admit(&obs("sealed", Some(pin(&k2, 1)), Some(2), true))
                 .unwrap(),
             Admission::Ok {
                 epoch: EpochStatus::Newer,
@@ -3950,6 +4287,7 @@ mod tests {
                 pin: true
             }
         ));
+        // The account's own key replacements stay automatic.
         assert!(matches!(
             pins.admit(&obs("account", Some(pin(&k2, 1)), None, false))
                 .unwrap(),
@@ -3969,6 +4307,7 @@ mod tests {
         let consent = Admission::Consent {
             rejoin: false,
             replaced: false,
+            own: false,
         };
         // Key pins withheld on a fresh device (the identity existed): nothing grandfathered.
         let missing = KeyPins::default()
@@ -4206,5 +4545,498 @@ mod tests {
         alice
             .sign_roster(&key, VAULT, Some(&v1), 0, &rows, &review.digest)
             .unwrap();
+    }
+
+    // ------------------------------------------------------------- round 4
+
+    /// A pin with made-up ids (`[id; 32]` as its key, `[r; 12]` retired), as the review
+    /// round 3 probe built them.
+    fn fake_pin(epoch: u64, id: u8, retired: &[u8]) -> EpochPin {
+        EpochPin {
+            key_epoch: epoch,
+            key_id: b64(&[id; 32]),
+            retired: retired.iter().map(|r| b64(&[*r; 12])).collect(),
+            signed_since: None,
+            roster_version_max: None,
+            roster_hash: None,
+            rejoined_at: None,
+            own: false,
+        }
+    }
+
+    fn with_pin(vault: &str, p: EpochPin) -> KeyPins {
+        KeyPins {
+            epochs: [(vault.to_owned(), p)].into_iter().collect(),
+            ..KeyPins::default()
+        }
+    }
+
+    /// Review round 4 H1: merging never un-retires a key, in either order.
+    #[test]
+    fn merging_never_unretires_a_key() {
+        let cur = |e, id| fake_pin(e, id, &[]);
+        // Same epoch: the server's copy K2@3, this device K3@3 having retired K2.
+        let server = with_pin("v", fake_pin(3, 2, &[1]));
+        let ours = with_pin("v", fake_pin(3, 3, &[1, 2]));
+        for m in [server.merge(&ours).unwrap(), ours.merge(&server).unwrap()] {
+            assert_eq!(m.epochs["v"].key_id, b64(&[3; 32]));
+            assert_eq!(m.check_epoch("v", &cur(3, 2), None), EpochStatus::Older);
+            assert_eq!(m.check_epoch("v", &cur(9, 2), None), EpochStatus::Older);
+            assert_eq!(m.check_epoch("v", &cur(3, 3), None), EpochStatus::Same);
+            assert_eq!(m.check_epoch("v", &cur(4, 4), None), EpochStatus::Newer);
+        }
+        // The retired key relabelled at a higher epoch in the server's copy.
+        let server = with_pin("v", fake_pin(4, 2, &[1]));
+        for m in [server.merge(&ours).unwrap(), ours.merge(&server).unwrap()] {
+            let p = &m.epochs["v"];
+            assert_eq!((p.key_epoch, p.key_id.clone()), (3, b64(&[3; 32])));
+            assert!(retires(p, &b64(&[2; 32])) && retires(p, &b64(&[1; 32])));
+            assert_eq!(m.check_epoch("v", &cur(4, 2), None), EpochStatus::Older);
+        }
+        // A true conflict (same epoch, neither retired): the base's key stays, and the
+        // other key shows as a conflict wherever it is served.
+        let a = with_pin("v", fake_pin(3, 2, &[1]));
+        let b = with_pin("v", fake_pin(3, 3, &[1]));
+        let m = a.merge(&b).unwrap();
+        assert_eq!(m.epochs["v"].key_id, b64(&[2; 32]));
+        assert_eq!(m.check_epoch("v", &cur(3, 3), None), EpochStatus::Conflict);
+        assert!(!retires(&m.epochs["v"], &b64(&[3; 32])));
+        let m = b.merge(&a).unwrap();
+        assert_eq!(m.check_epoch("v", &cur(3, 2), None), EpochStatus::Conflict);
+        // A lower epoch is retired by the higher one as before.
+        let m = with_pin("v", fake_pin(2, 2, &[1]))
+            .merge(&with_pin("v", fake_pin(5, 5, &[])))
+            .unwrap();
+        assert_eq!(m.epochs["v"].key_epoch, 5);
+        assert_eq!(m.check_epoch("v", &cur(6, 2), None), EpochStatus::Older);
+        // Both keys retired by the other side (mixed histories): neither is accepted
+        // until a newer key comes.
+        let x = with_pin("v", fake_pin(3, 2, &[3]));
+        let y = with_pin("v", fake_pin(4, 3, &[2]));
+        for m in [x.merge(&y).unwrap(), y.merge(&x).unwrap()] {
+            assert_eq!(m.check_epoch("v", &cur(4, 3), None), EpochStatus::Older);
+            assert_eq!(m.check_epoch("v", &cur(3, 2), None), EpochStatus::Older);
+            assert_eq!(m.check_epoch("v", &cur(5, 7), None), EpochStatus::Newer);
+            m.check().unwrap();
+        }
+    }
+
+    /// Review round 4 M2 and L4: a stale pin never undoes a leave, and the tombstone
+    /// keeps what the dropped pin knew.
+    #[test]
+    fn tombstones_beat_stale_pins_and_keep_their_knowledge() {
+        let o = |key: EpochPin, roster: u64| VaultObservation {
+            vault_id: "v".into(),
+            key_kind: "sealed".into(),
+            key: Some(key),
+            roster_version: Some(roster),
+            roster_hash: None,
+            chain_hashes: None,
+            signed_share: true,
+            paused: false,
+        };
+        let signed = |mut p: EpochPin, v: u64| {
+            p.signed_since = Some(v);
+            p.roster_version_max = Some(v);
+            p
+        };
+        // Probe 2: the server's copy has a pin with a higher signed_since than the one
+        // the leaving device knew (it left with "no roster").
+        let server = with_pin("v", signed(fake_pin(1, 1, &[]), 1));
+        let left = with_pin("v", fake_pin(1, 1, &[]))
+            .leave("v", 0, 100)
+            .unwrap();
+        let m = server.merge(&left).unwrap();
+        assert!(m.epochs.is_empty() && m.left.contains_key("v"));
+        assert_eq!(m.left["v"].roster_version, 1, "raised to the dropped pin's");
+        assert_eq!(
+            m.admit(&o(fake_pin(1, 1, &[]), 1)).unwrap(),
+            Admission::Refused {
+                reason: RefuseReason::Left
+            }
+        );
+        assert!(matches!(
+            m.admit(&o(fake_pin(1, 1, &[]), 2)).unwrap(),
+            Admission::Consent { rejoin: true, .. }
+        ));
+        // Probe 3: the tombstone wins and keeps the newer pin's retired key.
+        let server = with_pin("v", signed(fake_pin(2, 2, &[1]), 1));
+        let left = with_pin("v", signed(fake_pin(1, 1, &[]), 1))
+            .leave("v", 1, 100)
+            .unwrap();
+        for m in [server.merge(&left).unwrap(), left.merge(&server).unwrap()] {
+            let t = &m.left["v"];
+            assert_eq!(t.pin.as_ref().unwrap().key_epoch, 2);
+            assert!(retires(t.pin.as_ref().unwrap(), &b64(&[1; 32])));
+            assert_eq!(
+                m.admit(&o(fake_pin(1, 1, &[]), 5)).unwrap(),
+                Admission::Refused {
+                    reason: RefuseReason::Left
+                },
+                "the old key can't re-join"
+            );
+        }
+        // A real re-join is marked and beats the tombstone it cleared; a stale copy of
+        // the pin from before the leave doesn't.
+        let before = with_pin("v", signed(fake_pin(1, 1, &[]), 3));
+        let left = before.leave("v", 3, 10).unwrap();
+        let back = left.set_epoch("v", &fake_pin(2, 2, &[]), Some(4)).unwrap();
+        assert_eq!(back.epochs["v"].rejoined_at, Some(4));
+        let m = left.merge(&back).unwrap();
+        assert!(m.left.is_empty());
+        assert_eq!(m.epochs["v"].key_epoch, 2);
+        assert!(retires(&m.epochs["v"], &b64(&[1; 32])));
+        assert!(left.merge(&before).unwrap().epochs.is_empty());
+        // Left again after the re-join (seen at roster 4): that tombstone wins.
+        let again = back.leave("v", 4, 20).unwrap();
+        let m = again.merge(&back).unwrap();
+        assert!(m.epochs.is_empty() && m.left["v"].roster_version == 4);
+        // Tombstone against tombstone: the higher version, both pins, the later time.
+        let t1 = with_pin("v", signed(fake_pin(2, 2, &[1]), 2))
+            .leave("v", 2, 50)
+            .unwrap();
+        let t2 = with_pin("v", signed(fake_pin(3, 3, &[]), 5))
+            .leave("v", 0, 40)
+            .unwrap();
+        for m in [t1.merge(&t2).unwrap(), t2.merge(&t1).unwrap()] {
+            let t = &m.left["v"];
+            assert_eq!((t.roster_version, t.left_at), (5, 50));
+            let p = t.pin.as_ref().unwrap();
+            assert_eq!(p.key_epoch, 3);
+            assert!(retires(p, &b64(&[1; 32])) && retires(p, &b64(&[2; 32])));
+        }
+    }
+
+    /// Review round 4 L5: retired ids stay within their budget.
+    #[test]
+    fn retired_ids_have_a_budget() {
+        let many = |id: u8, n: usize| {
+            let mut p = fake_pin(n as u64, id, &[]);
+            p.retired = (0..n)
+                .map(|i| {
+                    let mut b = [id; 12];
+                    b[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                    b64(&b)
+                })
+                .collect();
+            p
+        };
+        // Tombstones keep the newest 64.
+        let full = with_pin("v", many(1, MAX_RETIRED_KEY_IDS));
+        let left = full.leave("v", 0, 1).unwrap();
+        let t = left.left["v"].pin.as_ref().unwrap();
+        assert_eq!(t.retired.len(), MAX_TOMBSTONE_RETIRED_KEY_IDS);
+        assert_eq!(t.retired.last(), full.epochs["v"].retired.last());
+        // Accepted vaults: at most the total budget together, longest lists first.
+        let mut pins = KeyPins::default();
+        for (i, id) in (10u8..16).enumerate() {
+            pins.epochs
+                .insert(format!("v{i}"), many(id, MAX_RETIRED_KEY_IDS));
+        }
+        pins.epochs.insert("small".into(), many(20, 10));
+        let merged = KeyPins::default().merge(&pins).unwrap();
+        let total: usize = merged.epochs.values().map(|p| p.retired.len()).sum();
+        assert!(total <= MAX_TOTAL_RETIRED_KEY_IDS, "{total}");
+        assert_eq!(merged.epochs["small"].retired.len(), 10);
+        assert!(merged.epochs["v0"].retired.len() >= MAX_TOMBSTONE_RETIRED_KEY_IDS);
+        assert_eq!(
+            merged.epochs["v0"].retired.last(),
+            pins.epochs["v0"].retired.last(),
+            "the newest kept"
+        );
+        // The sealed pins stay well under their size limit.
+        let json = serde_json::to_vec(&merged).unwrap();
+        assert!(json.len() < MAX_KEY_PINS_JSON / 2, "{}", json.len());
+    }
+
+    /// Review round 4 I1: `accept` checks the row, records the roster's hash and refuses
+    /// what `admit` refuses.
+    #[test]
+    fn accept_records_the_roster_and_refuses_refused_rows() {
+        let k1 = SymmetricKey::from_bytes([1; 32]);
+        let hash = b64(&[5; 32]);
+        let invitation = obs_hash("sealed", Some(pin(&k1, 0)), Some(2), true, Some(&hash));
+        let none = KeyPins::default();
+        assert!(matches!(
+            none.admit(&invitation).unwrap(),
+            Admission::Consent { .. }
+        ));
+        let accepted = none.accept(&invitation).unwrap();
+        let p = &accepted.epochs["v"];
+        assert_eq!(p.signed_since, Some(2));
+        assert_eq!(p.roster_version_max, Some(2));
+        assert_eq!(p.roster_hash.as_deref(), Some(hash.as_str()));
+        assert!(!p.own);
+        // Refusals become errors.
+        let forked = obs_hash(
+            "sealed",
+            Some(pin(&k1, 0)),
+            Some(2),
+            true,
+            Some(&b64(&[6; 32])),
+        );
+        assert!(matches!(accepted.accept(&forked), Err(Error::RosterForked)));
+        let stripped = obs("sealed", Some(pin(&k1, 0)), None, false);
+        assert!(matches!(accepted.accept(&stripped), Err(Error::Rollback)));
+        let mut paused = invitation.clone();
+        paused.paused = true;
+        assert!(matches!(none.accept(&paused), Err(Error::IdentityMismatch)));
+        assert!(none.accept(&obs("sealed", None, None, false)).is_err());
+        // A re-join through accept: marked, the tombstone cleared.
+        let left = accepted.leave("v", 2, 10).unwrap();
+        let k2 = SymmetricKey::from_bytes([2; 32]);
+        let rejoin = obs_hash("sealed", Some(pin(&k2, 1)), Some(3), true, Some(&hash));
+        assert!(matches!(
+            left.admit(&rejoin).unwrap(),
+            Admission::Consent { rejoin: true, .. }
+        ));
+        let back = left.accept(&rejoin).unwrap();
+        assert!(back.left.is_empty());
+        assert_eq!(back.epochs["v"].rejoined_at, Some(3));
+        // Observation JSON must say `signed_share` and `paused` (review round 4 I2).
+        let json = serde_json::json!({
+            "vault_id": "v", "key_kind": "sealed", "key": pin(&k1, 0),
+            "roster_version": null, "signed_share": false,
+        });
+        assert!(serde_json::from_value::<VaultObservation>(json).is_err());
+        let json = serde_json::json!({
+            "vault_id": "v", "key_kind": "sealed", "key": pin(&k1, 0),
+            "roster_version": null, "paused": false,
+        });
+        assert!(serde_json::from_value::<VaultObservation>(json).is_err());
+    }
+
+    /// Lead's round 4 finding: a server-made "puppet" account signs a version 1 roster
+    /// and a share of a key it chose for a vault the account pinned without signed
+    /// history (grandfathered, or its own vault served as sealed): consent, never ok.
+    #[test]
+    fn a_puppet_signed_key_on_a_vault_never_seen_signed_needs_consent() {
+        let (_, _, me) = signer("me", 1);
+        let (_, puppet, p) = signer("puppet", 66);
+        let old = SymmetricKey::from_bytes([1; 32]);
+        let server_key = SymmetricKey::from_bytes([77; 32]);
+        // The server's key, a roster v1 by the puppet listing it and me, and its share.
+        let roster = next(
+            &puppet,
+            &server_key,
+            None,
+            1,
+            &[(&p, "owner"), (&me, "write")],
+        )
+        .unwrap();
+        let trusted =
+            verify_roster_chain(VAULT, None, std::slice::from_ref(&roster), &roster).unwrap();
+        assert_eq!(trusted.signer_role(&p).unwrap().as_deref(), Some("owner"));
+        let share = puppet
+            .seal_and_sign_share(&server_key, VAULT, &me, "write", 1)
+            .unwrap();
+        verify_share(
+            VAULT,
+            &me,
+            "write",
+            1,
+            &share.sealed_key,
+            &p,
+            &share.signature,
+        )
+        .unwrap();
+        let key = |k: &SymmetricKey, e| EpochPin::of(k, VAULT, e).unwrap();
+        let row = VaultObservation {
+            vault_id: VAULT.into(),
+            key_kind: "sealed".into(),
+            key: Some(key(&server_key, 1)),
+            roster_version: Some(1),
+            roster_hash: Some(trusted.hash().unwrap()),
+            chain_hashes: None,
+            signed_share: true,
+            paused: false,
+        };
+        // A grandfathered share pinned unsigned.
+        let grand = KeyPins::default()
+            .grandfather(&[VAULT.into()], true)
+            .unwrap()
+            .set_epoch(VAULT, &key(&old, 0), None)
+            .unwrap();
+        assert_eq!(
+            grand.admit(&row).unwrap(),
+            Admission::Consent {
+                rejoin: false,
+                replaced: true,
+                own: false
+            }
+        );
+        assert!(!grand.observe(&row).unwrap().changed);
+        // The account's own vault, then served as sealed with the server's key.
+        let own_row = VaultObservation {
+            key_kind: "account".into(),
+            key: Some(key(&old, 0)),
+            roster_version: None,
+            roster_hash: None,
+            chain_hashes: None,
+            signed_share: false,
+            ..row.clone()
+        };
+        let mine = KeyPins::default().observe(&own_row).unwrap().pins;
+        assert!(mine.epochs[VAULT].own);
+        assert_eq!(
+            mine.admit(&row).unwrap(),
+            Admission::Consent {
+                rejoin: false,
+                replaced: true,
+                own: true
+            }
+        );
+        // Pins from before (no `own` mark) learn it from the next account row.
+        let legacy = KeyPins::default()
+            .set_epoch(VAULT, &key(&old, 0), None)
+            .unwrap();
+        assert!(matches!(
+            legacy.admit(&own_row).unwrap(),
+            Admission::Ok { pin: true, .. }
+        ));
+        let learned = legacy.observe(&own_row).unwrap();
+        assert!(learned.changed && learned.pins.epochs[VAULT].own);
+        assert!(matches!(
+            learned.pins.admit(&own_row).unwrap(),
+            Admission::Ok { pin: false, .. }
+        ));
+        // Accepted anyway (the user's choice): the server's key is pinned, not silently.
+        let accepted = mine.accept(&row).unwrap();
+        assert_eq!(accepted.epochs[VAULT].key_epoch, 1);
+        assert!(accepted.epochs[VAULT].own, "the mark stays");
+    }
+
+    /// Review round 4 I3: the reviewed digest binds the version, `first` and the previous
+    /// roster.
+    #[test]
+    fn review_digests_bind_the_previous_roster() {
+        let (_, alice, a) = signer("alice", 1);
+        let (_, _, b) = signer("bob", 2);
+        let key = SymmetricKey::from_bytes([9; 32]);
+        let v1 = next(&alice, &key, None, 0, &[(&a, "owner"), (&b, "read")]).unwrap();
+        let v1b = next(&alice, &key, None, 0, &[(&a, "owner"), (&b, "write")]).unwrap();
+        let rows = inputs(&[(&a, "owner"), (&b, "read")]);
+        let review = roster_review(VAULT, Some(&v1), &a, &rows, &KeyPins::default()).unwrap();
+        // Not valid for a version 1 of the same list, nor after another version 1.
+        assert!(matches!(
+            alice.sign_roster(&key, VAULT, None, 0, &rows, &review.digest),
+            Err(Error::ReviewMismatch)
+        ));
+        assert!(matches!(
+            alice.sign_roster(&key, VAULT, Some(&v1b), 0, &rows, &review.digest),
+            Err(Error::ReviewMismatch)
+        ));
+        let first = roster_review(VAULT, None, &a, &rows, &KeyPins::default()).unwrap();
+        assert_ne!(first.digest, review.digest);
+        alice
+            .sign_roster(&key, VAULT, Some(&v1), 0, &rows, &review.digest)
+            .unwrap();
+    }
+
+    /// Review round 4 M3: invisible characters, trailing dots and IDNA failures.
+    #[test]
+    fn emails_lose_invisible_characters() {
+        let alice = normalize_email("alice@example.com");
+        for email in [
+            "ali\u{200B}ce@example.com",
+            "alice@example.com.",
+            "alice@example.com\u{200B}",
+            "\u{FEFF}alice@example.com",
+            "alice\u{2028}@example.com",
+            "alice@exam\u{3164}ple.com",
+            "alice@example.com\u{E0001}",
+            "al\u{202E}ice@example.com",
+        ] {
+            assert_eq!(normalize_email(email), alice, "{email:?}");
+        }
+        // A look-alike domain is punycode, so not equal and plainly different.
+        let fake = normalize_email("alice@ex\u{0430}mple.com\u{E0001}");
+        assert_ne!(fake, alice);
+        assert!(fake.is_ascii() && fake.contains("xn--"), "{fake}");
+        // A domain IDNA refuses: no non-ASCII character left that could look like one.
+        let refused = normalize_email("al\u{0456}ce@b\u{00FC} cher.example");
+        assert_eq!(refused, "al\\u{456}ce@b\\u{fc} cher.example");
+        assert_eq!(normalize_email("a\\b@"), "a\\u{5c}b@");
+    }
+
+    /// Round 4 follow-up: a chain verified from an older (or no) remembered roster must
+    /// contain the roster the key pins remember at their highest version, with its hash.
+    #[test]
+    fn fetched_chains_must_contain_the_pinned_roster() {
+        let k = SymmetricKey::from_bytes([1; 32]);
+        let h = |n: u8| b64(&[n; 32]);
+        let chain = |items: &[(u64, u8)]| {
+            Some(
+                items
+                    .iter()
+                    .map(|(v, n)| (v.to_string(), h(*n)))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+        };
+        let row = |version: u64, hash: u8, hashes| VaultObservation {
+            chain_hashes: hashes,
+            ..obs_hash(
+                "sealed",
+                Some(pin(&k, 0)),
+                Some(version),
+                true,
+                Some(&h(hash)),
+            )
+        };
+        // Seen signed up to roster version 2 (hash 2).
+        let pins = KeyPins::default().accept(&row(2, 2, None)).unwrap();
+        assert_eq!(pins.epochs["v"].roster_hash, Some(h(2)));
+        let forked = Admission::Refused {
+            reason: RefuseReason::RosterForked,
+        };
+        // A device without the remembered roster is shown a chain from version 1 that a
+        // server-made account signed (hashes 11, 12, 13): refused.
+        let puppet = row(3, 13, chain(&[(1, 11), (2, 12), (3, 13)]));
+        assert_eq!(pins.admit(&puppet).unwrap(), forked);
+        assert!(matches!(pins.accept(&puppet), Err(Error::RosterForked)));
+        assert!(!pins.observe(&puppet).unwrap().changed);
+        // The real chain (through hash 2 at version 2), or one from a remembered roster
+        // at or after it: fine.
+        for c in [
+            chain(&[(1, 1), (2, 2), (3, 3)]),
+            chain(&[(2, 2), (3, 3)]),
+            chain(&[(3, 3)]),
+            None,
+        ] {
+            assert!(
+                matches!(
+                    pins.admit(&row(3, 3, c.clone())).unwrap(),
+                    Admission::Ok { pin: true, .. }
+                ),
+                "{c:?}"
+            );
+        }
+        // Malformed: a gap over the pinned version, another hash for the trusted roster,
+        // versions that aren't plain numbers from 1.
+        assert!(pins.admit(&row(3, 3, chain(&[(1, 1), (3, 3)]))).is_err());
+        assert!(pins.admit(&row(3, 3, chain(&[(2, 2), (3, 4)]))).is_err());
+        for bad in ["0", "02", "x", "-1"] {
+            let mut c = chain(&[(3, 3)]).unwrap();
+            c.insert(bad.into(), h(3));
+            assert!(pins.admit(&row(3, 3, Some(c))).is_err(), "{bad}");
+        }
+        let mut short = chain(&[(3, 3)]).unwrap();
+        short.insert("1".into(), "short".into());
+        assert!(pins.admit(&row(3, 3, Some(short))).is_err());
+        // A tombstone remembers the hash too: a re-share whose chain from version 1 was
+        // signed by someone else can't even ask to re-join.
+        let left = pins.leave("v", 2, 10).unwrap();
+        assert_eq!(left.left["v"].pin.as_ref().unwrap().roster_hash, Some(h(2)));
+        assert_eq!(left.admit(&puppet).unwrap(), forked);
+        assert!(matches!(left.accept(&puppet), Err(Error::RosterForked)));
+        let real = row(3, 3, chain(&[(1, 1), (2, 2), (3, 3)]));
+        assert!(matches!(
+            left.admit(&real).unwrap(),
+            Admission::Consent { rejoin: true, .. }
+        ));
+        left.accept(&real).unwrap();
+        // Merged tombstones and pins keep the hash.
+        let merged = left.merge(&pins).unwrap();
+        assert_eq!(merged.admit(&puppet).unwrap(), forked);
     }
 }

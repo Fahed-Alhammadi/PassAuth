@@ -302,6 +302,10 @@ pub(super) struct AddMember {
 
 /// New invitations one user may send per hour.
 const INVITATIONS_PER_HOUR: u32 = 100;
+/// Key replacements (`/rotate`, `/members/{user}/remove`) per vault and hour. Each one
+/// adds a retired key id to every member's key pins; this bounds how fast an admin can
+/// grow them (signed sharing review round 4 L5; the core also caps them).
+pub(crate) const KEY_REPLACEMENTS_PER_HOUR: u32 = 30;
 
 /// Share a vault: someone who isn't a member yet gets an invitation (`invited`,
 /// shown to them in `/sync` until they accept or decline it, and emailed when
@@ -697,6 +701,7 @@ pub(super) async fn rotate_vault(
     check_rotation(&b, &id, &user.user_id)?;
     let need = Need::new(&id, Role::Admin, b.key_epoch);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
+    limit_key_replacements(&state, &id)?;
     // Invitations carry the sealed key and the encrypted name: both change.
     w.tell_invitees(&id);
     let seq = w.seq(&id);
@@ -729,6 +734,7 @@ pub(super) async fn remove_member_and_rotate(
     if target == Role::Owner {
         return Err(ApiError::Forbidden("the owner cannot be removed".into()));
     }
+    limit_key_replacements(&state, &id)?;
     if target >= mine {
         return Err(ApiError::Forbidden(
             "you can't remove a member at or above your own role".into(),
@@ -756,6 +762,18 @@ pub(super) async fn remove_member_and_rotate(
     let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
     let revision = w.commit(&state).await?;
     Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
+}
+
+/// Count a key replacement of vault `id` ([`KEY_REPLACEMENTS_PER_HOUR`]). Called only
+/// after the caller's admin role in the vault was checked, so the key names a vault the
+/// request has proven exists (a [`Class::Target`] key).
+fn limit_key_replacements(state: &AppState, id: &str) -> ApiResult<()> {
+    state.limiter.limit(
+        Class::Target,
+        &format!("key-replacement:{id}"),
+        KEY_REPLACEMENTS_PER_HOUR,
+        3600,
+    )
 }
 
 /// A rotation's answer: `{"revision", "key_epoch", "vault_seq"}`, plus

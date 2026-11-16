@@ -5429,7 +5429,7 @@
             }
           ],
           "missing": [],
-          "digest": "I1_J72Dy-KRzBkmWiJ7d1LExnNuKk3KTUDayEevLL2E"
+          "digest": "q_cKXLnL1CucOUcHIDIljfKMocOlhqtcJY5sg34_1pg"
         }
       },
       {
@@ -5497,7 +5497,7 @@
             }
           ],
           "missing": [],
-          "digest": "UGxP1X-PnEu8Z4Ht_guRF9KPhh6sjBIFWXVX5fY95hk"
+          "digest": "9KojfrwsWO7N7jELsJYiPcWYYuEnI2qeoHC8QNKUd6g"
         }
       },
       {
@@ -5646,7 +5646,7 @@
             }
           ],
           "missing": [],
-          "digest": "UGxP1X-PnEu8Z4Ht_guRF9KPhh6sjBIFWXVX5fY95hk"
+          "digest": "mMrY6QmIOw75TZWFVneQ3nIOKaFHmZByPL5LAOcpfjg"
         }
       }
     ],
@@ -6068,6 +6068,22 @@
       "grandfathered": null,
       "left": {}
     },
+    "keyPinsOwn": {
+      "version": 0,
+      "pins": [],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null,
+          "own": true
+        }
+      },
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
     "admissions": [
       {
         "pins": "none",
@@ -6124,7 +6140,8 @@
         "expected": {
           "status": "consent",
           "rejoin": false,
-          "replaced": false
+          "replaced": false,
+          "own": false
         }
       },
       {
@@ -6145,7 +6162,8 @@
         "expected": {
           "status": "consent",
           "rejoin": false,
-          "replaced": false
+          "replaced": false,
+          "own": false
         }
       },
       {
@@ -6333,7 +6351,7 @@
           "status": "ok",
           "epoch": "same",
           "trust": "own",
-          "pin": false
+          "pin": true
         }
       },
       {
@@ -6395,7 +6413,7 @@
           "status": "ok",
           "epoch": "same",
           "trust": "own",
-          "pin": false
+          "pin": true
         }
       },
       {
@@ -6436,7 +6454,8 @@
         "expected": {
           "status": "consent",
           "rejoin": true,
-          "replaced": false
+          "replaced": false,
+          "own": false
         }
       },
       {
@@ -6498,7 +6517,8 @@
         "expected": {
           "status": "consent",
           "rejoin": false,
-          "replaced": false
+          "replaced": false,
+          "own": false
         }
       },
       {
@@ -6519,7 +6539,8 @@
         "expected": {
           "status": "consent",
           "rejoin": false,
-          "replaced": false
+          "replaced": false,
+          "own": false
         }
       },
       {
@@ -6585,7 +6606,8 @@
         "expected": {
           "status": "consent",
           "rejoin": false,
-          "replaced": true
+          "replaced": true,
+          "own": false
         }
       },
       {
@@ -6604,10 +6626,10 @@
           "paused": false
         },
         "expected": {
-          "status": "ok",
-          "epoch": "newer",
-          "trust": "signed",
-          "pin": true
+          "status": "consent",
+          "rejoin": false,
+          "replaced": true,
+          "own": false
         }
       },
       {
@@ -6761,6 +6783,990 @@
         "expected": {
           "status": "refused",
           "reason": "roster_forked"
+        }
+      },
+      {
+        "pins": "grandfathered",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "roster_hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": false,
+          "own": false
+        }
+      },
+      {
+        "pins": "own",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "own",
+          "pin": false
+        }
+      },
+      {
+        "pins": "own",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "roster_hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": true,
+          "own": true
+        }
+      },
+      {
+        "pins": "own",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": true,
+          "own": true
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "own",
+          "pin": true
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "chain_hashes": {
+            "1": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+            "2": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+            "3": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI",
+            "4": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0"
+          },
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "roster_forked"
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "chain_hashes": {
+            "1": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+            "2": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+            "3": "2h_H1zAVUcQYyLco7hr6gDGsW4mjIn7oNQeYKH7Oc-E",
+            "4": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0"
+          },
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": true
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "chain_hashes": {
+            "4": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0"
+          },
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": true
+        }
+      }
+    ],
+    "accepts": [
+      {
+        "pins": "none",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 1,
+              "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+              "retired": [],
+              "signed_since": 2,
+              "roster_version_max": 2,
+              "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "version": 0,
+          "pins": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "email": "bob@example.com",
+              "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+              "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "verified": true,
+              "first_seen": 1000
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "email": "carol@example.com",
+              "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+              "signing_key": null,
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "verified": false,
+              "first_seen": 1000
+            }
+          ],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+              "retired": [
+                "b7oV2a1UFfA_lB8x"
+              ],
+              "signed_since": 4,
+              "roster_version_max": 4,
+              "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+              "rejoined_at": 4
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "roster_hash": "2h_H1zAVUcQYyLco7hr6gDGsW4mjIn7oNQeYKH7Oc-E",
+          "signed_share": true,
+          "paused": false
+        },
+        "error": "rollback"
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "roster_hash": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI",
+          "signed_share": true,
+          "paused": false
+        },
+        "error": "roster_forked"
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "version": 0,
+          "pins": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "email": "bob@example.com",
+              "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+              "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "verified": true,
+              "first_seen": 1000
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "email": "carol@example.com",
+              "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+              "signing_key": null,
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "verified": false,
+              "first_seen": 1000
+            }
+          ],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+              "retired": [
+                "b7oV2a1UFfA_lB8x"
+              ],
+              "signed_since": 2,
+              "roster_version_max": 2,
+              "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+            }
+          },
+          "own_identity": null,
+          "grandfathered": [
+            "00000000-0000-4000-8000-0000000000f1"
+          ],
+          "left": {}
+        }
+      },
+      {
+        "pins": "own",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "roster_hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+              "retired": [
+                "b7oV2a1UFfA_lB8x"
+              ],
+              "signed_since": 1,
+              "roster_version_max": 1,
+              "roster_hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+              "own": true
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "chain_hashes": {
+            "1": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+            "2": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+            "3": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI",
+            "4": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0"
+          },
+          "signed_share": true,
+          "paused": false
+        },
+        "error": "roster_forked"
+      }
+    ],
+    "merges": [
+      {
+        "name": "same epoch, the other side retired the key",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "same epoch, reversed",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "a retired key relabelled higher",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 4,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "a retired key relabelled higher, reversed",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 4,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB",
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "a fork at the same epoch",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "both keys retired by the other side",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 3,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AwMDAwMDAwMDAwMD"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 4,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AgICAgICAgICAgIC"
+              ],
+              "signed_since": null
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 4,
+              "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+              "retired": [
+                "AgICAgICAgICAgIC",
+                "AwMDAwMDAwMDAwMD"
+              ],
+              "signed_since": null
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "a stale pin and a leave",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 1,
+              "key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+              "retired": [],
+              "signed_since": 1,
+              "roster_version_max": 1
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 1,
+                "key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+                "retired": [],
+                "signed_since": null
+              },
+              "roster_version": 0,
+              "left_at": 100
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 1,
+                "key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+                "retired": [],
+                "signed_since": 1,
+                "roster_version_max": 1
+              },
+              "roster_version": 1,
+              "left_at": 100
+            }
+          }
+        }
+      },
+      {
+        "name": "a tombstone keeps the newer key",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": 1,
+              "roster_version_max": 1
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 1,
+                "key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+                "retired": [],
+                "signed_since": 1,
+                "roster_version_max": 1
+              },
+              "roster_version": 1,
+              "left_at": 100
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 2,
+                "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+                "retired": [
+                  "AQEBAQEBAQEBAQEB"
+                ],
+                "signed_since": 1,
+                "roster_version_max": 1
+              },
+              "roster_version": 1,
+              "left_at": 100
+            }
+          }
+        }
+      },
+      {
+        "name": "a re-join beats its tombstone",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 1,
+                "key_id": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+                "retired": [],
+                "signed_since": 3,
+                "roster_version_max": 3
+              },
+              "roster_version": 3,
+              "left_at": 10
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": 4,
+              "roster_version_max": 4,
+              "rejoined_at": 4
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "key_epoch": 2,
+              "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+              "retired": [
+                "AQEBAQEBAQEBAQEB"
+              ],
+              "signed_since": 3,
+              "roster_version_max": 4,
+              "rejoined_at": 4
+            }
+          },
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {}
+        }
+      },
+      {
+        "name": "two tombstones",
+        "base": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 2,
+                "key_id": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+                "retired": [
+                  "AQEBAQEBAQEBAQEB"
+                ],
+                "signed_since": 2,
+                "roster_version_max": 2
+              },
+              "roster_version": 2,
+              "left_at": 50
+            }
+          }
+        },
+        "ours": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 3,
+                "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+                "retired": [],
+                "signed_since": 5,
+                "roster_version_max": 5
+              },
+              "roster_version": 5,
+              "left_at": 40
+            }
+          }
+        },
+        "expected": {
+          "version": 0,
+          "pins": [],
+          "epochs": {},
+          "own_identity": null,
+          "grandfathered": null,
+          "left": {
+            "00000000-0000-4000-8000-0000000000f1": {
+              "pin": {
+                "key_epoch": 3,
+                "key_id": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+                "retired": [
+                  "AQEBAQEBAQEBAQEB",
+                  "AgICAgICAgICAgIC"
+                ],
+                "signed_since": 2,
+                "roster_version_max": 5
+              },
+              "roster_version": 5,
+              "left_at": 50
+            }
+          }
         }
       }
     ],
@@ -7100,6 +8106,46 @@
       {
         "email": "x@",
         "expected": "x@"
+      },
+      {
+        "email": "ali​ce@example.com",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "﻿alice@example.com",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "alice@example.com.",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "alice@example.com​",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "alice@exаmple.com󠀁",
+        "expected": "alice@xn--exmple-4nf.com"
+      },
+      {
+        "email": "al‮ice@examㅤple.com",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "alice @example.com",
+        "expected": "alice@example.com"
+      },
+      {
+        "email": "alіce@bü cher.example",
+        "expected": "al\\u{456}ce@b\\u{fc} cher.example"
+      },
+      {
+        "email": "a\\b@",
+        "expected": "a\\u{5c}b@"
+      },
+      {
+        "email": "x@.",
+        "expected": "x@."
       }
     ],
     "legacyWraps": [
@@ -7133,6 +8179,10 @@
       },
       {
         "pins": "rosterMax",
+        "expected": true
+      },
+      {
+        "pins": "own",
         "expected": true
       }
     ],

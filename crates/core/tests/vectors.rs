@@ -388,12 +388,27 @@ fn signed_sharing_vectors() {
             key: Some(ep(&vault_key, 1)),
             roster_version: Some(3),
             roster_hash: Some(roster_hash("v3")),
+            chain_hashes: None,
             signed_share: true,
             paused: false,
         })
         .unwrap()
         .pins;
     assert_eq!(json!(roster_max), s["keyPinsRosterMax"]);
+    let own_vault = KeyPins::default()
+        .observe(&VaultObservation {
+            vault_id: vault_id.to_owned(),
+            key_kind: "account".into(),
+            key: Some(ep(&vault_key, 1)),
+            roster_version: None,
+            roster_hash: None,
+            chain_hashes: None,
+            signed_share: false,
+            paused: false,
+        })
+        .unwrap()
+        .pins;
+    assert_eq!(json!(own_vault), s["keyPinsOwn"]);
     let sets: BTreeMap<&str, KeyPins> = [
         ("none", KeyPins::default()),
         ("withEpoch", with_epoch),
@@ -403,6 +418,7 @@ fn signed_sharing_vectors() {
         ("withheld", withheld),
         ("unsigned", unsigned),
         ("rosterMax", roster_max),
+        ("own", own_vault),
     ]
     .into_iter()
     .collect();
@@ -412,6 +428,25 @@ fn signed_sharing_vectors() {
             json!(sets[c["pins"].as_str().unwrap()].admit(&o).unwrap()),
             c["expected"],
             "admission {c}"
+        );
+    }
+    for c in s["accepts"].as_array().unwrap() {
+        let o: VaultObservation = serde_json::from_value(c["observation"].clone()).unwrap();
+        let got = sets[c["pins"].as_str().unwrap()].accept(&o);
+        match (&got, c.get("expected"), c.get("error")) {
+            (Ok(p), Some(e), _) => assert_eq!(&json!(p), e, "accept {c}"),
+            (Err(err), _, Some(e)) => assert_eq!(json!(err.code()), *e, "accept {c}"),
+            _ => panic!("accept {c}: {got:?}"),
+        }
+    }
+    for c in s["merges"].as_array().unwrap() {
+        let base: KeyPins = serde_json::from_value(c["base"].clone()).unwrap();
+        let ours: KeyPins = serde_json::from_value(c["ours"].clone()).unwrap();
+        assert_eq!(
+            json!(base.merge(&ours).unwrap()),
+            c["expected"],
+            "merge {}",
+            c["name"]
         );
     }
     let mut step = sets["grandfathered"].clone();

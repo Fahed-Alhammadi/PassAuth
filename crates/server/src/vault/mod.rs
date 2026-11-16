@@ -48,6 +48,8 @@ pub use attachments::sweep as sweep_attachments;
 pub(crate) use attachments::{detach_vault, file_response, remove_files};
 pub use history::trim_versions;
 pub use items::purge_trash;
+#[cfg(test)]
+pub(crate) use sharing::KEY_REPLACEMENTS_PER_HOUR;
 pub use sharing::insert_vault;
 #[cfg(test)]
 pub(crate) use sharing::invitation_email;

@@ -442,9 +442,10 @@ pub fn pins_grandfather(
 }
 
 /// What to do with a vault row (`observation_json`: `{vault_id, key_kind, key,
-/// roster_version, roster_hash?, signed_share, paused}`): JSON `{"status": "ok", "epoch",
-/// "trust", "pin"}` | `{"status": "consent", "rejoin", "replaced"}` | `{"status":
-/// "refused", "reason"}`.
+/// roster_version, roster_hash?, chain_hashes?, signed_share, paused}`; `signed_share` and
+/// `paused` required; `chain_hashes` = `{"<version>": "<roster_hash>"}` of the trusted
+/// roster and every newer one verified now, sent whenever a chain was fetched): JSON `{"status": "ok", "epoch", "trust", "pin"}` | `{"status": "consent",
+/// "rejoin", "replaced", "own"}` | `{"status": "refused", "reason"}`.
 #[uniffi::export]
 pub fn pins_admit(pins_json: Option<String>, observation_json: String) -> R<String> {
     let observation: VaultObservation = json_in(&observation_json)?;
@@ -459,14 +460,25 @@ pub fn pins_observe(pins_json: Option<String>, observation_json: String) -> R<St
     json_out(&pins_or_empty(pins_json)?.observe(&observation)?)
 }
 
+/// Accept a vault row the user agreed to (an invitation or a consent prompt): the key
+/// pins (JSON) with its key pinned, its roster version and hash remembered, a tombstone
+/// cleared (marked re-joined) and an `account` row marked `own`. Errors for what
+/// `pins_admit` would refuse (`Rollback`, `RosterForked`, `IdentityMismatch`).
+#[uniffi::export]
+pub fn pins_accept(pins_json: Option<String>, observation_json: String) -> R<String> {
+    let observation: VaultObservation = json_in(&observation_json)?;
+    json_out(&pins_or_empty(pins_json)?.accept(&observation)?)
+}
+
 /// A member roster's hash (base64url; the observation's `roster_hash`).
 #[uniffi::export]
 pub fn roster_hash(roster_json: String) -> R<String> {
     Ok(roster(&roster_json)?.hash()?)
 }
 
-/// An email as key pins compare it (trimmed, NFKC, lower case, IDNA ASCII domain); show
-/// pinned emails in this form.
+/// An email as key pins compare it (invisible characters removed, NFKC, lower case,
+/// trimmed, the domain without trailing dots in IDNA ASCII; non-ASCII escaped as
+/// `\u{hex}` when IDNA refuses the domain); show pinned emails in this form.
 #[uniffi::export]
 pub fn normalize_email(email: String) -> String {
     core::normalize_email(&email)
@@ -801,6 +813,17 @@ mod tests {
             observed["pins"]["epochs"][&vault]["key_id"],
             json(&key.epoch_pin_json(vault.clone(), 1).unwrap())["key_id"]
         );
+        // Accepting a consent: pinned with the roster version; a left vault can't be.
+        let accepted = json(&pins_accept(None, row(true)).unwrap());
+        assert_eq!(accepted["epochs"][&vault]["signed_since"], 1);
+        assert!(matches!(
+            pins_accept(Some(left.clone()), row(true)),
+            Err(CoreError::Rollback)
+        ));
+        // Observations must say `signed_share` and `paused`.
+        let mut partial = json(&row(true));
+        partial.as_object_mut().unwrap().remove("paused");
+        assert!(pins_admit(None, partial.to_string()).is_err());
         assert_eq!(roster_hash(roster_json.clone()).unwrap().len(), 43);
         assert_eq!(
             normalize_email(" ＢＯＢ@Bücher.example".into()),

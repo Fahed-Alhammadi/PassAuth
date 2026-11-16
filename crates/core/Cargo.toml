@@ -47,6 +47,9 @@ url = "2.5.8"
 idna = "1.1.0"
 # Key pins compare emails NFKC-normalized (src/sharing.rs); the normalizer idna already uses.
 icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+# ...and strip invisible characters (general categories Cf, Cc, Zl, Zp) first; already in the
+# tree through idna.
+icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 regex-lite = "0.1.9"
 
 [dev-dependencies]

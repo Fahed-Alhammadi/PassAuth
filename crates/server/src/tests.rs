@@ -1501,6 +1501,41 @@ async fn rotation_rejects_duplicates_and_foreign_account_keys() {
     );
 }
 
+/// Signed sharing review round 4 L5: key replacements per vault are rate limited (each
+/// adds a retired key id to every member's key pins).
+#[tokio::test]
+async fn key_replacements_per_vault_are_limited() {
+    let app = app().await;
+    let alice = register(&app, "rot-limit@example.com", "pw-alice-1").await;
+    let ta = token(&app, "rot-limit@example.com", "pw-alice-1").await;
+    let (_, me) = call(&app, Method::GET, "/api/account", Some(&ta), json!(null)).await;
+    let me = me["user_id"].as_str().unwrap().to_owned();
+    let rotate = format!("/api/vaults/{}/rotate", alice.vault_id);
+    let body = json!({
+        "keys": [{ "user_id": me, "wrapped_key": "a2V5", "key_kind": "account" }],
+        "items": [],
+    });
+    for _ in 0..crate::vault::KEY_REPLACEMENTS_PER_HOUR {
+        let (s, v) = call(&app, Method::POST, &rotate, Some(&ta), body.clone()).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+    }
+    let (s, v) = call(&app, Method::POST, &rotate, Some(&ta), body.clone()).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "{v}");
+    assert_eq!(v["error"], "rate_limited");
+    // Nothing changed: the epoch is the one after the last allowed replacement.
+    let (_, sync) = call(&app, Method::GET, "/api/sync", Some(&ta), json!(null)).await;
+    let vault = sync["vaults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == alice.vault_id.as_str())
+        .unwrap();
+    assert_eq!(
+        vault["key_epoch"],
+        u64::from(crate::vault::KEY_REPLACEMENTS_PER_HOUR)
+    );
+}
+
 #[tokio::test]
 async fn deleting_an_account_keeps_vaults_with_another_owner() {
     let (app, state) = app_with_state().await;
