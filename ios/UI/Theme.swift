@@ -541,6 +541,27 @@ struct Notice: View {
     }
 }
 
+/// A warning about the current choice (e.g. a login in a shared vault): a warning sign and the
+/// text in the danger colour; VoiceOver reads it as "Warning, …". Used by the iOS and the macOS
+/// AutoFill sheets.
+struct WarningNote: View {
+    let text: String
+    var identifier = "warning"
+
+    var body: some View {
+        Label {
+            Text(text).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(Color.paDanger)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Warning, \(text)")
+        .accessibilityIdentifier(identifier)
+    }
+}
+
 /// Error text under a form.
 struct ErrorText: View {
     let text: String?

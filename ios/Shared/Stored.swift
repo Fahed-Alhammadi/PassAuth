@@ -60,6 +60,9 @@ public struct Settings: Codable, Equatable, Sendable {
     /// Background App Refresh of the offline copy, in minutes between runs (iOS decides the
     /// actual timing); 0 = off. Options: 0, 30, 60, 120, 360, 720.
     public var backgroundSyncMinutes = 120
+    /// The vault timeout was lowered to the server's longest one (policy
+    /// `max_vault_timeout_minutes`); Settings says so until the user picks a timeout.
+    public var vaultTimeoutLowered = false
 
     public init() {}
 
@@ -79,6 +82,7 @@ public struct Settings: Codable, Equatable, Sendable {
         generator = c.lenient(.generator, d.generator)
         permissions = c.lenient(.permissions, d.permissions)
         backgroundSyncMinutes = c.lenient(.backgroundSyncMinutes, d.backgroundSyncMinutes)
+        vaultTimeoutLowered = c.lenient(.vaultTimeoutLowered, d.vaultTimeoutLowered)
     }
 }
 
@@ -139,6 +143,16 @@ public struct AccountData: Codable, Equatable, Sendable {
     public var bundle: String?
     /// Face ID / Touch ID unlock is set up (session bytes in a biometry-bound Keychain item).
     public var biometric = false
+    /// The server's `/api/config` `features` when last asked (`featuresAt`, unix seconds); nil
+    /// until then. Optional, so files written before they existed decode.
+    public var features: [String]?
+    public var featuresAt: Double?
+    /// The server's API version (`/api/config` `api`, kept with `features`); nil until asked
+    /// and from older servers without one.
+    public var api: Int?
+    /// The server's account policies (`/api/config` `policies`, kept with `features`); nil until
+    /// asked or from servers without the `policies` feature.
+    public var policies: Policies?
 
     public init(server: String = "", email: String = "") {
         self.server = server
@@ -179,9 +193,17 @@ public struct Stored: Equatable, Sendable {
     public var file = StoredFile()
     public var secrets = Secrets()
 
+    public init() {}
+
     public var activeId: String { file.activeId }
     public var active: AccountData? { file.accounts[file.activeId] }
     public var settings: Settings { file.settings }
 
     public func tokens(_ id: String) -> Tokens? { secrets.tokens[id] }
+
+    /// The longest vault timeout the servers of the signed-in accounts allow (the strictest
+    /// policy; the timeout locks every account), in minutes; 0 = no limit.
+    public var timeoutLimit: Int {
+        PolicyRules.strictestLimit(file.accounts.compactMap { id, a in tokens(id) == nil ? nil : a.policies?.maxVaultTimeoutMinutes })
+    }
 }

@@ -29,9 +29,21 @@ public struct AppState: Equatable, Sendable {
     public var secretKeyStored = false
     public var biometricEnabled = false
     public var settings = Settings()
+    /// Website icons for the active account: the user's setting and the server's icon service
+    /// (`SiteIcons.shown`).
+    public var showSiteIcons = true
     public var lastSync: Double = 0
     /// The active record is an unfinished "add account".
     public var adding = false
+    /// The active account's server's policies (the defaults when it has none).
+    public var policies = Policies()
+    /// The longest vault timeout the signed-in accounts' servers allow, in minutes; 0 = no limit.
+    public var timeoutLimit = 0
+    /// The active account's server requires two-step login and the account has no method yet:
+    /// the app shows the setup screen instead of the vault (`TwoStepGate`).
+    public var twoStepRequired = false
+    /// What the active account still has to change for its server's policies.
+    public var policyViolations: [PolicyViolation] = []
 }
 
 /// A decrypted item of the active account.
@@ -65,12 +77,17 @@ public struct VaultInfo: Identifiable, Equatable, Sendable {
     /// `account`: the vault key is wrapped with this account's own key (only this account can
     /// have made it). `sealed`: someone shared the vault with this account.
     public let keyKind: String
+    /// The epoch of the vault key this device holds, from `/sync` (API v2: goes up by one with
+    /// every key replacement); nil from older servers. Writes encrypted under that key carry it
+    /// (`key_epoch`), so the server refuses them once the key was replaced.
+    public let keyEpoch: Int64?
 
-    public init(id: String, name: String, role: Role, keyKind: String = VaultInfo.accountKeyKind) {
+    public init(id: String, name: String, role: Role, keyKind: String = VaultInfo.accountKeyKind, keyEpoch: Int64? = nil) {
         self.id = id
         self.name = name
         self.role = role
         self.keyKind = keyKind
+        self.keyEpoch = keyEpoch
     }
 
     public var personal: Bool { keyKind == Self.accountKeyKind }
@@ -91,6 +108,9 @@ public struct VaultData: Sendable {
     public var revision: Int64 = 0
     /// Shown from the on-device copy because the server couldn't be reached.
     public var offline = false
+    /// Vaults shared with the account and waiting for an answer (the app only; the AutoFill
+    /// extensions ignore invitations).
+    public var invitations: [Invitation] = []
 
     public init() {}
 
@@ -105,6 +125,10 @@ public struct VaultData: Sendable {
     /// In the account's own vault (not one somebody shared) and editable: the only logins that
     /// are picked as a default place to write to (`SaveLogic`).
     public func isOwn(_ e: Entry) -> Bool { vaults.first { $0.id == e.vaultId }.map { $0.personal && $0.role != .read } ?? false }
+    /// In one of the account's own vaults (key wrapped with its own key), whatever the role: the
+    /// only logins whose regular-expression websites are used for matching (`AutofillMatcher`).
+    /// A login whose vault is unknown counts as somebody else's.
+    public func isPersonal(_ e: Entry) -> Bool { vaults.first { $0.id == e.vaultId }?.personal ?? false }
     /// The name of the entry's vault when it is one somebody shared; nil for the account's own.
     public func sharedVaultName(_ e: Entry) -> String? { vaults.first { $0.id == e.vaultId }.flatMap { $0.personal ? nil : $0.name } }
     public var writable: [VaultInfo] { vaults.filter { $0.role != .read } }
@@ -120,11 +144,14 @@ public struct Registered: Sendable {
     public let emailVerificationRequired: Bool
 }
 
-/// What a locked cache refresh writes (`VaultRepository.offlineCopyUpdate`).
-public struct OfflineCopyUpdate: Equatable, Sendable {
-    public let revision: Int64
-    /// The account bundle as JSON text.
-    public let bundle: String?
+/// What one decryption of the copy produced, kept so the next one decrypts only what changed:
+/// the shown vault, the opened vault keys and the headers they were opened from.
+struct OpenedVault: Sendable {
+    var data: VaultData
+    var keys: [String: VaultKey]
+    var headers: [String: SyncVault]
+    /// Vault names read from invitations, by sealed key and encrypted name (nil: can't be opened).
+    var names: [String: String?] = [:]
 }
 
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
@@ -173,11 +200,53 @@ public final class VaultRepository {
     @ObservationIgnored var sessions: [String: Session] = [:]
     private var sessionIds: Set<String> = []
     @ObservationIgnored private var vaultKeys: [String: VaultKey] = [:]
+    /// The vault headers `vaultKeys` were opened from (a changed header opens the key again).
+    @ObservationIgnored private var vaultHeaders: [String: SyncVault] = [:]
+    /// The active account's copy behind `vault` (ciphertext, cursor, vault numbers): the base of
+    /// the next delta sync and of local changes after this device's writes.
+    @ObservationIgnored private var copy: (account: String, snapshot: SyncSnapshot)?
+    /// Public syncs: one in flight, one waiting (`SyncQueue`).
+    @ObservationIgnored private let syncQueue = SyncQueue()
     @ObservationIgnored private var pendingMaster: MasterKeys?
     @ObservationIgnored private var pendingRemember = ""
+    /// A sign-in request to another device in progress (`beginDeviceLogin`): its key, made for
+    /// it and never stored, waits here in memory, also through two-step login.
+    @ObservationIgnored var pendingDevice: PendingDeviceLogin?
+    /// Another device's approval of that request, waiting for the code it shows
+    /// (`confirmDeviceLogin`); memory only, nothing of it stored before the code is confirmed.
+    @ObservationIgnored var approvedDevice: ApprovedDeviceLogin?
+    /// How the device sign-in waits between polls; tests make it instant (real time otherwise).
+    @ObservationIgnored public var deviceLoginSleep: (@Sendable (Double) async throws -> Void)?
+    /// Vault names read from the invitations shown now (see `OpenedVault.names`).
+    @ObservationIgnored private var invitationNames: [String: String?] = [:]
+    /// Accounts whose server answered 403 `two_step_required` (memory only): the app shows the
+    /// two-step setup screen for them until a sync goes through.
+    private var twoStepGated: Set<String> = []
+    /// `policy_violations` per account (`GET /account` after sign-in and unlock; memory only).
+    private var violations: [String: [PolicyViolation]] = [:]
+
+    /// The app itself, not an AutoFill extension: it opens invitations to show their vault's name
+    /// and follows the server's policies (config, the account's violations, the vault timeout
+    /// limit). The extensions ignore both.
+    @ObservationIgnored public var isApp = false
+
+    /// Ask for trashed items without their key and data (`trash=summary`): the macOS AutoFill
+    /// extension never shows the trash and keeps its own copy. On iOS the app shows the trash and
+    /// shares its copy with the AutoFill extension, so both fetch it whole.
+    @ObservationIgnored public var trashSummary: Bool = {
+        #if os(macOS)
+        true
+        #else
+        false
+        #endif
+    }()
 
     /// The active account's decrypted vault; nil while locked.
     public private(set) var vault: VaultData?
+
+    /// Called whenever the decrypted vault is dropped (lock, log out, switching or adding an
+    /// account): what the app derived from it for this session (password health) goes too.
+    @ObservationIgnored public var onVaultClosed: (@MainActor () -> Void)?
 
     /// Keeps iOS's AutoFill identities (QuickType bar, passkey sheet) in step with the active account.
     @ObservationIgnored public let identities = CredentialIdentitySync()
@@ -190,6 +259,9 @@ public final class VaultRepository {
         self.api = api
         identities.onWritten = { [weak self] fingerprint in
             self?.store.update { $0.file.identityFingerprint = fingerprint }
+        }
+        api.onTwoStepRequired = { [weak self] id in
+            self?.twoStepGated.insert(id)
         }
         api.onSessionLost = { [weak self] id in
             // Runs later: the request that noticed it may hold the lock.
@@ -226,17 +298,24 @@ public final class VaultRepository {
         st.secretKeyStored = a.map { s.secrets.secretKeys[$0.email.lowercased()] != nil } ?? false
         st.biometricEnabled = a?.biometric ?? false
         st.settings = s.settings
+        st.showSiteIcons = SiteIcons.shown(wanted: s.settings.showIcons, api: a?.api, features: a?.features)
         st.lastSync = a?.lastSync ?? 0
         st.adding = a.map { !$0.isListed } ?? false
+        st.policies = a?.policies ?? Policies()
+        st.timeoutLimit = s.timeoutLimit
+        st.twoStepRequired = s.tokens(s.activeId) != nil && twoStepGated.contains(s.activeId)
+        st.policyViolations = violations[s.activeId] ?? []
         return st
     }
 
     var activeId: String { store.get().activeId }
 
-    /// Read the stored state and, with the vault timeout "never", reopen the kept keys.
+    /// Read the stored state and, with the vault timeout "never", reopen the kept keys (unless a
+    /// server's policy now limits the timeout: it is lowered first, which drops them).
     public func start() async {
         store.load()
-        _ = await restorePersisted()
+        await enforceTimeoutLimit()
+        if await restorePersisted() { afterOpen() }
     }
 
     // MARK: Server
@@ -259,12 +338,17 @@ public final class VaultRepository {
         }
         guard ok else { throw UserError("No PassAuth server answered at that address.") }
         await lock.run {
+            dropDeviceLogin()
             closeSession(activeId)
             store.update { st in
                 let id = st.file.accounts[st.file.activeId] != nil ? st.file.activeId : UUID().uuidString.lowercased()
                 var a = st.file.accounts[id] ?? AccountData()
                 a.server = origin
                 a.bundle = nil
+                a.features = nil
+                a.featuresAt = nil
+                a.api = nil
+                a.policies = nil
                 st.file.accounts[id] = a
                 st.file.activeId = id
                 st.secrets.tokens[id] = nil
@@ -293,6 +377,7 @@ public final class VaultRepository {
 
     public func login(email: String, password: String, secretKey: String?) async throws -> LoginResult {
         try await lock.run {
+            dropDeviceLogin()
             let s = store.get()
             let id = s.activeId
             let mail = email.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -327,17 +412,26 @@ public final class VaultRepository {
             }
             try await finishLogin(id, master, result)
             try? await syncLocked()
+            afterOpen()
             return .done
         }
     }
 
-    public func verifyTwoFactor(token: String, provider: String, code: String, remember: Bool) async throws {
+    /// The second step of a sign-in. After another device's approval (`awaitDeviceLogin`), the
+    /// code that device shows comes next (`.enterDeviceCode`, then `confirmDeviceLogin`).
+    @discardableResult
+    public func verifyTwoFactor(token: String, provider: String, code: String, remember: Bool) async throws -> TwoStepNext {
         try await lock.run {
             let id = activeId
             let clean = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "")
             let result = try await api.call(id, "/auth/2fa/verify", body: [
                 "two_factor_token": .string(token), "provider": .string(provider), "code": .string(clean), "remember": .bool(remember),
             ], auth: false)
+            // Approved by another device, two-step login done: the session comes with the sealed key.
+            if let device = pendingDevice {
+                try await receiveDeviceApproval(device, result)
+                return .enterDeviceCode
+            }
             guard let master = pendingMaster else { throw UserError("Sign-in expired. Start again.") }
             pendingMaster = nil
             if let t = result["remember_token"]?.string {
@@ -346,6 +440,8 @@ public final class VaultRepository {
             }
             try await finishLogin(id, master, result)
             try? await syncLocked()
+            afterOpen()
+            return .signedIn
         }
     }
 
@@ -355,8 +451,16 @@ public final class VaultRepository {
 
     private func finishLogin(_ id: String, _ master: MasterKeys, _ result: JSON) async throws {
         let bundle = (result["bundle"] ?? .null).text
-        let email = result.str("email")
         let account = try await core { try master.unlock(bundleJson: bundle) }
+        finishSession(id, account: account, result)
+    }
+
+    /// What every sign-in does once the account is unlocked (with the master password or another
+    /// device's approval): the session answer's tokens and bundle are kept, an older record of
+    /// the same account replaced, and the vault opened in memory.
+    func finishSession(_ id: String, account: Account, _ result: JSON) {
+        let bundle = (result["bundle"] ?? .null).text
+        let email = result.str("email")
         let before = store.get()
         let server = before.file.accounts[id]?.server
         // Signing in again to an account that is already listed replaces the old record.
@@ -382,10 +486,13 @@ public final class VaultRepository {
             s.secrets.persistedKeys[id] = nil
         }
         Keychain.deleteBiometric(id)
+        twoStepGated.remove(id)
+        violations[id] = nil
         openSession(id, Session(accountId: Self.bundleAccountId(bundle), account: account))
     }
 
-    /// Create an account on the active record's server (the web vault's Register).
+    /// Create an account on the active record's server (the web vault's Register), with keys
+    /// that meet the server's key-derivation policy (`createAccountWithKdf`).
     public func register(email: String, name: String, password: String, withSecretKey: Bool) async throws -> Registered {
         try await lock.run {
             let id = activeId
@@ -393,7 +500,12 @@ public final class VaultRepository {
             let initRes = try await api.call(id, "/auth/register/init", body: ["email": .string(mail)], auth: false)
             let accountId = initRes.str("account_id")
             let registrationId = initRes.str("registration_id")
-            let created = try await core { try createAccount(accountId: accountId, password: password, withSecretKey: withSecretKey) }
+            // New keys follow the server's key-derivation minimums as they are now.
+            let kdf = PolicyRules.kdfMinimums(await publicConfig())
+            let created = try await core {
+                try createAccountWithKdf(accountId: accountId, password: password, withSecretKey: withSecretKey,
+                                         minMemoryMib: kdf.memoryMib, minIterations: kdf.iterations)
+            }
             let master = created.master
             let start = try await core { try opaqueRegisterStart(master: master) }
             let resp = try await api.call(id, "/auth/register/start", body: ["registration_id": .string(registrationId), "message": .string(start.message)], auth: false)
@@ -453,7 +565,8 @@ public final class VaultRepository {
                 store.update { $0.secrets.secretKeys[a.email.lowercased()] = sk }
             }
             openSession(id, Session(accountId: accountId, account: account))
-            try await syncLocked(fallbackToCache: true, cacheFirst: true)
+            try await syncOrGate(fallbackToCache: true, cacheFirst: true)
+            afterOpen()
         }
     }
 
@@ -499,7 +612,8 @@ public final class VaultRepository {
                 let copy = bytes
                 let account = try await core { try accountFromSessionBytes(accountId: accountId, bytes: copy) }
                 openSession(id, Session(accountId: accountId, account: account))
-                try await syncLocked(fallbackToCache: true, cacheFirst: true)
+                try await syncOrGate(fallbackToCache: true, cacheFirst: true)
+                afterOpen()
                 return true
             }
         }
@@ -550,7 +664,11 @@ public final class VaultRepository {
 
     private func unloadVault() {
         vaultKeys = [:]
+        vaultHeaders = [:]
+        invitationNames = [:]
+        copy = nil
         vault = nil
+        onVaultClosed?()
     }
 
     // MARK: Lock / logout
@@ -583,16 +701,31 @@ public final class VaultRepository {
             }
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            twoStepGated.remove(id)
+            violations[id] = nil
         }
         identities.clear()
     }
 
     /// Log out of the active account and remove it from this device; the next one becomes active.
     public func logout() async {
+        await signOut(remote: true, forgetRememberToken: false)
+    }
+
+    /// Sign the active account out on this device (Log out). `remote: false` when the server
+    /// already ended the session (this device was forgotten); `forgetRememberToken` drops the
+    /// two-step "remember this device" token the server no longer knows.
+    func signOut(remote: Bool, forgetRememberToken: Bool) async {
         await lock.run {
             let s = store.get()
             let id = s.activeId
-            if let a = s.active { await api.logoutRemote(server: a.server, tokens: s.tokens(id)) }
+            if remote, let a = s.active { await api.logoutRemote(server: a.server, tokens: s.tokens(id)) }
+            if forgetRememberToken, let a = s.active {
+                let key = "\(a.server)|\(a.email.lowercased())"
+                store.update { $0.secrets.rememberTokens[key] = nil }
+            }
+            twoStepGated.remove(id)
+            violations[id] = nil
             closeSession(id)
             pendingMaster = nil
             Keychain.deleteBiometric(id)
@@ -693,79 +826,92 @@ public final class VaultRepository {
 
     // MARK: Sync
 
+    /// Sync the active account (pull to refresh, live sync, before AutoFill saves). One sync runs
+    /// at a time and at most one waits: a request made while one is waiting joins it.
     public func sync() async throws {
-        try await lock.run { try await syncLocked() }
+        try await syncQueue.run { try await self.lock.run { try await self.syncLocked() } }
     }
 
-    /// Re-sync if the server has newer data (cheap revision check). When the server's revision
-    /// is the one already shown, the copy is current: only the offline mark is dropped (no
-    /// `/sync`, decrypt or cache re-seal). An unanswered revision call keeps it.
+    /// Where the open copy is (revision and vault numbers); nil while locked.
+    public var syncPosition: SyncPosition? {
+        guard let v = vault else { return nil }
+        if let c = copy, c.account == activeId { return c.snapshot.position }
+        return SyncPosition(revision: v.revision, vaults: nil)
+    }
+
+    /// Re-sync if the server has something the copy lacks (cheap `/sync/revision` check: the
+    /// revision and, with delta sync, every vault's number; `SyncDecision.isStale`). When the
+    /// copy is current only the offline mark is dropped (no `/sync`, decrypt or cache re-seal).
+    /// An unanswered check keeps it.
     public func refreshIfStale() async {
-        guard let current = vault else { return }
+        guard vault != nil, let have = syncPosition else { return }
         let id = activeId
-        guard let r = try? await api.call(id, "/sync/revision")["revision"]?.int else { return }
-        if r > current.revision {
-            await lock.run { try? await syncLocked() }
-        } else if current.offline {
+        guard let j = try? await api.call(id, "/sync/revision"), let r = j["revision"]?.int else { return }
+        twoStepGated.remove(id)
+        if SyncDecision.isStale(revision: r, vaults: DeltaSync.vaultNumbers(j["vaults"]), have: have) {
+            try? await sync()
+        } else if vault?.offline == true {
             await lock.run {
-                guard activeId == id, let v = vault, v.offline, v.revision == current.revision else { return }
+                guard activeId == id, let v = vault, v.offline, syncPosition == have else { return }
                 vault?.offline = false
             }
         }
     }
+
+    /// A whole number in a server answer (nil when absent or not a number).
+    nonisolated static func number(_ j: JSON?) -> Int64? {
+        switch j {
+        case .int(let n)?: n
+        case .double(let d)?: Int64(d)
+        default: nil
+        }
+    }
+
 
     /// Fetch and decrypt the active account's vault. With `fallbackToCache` an unreachable
     /// server shows the on-device copy (offline). With `cacheFirst` the on-device copy is shown
     /// straight away: in the app the server sync then runs in the background (unlocking doesn't
     /// wait for a slow or unreachable server); the AutoFill extension (`preferCache`) shows it
     /// as offline and syncs only when needed.
+    ///
+    /// With delta sync the server sends only what changed since the copy's cursor; the merged
+    /// copy is decrypted incrementally (`open`) and stored with its new cursor in one write, so a
+    /// failed or interrupted sync leaves the previous copy and cursor.
     func syncLocked(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
         let id = activeId
         guard let session = sessions[id] else { return }
-        var data: Data
+        var next: SyncSnapshot
         var offline = false
         var fromServer = true
         do {
-            if cacheFirst, let cached = await store.readCacheInBackground(id) {
-                data = cached
+            if cacheFirst, let cached = await readSnapshot(id) {
+                next = cached
                 offline = preferCache
                 fromServer = false
             } else {
-                data = try await api.callData(id, "/sync")
+                next = try await fetchSnapshot(id)
+                // The server answered `/sync`: it doesn't (or no longer) require two-step setup first.
+                twoStepGated.remove(id)
             }
         } catch {
-            guard fallbackToCache, let cached = await store.readCacheInBackground(id) else {
+            // An answer that isn't a vault is an error, not "offline".
+            if let e = error as? UserError, e == DeltaSync.unreadable { throw e }
+            guard fallbackToCache, let cached = await readSnapshot(id) else {
                 if fallbackToCache && !(error is ApiError) {
                     var empty = VaultData()
                     empty.offline = true
+                    copy = nil
                     vault = empty
                     return
                 }
                 throw error
             }
-            data = cached
+            next = cached
             offline = true
             fromServer = false
         }
-        guard sessions[id] === session else { return }
-        let account = session.account
-        let raw = data
-        let (next, keys, user, bundle) = try await core { try Self.decryptVault(account, raw) }
         guard sessions[id] === session, activeId == id else { return }
-        if fromServer {
-            await store.writeCacheInBackground(id, data)
-            store.updateAccount(id) { a in
-                a.lastSync = Date().timeIntervalSince1970
-                if let user { a.name = user }
-                if let bundle { a.bundle = bundle }
-            }
-        }
-        guard sessions[id] === session, activeId == id else { return }
-        vaultKeys = keys
-        var v = next
-        v.offline = offline
-        vault = v
-        refreshIdentities()
+        try await show(id, session, next, offline: offline, store: fromServer ? .synced : .none)
         if cacheFirst && !fromServer && !offline {
             // Queued behind the current operation (the lock is first in, first out), so a change
             // the user makes next runs after this sync.
@@ -773,24 +919,132 @@ public final class VaultRepository {
         }
     }
 
+    /// What `show` keeps of a copy besides showing it.
+    private enum CopyStore { case none, localChange, synced }
+
+    /// Decrypt `snapshot` (only what changed since the copy shown now) and show it. `.synced`:
+    /// fresh from the server, stored as the offline copy with the time of the sync, the profile
+    /// name and the bundle; `.localChange`: this device's write applied to the copy, stored too.
+    private func show(_ id: String, _ session: Session, _ snapshot: SyncSnapshot, offline: Bool, store mode: CopyStore) async throws {
+        let account = session.account
+        let previous: OpenedVault? = copy?.account == id ? vault.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
+        let invitations = isApp
+        let opened = try await core { Self.open(account, snapshot, previous: previous, invitations: invitations) }
+        guard sessions[id] === session, activeId == id else { return }
+        if mode != .none {
+            let data = try await core { try snapshot.encoded() }
+            await store.writeCacheInBackground(id, data)
+            if mode == .synced {
+                store.updateAccount(id) { a in
+                    a.lastSync = Date().timeIntervalSince1970
+                    if let name = snapshot.user?["name"]?.string { a.name = name }
+                    if let bundle = snapshot.bundle { a.bundle = bundle.text }
+                }
+            }
+        }
+        guard sessions[id] === session, activeId == id else { return }
+        vaultKeys = opened.keys
+        vaultHeaders = opened.headers
+        invitationNames = opened.names
+        copy = (id, snapshot)
+        var v = opened.data
+        v.offline = offline
+        vault = v
+        refreshIdentities()
+    }
+
+    /// The account's copy after asking the server: since the copy's cursor when the server does
+    /// delta sync, else everything. The base is the copy shown now, or the one on the device.
+    private func fetchSnapshot(_ id: String) async throws -> SyncSnapshot {
+        let base: SyncSnapshot? = if let c = copy, c.account == id { c.snapshot } else { await readSnapshot(id) }
+        let delta = await deltaSyncEnabled(id)
+        let api = self.api
+        return try await DeltaSync.fetch(base: base, delta: delta, trashSummary: trashSummary) { path in
+            try await api.callData(id, path)
+        }
+    }
+
+    /// The account's copy on this device (nil if missing or unreadable), read and decoded off the main thread.
+    private func readSnapshot(_ id: String) async -> SyncSnapshot? {
+        guard let data = await store.readCacheInBackground(id) else { return nil }
+        return await Task.detached(priority: .userInitiated) { SyncSnapshot.decode(data) }.value
+    }
+
+    /// The active account's server's `/api/config` `features`, asked now (password health
+    /// follows the admin's breach-check switch as it is) and kept with the account; nil when the
+    /// settings couldn't be loaded.
+    public func serverFeatures() async -> [String]? {
+        await fetchConfig(activeId)?.features
+    }
+
+    /// The account's server's `/api/config`, asked now: its `features` and (with the `policies`
+    /// feature) `policies` are kept with the account. nil when it couldn't be read. The app then
+    /// applies the vault timeout limit (outside whatever operation asked).
+    @discardableResult
+    func fetchConfig(_ id: String) async -> PublicConfig? {
+        guard let a = store.get().file.accounts[id], !a.server.isEmpty, let url = URL(string: a.server + "/api/config"),
+              let (data, res) = try? await api.get(url), res.statusCode == 200,
+              let j = try? JSON.parse(data), let config = PublicConfig(json: j) else { return nil }
+        let before = store.get().file.accounts[id]?.policies
+        store.updateAccount(id) { a in
+            a.features = config.features
+            a.featuresAt = Date().timeIntervalSince1970
+            a.api = config.api
+            a.policies = config.features.contains(policiesFeature) ? config.policies : nil
+        }
+        if isApp && store.get().file.accounts[id]?.policies != before {
+            // Not here: a sync holding the repository's lock may have asked.
+            Task { @MainActor [weak self] in await self?.enforceTimeoutLimit() }
+        }
+        return config
+    }
+
+    /// `/api/config` of the active record's server, before anyone signs in (sign-ups, policies
+    /// for creating an account); nil when it couldn't be read.
+    public func publicConfig() async -> PublicConfig? {
+        guard let server = store.get().active?.server, let url = URL(string: server + "/api/config"),
+              let (data, res) = try? await api.get(url), res.statusCode == 200, let j = try? JSON.parse(data) else { return nil }
+        return PublicConfig(json: j)
+    }
+
+    /// Whether the account's server does delta sync (`/api/config` `features` has
+    /// `delta_sync`), asked at most every 6 hours and kept with the account (the macOS AutoFill
+    /// extension runs as a new process for each request). A list gone stale is harmless: a
+    /// server without the feature ignores `since` and answers in full. Unknown → no.
+    func deltaSyncEnabled(_ id: String) async -> Bool {
+        guard let a = store.get().file.accounts[id], !a.server.isEmpty else { return false }
+        let now = Date().timeIntervalSince1970
+        if let f = a.features, let at = a.featuresAt, now >= at, now - at < 6 * 3600 { return f.contains(deltaSyncFeature) }
+        guard let config = await fetchConfig(id) else { return a.features?.contains(deltaSyncFeature) ?? false }
+        return config.features.contains(deltaSyncFeature)
+    }
+
     /// Background App Refresh: keep an account's encrypted offline copy current without
-    /// unlocking it. The `/sync` body is stored as the server sent it (ciphertext and metadata;
-    /// nothing is decrypted or kept in memory, the identity store isn't touched), and only when
-    /// it is a valid sync response at least as new as the copy on disk ([offlineCopyUpdate]).
-    /// The active account, when unlocked, gets a normal sync instead.
+    /// unlocking it. Nothing is decrypted or kept in memory and the identity store isn't
+    /// touched: with delta sync `/sync/revision` decides and only the changes are fetched and
+    /// merged into the copy; otherwise the whole `/sync` replaces it. Only a valid sync answer
+    /// at least as new as the copy on disk is written (`DeltaSync.refresh`). The active account,
+    /// when unlocked, gets a normal sync instead.
     public func refreshCacheLocked(accountId id: String) async throws {
         if sessions[id] != nil && activeId == id {
-            try await lock.run { try await syncLocked() }
+            try await sync()
             return
         }
         let s = store.get()
         guard let a = s.file.accounts[id], a.isListed, s.tokens(id) != nil else { return }
-        let data = try await api.callData(id, "/sync")
-        try Task.checkCancellation()
-        let cached = await store.readCacheInBackground(id)
-        guard let update = try await core({ Self.offlineCopyUpdate(fetched: data, cached: cached) }) else {
-            throw UserError("The server's answer couldn't be read.")
+        let cached = await readSnapshot(id)
+        let delta = await deltaSyncEnabled(id)
+        let api = self.api
+        let result = try await DeltaSync.refresh(cached: cached, delta: delta, trashSummary: trashSummary) { path in
+            try await api.callData(id, path)
         }
+        twoStepGated.remove(id)
+        try Task.checkCancellation()
+        guard case .write(let next) = result else {
+            if result == .current { store.updateAccount(id) { $0.lastSync = Date().timeIntervalSince1970 } }
+            return
+        }
+        let data = try await core { try next.encoded() }
         try Task.checkCancellation()
         await lock.run {
             // Unlocked and shown meanwhile: its own sync writes the copy.
@@ -798,26 +1052,71 @@ public final class VaultRepository {
             await store.writeCacheInBackground(id, data)
             store.updateAccount(id) { a in
                 a.lastSync = Date().timeIntervalSince1970
-                if let bundle = update.bundle { a.bundle = bundle }
+                if let bundle = next.bundle { a.bundle = bundle.text }
             }
         }
     }
 
-    /// Decides what a locked cache refresh may write: `fetched` must decode as a sync response
-    /// (numeric revision, bundle, vaults and items present; well-formed rows) and must not be
-    /// older than the `cached` copy (never downgrade). An unreadable cached copy is replaced.
-    nonisolated public static func offlineCopyUpdate(fetched: Data, cached: Data?) -> OfflineCopyUpdate? {
-        guard let res = try? JSONDecoder().decode(SyncResponse.self, from: fetched),
-              let revision = res.revision, res.vaults != nil, res.items != nil,
-              let bundle = res.bundle, bundle != .null else { return nil }
-        if let cached, let old = try? JSONDecoder().decode(SyncRevision.self, from: cached),
-           let oldRevision = old.revision, revision < oldRevision {
-            return nil
-        }
-        return OfflineCopyUpdate(revision: revision, bundle: bundle.text)
+    /// The first sync after the keys are in memory (unlock): a server that requires two-step login
+    /// first (403 `two_step_required`) isn't an error here. The account is marked (see
+    /// `ApiClient.onTwoStepRequired`), the app shows the setup screen, and the keys stay for
+    /// `continueAfterTwoStep`.
+    private func syncOrGate(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
+        do {
+            try await syncLocked(fallbackToCache: fallbackToCache, cacheFirst: cacheFirst)
+        } catch let e as ApiError where TwoStepGate.isRequired(status: e.status, code: e.code) {}
     }
 
-    private struct SyncRevision: Decodable { let revision: Int64? }
+    /// After sign-in, unlock and restore (the app only): what the server's policies ask, in the
+    /// background (never holding up the vault).
+    func afterOpen() {
+        guard isApp else { return }
+        Task { @MainActor [weak self] in await self?.refreshPolicies() }
+    }
+
+    /// The server's policies (`/api/config`, kept with the account), the vault timeout lowered to
+    /// their limit, and what the account still has to change (`GET /account`
+    /// `policy_violations`, servers with `policies`). Best effort: a failed request keeps what is
+    /// known.
+    public func refreshPolicies() async {
+        let id = activeId
+        guard store.get().tokens(id) != nil, let config = await fetchConfig(id) else { return }
+        await enforceTimeoutLimit()
+        guard config.features.contains(policiesFeature) else {
+            violations[id] = nil
+            return
+        }
+        guard let j = try? await api.call(id, "/account"), activeId == id else { return }
+        violations[id] = PolicyRules.readViolations(j["policy_violations"])
+    }
+
+    /// Keep the vault timeout within the servers' limit (policy `max_vault_timeout_minutes`, the
+    /// strictest of the signed-in accounts): a saved choice above it is lowered to the longest
+    /// choice within it ("Never" keys are dropped as for any change) and Settings says so.
+    public func enforceTimeoutLimit() async {
+        let s = store.get()
+        let saved = s.settings.vaultTimeout
+        let clamped = PolicyRules.clampTimeout(saved, max: s.timeoutLimit)
+        guard clamped != saved else { return }
+        await updateSettings {
+            $0.vaultTimeout = clamped
+            $0.vaultTimeoutLowered = true
+        }
+    }
+
+    /// The two-step setup screen's "Continue", once a method is on: with the keys in memory the
+    /// vault syncs and opens (another 403 keeps the screen); without them (it came up while
+    /// locked) the unlock screen follows.
+    public func continueAfterTwoStep() async throws {
+        let id = activeId
+        switch TwoStepGate.afterSetup(keysInMemory: sessions[id] != nil) {
+        case .sync:
+            try await sync()
+        case .unlock:
+            twoStepGated.remove(id)
+        }
+        afterOpen()
+    }
 
     /// The server sync after a cache-first unlock; an unreachable server leaves the copy marked offline.
     private func backgroundSync(_ id: String, _ session: Session) async {
@@ -825,6 +1124,8 @@ public final class VaultRepository {
             guard sessions[id] === session, activeId == id else { return }
             do {
                 try await syncLocked()
+            } catch let e as ApiError where TwoStepGate.isRequired(status: e.status, code: e.code) {
+                // The server answered: two-step setup comes first (the app shows that screen).
             } catch {
                 if sessions[id] === session, activeId == id { vault?.offline = true }
             }
@@ -841,6 +1142,33 @@ public final class VaultRepository {
         }
     }
 
+    /// After this device's write into `vaultId` (`answer`: the server's reply, with `vault_seq`
+    /// on servers with delta sync): when it is the vault's next number nothing else changed
+    /// there, so `change` is applied to the copy without asking the server; when the copy
+    /// already has it nothing is done; otherwise (other writes too, a move, an older server) the
+    /// copy is synced, as before every write.
+    private func afterWrite(_ vaultId: String, _ answer: JSON, _ change: LocalChange?) async {
+        let id = activeId
+        guard let change, let c = copy, c.account == id, let session = sessions[id] else { return await syncAfterWrite() }
+        let known = c.snapshot.vaults.first { $0.id == vaultId }?.seq
+        let seq = Self.number(answer["vault_seq"])
+        switch SyncDecision.afterWrite(known: known, vaultSeq: seq) {
+        case .nothing:
+            return
+        case .sync:
+            return await syncAfterWrite()
+        case .applyLocally:
+            guard let seq, let next = SyncMerge.applyLocal(change, vaultId: vaultId, vaultSeq: seq, to: c.snapshot) else {
+                return await syncAfterWrite()
+            }
+            do {
+                try await show(id, session, next, offline: false, store: .localChange)
+            } catch {
+                await syncAfterWrite()
+            }
+        }
+    }
+
     /// Write the active account's logins to the AutoFill identity store (or empty it when the
     /// active account is locked or signed out).
     public func refreshIdentities() {
@@ -850,62 +1178,68 @@ public final class VaultRepository {
         identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch))
     }
 
-    private struct SyncResponse: Decodable {
-        struct VaultRow: Decodable {
-            let id: String
-            let wrapped_key: String
-            let key_kind: String
-            let meta: String
-            let role: String
-        }
-        struct ItemRow: Decodable {
-            let id: String
-            let vault_id: String
-            let item_key: String
-            let data: String
-            let revision: Int64?
-            let deleted_at: JSON?
-        }
-        struct User: Decodable { let name: String? }
-        let vaults: [VaultRow]?
-        let items: [ItemRow]?
-        let revision: Int64?
-        let user: User?
-        let bundle: JSON?
-    }
-
-    nonisolated private static func decryptVault(_ account: Account, _ data: Data) throws -> (VaultData, [String: VaultKey], String?, String?) {
-        let res = try JSONDecoder().decode(SyncResponse.self, from: data)
+    /// Decrypt a copy, reusing what `previous` already opened: a vault key whose header
+    /// (wrapping, kind, epoch) is unchanged, the vault's name while its `meta` is too, and items
+    /// whose ciphertext is the same in a vault whose key was kept. A vault key that can't be
+    /// opened (rotated) is skipped with its items, and so is an undecryptable item or a trashed
+    /// one without data (`trash=summary`), as before.
+    ///
+    /// `invitations` (the app only): each invitation's sealed key is opened just to read the
+    /// vault's name and dropped at once (`Invitation.open`; a name already read from the same
+    /// sealed key and encrypted name is reused); one that can't be opened has no name.
+    nonisolated static func open(_ account: Account, _ snap: SyncSnapshot, previous: OpenedVault?, invitations: Bool = false) -> OpenedVault {
         var keys: [String: VaultKey] = [:]
+        var headers: [String: SyncVault] = [:]
+        var kept = Set<String>()
         var out = VaultData()
-        for v in res.vaults ?? [] {
-            // A vault key that can't be opened (rotated) is skipped.
-            guard let key = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrapped_key, kind: v.key_kind) else { continue }
-            let name = (try? key.decryptMeta(vaultId: v.id, meta: v.meta)).flatMap { try? JSON.parse($0) }?.str("name") ?? ""
-            keys[v.id] = key
-            out.vaults.append(VaultInfo(id: v.id, name: name.isEmpty ? "Vault" : name, role: Role(rawValue: v.role) ?? .read,
-                                        keyKind: v.key_kind.isEmpty ? VaultInfo.accountKeyKind : v.key_kind))
-        }
-        for row in res.items ?? [] {
-            guard let key = keys[row.vault_id] else { continue }
-            let enc = EncryptedItem(id: row.id, vaultId: row.vault_id, key: row.item_key, data: row.data)
-            // An undecryptable item is skipped.
-            guard let json = try? key.decryptItem(encrypted: enc), let item = try? ItemCodec.decode(json) else { continue }
-            let deleted: Int64? = switch row.deleted_at {
-            case .none, .some(.null): nil
-            case .some(let j): j.int
+        let oldNames = Dictionary((previous?.data.vaults ?? []).map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        for v in snap.vaults {
+            let key: VaultKey
+            var name: String?
+            if let p = previous, let old = p.headers[v.id], old.sameKey(as: v), let k = p.keys[v.id] {
+                key = k
+                kept.insert(v.id)
+                if old.meta == v.meta { name = oldNames[v.id] }
+            } else {
+                guard let k = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind) else { continue }
+                key = k
             }
-            let e = Entry(id: row.id, item: item, vaultId: row.vault_id, revision: row.revision ?? 0, enc: enc, deletedAt: deleted)
-            if deleted == nil { out.entries.append(e) } else { out.trash.append(e) }
+            let n = name ?? ((try? key.decryptMeta(vaultId: v.id, meta: v.meta)).flatMap { try? JSON.parse($0) }?.str("name") ?? "")
+            keys[v.id] = key
+            headers[v.id] = v
+            out.vaults.append(VaultInfo(id: v.id, name: n.isEmpty ? "Vault" : n, role: Role(rawValue: v.role) ?? .read,
+                                        keyKind: v.keyKind.isEmpty ? VaultInfo.accountKeyKind : v.keyKind, keyEpoch: v.keyEpoch))
+        }
+        var before: [String: Entry] = [:]
+        if let p = previous {
+            for e in p.data.entries + p.data.trash { before[e.id] = e }
+        }
+        for row in snap.items {
+            guard let key = keys[row.vaultId], let itemKey = row.itemKey, let data = row.data else { continue }
+            let enc = EncryptedItem(id: row.id, vaultId: row.vaultId, key: itemKey, data: data)
+            let item: Item
+            if kept.contains(row.vaultId), let old = before[row.id], old.vaultId == row.vaultId, old.enc.key == itemKey, old.enc.data == data {
+                item = old.item
+            } else {
+                guard let json = try? key.decryptItem(encrypted: enc), let decoded = try? ItemCodec.decode(json) else { continue }
+                item = decoded
+            }
+            let e = Entry(id: row.id, item: item, vaultId: row.vaultId, revision: row.revision ?? 0, enc: enc, deletedAt: row.deletedAt)
+            if row.deletedAt == nil { out.entries.append(e) } else { out.trash.append(e) }
         }
         out.entries.sort { $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending }
         out.trash.sort { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
-        out.revision = res.revision ?? 0
-        let bundle: String? = switch res.bundle {
-        case .none, .some(.null): nil
-        case .some(let b): b.text
+        out.revision = snap.revision
+        var names: [String: String?] = [:]
+        if invitations {
+            let opened = Invitation.open(snap.invitations, previous: previous?.names ?? [:]) { inv in
+                let key = try account.openVaultKey(vaultId: inv.vaultId, wrapped: inv.wrappedKey, kind: "sealed")
+                return Invitation.name(fromMeta: try key.decryptMeta(vaultId: inv.vaultId, meta: inv.meta))
+            }
+            out.invitations = opened.invitations
+            names = opened.names
         }
-        return (out, keys, res.user?.name, bundle)
+        return OpenedVault(data: out, keys: keys, headers: headers, names: names)
     }
 
     // MARK: Items
@@ -923,62 +1257,127 @@ public final class VaultRepository {
         throw UserError("Your own vault isn't available. Choose a vault to save to.")
     }
 
+    /// Create an item; `id` keeps the item's id across the caller's retries (an editor or a save
+    /// sheet whose first attempt failed or timed out), so a create that did reach the server
+    /// isn't saved twice.
+    ///
+    /// API v2: the body carries the vault key's `key_epoch`. If the key was replaced meanwhile
+    /// (409 `vault_key_changed`, nothing written), the vault is synced for the new key and the
+    /// item encrypted again under the same id, once. If the id already exists (409
+    /// `item_exists`, or "item id already exists" from older servers), an earlier attempt got
+    /// through: that item, once synced, is updated with this content instead.
     @discardableResult
-    public func createItem(_ item: Item, vaultId: String?) async throws -> String {
-        try await lock.run {
-            let v = try requireVault()
-            let target = try vaultId.flatMap { id in v.vaults.first { $0.id == id } } ?? writableVault(v)
+    public func createItem(_ item: Item, vaultId: String?, id: String? = nil) async throws -> String {
+        try await lock.run { try await createLocked(item, vaultId: vaultId, id: id) }
+    }
+
+    private func createLocked(_ item: Item, vaultId: String?, id requested: String?) async throws -> String {
+        var v = try requireVault()
+        let id: String
+        if let requested { id = requested } else { id = try await core { try newId() } }
+        var next = item
+        next.createdAt = now
+        next.updatedAt = now
+        let json = ItemCodec.encode(next)
+        var retried = false
+        var written: (answer: JSON, enc: EncryptedItem, vault: String)?
+        while true {
+            let target = try vaultId.flatMap { want in v.vaults.first { $0.id == want } } ?? writableVault(v)
             guard let key = vaultKeys[target.id] else { throw UserError("Vault not found.") }
-            var next = item
-            next.createdAt = now
-            next.updatedAt = now
-            let json = ItemCodec.encode(next)
             let targetId = target.id
-            let (id, enc) = try await core { () -> (String, EncryptedItem) in
-                let id = try newId()
-                return (id, try key.encryptItem(itemJson: json, id: id, vaultId: targetId))
+            let enc = try await core { try key.encryptItem(itemJson: json, id: id, vaultId: targetId) }
+            do {
+                let answer = try await api.call(activeId, "/items", body: Self.body(enc, keyEpoch: target.keyEpoch))
+                written = (answer, enc, targetId)
+                break
+            } catch let e as ApiError where e.status == 409 && e.hasCode("vault_key_changed") {
+                if retried { throw e }
+                retried = true
+                try await syncLocked()
+                v = try requireVault()
+            } catch let e as ApiError where e.status == 409 && Self.itemExists(e) {
+                try await syncLocked()
+                guard let landed = vault?.get(id), landed.vaultId == targetId, landed.deletedAt == nil else { throw e }
+                var mine = next
+                mine.createdAt = landed.item.createdAt
+                try await updateLocked(landed, mine, targetVaultId: nil)
+                return id
             }
-            _ = try await api.call(activeId, "/items", body: Self.json(enc))
-            await syncAfterWrite()
-            return id
         }
+        if let w = written {
+            let change = Self.number(w.answer["revision"]).map { rev in
+                LocalChange.put(SyncItem(id: id, vaultId: w.vault, itemKey: w.enc.key, data: w.enc.data, revision: rev, createdAt: now, updatedAt: now))
+            }
+            await afterWrite(w.vault, w.answer, change)
+        }
+        return id
+    }
+
+    /// A create was refused because the id exists (API v2 code, or the older servers' message).
+    nonisolated static func itemExists(_ e: ApiError) -> Bool {
+        e.hasCode("item_exists", orMessage: "item id already exists")
     }
 
     /// Save changes to an item; with another `targetVaultId` the item also moves to that vault
     /// (re-encrypted with its key under the same id), like the web vault's `updateItem`.
     /// Throws [ConflictError] when the item changed on the server since `entry` was read.
+    ///
+    /// API v2: the body carries the (target) vault key's `key_epoch`. If the key was replaced
+    /// meanwhile (409 `vault_key_changed`, nothing written; a key rotation also re-encrypts every
+    /// item of the vault), the vault is synced and the change saved again with the new key and
+    /// the item's new revision, once, but only when the item's content is still the one the
+    /// change was made to (else it is the usual conflict).
     public func updateItem(_ entry: Entry, _ item: Item, targetVaultId: String? = nil) async throws {
-        try await lock.run {
-            let v = try requireVault()
+        try await lock.run { try await updateLocked(entry, item, targetVaultId: targetVaultId) }
+    }
+
+    private func updateLocked(_ base: Entry, _ item: Item, targetVaultId: String?) async throws {
+        var v = try requireVault()
+        var next = item
+        next.updatedAt = now
+        let old = base.item.login?.password ?? ""
+        if next.login != nil, !old.isEmpty, old != next.login?.password, next.passwordHistory == base.item.passwordHistory {
+            next.passwordHistory = Array(([PasswordChange(password: old, changedAt: now)] + next.passwordHistory).prefix(20))
+        }
+        let json = ItemCodec.encode(next)
+        var entry = base
+        var retried = false
+        var written: (answer: JSON, enc: EncryptedItem, vault: String, moved: Bool)?
+        while true {
             guard let vault = v.vaults.first(where: { $0.id == entry.vaultId }) else { throw UserError("Vault not found.") }
             if vault.role == .read { throw UserError("You can only view items in this vault.") }
             let targetId = targetVaultId ?? entry.vaultId
             guard let target = v.vaults.first(where: { $0.id == targetId }) else { throw UserError("Vault not found.") }
             if target.role == .read { throw UserError("You can't add items to \(target.name).") }
             guard let key = vaultKeys[target.id] else { throw UserError("Vault not found.") }
-            var next = item
-            next.updatedAt = now
-            let old = entry.item.login?.password ?? ""
-            if next.login != nil, !old.isEmpty, old != next.login?.password, next.passwordHistory == entry.item.passwordHistory {
-                next.passwordHistory = Array(([PasswordChange(password: old, changedAt: now)] + next.passwordHistory).prefix(20))
-            }
-            let json = ItemCodec.encode(next)
             let enc0 = entry.enc
             let same = target.id == entry.vaultId
             let entryId = entry.id
             let enc = try await core { same ? try key.updateItem(encrypted: enc0, itemJson: json) : try key.encryptItem(itemJson: json, id: entryId, vaultId: targetId) }
-            var body = Self.json(enc)
-            if case .object(var o) = body {
-                o["revision"] = .int(entry.revision)
-                body = .object(o)
-            }
             do {
-                _ = try await api.call(activeId, "/items/\(entry.id)", body: body, method: "PUT")
+                let answer = try await api.call(activeId, "/items/\(entry.id)", body: Self.body(enc, keyEpoch: target.keyEpoch, revision: entry.revision), method: "PUT")
+                written = (answer, enc, targetId, !same)
+                break
+            } catch let e as ApiError where e.status == 409 && e.hasCode("vault_key_changed") {
+                if retried { throw e }
+                retried = true
+                try await syncLocked()
+                v = try requireVault()
+                guard let fresh = v.get(base.id), fresh.vaultId == base.vaultId, fresh.deletedAt == base.deletedAt, fresh.item == base.item else {
+                    throw ConflictError(itemId: base.id)
+                }
+                entry = fresh
             } catch let e as ApiError where e.status == 409 {
                 throw ConflictError(itemId: entry.id)
             }
-            await syncAfterWrite()
         }
+        guard let w = written else { return }
+        // A move also changed the vault it left (its number isn't in the answer): sync.
+        let deletedAt = entry.deletedAt
+        let change = w.moved ? nil : Self.number(w.answer["revision"]).map { rev in
+            LocalChange.put(SyncItem(id: base.id, vaultId: w.vault, itemKey: w.enc.key, data: w.enc.data, revision: rev, deletedAt: deletedAt, updatedAt: now))
+        }
+        await afterWrite(w.vault, w.answer, change)
     }
 
     public func setFavorite(_ entry: Entry, _ favorite: Bool) async throws {
@@ -991,8 +1390,10 @@ public final class VaultRepository {
         try await lock.run {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
-            _ = try await api.call(activeId, "/items/\(entry.id)", method: "DELETE")
-            await syncAfterWrite()
+            let answer = try await api.call(activeId, "/items/\(entry.id)", method: "DELETE")
+            let summary = trashSummary
+            let change = Self.number(answer["revision"]).map { LocalChange.trash(id: entry.id, at: now, revision: $0, summary: summary) }
+            await afterWrite(entry.vaultId, answer, change)
         }
     }
 
@@ -1000,8 +1401,9 @@ public final class VaultRepository {
         try await lock.run {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
-            _ = try await api.call(activeId, "/items/\(entry.id)/restore", method: "POST")
-            await syncAfterWrite()
+            let answer = try await api.call(activeId, "/items/\(entry.id)/restore", method: "POST")
+            let change = Self.number(answer["revision"]).map { LocalChange.restore(id: entry.id, revision: $0) }
+            await afterWrite(entry.vaultId, answer, change)
         }
     }
 
@@ -1010,8 +1412,8 @@ public final class VaultRepository {
         try await lock.run {
             let v = try requireVault()
             if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
-            _ = try await api.call(activeId, "/items/\(entry.id)/permanent", method: "DELETE")
-            await syncAfterWrite()
+            let answer = try await api.call(activeId, "/items/\(entry.id)/permanent", method: "DELETE")
+            await afterWrite(entry.vaultId, answer, .purge(id: entry.id))
         }
     }
 
@@ -1073,6 +1475,8 @@ public final class VaultRepository {
             let token = try await reauthToken(id, password: password, secretKey: secretKey)
             _ = try await api.call(id, "/account", method: "DELETE", headers: ["x-reauth-token": token])
             // The server has ended every session of this account: no remote logout.
+            twoStepGated.remove(id)
+            violations[id] = nil
             closeSession(id)
             pendingMaster = nil
             Keychain.deleteBiometric(id)
@@ -1130,12 +1534,22 @@ public final class VaultRepository {
     /// through the refresh-token path) and catch up.
     public func checkSession() async { await refreshIfStale() }
 
+    /// The live-sync socket said the server now requires two-step login first (its
+    /// `two_step_required` message or close reason): the app shows the setup screen and live
+    /// sync stops, as after a 403 `two_step_required`. A sync that goes through lifts it.
+    public func twoStepRequiredBySocket(_ id: String) {
+        guard store.get().tokens(id) != nil else { return }
+        twoStepGated.insert(id)
+    }
+
     // MARK: Queries (AutoFill, phase 2)
 
-    /// Logins of the unlocked active account that match a web page (default match from settings).
+    /// Logins of the unlocked active account that match a web page (default match from settings;
+    /// regular expressions only from the account's own vaults).
     public func loginsFor(_ pageUrl: String) -> [Entry] {
         let fallback = store.get().settings.defaultMatch
-        return (vault?.entries ?? []).filter { e in e.item.login.map { UrlMatcher.matchesAny(pageUrl, $0, fallback: fallback) } ?? false }
+        guard let v = vault else { return [] }
+        return v.entries.filter { e in e.item.login.map { UrlMatcher.matchesAny(pageUrl, $0, fallback: fallback, allowRegex: v.isPersonal(e)) } ?? false }
     }
 
     /// Passkeys saved for a relying party.
@@ -1189,7 +1603,8 @@ public final class VaultRepository {
     /// - `target == nil`: the default plan of the synced vault, without any sheet. A rule-3
     ///   update ("no user name typed, the only login for the site") is refused here with
     ///   `SaveChoiceChanged`: it is only applied after the user saw which login changes.
-    public func saveLogin(page: String, username: String, password: String, target: String? = nil, isDefault: Bool = false) async throws -> SaveOutcome {
+    /// - `newItemId`: the id a new login gets, kept by the sheet across its retries (see `createItem`).
+    public func saveLogin(page: String, username: String, password: String, target: String? = nil, isDefault: Bool = false, newItemId: String? = nil) async throws -> SaveOutcome {
         guard !password.isEmpty else { throw UserError("There is no password to save.") }
         try await sync()
         guard let v = vault else { throw UserError("Your vault is locked.") }
@@ -1213,15 +1628,13 @@ public final class VaultRepository {
         }
         switch plan {
         case .create:
-            try await createItem(SaveLogic.newItem(page: page, username: username, password: password), vaultId: nil)
+            try await createItem(SaveLogic.newItem(page: page, username: username, password: password), vaultId: nil, id: newItemId)
             return .created
         case .update(let e, _):
             try await updateItem(e, SaveLogic.updatedItem(e, username: username, password: password))
             return .updated
         case .unchanged:
             return .unchanged
-        case .readOnly(let e):
-            throw UserError("This login is in \(v.vaultName(e.vaultId)), which you can only view.")
         case .noPassword:
             throw UserError("There is no password to save.")
         }
@@ -1229,8 +1642,13 @@ public final class VaultRepository {
 
     // MARK: Helpers
 
-    private static func json(_ e: EncryptedItem) -> JSON {
-        ["id": .string(e.id), "vault_id": .string(e.vaultId), "key": .string(e.key), "data": .string(e.data)]
+    /// An item write's body: the encrypted item, the `key_epoch` of the vault key it was
+    /// encrypted with (when the server sent one) and, for updates, the revision it was based on.
+    nonisolated static func body(_ e: EncryptedItem, keyEpoch: Int64?, revision: Int64? = nil) -> JSON {
+        var o: [String: JSON] = ["id": .string(e.id), "vault_id": .string(e.vaultId), "key": .string(e.key), "data": .string(e.data)]
+        if let keyEpoch { o["key_epoch"] = .int(keyEpoch) }
+        if let revision { o["revision"] = .int(revision) }
+        return .object(o)
     }
 
     nonisolated static func bundleAccountId(_ bundle: String) -> String {

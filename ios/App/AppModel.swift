@@ -11,10 +11,14 @@ import UniformTypeIdentifiers
 final class AppModel {
     let repo: VaultRepository
     let icons: IconLoader
+    /// Sign-in requests from new devices waiting for this app's answer.
+    let authRequests: AuthRequestInbox
     @ObservationIgnored private(set) var lockManager: LockManager!
     @ObservationIgnored private(set) var liveSync: LiveSync!
     @ObservationIgnored private(set) var backgroundRefresh: BackgroundRefresh!
     let permissions: PermissionCenter
+    /// Password health of the unlocked vault (Settings → Password health, notes on item pages).
+    let health: HealthSession
     /// UI tests that aren't about it skip the first-launch permissions screen.
     let skipPermissionsIntro: Bool
 
@@ -27,6 +31,12 @@ final class AppModel {
 
     /// An authenticator key from an opened otpauth link, waiting for the vault to be unlocked.
     var pendingOtp: PendingOtp?
+
+    /// Notices dismissed in this app run, per account: the invitations (`InvitationText.key`)
+    /// and policy violations (`PolicyRules.violationsKey`) they were about. A changed set shows
+    /// the notice again.
+    var dismissedInvitations: [String: String] = [:]
+    var dismissedViolations: [String: String] = [:]
 
     /// otpauth:// and apple-otpauth:// links (QR codes from the Camera, Set Up Codes In, links in Safari).
     func open(_ url: URL) {
@@ -57,10 +67,21 @@ final class AppModel {
             return { work.end() }
         }
         repo = VaultRepository(store: store, api: api)
+        // Invitations and the server's policies are the app's (the AutoFill extension ignores them).
+        repo.isApp = true
         icons = IconLoader(session: api.session)
+        authRequests = AuthRequestInbox(source: repo)
         lockManager = LockManager(repo: repo)
-        liveSync = LiveSync(repo: repo)
+        liveSync = LiveSync(repo: repo, inbox: authRequests)
         permissions = PermissionCenter(repo: repo)
+        #if DEBUG
+        // UI tests: the breach check answered by a stub instead of Have I Been Pwned.
+        health = ProcessInfo.processInfo.arguments.contains("-PAStubBreachCheck")
+            ? HealthSession(repo: repo, checker: BreachChecker(fetch: HealthSession.stubFetch))
+            : HealthSession(repo: repo)
+        #else
+        health = HealthSession(repo: repo)
+        #endif
         backgroundRefresh = BackgroundRefresh(repo: repo)
         BackgroundRefresh.current = backgroundRefresh
     }

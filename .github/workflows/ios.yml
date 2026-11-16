@@ -18,6 +18,7 @@ on:
     tags: ["ios-[0-9]*.*.*"]
     paths:
       - "ios/**"
+      - "testdata/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -27,6 +28,7 @@ on:
   pull_request:
     paths:
       - "ios/**"
+      - "testdata/**"
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"

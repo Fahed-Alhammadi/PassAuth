@@ -125,6 +125,9 @@ final class AutofillModel {
     private(set) var saveTarget = SaveLogic.newLogin
     /// The user picked the target themselves (kept when the vault catches up with the server).
     @ObservationIgnored private var saveTargetPicked = false
+    /// A new login's id, the same for every Save of this sheet (an attempt whose answer was lost
+    /// isn't saved twice; see `VaultRepository.createItem`).
+    @ObservationIgnored private let newItemId = UUID().uuidString.lowercased()
     /// Debug builds: memory measured around unlocking (for the extension memory limit).
     private(set) var memoryNote = ""
     @ObservationIgnored weak var context: ASCredentialProviderExtensionContext?
@@ -329,6 +332,11 @@ final class AutofillModel {
     // MARK: After unlock
 
     private func proceed() async {
+        // The server requires two-step login first and there is no copy of the vault to work
+        // from (e.g. right after signing in here): this extension can't set a method up.
+        if repo.vault == nil && repo.state.twoStepRequired {
+            return message(TwoStepGate.title, "Set up two-step login in the PassAuth app or the web vault, then try again.")
+        }
         switch request {
         case .list, .oneTimeCodes:
             screen = .list
@@ -341,8 +349,9 @@ final class AutofillModel {
             Task { await repo.refreshIfStale() }
         case .registerPasskey:
             if let r = registration, let v = repo.vault {
-                passkeyTargets = PasskeyLogic.saveTargets(v, rpId: r.rpId, userName: r.user)
-                passkeyTarget = PasskeyLogic.defaultTarget(passkeyTargets, rpId: r.rpId, in: v)
+                let choices = PasskeyLogic.saveChoices(v, rpId: r.rpId, userName: r.user)
+                passkeyTargets = choices.map(\.entry)
+                passkeyTarget = PasskeyLogic.defaultTarget(choices)
             }
             screen = .confirmPasskey
         case .credential(let r):
@@ -351,8 +360,6 @@ final class AutofillModel {
             switch savePlan {
             case .unchanged?: completeSave()
             case .noPassword?: cancel()
-            case .readOnly(let e)?:
-                message("Can't update this login", "\(e.item.name) is in \(repo.vault?.vaultName(e.vaultId) ?? "a vault") that you can only view.")
             default:
                 resetSaveChoice()
                 screen = .confirmSave
@@ -411,7 +418,7 @@ final class AutofillModel {
 
     var suggestions: [Entry] {
         guard let v = repo.vault else { return [] }
-        let all = AutofillMatcher.candidates(pages, v.entries, defaultMatch: state.settings.defaultMatch)
+        let all = AutofillMatcher.candidates(pages, in: v, defaultMatch: state.settings.defaultMatch)
         return onlyCodes ? all.filter { Clipboard.totp($0.item.login?.totp) != nil } : all
     }
 
@@ -562,9 +569,23 @@ final class AutofillModel {
         repo.vault?.sharedVaultName(e)
     }
 
+    /// The warning under "Save in" when the chosen login is in a shared vault: saving there hands
+    /// the password to that vault's members (a login somebody shared is never preselected).
+    var saveWarning: String? {
+        guard let v = repo.vault else { return nil }
+        return SaveLogic.sharedWarning(saveUpdates, in: v)
+    }
+
+    /// The same warning for a new passkey: the chosen login is in a shared vault, so its members
+    /// get the passkey (never preselected there either; see `PasskeyLogic.defaultTarget`).
+    var passkeyWarning: String? {
+        guard let v = repo.vault else { return nil }
+        return PasskeyLogic.sharedWarning(passkeyTargets.first { $0.id == passkeyTarget }, in: v)
+    }
+
     /// "Save in" for the vault as currently open: the logins for the site in the account's own
-    /// vault (plus the same-user-name login of a shared vault, when that is the default), with
-    /// the default plan's one selected, unless the user picked one that is still possible.
+    /// vault, then those with the typed user name in shared vaults (never preselected), with the
+    /// default plan's one selected, unless the user picked one that is still possible.
     private func resetSaveChoice() {
         guard let info = saveInfo, let page = info.page, let v = repo.vault else { return }
         saveTargets = SaveLogic.targets(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch)
@@ -595,7 +616,7 @@ final class AutofillModel {
         guard model.repo.isUnlocked, let plan = model.savePlan else { return model.cancel(.userInteractionRequired) }
         switch plan {
         case .unchanged: model.completeSave()
-        case .readOnly, .noPassword: model.cancel()
+        case .noPassword: model.cancel()
         case .update(_, .only): model.cancel(.userInteractionRequired)
         case .create, .update:
             guard info.event == .userInitiated, let page = info.page else { return model.cancel(.userInteractionRequired) }
@@ -620,7 +641,8 @@ final class AutofillModel {
             do {
                 // Exactly what the sheet shows is applied. If the synced vault no longer allows
                 // it (or would have made another default), nothing is written.
-                _ = try await repo.saveLogin(page: page, username: info.username, password: info.password, target: saveTarget, isDefault: !saveTargetPicked)
+                _ = try await repo.saveLogin(page: page, username: info.username, password: info.password, target: saveTarget, isDefault: !saveTargetPicked,
+                                             newItemId: newItemId)
                 // iOS leaves the identity store to the provider: the new login is suggested next time.
                 await repo.identities.flush()
                 completeSave()
@@ -630,8 +652,6 @@ final class AutofillModel {
                 resetSaveChoice()
                 switch savePlan {
                 case .unchanged?: completeSave()
-                case .readOnly(let e)?:
-                    message("Can't update this login", "\(e.item.name) is in \(repo.vault?.vaultName(e.vaultId) ?? "a vault") that you can only view.")
                 default:
                     self.error = "Your vault changed while this was open. Check “Save in”, then confirm again."
                 }

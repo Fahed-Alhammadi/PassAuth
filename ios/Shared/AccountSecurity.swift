@@ -60,6 +60,69 @@ public struct TwoFactorStatus: Equatable, Sendable {
     public func isLast(_ p: TwoFactorProvider) -> Bool { providers.filter { $0 != p.rawValue && $0 != "recovery" }.isEmpty }
 }
 
+/// The account's storage as `GET /api/account` reports it: items and bytes (encrypted item keys
+/// and data, trash included) in the vaults it owns, and the server admin's limits (0 = none).
+public struct AccountUsage: Equatable, Sendable {
+    public var itemCount: Int64
+    public var storageBytes: Int64
+    public var maxItems: Int64
+    public var maxStorageBytes: Int64
+
+    public init(itemCount: Int64, storageBytes: Int64, maxItems: Int64, maxStorageBytes: Int64) {
+        self.itemCount = itemCount
+        self.storageBytes = storageBytes
+        self.maxItems = maxItems
+        self.maxStorageBytes = maxStorageBytes
+    }
+
+    /// Absent fields (older servers) read as 0: no usage, no limit.
+    public init(json j: JSON) {
+        let usage = j["usage"], limits = j["limits"]
+        itemCount = max(usage?["item_count"]?.int ?? 0, 0)
+        storageBytes = max(usage?["storage_bytes"]?.int ?? 0, 0)
+        maxItems = max(limits?["max_items"]?.int ?? 0, 0)
+        maxStorageBytes = max(limits?["max_storage_bytes"]?.int ?? 0, 0)
+    }
+
+    /// The server limits items or storage: only then is the usage shown.
+    public var limited: Bool { maxItems > 0 || maxStorageBytes > 0 }
+
+    /// "120 of 500 items"; nil without an item limit.
+    public var itemsLine: String? {
+        guard maxItems > 0 else { return nil }
+        return "\(itemCount) of \(maxItems) \(maxItems == 1 ? "item" : "items")"
+    }
+
+    /// "1.2 MB of 50 MB"; nil without a storage limit.
+    public var storageLine: String? {
+        guard maxStorageBytes > 0 else { return nil }
+        return "\(Self.bytes(storageBytes)) of \(Self.bytes(maxStorageBytes))"
+    }
+
+    /// Share of each limit used (0…1), for a bar; nil without that limit.
+    public var itemsUsed: Double? { maxItems > 0 ? min(Double(itemCount) / Double(maxItems), 1) : nil }
+    public var storageUsed: Double? { maxStorageBytes > 0 ? min(Double(storageBytes) / Double(maxStorageBytes), 1) : nil }
+
+    /// A limit is reached: new items (or bigger ones) are refused until something is deleted.
+    public var full: Bool { (maxItems > 0 && itemCount >= maxItems) || (maxStorageBytes > 0 && storageBytes >= maxStorageBytes) }
+
+    /// Sizes in binary units as the admin page sets them ("50 MB" = 50 MiB): bytes, KB, MB, GB,
+    /// one decimal below 10 when it isn't whole.
+    public static func bytes(_ n: Int64) -> String {
+        if n < 1024 { return "\(n) \(n == 1 ? "byte" : "bytes")" }
+        let units = ["KB", "MB", "GB", "TB"]
+        var value = Double(n) / 1024
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        let rounded = (value * 10).rounded() / 10
+        let text = rounded < 10 && rounded != rounded.rounded() ? String(format: "%.1f", rounded) : String(Int(value.rounded()))
+        return "\(text) \(units[unit])"
+    }
+}
+
 public enum TwoFactorProvider: String, Sendable, CaseIterable {
     case totp, email
 }
@@ -72,6 +135,15 @@ public struct TotpSetup: Equatable, Sendable {
         self.secret = secret
         self.uri = uri
     }
+}
+
+/// A reauth token kept between tries of turning a two-step method on (`enableTwoFactor`): the
+/// server uses it up only when the method goes on. The screen drops it when the master password
+/// typed changes, and it dies with the screen.
+@MainActor
+public final class ReauthHold {
+    public var token: String?
+    public init() {}
 }
 
 /// The Secret Key part of a master password change.
@@ -99,11 +171,14 @@ public enum AccountSecurityLogic {
         /// Weak: shown once; submitting again uses it anyway.
         case weak
 
-        public var message: String {
+        public var message: String { message(minLength: AccountSecurityLogic.minPasswordLength) }
+
+        /// The message with the length the server's policy asks for (`PolicyRules.minPasswordLength`).
+        public func message(minLength: Int) -> String {
             switch self {
             case .noCurrent: "Enter your current master password."
             case .nothingToChange: "Enter a new master password, or change the Secret Key setting."
-            case .tooShort: "Use at least \(AccountSecurityLogic.minPasswordLength) characters for your new master password."
+            case .tooShort: "Use at least \(minLength) characters for your new master password."
             case .mismatch: "The new passwords don't match. Type the same password in both fields."
             case .sameAsCurrent: "The new master password is the same as the current one."
             case .weak: "This password is easy to guess. Choose a longer one, or select Change master password again to use it anyway."
@@ -112,14 +187,18 @@ public enum AccountSecurityLogic {
     }
 
     /// Checks before a master password change (as the web vault's Security tab and Register).
-    /// An empty new password keeps the current one, allowed only when the Secret Key setting changes.
+    /// An empty new password keeps the current one, allowed only when the Secret Key setting
+    /// changes. `minLength`: the server's minimum (policy), never below the apps' own.
+    /// `allowSame`: the account has a `kdf` policy violation, which a keys change with the same
+    /// password fixes (new encryption settings, same password).
     public static func passwordProblem(current: String, new: String, confirm: String, secretKeyChange: SecretKeyChange,
-                                       weakAccepted: Bool, bits: (String) -> Double) -> PasswordProblem? {
+                                       weakAccepted: Bool, bits: (String) -> Double, minLength: Int = minPasswordLength,
+                                       allowSame: Bool = false) -> PasswordProblem? {
         if current.isEmpty { return .noCurrent }
         if new.isEmpty && confirm.isEmpty { return secretKeyChange == .keep ? .nothingToChange : nil }
-        if new.count < minPasswordLength { return .tooShort }
+        if new.count < max(minPasswordLength, minLength) { return .tooShort }
         if new != confirm { return .mismatch }
-        if new == current && secretKeyChange == .keep { return .sameAsCurrent }
+        if new == current && secretKeyChange == .keep && !allowSame { return .sameAsCurrent }
         if bits(new) < weakBits && !weakAccepted { return .weak }
         return nil
     }
@@ -179,29 +258,31 @@ public struct ShownOnce: Equatable, Sendable {
 /// Error text for the two-step and password screens: wrong code, rate limit, network.
 public func securityErrorMessage(_ error: Error) -> String {
     if let e = error as? ApiError {
-        if e.status == 429 || e.code == "rate_limited" { return "Too many attempts, try again later." }
-        switch e.message.lowercased() {
-        case "invalid code": return "That code isn't right. Check it and try again."
-        case "start setup first": return "Setup has expired. Start again."
-        case "email is not configured on this server": return "This server can't send email, so email codes aren't available."
-        case "reauth_required": return "Please confirm your master password again."
-        default: break
-        }
-        if e.status == 409 { return "This method is already on. Turn it off first to set it up again." }
+        if e.isRateLimited { return tooManyAttemptsMessage(e) ?? "Too many attempts, try again later." }
+        // The server's `error` code first (API v2), the message text of older servers second.
+        if e.hasCode("invalid_code", orMessage: "invalid code") { return "That code isn't right. Check it and try again." }
+        if e.hasCode("expired", orMessage: "start setup first") { return "Setup has expired. Start again." }
+        if e.hasCode("reauth_required") { return "Please confirm your master password again." }
+        if e.message.lowercased() == "email is not configured on this server" { return "This server can't send email, so email codes aren't available." }
+        if e.hasCode("already_enabled") || e.status == 409 { return "This method is already on. Turn it off first to set it up again." }
     }
     return errorMessage(error)
 }
 
 extension VaultRepository {
     private func requireOnline() throws {
-        if vault?.offline == true { throw UserError("You're offline. This needs your PassAuth server.") }
+        // While the server asks for two-step setup first, the copy shown may be marked offline
+        // although the server answers: setting a method up just needs it.
+        if vault?.offline == true && !state.twoStepRequired { throw UserError("You're offline. This needs your PassAuth server.") }
     }
 
     // MARK: Master password / Secret Key
 
     /// Change the master password and/or the Secret Key setting (the web vault's `changeKeys`):
-    /// re-authenticate with the current password → `Account.rewrap` (same account key and key
-    /// pair, wrapped with the new password) → `/account/keys/start` → OPAQUE registration with
+    /// re-authenticate with the current password → `Account.rewrapWithKdf` (same account key and
+    /// key pair, wrapped with the new password and the server's key-derivation minimums, read
+    /// again from `/api/config`; also the fix for a `kdf` policy violation, with the same
+    /// password too) → `/account/keys/start` → OPAQUE registration with
     /// the new password → `/account/keys/finish` with the reauth token. The server signs every
     /// other session out. `newPassword` nil keeps the current one (Secret Key change only).
     /// Returns the new Secret Key when one was created (show it once).
@@ -240,7 +321,12 @@ extension VaultRepository {
         if withKey && enabled && current == nil { throw UserError(secretKeyRequiredMessage) }
         let account = session.account
         let keep = withKey ? current : nil
-        let next = try await core { try account.rewrap(bundleJson: bundle, newPassword: newPassword, withSecretKey: withKey, existingSecretKey: keep) }
+        // The server's minimums as they are now (a policy may have changed since sign-in).
+        let kdf = PolicyRules.kdfMinimums(await fetchConfig(id), stored: a.policies)
+        let next = try await core {
+            try account.rewrapWithKdf(bundleJson: bundle, newPassword: newPassword, withSecretKey: withKey, existingSecretKey: keep,
+                                      minMemoryMib: kdf.memoryMib, minIterations: kdf.iterations)
+        }
         let master = next.master
         let start = try await core { try opaqueRegisterStart(master: master) }
         let resp = try await api.call(id, "/account/keys/start", body: ["message": .string(start.message)])
@@ -293,6 +379,11 @@ extension VaultRepository {
         TwoFactorStatus(json: try await api.call(activeId, "/account"))
     }
 
+    /// Items and storage of the active account against the server's limits (`GET /account`).
+    public func accountUsage() async throws -> AccountUsage {
+        AccountUsage(json: try await api.call(activeId, "/account"))
+    }
+
     /// Start authenticator setup: a new secret, enabled only after `enableTotp` with a code.
     public func startTotpSetup() async throws -> TotpSetup {
         try requireOnline()
@@ -302,21 +393,58 @@ extension VaultRepository {
         return TotpSetup(secret: secret, uri: uri)
     }
 
-    /// Turn on the authenticator app. Returns the recovery codes when this is the first method.
-    public func enableTotp(code: String) async throws -> [String]? {
-        let r = try await api.call(activeId, "/account/2fa/totp/enable", body: ["code": .string(AccountSecurityLogic.cleanCode(code))])
-        return Self.recoveryCodes(r)
-    }
-
     /// Email a setup code to the account's address.
     public func sendEmailSetupCode() async throws {
         try requireOnline()
         _ = try await api.call(activeId, "/account/2fa/email/setup", method: "POST")
     }
 
-    /// Turn on email codes. Returns the recovery codes when this is the first method.
-    public func enableEmailCodes(code: String) async throws -> [String]? {
-        let r = try await api.call(activeId, "/account/2fa/email/enable", body: ["code": .string(AccountSecurityLogic.cleanCode(code))])
+    /// Turn on a two-step method with the code that proves it works, after the master password:
+    /// the server wants a fresh reauth token for it (403 `reauth_required` without one), so a
+    /// stolen session alone can't put its own authenticator on the account. The server uses the
+    /// token up only when the method is turned on, so it is kept in `hold` and sent again with
+    /// another code after a mistyped one (no second password check); a token the server no
+    /// longer takes (it lasts 5 minutes) is replaced once. Returns the recovery codes when this is
+    /// the first method.
+    public func enableTwoFactor(_ provider: TwoFactorProvider, code: String, password: String, typedSecretKey: String?, hold: ReauthHold) async throws -> [String]? {
+        try await lock.run {
+            try requireOnline()
+            let id = activeId
+            if let held = hold.token {
+                do {
+                    let codes = try await enableLocked(provider, code: code, token: held)
+                    hold.token = nil
+                    return codes
+                } catch let e as ApiError where Self.isReauthRequired(e) {
+                    // The held token ran out: a fresh one below.
+                    hold.token = nil
+                }
+            }
+            let token = try await reauthToken(id, password: password, secretKey: typedSecretKey)
+            hold.token = token
+            do {
+                let codes = try await enableLocked(provider, code: code, token: token)
+                hold.token = nil
+                return codes
+            } catch let e as ApiError where Self.isReauthRequired(e) {
+                hold.token = nil
+                throw e
+            }
+        }
+    }
+
+    nonisolated static func isReauthRequired(_ e: ApiError) -> Bool {
+        e.status == 403 && e.hasCode("reauth_required")
+    }
+
+    /// `enableTwoFactor` with a reauth token from the server.
+    public func enableTwoFactor(_ provider: TwoFactorProvider, code: String, reauthToken: String) async throws -> [String]? {
+        try await lock.run { try await enableLocked(provider, code: code, token: reauthToken) }
+    }
+
+    private func enableLocked(_ provider: TwoFactorProvider, code: String, token: String) async throws -> [String]? {
+        let r = try await api.call(activeId, "/account/2fa/\(provider.rawValue)/enable", body: ["code": .string(AccountSecurityLogic.cleanCode(code))],
+                                   headers: ["x-reauth-token": token])
         return Self.recoveryCodes(r)
     }
 

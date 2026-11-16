@@ -31,11 +31,18 @@ struct ChangePasswordPage: View {
     var body: some View {
         let s = model.state
         let wasOn = s.secretKeyRequired
-        let change = SecretKeyChange.from(wasOn: wasOn, wantOn: useKey ?? wasOn)
+        // The server's policy: a Secret Key can't be turned off, and turning it on is preselected.
+        let keyRequired = s.policies.requireSecretKey
+        let change = SecretKeyChange.from(wasOn: wasOn, wantOn: keyRequired || (useKey ?? wasOn))
+        let minLength = PolicyRules.minPasswordLength(s.policies)
         Form {
             Section {
                 Text("Your master password encrypts your vault and is never sent to the server. If you forget it, nobody can recover your data.")
                     .foregroundStyle(Color.paInk)
+                if kdfFix {
+                    // A keys change with the server's minimums fixes the `kdf` violation, with the same password too.
+                    Text(PolicyRules.kdfSamePasswordNote).font(.subheadline).foregroundStyle(Color.paMuted)
+                }
             }
             .paRow()
             Section {
@@ -55,17 +62,18 @@ struct ChangePasswordPage: View {
             } header: {
                 Text("New")
             } footer: {
-                Text("At least \(AccountSecurityLogic.minPasswordLength) characters. A few unrelated words are easy to remember and hard to guess."
+                Text("At least \(minLength) characters. A few unrelated words are easy to remember and hard to guess."
                      + (change == .keep ? "" : " Leave both empty to keep your current master password."))
             }
             .paRow()
             Section {
-                Toggle("Use a Secret Key", isOn: Binding(get: { useKey ?? wasOn }, set: { useKey = $0 }))
+                Toggle("Use a Secret Key", isOn: Binding(get: { keyRequired || (useKey ?? wasOn) }, set: { useKey = $0 }))
+                    .disabled(keyRequired)
                     .accessibilityIdentifier("pw.useSecretKey")
             } header: {
                 Text("Secret Key")
             } footer: {
-                Text(secretKeyFooter(change, wasOn: wasOn))
+                Text(secretKeyFooter(change, wasOn: wasOn) + (keyRequired ? " " + PolicyRules.secretKeyRequiredNote : ""))
             }
             .paRow()
             Section {
@@ -102,6 +110,9 @@ struct ChangePasswordPage: View {
         .onDisappear { clear() }
     }
 
+    /// The server asks for new encryption settings (`kdf` policy violation): the same password is fine.
+    private var kdfFix: Bool { model.state.policyViolations.contains(.kdf) }
+
     private func secretKeyFooter(_ change: SecretKeyChange, wasOn: Bool) -> String {
         switch change {
         case .keep where wasOn: "Your Secret Key stays the same. You need it, together with your master password, to sign in on a new device."
@@ -122,12 +133,15 @@ struct ChangePasswordPage: View {
     private func submit() {
         guard !busy else { return }
         error = nil
-        let change = SecretKeyChange.from(wasOn: model.state.secretKeyRequired, wantOn: useKey ?? model.state.secretKeyRequired)
+        let s = model.state
+        let change = SecretKeyChange.from(wasOn: s.secretKeyRequired, wantOn: s.policies.requireSecretKey || (useKey ?? s.secretKeyRequired))
+        let minLength = PolicyRules.minPasswordLength(s.policies)
         if let p = AccountSecurityLogic.passwordProblem(current: current, new: newPassword, confirm: confirm, secretKeyChange: change,
-                                                        weakAccepted: weakAccepted, bits: { estimateBits(password: $0) }) {
+                                                        weakAccepted: weakAccepted, bits: { estimateBits(password: $0) }, minLength: minLength,
+                                                        allowSame: kdfFix) {
             if p == .weak { weakAccepted = true }
-            error = p.message
-            UIAccessibility.post(notification: .announcement, argument: p.message)
+            error = p.message(minLength: minLength)
+            UIAccessibility.post(notification: .announcement, argument: error)
             return
         }
         confirming = true
@@ -137,6 +151,7 @@ struct ChangePasswordPage: View {
         busy = true
         error = nil
         let c = current, n = newPassword.isEmpty ? nil : newPassword, k = typedKey.isEmpty ? nil : typedKey
+        let samePassword = n == nil || n == c
         Task {
             do {
                 let sk = try await model.repo.changeMasterPassword(current: c, typedSecretKey: k, newPassword: n, secretKeyChange: change)
@@ -146,7 +161,11 @@ struct ChangePasswordPage: View {
                     newKey = sk
                     showKey = true
                 } else {
-                    model.notify(change == .turnOff && n == nil ? "Secret Key turned off. Other devices were signed out." : "Master password changed. Other devices were signed out.")
+                    model.notify(change == .turnOff && n == nil ? "Secret Key turned off. Other devices were signed out."
+                        : samePassword && change == .keep ? "Encryption settings updated. Other devices were signed out."
+                        : "Master password changed. Other devices were signed out.")
+                    // The violation is gone once the server has the new keys.
+                    Task { await model.repo.refreshPolicies() }
                     dismiss()
                 }
             } catch {
@@ -256,6 +275,12 @@ private enum ReauthAction: Identifiable, Equatable {
 
 struct TwoStepPage: View {
     @Environment(AppModel.self) private var model
+    /// The server requires two-step login and the account has no method yet (`TwoStepGate`):
+    /// the page stands in for the vault and offers only setting a method up and signing out;
+    /// once one is on, "Continue" opens the vault (`TwoStepRequiredView`).
+    var gate = false
+    @State private var continuing = false
+    @State private var continueError: String?
     @State private var status: TwoFactorStatus?
     @State private var loadError: String?
     @State private var loading = false
@@ -268,19 +293,50 @@ struct TwoStepPage: View {
     @State private var emailError: String?
     @State private var emailCodes = ShownOnce([])
     @State private var showEmailCodes = false
+    /// Turning email codes on needs the master password (the server wants a reauth token).
+    @State private var emailPassword = ""
+    @State private var emailKey = ""
+    @State private var emailHold = ReauthHold()
 
     var body: some View {
         Form {
-            Section {
-                Text("Two-step login asks for a code after your master password when you sign in on a new device, so a stolen password isn't enough.")
-                    .foregroundStyle(Color.paInk)
+            if gate {
+                Section {
+                    VStack(alignment: .leading, spacing: PA.Space.s) {
+                        LogoMark(height: 40).accessibilityHidden(true)
+                        Text(TwoStepGate.title).font(.title3.weight(.semibold)).foregroundStyle(Color.paInk)
+                            .accessibilityAddTraits(.isHeader)
+                        Text(TwoStepGate.intro(email: model.state.email)).foregroundStyle(Color.paInk)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, PA.Space.xs)
+                    .accessibilityIdentifier("twoStepGate")
+                }
+                .paRow()
+            } else {
+                Section {
+                    Text("Two-step login asks for a code after your master password when you sign in on a new device, so a stolen password isn't enough.")
+                        .foregroundStyle(Color.paInk)
+                }
+                .paRow()
             }
-            .paRow()
             if let status {
-                totpSection(status)
-                emailSection(status)
-                securityKeysSection(status)
-                recoverySection(status)
+                if gate && status.anyOn {
+                    gateDoneSection
+                } else {
+                    totpSection(status)
+                    emailSection(status)
+                    securityKeysSection(status)
+                    if gate {
+                        Section {
+                            Text(TwoStepGate.hint).font(.subheadline).foregroundStyle(Color.paMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .paRow()
+                    } else {
+                        recoverySection(status)
+                    }
+                }
             } else if let loadError {
                 Section {
                     ErrorText(text: loadError)
@@ -293,6 +349,18 @@ struct TwoStepPage: View {
                         ProgressView()
                         Text("Loading…").foregroundStyle(Color.paMuted)
                     }
+                }
+                .paRow()
+            }
+            if gate {
+                Section {
+                    Button(role: .destructive) {
+                        model.run { await model.repo.logout() }
+                    } label: {
+                        Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                    .disabled(continuing)
+                    .accessibilityIdentifier("twoStepGate.signOut")
                 }
                 .paRow()
             }
@@ -327,9 +395,50 @@ struct TwoStepPage: View {
             }
             .interactiveDismissDisabled(!emailCodes.canClose)
         }
+        .onChange(of: emailPassword) { emailHold.token = nil }
+        .onChange(of: emailKey) { emailHold.token = nil }
         .onDisappear {
             emailCode = ""
             emailSent = false
+            forgetEmailPassword()
+        }
+    }
+
+    private func forgetEmailPassword() {
+        emailPassword = ""
+        emailKey = ""
+        emailHold.token = nil
+    }
+
+    /// The gate's last step: a method is on, the vault can open.
+    private var gateDoneSection: some View {
+        Section {
+            Notice(text: "\(TwoStepGate.onTitle). \(TwoStepGate.onText)", kind: .ok)
+                .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+            ErrorText(text: continueError)
+            Button(action: proceed) {
+                HStack {
+                    Text(continuing ? "Opening vault…" : "Continue").fontWeight(.semibold)
+                    if continuing { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(continuing)
+            .accessibilityIdentifier("twoStepGate.continue")
+        }
+        .paRow()
+    }
+
+    private func proceed() {
+        guard !continuing else { return }
+        continuing = true
+        continueError = nil
+        Task {
+            do {
+                try await model.repo.continueAfterTwoStep()
+            } catch {
+                continueError = errorMessage(error)
+            }
+            continuing = false
         }
     }
 
@@ -375,6 +484,7 @@ struct TwoStepPage: View {
             } else if emailSent {
                 Text("We sent a code to \(s.email). Enter it below.").font(.subheadline).foregroundStyle(Color.paInk)
                 LabeledInput(label: "Verification code", text: $emailCode, mono: true, keyboard: .numberPad, content: .oneTimeCode, autocap: .never, identifier: "email.code")
+                MasterPasswordConfirm(password: $emailPassword, secretKey: $emailKey, identifier: "email")
                 ErrorText(text: emailError)
                 Button(action: enableEmail) {
                     HStack {
@@ -382,13 +492,14 @@ struct TwoStepPage: View {
                         if emailBusy { Spacer(); ProgressView() }
                     }
                 }
-                .disabled(emailBusy || !AccountSecurityLogic.isEmailCode(emailCode))
+                .disabled(emailBusy || !AccountSecurityLogic.isEmailCode(emailCode) || emailPassword.isEmpty)
                 .accessibilityIdentifier("email.enable")
                 Button("Send a new code", action: sendEmail).disabled(emailBusy)
                 Button("Cancel") {
                     emailSent = false
                     emailCode = ""
                     emailError = nil
+                    forgetEmailPassword()
                 }
                 .disabled(emailBusy)
             } else {
@@ -430,8 +541,16 @@ struct TwoStepPage: View {
                 }
                 .accessibilityElement(children: .combine)
             }
+            if gate {
+                Button { model.openWebVault("/settings/two-step") } label: {
+                    Label("Add a security key in the web vault", systemImage: "arrow.up.forward.square")
+                }
+                .accessibilityHint("Opens in the browser")
+            }
         } footer: {
-            Text(s.securityKeys.isEmpty
+            Text(gate
+                 ? TwoStepGate.securityKeys + " This app can't use a security key to sign in yet, so set up another method too if you sign in here."
+                 : s.securityKeys.isEmpty
                  ? "Use a hardware security key or a passkey to confirm your sign-in. Add one in the web vault under Settings → Two-step login."
                  : "Add keys in the web vault. This app can't use a security key to sign in yet, so keep another method on if you sign in here.")
         }
@@ -488,14 +607,19 @@ struct TwoStepPage: View {
             emailError = "Enter the code from the email we sent you."
             return
         }
+        guard !emailPassword.isEmpty else {
+            emailError = MasterPasswordConfirm.missing
+            return
+        }
         emailBusy = true
         emailError = nil
-        let code = emailCode
+        let code = emailCode, pw = emailPassword, key = emailKey.isEmpty ? nil : emailKey
         Task {
             do {
-                let codes = try await model.repo.enableEmailCodes(code: code)
+                let codes = try await model.repo.enableTwoFactor(.email, code: code, password: pw, typedSecretKey: key, hold: emailHold)
                 emailSent = false
                 emailCode = ""
+                forgetEmailPassword()
                 model.notify("Email codes turned on.")
                 if let codes {
                     emailCodes = ShownOnce(codes)
@@ -547,6 +671,10 @@ private struct TotpSetupSheet: View {
     @State private var busy = false
     @State private var error: String?
     @State private var codes = ShownOnce([])
+    /// Turning the authenticator on needs the master password (the server wants a reauth token).
+    @State private var password = ""
+    @State private var typedKey = ""
+    @State private var hold = ReauthHold()
 
     var body: some View {
         NavigationStack {
@@ -583,13 +711,18 @@ private struct TotpSetupSheet: View {
             }
         }
         // A typed code isn't thrown away by a stray swipe (Cancel still closes).
-        .interactiveDismissDisabled(busy || !code.isEmpty || !codes.value.isEmpty)
+        .interactiveDismissDisabled(busy || !code.isEmpty || !password.isEmpty || !codes.value.isEmpty)
         .task { await start() }
         .onAppear { model.showsSecret = true }
+        .onChange(of: password) { hold.token = nil }
+        .onChange(of: typedKey) { hold.token = nil }
         .onDisappear {
             setup = nil
             qr = nil
             code = ""
+            password = ""
+            typedKey = ""
+            hold.token = nil
             model.showsSecret = false
         }
     }
@@ -639,6 +772,7 @@ private struct TotpSetupSheet: View {
         .paRow()
         Section {
             LabeledInput(label: "Verification code", text: $code, mono: true, keyboard: .numberPad, content: .oneTimeCode, autocap: .never, identifier: "totp.code")
+            MasterPasswordConfirm(password: $password, secretKey: $typedKey, identifier: "totp")
             ErrorText(text: error)
             Button(action: enable) {
                 HStack {
@@ -646,7 +780,7 @@ private struct TotpSetupSheet: View {
                     if busy { Spacer(); ProgressView() }
                 }
             }
-            .disabled(busy || !AccountSecurityLogic.isTotpCode(code))
+            .disabled(busy || !AccountSecurityLogic.isTotpCode(code) || password.isEmpty)
             .accessibilityIdentifier("totp.enable")
         } header: {
             Text("2. Enter the code the app shows")
@@ -670,13 +804,19 @@ private struct TotpSetupSheet: View {
             error = "Enter the 6-digit code from your authenticator app."
             return
         }
+        guard !password.isEmpty else {
+            error = MasterPasswordConfirm.missing
+            return
+        }
         busy = true
         error = nil
-        let c = code
+        let c = code, pw = password, key = typedKey.isEmpty ? nil : typedKey
         Task {
             do {
-                let recovery = try await model.repo.enableTotp(code: c)
+                let recovery = try await model.repo.enableTwoFactor(.totp, code: c, password: pw, typedSecretKey: key, hold: hold)
                 code = ""
+                password = ""
+                typedKey = ""
                 model.notify("Authenticator app turned on.")
                 setup = nil
                 qr = nil
@@ -698,6 +838,29 @@ func qrImage(_ text: String) -> UIImage? {
     guard let out = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)),
           let cg = CIContext().createCGImage(out, from: out.extent) else { return nil }
     return UIImage(cgImage: cg)
+}
+
+/// The master password (and the Secret Key when this device doesn't keep it) that turning a
+/// two-step method on needs: the server checks it first (a reauth token), so a stolen session
+/// alone can't add its own method.
+private struct MasterPasswordConfirm: View {
+    @Environment(AppModel.self) private var model
+    @Binding var password: String
+    @Binding var secretKey: String
+    let identifier: String
+
+    static let hint = "Confirms that it's you turning on two-step login."
+    static let missing = "Enter your master password to continue."
+
+    var body: some View {
+        let s = model.state
+        SecretInput(label: "Master password", text: $password, mono: false, identifier: "\(identifier).password")
+        if s.secretKeyRequired && !s.secretKeyStored {
+            LabeledInput(label: "Secret Key", text: $secretKey, mono: true, autocap: .characters, identifier: "\(identifier).secretKey")
+        }
+        Text(Self.hint).font(.footnote).foregroundStyle(Color.paMuted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
 }
 
 /// Master password check for turning a method off or new recovery codes (destructive: the
@@ -874,5 +1037,15 @@ private struct RecoveryCodesView: View {
         .paRow()
         .onAppear { model.showsSecret = true }
         .onDisappear { model.showsSecret = false }
+    }
+}
+
+/// Stands in for the vault while the server requires two-step login and the account has no
+/// method yet (`TwoStepGate`): the two-step setup page in gate mode.
+struct TwoStepRequiredView: View {
+    var body: some View {
+        NavigationStack {
+            TwoStepPage(gate: true)
+        }
     }
 }

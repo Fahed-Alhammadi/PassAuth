@@ -3,12 +3,14 @@ import Foundation
 
 /// Which logins AutoFill may offer for what iOS asks about. iOS hands the credential provider
 /// service identifiers: a page URL (Safari, `.URL`, full address) or a domain (apps with
-/// associated domains, `.domain`). Same rules as the extension and the Android app's
-/// `AutofillMatcher` for web content: `UrlMatcher` with the default-match setting, a domain
-/// without scheme is taken as `https://<domain>/` (so "exact" / "starts with" see that), app
-/// websites (`androidapp://…`) never match and an https login is never offered on an http page.
+/// associated domains, `.domain`). The same rules as every PassAuth client for web content (the
+/// Rust core's site logic through `UrlMatcher`, with the default-match setting): a domain without
+/// scheme is taken as `https://<domain>/` (so "exact" / "starts with" see that), app websites
+/// (`androidapp://…`) never match and an https login is never offered on an http page.
 /// The PassAuth server's own web vault is an ordinary website: a login saved for the server's
-/// address is offered on its sign-in page.
+/// address is offered on its sign-in page. A website that is a regular expression counts only for
+/// logins in the user's own vaults: one in a vault somebody shared was written by somebody else,
+/// who could make it slow or match every site (the extension's `allowRegex` rule).
 public enum AutofillMatcher {
     public static let androidAppScheme = "androidapp://"
 
@@ -51,19 +53,22 @@ public enum AutofillMatcher {
         u.url.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix(androidAppScheme)
     }
 
-    /// May `login` be offered on `page`?
-    public static func matches(_ page: String, _ login: Login, defaultMatch: UrlMatch) -> Bool {
-        login.urls.contains { !isAppUrl($0) && UrlMatcher.matches(page, $0, fallback: defaultMatch) }
+    /// May `login` be offered on `page`? `allowRegex`: the login is in one of the user's own
+    /// vaults (`VaultData.isPersonal`), the only place its regular expressions count. The core
+    /// matches all its websites in one call (app addresses never match a page).
+    public static func matches(_ page: String, _ login: Login, defaultMatch: UrlMatch, allowRegex: Bool) -> Bool {
+        UrlMatcher.matchesAny(page, login, fallback: defaultMatch, allowRegex: allowRegex)
             && !login.urls.contains { UrlMatcher.downgrade(page, $0) }
     }
 
-    /// Matching logins for the pages (first page's matches first), no duplicates.
-    public static func candidates(_ pages: [String], _ entries: [Entry], defaultMatch: UrlMatch) -> [Entry] {
+    /// The vault's logins matching the pages (first page's matches first), no duplicates.
+    public static func candidates(_ pages: [String], in vault: VaultData, defaultMatch: UrlMatch) -> [Entry] {
         var out: [Entry] = []
         var seen = Set<String>()
         for page in pages {
-            for e in entries {
-                guard let l = e.item.login, !seen.contains(e.id), matches(page, l, defaultMatch: defaultMatch) else { continue }
+            for e in vault.entries {
+                guard let l = e.item.login, !seen.contains(e.id),
+                      matches(page, l, defaultMatch: defaultMatch, allowRegex: vault.isPersonal(e)) else { continue }
                 seen.insert(e.id)
                 out.append(e)
             }

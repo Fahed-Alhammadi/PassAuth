@@ -647,11 +647,17 @@ struct MacPasskey: View {
                     if ids.indices.contains(next) { model.passkeyTarget = ids[next] }
                 }
                 .accessibilityIdentifier("saveIn")
-                let shared = targets.first { $0.id == model.passkeyTarget }.flatMap(model.sharedVaultName)
-                Text(shared.map { "The passkey is kept with that login in the shared vault \($0); its members can use it too." }
-                     ?? "The passkey is kept with that login in your vault (\(model.state.email)).")
-                    .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    .padding(.top, -PA.Space.s)
+                // A login in a shared vault is never preselected: only a deliberate pick, with this warning.
+                if let warning = model.passkeyWarning {
+                    WarningNote(text: warning, identifier: "passkeyWarning")
+                        .padding(.top, -PA.Space.s)
+                } else {
+                    Text(model.passkeyTarget == PasskeyLogic.newLogin
+                         ? "Saved as a new login for \(rp) in your vault (\(model.state.email))."
+                         : "The passkey is kept with that login in your vault (\(model.state.email)).")
+                        .font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, -PA.Space.s)
+                }
             }
         } actions: {
             MacPrimaryButton(title: model.busy ? "Saving…" : "Save passkey", busy: model.busy, action: model.savePasskey)
@@ -674,7 +680,7 @@ private func matchHelp(_ m: UrlMatch) -> String {
     switch m {
     case .host: "Same host name and port only: login.example.com doesn't match www.example.com."
     case .startsWith: "The page address must start with the saved website address."
-    case .regex: "The saved website is a regular expression tested against the page address. Advanced."
+    case .regex: "A saved website written as a pattern (such as ^https://example\\.com/) is tested against the page address; a plain address matches by base domain. Advanced."
     case .exact: "The page address must be exactly the saved website address."
     case .never: "Never suggest or fill logins automatically. Items can still set their own matching."
     default: "login.example.com and www.example.com both match example.com."

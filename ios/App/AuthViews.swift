@@ -75,11 +75,17 @@ struct LoginView: View {
     @Environment(AppModel.self) private var model
     @State private var changingServer = false
     @State private var creating = false
+    @State private var withDevice = false
+    /// The server offers signing in with another device (`login_with_device`); hidden while unknown.
+    @State private var deviceLoginOffered = false
     @State private var email = ""
     @State private var password = ""
     @State private var secretKey = ""
     @State private var needKey = false
-    @State private var challenge: (token: String, providers: [String])?
+    /// Two-step login after the master password, or after another device approved (`fromDevice`).
+    @State private var challenge: (token: String, providers: [String], fromDevice: Bool)?
+    /// Another device approved: the code it shows comes next (the email the request was for).
+    @State private var deviceCode: String?
     @State private var busy = false
     @State private var error: String?
 
@@ -93,8 +99,34 @@ struct LoginView: View {
                 email = e
                 if let p { signIn(e, p, sk) }
             }, onBack: { creating = false })
+        } else if let mail = deviceCode {
+            DeviceCodeView(email: mail, onStopped: { message in
+                // Three wrong codes (or an approval that can't be used): back to the start.
+                deviceCode = nil
+                error = message
+            }, onCancel: {
+                model.repo.cancelDeviceLogin()
+                deviceCode = nil
+            })
         } else if let c = challenge {
-            TwoStepView(token: c.token, providers: c.providers, email: email) { challenge = nil }
+            TwoStepView(token: c.token, providers: c.providers, email: email, onCancel: {
+                // Back: the other device's approval (its key in memory) is dropped too.
+                if c.fromDevice { model.repo.cancelDeviceLogin() }
+                challenge = nil
+            }, onDeviceCode: {
+                challenge = nil
+                deviceCode = email
+            })
+        } else if withDevice {
+            DeviceLoginView(initialEmail: email, onTwoFactor: { token, providers, e in
+                email = e
+                withDevice = false
+                challenge = (token, providers, true)
+            }, onCode: { e in
+                email = e
+                withDevice = false
+                deviceCode = e
+            }, onBack: { withDevice = false })
         } else {
             AuthFrame(title: "Sign in to PassAuth") {
                 AuthField(label: "Email", text: $email, keyboard: .emailAddress, content: .username)
@@ -104,11 +136,24 @@ struct LoginView: View {
                 }
                 ErrorText(text: error)
                 PrimaryButton(title: busy ? "Signing in…" : "Sign in", busy: busy, enabled: !email.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty, action: submit)
+                if deviceLoginOffered {
+                    Button {
+                        error = nil
+                        withDevice = true
+                    } label: {
+                        Label(DeviceLogin.link, systemImage: "iphone.and.arrow.forward").fontWeight(.medium).frame(maxWidth: .infinity, minHeight: 30)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(busy)
+                    .accessibilityIdentifier("signInWithDevice")
+                }
                 LinkRow(text: hostOf(state.server), action: "Change server") { changingServer = true }
                 LinkRow(text: "New to PassAuth?", action: "Create account") { creating = true }
                 OtherAccounts()
             }
             .onAppear { if email.isEmpty { email = state.email } }
+            .task(id: state.server) { deviceLoginOffered = await model.repo.deviceLoginAvailable() }
         }
     }
 
@@ -123,7 +168,7 @@ struct LoginView: View {
         Task {
             do {
                 if case .twoFactor(let token, let providers) = try await model.repo.login(email: e, password: p, secretKey: sk) {
-                    challenge = (token, providers)
+                    challenge = (token, providers, false)
                 }
             } catch {
                 if (error as? UserError)?.message == secretKeyRequiredMessage { needKey = true }
@@ -131,6 +176,97 @@ struct LoginView: View {
             }
             busy = false
         }
+    }
+}
+
+// MARK: Sign in with another device
+
+/// Sign in with another device's approval: the email, then the five words the other device asks
+/// for and a countdown while it decides (`VaultRepository.beginDeviceLogin` / `awaitDeviceLogin`).
+/// The request key lives in the repository for as long as the wait does.
+struct DeviceLoginView: View {
+    @Environment(AppModel.self) private var model
+    let initialEmail: String
+    /// Approved, but two-step login first: token, providers, email.
+    let onTwoFactor: (String, [String], String) -> Void
+    /// Approved: the code the other device shows comes next (email).
+    let onCode: (String) -> Void
+    let onBack: () -> Void
+    @State private var email = ""
+    @State private var request: DeviceLoginRequest?
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        if let r = request {
+            AuthFrame(title: DeviceLogin.waitTitle) {
+                Text(DeviceLogin.waitText(email: r.email))
+                    .font(.subheadline).foregroundStyle(Color.paInk)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(r.phrase)
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Color.paInk)
+                    .multilineTextAlignment(.center)
+                    .padding(PA.Space.l)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.paSurface2, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous).stroke(Color.paLine))
+                    .accessibilityIdentifier("deviceLogin.phrase")
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(DeviceLogin.expiresIn(expiresAt: r.expiresAt, now: context.date.timeIntervalSince1970))
+                        .font(.subheadline.monospacedDigit()).foregroundStyle(Color.paMuted)
+                }
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text(DeviceLogin.waiting)
+                }
+                .font(.subheadline).foregroundStyle(Color.paMuted)
+                .accessibilityElement(children: .combine)
+                QuietActions { QuietButton(title: "Cancel", action: cancel) }
+            }
+            .task(id: r.id) { await waitForAnswer(r) }
+        } else {
+            AuthFrame(title: DeviceLogin.title, subtitle: DeviceLogin.intro) {
+                AuthField(label: "Email", text: $email, keyboard: .emailAddress, content: .username, submit: send)
+                ErrorText(text: error)
+                PrimaryButton(title: busy ? "Sending…" : DeviceLogin.send, busy: busy, enabled: !email.trimmingCharacters(in: .whitespaces).isEmpty, action: send)
+                QuietActions { QuietButton(title: "Back", action: onBack).disabled(busy) }
+            }
+            .onAppear { if email.isEmpty { email = initialEmail } }
+        }
+    }
+
+    private func send() {
+        guard !busy, !email.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                request = try await model.repo.beginDeviceLogin(email: email)
+            } catch {
+                self.error = errorMessage(error)
+            }
+            busy = false
+        }
+    }
+
+    /// Runs while the waiting screen is up; leaving it (Cancel, another screen) cancels the wait.
+    private func waitForAnswer(_ r: DeviceLoginRequest) async {
+        do {
+            switch try await model.repo.awaitDeviceLogin() {
+            case .enterCode: onCode(r.email)
+            case .twoFactor(let token, let providers): onTwoFactor(token, providers, r.email)
+            }
+        } catch {
+            guard !Task.isCancelled, !(error is CancellationError) else { return }
+            self.error = errorMessage(error)
+            request = nil
+        }
+    }
+
+    private func cancel() {
+        model.repo.cancelDeviceLogin()
+        request = nil
     }
 }
 
@@ -147,12 +283,62 @@ private func providerLabel(_ p: String) -> String {
 /// security key (WebAuthn), which the app can't use yet.
 let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
+/// The code that the device which approved this sign-in shows (sign in with another device), the
+/// last step before the vault opens: three wrong codes end the sign-in (`DeviceLoginStopped`).
+struct DeviceCodeView: View {
+    @Environment(AppModel.self) private var model
+    let email: String
+    /// The sign-in was stopped (its message goes to the start screen).
+    let onStopped: (String) -> Void
+    let onCancel: () -> Void
+    @State private var code = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        AuthFrame(title: DeviceLogin.codeTitle, subtitle: email) {
+            Text(DeviceLogin.codePrompt)
+                .font(.subheadline).foregroundStyle(Color.paInk)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            AuthField(label: DeviceLogin.codeLabel, text: $code, mono: true, keyboard: .numberPad, submit: confirm)
+            ErrorText(text: error)
+            PrimaryButton(title: busy ? "Checking…" : DeviceLogin.codeConfirm, busy: busy,
+                          enabled: AccountSecurityLogic.isTotpCode(code), action: confirm)
+                .accessibilityIdentifier("deviceLogin.confirm")
+            QuietActions { QuietButton(title: "Cancel", action: onCancel).disabled(busy) }
+        }
+    }
+
+    private func confirm() {
+        guard !busy, AccountSecurityLogic.isTotpCode(code) else { return }
+        busy = true
+        error = nil
+        let typed = code
+        Task {
+            do {
+                try await model.repo.confirmDeviceLogin(code: typed)
+                // Signed in: the root view moves on.
+            } catch let e as DeviceLoginStopped {
+                onStopped(e.message)
+            } catch {
+                code = ""
+                self.error = errorMessage(error)
+                UIAccessibility.post(notification: .announcement, argument: self.error)
+            }
+            busy = false
+        }
+    }
+}
+
 struct TwoStepView: View {
     @Environment(AppModel.self) private var model
     let token: String
     let providers: [String]
     let email: String
     let onCancel: () -> Void
+    /// Another device approved this sign-in: its code comes next.
+    var onDeviceCode: () -> Void = {}
     @State private var provider = ""
     @State private var code = ""
     @State private var remember = true
@@ -216,7 +402,10 @@ struct TwoStepView: View {
         error = nil
         Task {
             do {
-                try await model.repo.verifyTwoFactor(token: token, provider: provider, code: code, remember: remember)
+                if try await model.repo.verifyTwoFactor(token: token, provider: provider, code: code, remember: remember) == .enterDeviceCode {
+                    busy = false
+                    onDeviceCode()
+                }
             } catch {
                 self.error = errorMessage(error)
                 busy = false
@@ -253,6 +442,8 @@ struct RegisterView: View {
     @State private var saved = false
     @State private var closed = false
     @State private var exporting = false
+    /// The server's account policies (master password length, Secret Key), from `/api/config`.
+    @State private var policies = Policies()
 
     var body: some View {
         if let d = done {
@@ -300,25 +491,32 @@ struct RegisterView: View {
                 StrengthMeter(password: password, reserveSpace: true, scale: .masterPassword)
                 AuthField(label: "Confirm master password", text: $confirm, secure: true)
                 Notice(text: "Your master password can't be reset. If you forget it, the data in your vault can't be recovered by anyone, including the server administrator.")
-                Toggle(isOn: $withSecretKey) {
+                Toggle(isOn: Binding(get: { withSecretKey || policies.requireSecretKey }, set: { withSecretKey = $0 })) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Add a Secret Key")
-                        Text("A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password. You'll enter it once on each new device.")
+                        Text("A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password. You'll enter it once on each new device."
+                             + (policies.requireSecretKey ? " " + PolicyRules.secretKeyRequiredNote : ""))
                             .font(.footnote).foregroundStyle(Color.paMuted)
                     }
                 }
+                .disabled(policies.requireSecretKey)
                 .accessibilityIdentifier("secretKeyToggle")
                 ErrorText(text: error)
                 PrimaryButton(title: busy ? "Creating account…" : "Create account", busy: busy, enabled: !email.trimmingCharacters(in: .whitespaces).isEmpty && !password.isEmpty, action: submit)
                 LinkRow(text: "Already have an account?", action: "Sign in", run: onBack)
             }
-            .task { closed = await model.repo.signupsAllowed() == false }
+            .task {
+                let config = await model.repo.publicConfig()
+                closed = config?.signupsAllowed == false
+                policies = config?.policies ?? Policies()
+            }
         }
     }
 
     private func submit() {
         error = nil
-        if password.count < 10 { error = "Use at least 10 characters for your master password."; return }
+        let minLength = PolicyRules.minPasswordLength(policies)
+        if password.count < minLength { error = "Use at least \(minLength) characters for your master password."; return }
         if password != confirm { error = "The two passwords don't match."; return }
         if estimateBits(password: password) < AccountSecurityLogic.weakBits && !hinted {
             hinted = true
@@ -328,7 +526,7 @@ struct RegisterView: View {
         busy = true
         Task {
             do {
-                done = try await model.repo.register(email: email, name: name, password: password, withSecretKey: withSecretKey)
+                done = try await model.repo.register(email: email, name: name, password: password, withSecretKey: withSecretKey || policies.requireSecretKey)
             } catch { self.error = errorMessage(error) }
             busy = false
         }

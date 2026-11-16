@@ -3,20 +3,31 @@ import PassAuthKit
 
 /// Live sync while the app is on screen: a WebSocket to the active account's server
 /// (`/api/ws?access_token=…`), connected only while the scene is active and the active account
-/// is unlocked. A newer revision refreshes the vault without pull-to-refresh. Reconnects with
+/// is unlocked. A change the copy doesn't have yet (a newer vault number, or a profile change)
+/// refreshes the vault without pull-to-refresh, through the repository's sync queue (one sync
+/// running, one waiting), with delta sync where the server has it. Reconnects with
 /// backoff (1 s doubling to 60 s, jitter); each reconnect first goes through the normal API
-/// (`/sync/revision`), which refreshes an expired access token and catches up.
+/// (`/sync/revision`), which refreshes an expired access token and catches up. A server that
+/// now requires two-step login first says so on the socket (`two_step_required`, then close code
+/// 1008): the loop stops and the app shows the two-step setup screen; it starts again once the
+/// account may use the vault.
 @MainActor
 final class LiveSync {
     private let repo: VaultRepository
+    /// Sign-in requests from new devices: listed when the socket opens and when one arrives.
+    private let inbox: AuthRequestInbox
     private var target: String?
     private var loop: Task<Void, Never>?
+    /// This socket session's live-sync origin (its `hello`). Not used to skip messages: tabs and
+    /// processes sharing a session share it, so the vault numbers decide instead.
+    private(set) var origin: String?
 
     private let events = SocketEvents()
     private let sockets: URLSession
 
-    init(repo: VaultRepository) {
+    init(repo: VaultRepository, inbox: AuthRequestInbox) {
         self.repo = repo
+        self.inbox = inbox
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.httpCookieStorage = nil
@@ -27,7 +38,8 @@ final class LiveSync {
     /// Call when the scene phase, the active account or its lock state changes.
     func update(foreground: Bool) {
         let s = repo.state
-        let want = foreground && s.status == .unlocked && !s.activeId.isEmpty ? s.activeId : nil
+        // The server refuses the socket too while it requires two-step setup first.
+        let want = foreground && s.status == .unlocked && !s.twoStepRequired && !s.activeId.isEmpty ? s.activeId : nil
         guard want != target else { return }
         loop?.cancel()
         loop = nil
@@ -37,10 +49,21 @@ final class LiveSync {
         }
     }
 
+    /// How a socket session ended.
+    private enum Ended { case failed, closed, twoStepRequired }
+
     private func connectLoop(_ id: String) async {
         var attempt = 0
         while !Task.isCancelled {
-            if await session(id) { attempt = 0 }
+            switch await session(id) {
+            case .twoStepRequired:
+                // Never reconnect in a loop: the gate's screen stops live sync (`update`), and
+                // it starts again when the gate lifts.
+                repo.twoStepRequiredBySocket(id)
+                return
+            case .closed: attempt = 0
+            case .failed: break
+            }
             if Task.isCancelled { return }
             let wait = LiveSyncProtocol.backoffMillis(attempt: attempt, jitter: Double.random(in: 0...1))
             attempt += 1
@@ -50,21 +73,25 @@ final class LiveSync {
         }
     }
 
-    /// One connection; returns when it closes (true if it had opened).
-    private func session(_ id: String) async -> Bool {
+    /// One connection; returns when it closes.
+    private func session(_ id: String) async -> Ended {
         let s = repo.store.get()
         guard let a = s.file.accounts[id], let tokens = s.tokens(id),
-              let url = LiveSyncProtocol.socketURL(server: a.server, accessToken: tokens.access) else { return false }
-        let socket = sockets.webSocketTask(with: url)
+              let url = LiveSyncProtocol.socketURL(server: a.server, accessToken: tokens.access) else { return .failed }
+        var request = URLRequest(url: url)
+        request.setValue(ApiClient.clientHeader, forHTTPHeaderField: ApiClient.clientHeaderName)
+        let socket = sockets.webSocketTask(with: request)
         let open = events.opened(socket)
         socket.resume()
         var opened = false
+        var twoStep = false
         await withTaskCancellationHandler {
             // A 401 (expired access token) or an unreachable server fails the handshake.
             guard await open.value else { return }
             opened = true
-            // Catch up on anything missed while disconnected.
+            // Catch up on anything missed while disconnected, sign-in requests included.
             await repo.refreshIfStale()
+            await inbox.refresh()
             let pinger = Task {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 25_000_000_000)
@@ -77,17 +104,23 @@ final class LiveSync {
                 guard let message = try? await socket.receive() else { break }
                 guard case .string(let text) = message else { continue }
                 let msg = LiveSyncProtocol.parse(text)
-                switch LiveSyncProtocol.action(msg, currentRevision: repo.vault?.revision) {
+                if case .hello(let o)? = msg { origin = o }
+                switch LiveSyncProtocol.action(msg, have: repo.syncPosition) {
                 case .sync: try? await repo.sync()
                 case .checkSession: await repo.checkSession()
+                case .listAuthRequests: await inbox.refresh()
+                case .authRequestAnswered(let id): inbox.answered(id)
+                case .twoStepRequired: twoStep = true
                 case .ignore: break
                 }
+                if twoStep { break }
             }
         } onCancel: {
             socket.cancel(with: .goingAway, reason: nil)
         }
+        if LiveSyncProtocol.closedForTwoStep(code: socket.closeCode.rawValue, reason: socket.closeReason) { twoStep = true }
         socket.cancel(with: .goingAway, reason: nil)
-        return opened
+        return twoStep ? .twoStepRequired : opened ? .closed : .failed
     }
 
     /// A ping that reports an error (connection gone). Answers are not waited for: the server

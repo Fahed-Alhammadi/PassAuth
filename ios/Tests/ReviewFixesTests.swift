@@ -16,14 +16,21 @@ final class ReviewFixesTests: XCTestCase {
         XCTAssertFalse(m("https://x.ddns.net", "https://y.ddns.net", .domain))
         XCTAssertEqual(UrlMatcher.baseDomain("api.app.up.railway.app"), "app.up.railway.app")
         XCTAssertEqual(UrlMatcher.baseDomain("duckdns.org"), "duckdns.org")
+        // Review finding S3: suffixes the old built-in list lacked (the core has the full list).
+        XCTAssertFalse(m("https://attacker.myfritz.net/", "https://nas.myfritz.net", .domain))
+        XCTAssertFalse(m("https://b.cloudapp.net/", "https://a.cloudapp.net", .domain))
     }
 
-    func testRegexIsBoundedAndIgnoresTheQuery() {
+    func testRegexRunsInLinearTimeAndIgnoresTheQuery() {
         XCTAssertFalse(m("https://evil.com/?bank.com", "bank\\.com", .regex))
         XCTAssertTrue(m("https://bank.com/login?x=1", "^https://bank\\.com/", .regex))
-        XCTAssertTrue(UrlMatcher.unsafeRegex("(a+)+$"))
-        XCTAssertTrue(UrlMatcher.unsafeRegex(String(repeating: "a", count: UrlMatcher.maxRegexLength + 1)))
-        XCTAssertFalse(UrlMatcher.unsafeRegex("^https://accounts\\.example\\.com/"))
+        // Review finding S13: no backtracking engine, so a nested quantifier is just slow-looking.
+        let page = "https://example.com/" + String(repeating: "a", count: 2000) + "!"
+        let start = Date()
+        XCTAssertFalse(m(page, "(a+)+$", .regex))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        XCTAssertNotNil(UrlMatcher.regexError(String(repeating: "a", count: 301)))
+        XCTAssertNil(UrlMatcher.regexError("^https://accounts\\.example\\.com/"))
     }
 
     func testNewItemsGoToTheOwnVaultNeverASharedOne() {

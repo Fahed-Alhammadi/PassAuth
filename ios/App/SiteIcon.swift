@@ -13,7 +13,8 @@ struct SiteIcon: View {
 
     var body: some View {
         let s = model.repo.state
-        let enabled = s.settings.showIcons && !host.isEmpty
+        // The user's setting and the server's icon service (`SiteIcons.shown`).
+        let enabled = s.showSiteIcons && !host.isEmpty
         RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
             // Site icons are drawn for light backgrounds: keep their tile light in dark mode too.
             .fill(enabled && image != nil ? Color.paIconTile : Color.paSurface2)

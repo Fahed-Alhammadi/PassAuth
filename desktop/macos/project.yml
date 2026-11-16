@@ -60,8 +60,9 @@ targets:
     sources:
       - path: ../../ios/Shared
         excludes:
-          # iOS app only (QR codes from images).
+          # iOS app only (QR codes from images; password health).
           - QrDecoder.swift
+          - PasswordHealth.swift
     dependencies:
       - target: PassAuthCore
         link: false
@@ -137,6 +138,21 @@ targets:
         group: Tests/Shared
       - path: ../../ios/Tests/AutofillTests.swift
         group: Tests/Shared
+      - path: ../../ios/Tests/GoldenVectorTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/DeltaSyncTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/InvitationPolicyTests.swift
+        group: Tests/Shared
+      # Sign in with another device (frozen sheet, word choices, the code) and error wording:
+      # ios/Shared code the macOS build compiles too.
+      - path: ../../ios/Tests/DeviceLoginTests.swift
+        group: Tests/Shared
+      - path: ../../ios/Tests/ErrorTextTests.swift
+        group: Tests/Shared
+      # Golden vectors shared with the other clients.
+      - path: ../../testdata/vectors.json
+        buildPhase: resources
     dependencies:
       - target: PassAuthKit
       - target: PassAuthCore

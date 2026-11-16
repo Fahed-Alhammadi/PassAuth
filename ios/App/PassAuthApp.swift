@@ -40,6 +40,10 @@ struct RootView: View {
                     switch state.status {
                     case _ where PermissionRules.showIntro(state.settings.permissions, hasAccounts: !state.accounts.isEmpty, skip: model.skipPermissionsIntro):
                         PermissionsIntroView()
+                    // The server requires two-step login and the account has none yet: only
+                    // setting a method up (or signing out) until then.
+                    case .locked where state.twoStepRequired, .unlocked where state.twoStepRequired:
+                        TwoStepRequiredView()
                     case .setup: SetupView()
                     case .loggedOut: LoginView()
                     case .locked: UnlockView()
@@ -47,7 +51,7 @@ struct RootView: View {
                     }
                 }
                 // Switching accounts starts each screen fresh.
-                .id(state.activeId + "|\(state.status)")
+                .id(state.activeId + "|\(state.status)|\(state.twoStepRequired)")
             }
         }
         .overlay(alignment: .bottom) { NoticeView().padding(.bottom, state.status == .unlocked ? 40 : 0) }
@@ -82,8 +86,15 @@ struct RootView: View {
         }
         .onChange(of: state.settings.backgroundSyncMinutes) { _, _ in model.backgroundRefresh.schedule() }
         // Live sync: only while on screen with the active account unlocked.
-        .onChange(of: "\(scenePhase == .active)|\(state.activeId)|\(state.status)", initial: true) { _, _ in
+        .onChange(of: "\(scenePhase == .active)|\(state.activeId)|\(state.status)|\(state.twoStepRequired)", initial: true) { _, _ in
             model.liveSync.update(foreground: scenePhase == .active)
+            // Sign-in requests from new devices: asked again on unlock and when back on screen;
+            // locked, signed out or another account: none.
+            if state.status == .unlocked && !state.twoStepRequired {
+                if scenePhase == .active { Task { await model.authRequests.refresh() } }
+            } else {
+                model.authRequests.clear()
+            }
         }
         .onChange(of: state.settings.theme) { _, t in applyTheme(t) }
         .onChange(of: state.settings.vaultTimeout) { _, _ in model.lockManager.settingsChanged() }
@@ -153,6 +164,12 @@ struct MainView: View {
         .modifier(BiometricOffer())
         .sheet(item: Binding(get: { model.pendingOtp }, set: { model.pendingOtp = $0 })) { p in
             AddCodeSheet(key: p.key)
+        }
+        // A new device asks to sign in to this account: one request at a time, frozen while it
+        // is shown (`ApprovalQueue`). Only the sheet's own buttons close it (it can't be swiped
+        // away), so a dismissal can never be taken for the next request's.
+        .sheet(item: Binding(get: { model.authRequests.shown }, set: { _ in })) { shown in
+            AuthRequestSheet(initial: shown)
         }
     }
 }

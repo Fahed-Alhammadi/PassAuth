@@ -24,6 +24,9 @@ struct EditView: View {
     @State private var error: String?
     @State private var conflict = false
     @State private var confirmDiscard = false
+    /// A new item's id, the same for every Save of this editor: if an earlier Save reached the
+    /// server but its answer didn't come back, the next one doesn't add the item twice.
+    @State private var newItemId = UUID().uuidString.lowercased()
 
     /// `otp`: an authenticator key to add (an otpauth:// link opened in the app); a new login also
     /// takes its issuer as the name and its account as the username.
@@ -178,6 +181,17 @@ struct EditView: View {
                         ForEach(matchOptions, id: \.0) { Text($0.1).tag($0.0) }
                     }
                     .font(.subheadline)
+                    // A website that runs as a regular expression (this entry's match, or
+                    // "Default" under the regular-expression setting): what the core says about
+                    // the pattern. Saving stays possible.
+                    switch UrlMatcher.patternNote(url: url(n).wrappedValue, match: match(n).wrappedValue, defaultMatch: model.state.settings.defaultMatch) {
+                    case .error(let reason)?:
+                        WarningNote(text: reason, identifier: "edit.url\(n).patternError")
+                    case .warning?:
+                        WarningNote(text: UrlMatcher.patternWarning, identifier: "edit.url\(n).patternWarning")
+                    case nil:
+                        EmptyView()
+                    }
                 }
             }
             Button { item.login?.urls.append(LoginUrl()) } label: { Label("Add website", systemImage: "plus") }
@@ -331,7 +345,7 @@ struct EditView: View {
                     model.notify("Changes saved.")
                     onSaved(entry.id)
                 } else {
-                    let id = try await model.repo.createItem(clean, vaultId: vaultId)
+                    let id = try await model.repo.createItem(clean, vaultId: vaultId, id: newItemId)
                     model.notify("Item saved.")
                     onSaved(id)
                 }

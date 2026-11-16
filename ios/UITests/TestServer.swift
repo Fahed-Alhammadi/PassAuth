@@ -12,11 +12,14 @@ final class TestServer {
 
     final class Session {
         let email: String
+        /// For steps that confirm the master password again (`reauth`).
+        let password: String
         let account: Account
         var access: String
         var refresh: String
-        init(email: String, account: Account, access: String, refresh: String) {
+        init(email: String, password: String, account: Account, access: String, refresh: String) {
             self.email = email
+            self.password = password
             self.account = account
             self.access = access
             self.refresh = refresh
@@ -94,7 +97,22 @@ final class TestServer {
             ])
         }
         let account = try master.unlock(bundleJson: try text(result["bundle"]))
-        return Session(email: email, account: account, access: result["access_token"] as! String, refresh: result["refresh_token"] as! String)
+        return Session(email: email, password: password, account: account, access: result["access_token"] as! String, refresh: result["refresh_token"] as! String)
+    }
+
+    /// A reauth token for `s` (the master password again, `purpose: "reauth"`), as turning on
+    /// two-step login needs (`x-reauth-token`).
+    func reauth(_ s: Session) async throws -> String {
+        let pre = try await call("POST", "/auth/prelogin", ["email": s.email])
+        let master = try deriveMasterKeys(password: s.password, secretKey: nil, accountId: pre["account_id"] as! String, kdfJson: try text(pre["kdf"]), secretKeyRequired: false)
+        let start = try opaqueLoginStart(master: master)
+        let resp = try await call("POST", "/auth/login/start", ["email": s.email, "message": start.message])
+        let fin = try opaqueLoginFinish(state: start.state, master: master, response: resp["message"] as! String)
+        let r = try await call("POST", "/auth/login/finish", [
+            "login_id": resp["login_id"]!, "message": fin, "purpose": "reauth",
+            "device": ["id": UUID().uuidString.lowercased(), "name": "UI test helper", "kind": "mobile"],
+        ], session: s)
+        return r["reauth_token"] as! String
     }
 
     /// The current code, waiting for a fresh period first if less than 8 s are left
@@ -113,8 +131,9 @@ final class TestServer {
     func enableTotp(_ s: Session) async throws -> String {
         let setup = try await call("POST", "/account/2fa/totp/setup", session: s)
         let secret = setup["secret"] as! String
+        let token = try await reauth(s)
         let c = try totpCode(secret: secret, unixSeconds: UInt64(Date().timeIntervalSince1970))
-        try await call("POST", "/account/2fa/totp/enable", ["code": c.code], session: s)
+        try await call("POST", "/account/2fa/totp/enable", ["code": c.code], session: s, headers: ["x-reauth-token": token])
         try await Task.sleep(nanoseconds: (UInt64(c.remaining) + 1) * 1_000_000_000)
         return secret
     }

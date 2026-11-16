@@ -22,12 +22,18 @@ final class SecurityServer: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var recovery: [String]? = ["aaaa-bbbb", "cccc-dddd"]
     /// Paths answered with HTTP 429.
     nonisolated(unsafe) static var rateLimited: Set<String> = []
+    /// Reauth tokens the fake server takes (as if issued by `login/finish` with `purpose: "reauth"`).
+    nonisolated(unsafe) static var reauthTokens: Set<String> = []
+    /// `/api/config` (the server's policies); a bare PassAuth answer when nil.
+    nonisolated(unsafe) static var config: [String: Any]?
     private static let lock = NSLock()
 
     static func reset() {
         lock.lock()
         requests = []
         rateLimited = []
+        reauthTokens = []
+        config = nil
         recovery = ["aaaa-bbbb", "cccc-dddd"]
         lock.unlock()
     }
@@ -66,21 +72,34 @@ final class SecurityServer: URLProtocol, @unchecked Sendable {
             switch (method, path) {
             case (_, "/api/sync"):
                 out = (try? JSONSerialization.jsonObject(with: Self.syncBody)) ?? [:]
-            case ("POST", "/api/account/keys/start"):
+            case ("POST", "/api/account/keys/start"), ("POST", "/api/auth/register/start"):
                 let req = Self.b64url(json["message"] as? String ?? "") ?? Data()
                 out = ["message": Self.b64url(Self.otherPoint + req)]
+            case ("GET", "/api/config"):
+                out = Self.config ?? ["name": "PassAuth"]
+            case ("POST", "/api/auth/register/init"):
+                out = ["account_id": UUID().uuidString.lowercased(), "registration_id": "reg-1"]
+            case ("POST", "/api/auth/register/finish"):
+                out = ["email_verification_required": false]
             case ("GET", "/api/account"):
                 out = ["email": "a@example.com", "two_factor": ["totp"], "recovery_codes_left": 2, "email_enabled": false]
             case ("POST", "/api/account/2fa/totp/setup"):
                 out = ["secret": Self.totpSecret, "uri": "otpauth://totp/PassAuth:a%40example.com?secret=\(Self.totpSecret)&issuer=PassAuth"]
-            case ("POST", "/api/account/2fa/totp/enable"):
+            case ("POST", "/api/account/2fa/totp/enable"), ("POST", "/api/account/2fa/email/enable"):
+                // Turning a method on needs a reauth token the server issued (used up only on success).
+                let token = request.value(forHTTPHeaderField: "x-reauth-token")
                 let now = UInt64(Date().timeIntervalSince1970)
-                let ok = (try? totpCode(secret: Self.totpSecret, unixSeconds: now).code) == json["code"] as? String
-                if ok {
+                let code = json["code"] as? String
+                let ok = path.contains("/email/") ? code == "12345678" : (try? totpCode(secret: Self.totpSecret, unixSeconds: now).code) == code
+                if token == nil || !Self.reauthTokens.contains(token ?? "") {
+                    status = 403
+                    out = ["error": "reauth_required", "message": "Confirm your master password first. Update the app if it doesn't ask for it."]
+                } else if ok {
+                    Self.reauthTokens.remove(token ?? "")
                     out = ["recovery_codes": Self.recovery.map { $0 as Any } ?? NSNull()]
                 } else {
                     status = 400
-                    out = ["error": "bad_request", "message": "invalid code"]
+                    out = ["error": "invalid_code", "message": "invalid code"]
                 }
             case ("POST", "/api/account/2fa/recovery"):
                 out = ["recovery_codes": ["new1-new1", "new2-new2"]]
@@ -172,9 +191,10 @@ final class AccountSecurityRepoTests: XCTestCase {
         let sk = try await repo.changeKeys(reauthToken: "reauth-1", newPassword: newPassword, secretKeyChange: .turnOn)
         let secretKey = try XCTUnwrap(sk, "a new Secret Key is returned to show once")
         let calls = SecurityServer.recorded
-        XCTAssertEqual(calls.map(\.path), ["/api/account/keys/start", "/api/account/keys/finish"])
-        XCTAssertNil(calls[0].headers["x-reauth-token"])
-        let finish = calls[1]
+        // The server's policies are read again first: the new keys follow its KDF minimums.
+        XCTAssertEqual(calls.map(\.path), ["/api/config", "/api/account/keys/start", "/api/account/keys/finish"])
+        XCTAssertNil(calls[1].headers["x-reauth-token"])
+        let finish = calls[2]
         XCTAssertEqual(finish.method, "POST")
         XCTAssertEqual(finish.headers["x-reauth-token"], "reauth-1")
         XCTAssertFalse((finish.body["upload"] as? String ?? "").isEmpty)
@@ -215,6 +235,53 @@ final class AccountSecurityRepoTests: XCTestCase {
         try await repo.unlock(password: newPassword, secretKey: nil)
     }
 
+    /// New keys follow the server's key-derivation policy as it is now (`rewrapWithKdf`), also
+    /// with the same password: the fix for a `kdf` violation. Without the policy feature: the
+    /// core's defaults.
+    func testKeysChangeFollowsTheKdfPolicy() async throws {
+        let (repo, store, _) = try await unlockedRepo()
+        SecurityServer.reset()
+        SecurityServer.config = ["name": "PassAuth", "api": 2, "features": ["policies"], "policies": ["min_kdf_memory_mib": 256, "min_kdf_iterations": 4]]
+        let none = try await repo.changeKeys(reauthToken: "reauth-1", newPassword: oldPassword, secretKeyChange: .keep)
+        XCTAssertNil(none)
+        func kdf() throws -> [String: Any] {
+            let finish = try XCTUnwrap(SecurityServer.recorded.last { $0.path == "/api/account/keys/finish" })
+            return try XCTUnwrap((finish.body["bundle"] as? [String: Any])?["kdf"] as? [String: Any])
+        }
+        XCTAssertEqual(try kdf()["memory_kib"] as? Int, 256 * 1024)
+        XCTAssertEqual(try kdf()["iterations"] as? Int, 4)
+        XCTAssertEqual(store.get().file.accounts["acc"]?.policies?.minKdfMemoryMib, 256, "kept with the account")
+        // The same password opens the new keys.
+        await repo.lockActive()
+        try await repo.unlock(password: oldPassword, secretKey: nil)
+
+        SecurityServer.reset()
+        SecurityServer.config = ["name": "PassAuth", "api": 2, "features": ["delta_sync"]]
+        _ = try await repo.changeKeys(reauthToken: "reauth-2", newPassword: newPassword, secretKeyChange: .keep)
+        XCTAssertEqual(try kdf()["memory_kib"] as? Int, 128 * 1024)
+        XCTAssertEqual(try kdf()["iterations"] as? Int, 3)
+    }
+
+    /// Registration creates keys for the server's KDF policy (`createAccountWithKdf`).
+    func testRegistrationFollowsTheKdfPolicy() async throws {
+        let seed = try createAccount(accountId: try newId(), password: oldPassword, withSecretKey: false)
+        SecurityServer.otherPoint = SecurityServer.b64url(try opaqueRegisterStart(master: seed.master).message) ?? Data()
+        SecurityServer.config = ["name": "PassAuth", "api": 2, "features": ["policies"], "policies": ["min_kdf_memory_mib": 192, "min_kdf_iterations": 5]]
+        let store = SecureStore(directory: dir, role: .app)
+        store.load()
+        store.update { s in
+            s.file.accounts["acc"] = AccountData(server: self.server)
+            s.file.activeId = "acc"
+        }
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [SecurityServer.self] })
+        let done = try await repo.register(email: email, name: "Alex", password: newPassword, withSecretKey: false)
+        XCTAssertNil(done.secretKey)
+        let finish = try XCTUnwrap(SecurityServer.recorded.first { $0.path == "/api/auth/register/finish" })
+        let kdf = try XCTUnwrap((finish.body["bundle"] as? [String: Any])?["kdf"] as? [String: Any])
+        XCTAssertEqual(kdf["memory_kib"] as? Int, 192 * 1024)
+        XCTAssertEqual(kdf["iterations"] as? Int, 5)
+    }
+
     func testChangePasswordNeedsTheServerFirst() async throws {
         let (repo, store, _) = try await unlockedRepo()
         let before = store.get().file.accounts["acc"]?.bundle
@@ -236,27 +303,30 @@ final class AccountSecurityRepoTests: XCTestCase {
         let setup = try await repo.startTotpSetup()
         XCTAssertEqual(setup.secret, SecurityServer.totpSecret)
         XCTAssertNotNil(AccountSecurityLogic.authenticatorURL(setup.uri))
+        SecurityServer.reauthTokens = ["reauth-1", "reauth-2"]
 
         do {
-            _ = try await repo.enableTotp(code: "000 000")
+            _ = try await repo.enableTwoFactor(.totp, code: "000 000", reauthToken: "reauth-1")
             XCTFail("wrong code")
         } catch {
             XCTAssertEqual(securityErrorMessage(error), "That code isn't right. Check it and try again.")
         }
         XCTAssertEqual(SecurityServer.recorded.last?.body["code"] as? String, "000000", "spaces dropped")
+        XCTAssertEqual(SecurityServer.recorded.last?.headers["x-reauth-token"], "reauth-1")
 
         var c = try totpCode(secret: setup.secret, unixSeconds: UInt64(Date().timeIntervalSince1970))
         if c.remaining < 3 {
             try await Task.sleep(nanoseconds: UInt64(c.remaining + 1) * 1_000_000_000)
             c = try totpCode(secret: setup.secret, unixSeconds: UInt64(Date().timeIntervalSince1970))
         }
-        let codes = try await repo.enableTotp(code: String(c.code.prefix(3)) + " " + String(c.code.dropFirst(3)))
+        // The same token again after a mistyped code (the server used it up only on success).
+        let codes = try await repo.enableTwoFactor(.totp, code: String(c.code.prefix(3)) + " " + String(c.code.dropFirst(3)), reauthToken: "reauth-1")
         XCTAssertEqual(codes, ["aaaa-bbbb", "cccc-dddd"], "first method: recovery codes to show once")
         XCTAssertEqual(SecurityServer.recorded.map(\.path), ["/api/account/2fa/totp/setup", "/api/account/2fa/totp/enable", "/api/account/2fa/totp/enable"])
 
         // A second method gets no codes (null).
         SecurityServer.recovery = nil
-        let again = try await repo.enableTotp(code: try totpCode(secret: setup.secret, unixSeconds: UInt64(Date().timeIntervalSince1970)).code)
+        let again = try await repo.enableTwoFactor(.totp, code: try totpCode(secret: setup.secret, unixSeconds: UInt64(Date().timeIntervalSince1970)).code, reauthToken: "reauth-2")
         XCTAssertNil(again)
 
         let status = try await repo.twoFactorStatus()
@@ -265,11 +335,61 @@ final class AccountSecurityRepoTests: XCTestCase {
 
         SecurityServer.rateLimited = ["/api/account/2fa/totp/enable"]
         do {
-            _ = try await repo.enableTotp(code: "123456")
+            _ = try await repo.enableTwoFactor(.totp, code: "123456", reauthToken: "reauth-3")
             XCTFail("rate limited")
         } catch {
             XCTAssertEqual(securityErrorMessage(error), "Too many attempts, try again later.")
         }
+    }
+
+    /// Spec §5: turning a method on needs the master password first (a reauth token). Without
+    /// one the server refuses; a held token is sent again after a mistyped code (no second
+    /// password check) and replaced once when the server no longer takes it.
+    func testEnablingTwoStepNeedsTheMasterPassword() async throws {
+        let (repo, _, _) = try await unlockedRepo()
+        SecurityServer.reset()
+        // Email codes with a reauth token from the server.
+        SecurityServer.reauthTokens = ["reauth-e"]
+        let codes = try await repo.enableTwoFactor(.email, code: "1234 5678", reauthToken: "reauth-e")
+        XCTAssertEqual(codes, ["aaaa-bbbb", "cccc-dddd"])
+        let enable = try XCTUnwrap(SecurityServer.recorded.last)
+        XCTAssertEqual(enable.path, "/api/account/2fa/email/enable")
+        XCTAssertEqual(enable.body["code"] as? String, "12345678")
+        XCTAssertEqual(enable.headers["x-reauth-token"], "reauth-e")
+        // The token was used up: the server wants the master password again.
+        do {
+            _ = try await repo.enableTwoFactor(.email, code: "12345678", reauthToken: "reauth-e")
+            XCTFail("used up")
+        } catch {
+            XCTAssertEqual(securityErrorMessage(error), "Please confirm your master password again.")
+            XCTAssertEqual(errorMessage(error), "Please confirm your master password again.")
+        }
+
+        // A held token: a mistyped code keeps it, no new password check.
+        SecurityServer.reset()
+        SecurityServer.reauthTokens = ["held-1"]
+        let hold = ReauthHold()
+        hold.token = "held-1"
+        do {
+            _ = try await repo.enableTwoFactor(.totp, code: "000000", password: oldPassword, typedSecretKey: nil, hold: hold)
+            XCTFail("wrong code")
+        } catch {
+            XCTAssertEqual(securityErrorMessage(error), "That code isn't right. Check it and try again.")
+        }
+        XCTAssertEqual(hold.token, "held-1", "kept for the next try")
+        XCTAssertEqual(SecurityServer.recorded.map(\.path), ["/api/account/2fa/totp/enable"], "no second password check")
+        XCTAssertEqual(SecurityServer.recorded.last?.headers["x-reauth-token"], "held-1")
+
+        // The server no longer takes it: a fresh master-password check (it starts with prelogin;
+        // the fake server can't prove the password, so it ends there), and nothing is enabled.
+        SecurityServer.reset()
+        do {
+            _ = try await repo.enableTwoFactor(.totp, code: "123456", password: oldPassword, typedSecretKey: nil, hold: hold)
+            XCTFail("the fake server can't confirm the password")
+        } catch {}
+        XCTAssertNil(hold.token, "a token the server refused is dropped")
+        XCTAssertEqual(SecurityServer.recorded.map(\.path).prefix(2), ["/api/account/2fa/totp/enable", "/api/auth/prelogin"])
+        XCTAssertEqual(SecurityServer.recorded.filter { $0.path == "/api/account/2fa/totp/enable" }.count, 1, "never sent without a token")
     }
 
     func testDisableAndRegenerateNeedReauth() async throws {
@@ -377,6 +497,8 @@ final class AccountSecurityLogicTests: XCTestCase {
     }
 
     func testErrorMessages() {
+        XCTAssertEqual(securityErrorMessage(ApiError(status: 403, code: "reauth_required", message: "Confirm your master password first. Update the app if it doesn't ask for it.")),
+                       "Please confirm your master password again.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 429, code: "rate_limited", message: "too many requests")), "Too many attempts, try again later.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "bad_request", message: "invalid code")), "That code isn't right. Check it and try again.")
         XCTAssertEqual(securityErrorMessage(UserError("Can't reach your PassAuth server. Check the server address and your connection.")),

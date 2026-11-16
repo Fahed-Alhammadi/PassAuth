@@ -65,48 +65,55 @@ public enum PasskeyLogic {
     /// Save target meaning "create a new login" (never an item id: those are UUIDs).
     public static let newLogin = "new"
 
-    /// Hostnames of a login's http(s) URLs, lowercase, without a trailing dot.
-    static func loginHosts(_ e: Entry) -> [String] {
-        (e.item.login?.urls ?? []).compactMap { u in
-            guard let p = UrlMatcher.parse(u.url), p.scheme == "http" || p.scheme == "https" else { return nil }
-            return p.hostname.hasSuffix(".") ? String(p.hostname.dropLast()) : p.hostname
+    /// A login a new passkey can be saved in, and whether it is preselected.
+    public struct SaveChoice: Identifiable, Sendable {
+        public let entry: Entry
+        /// The core's `preferred`: the user's own login for this exact host (never one in a
+        /// shared vault).
+        public let preferred: Bool
+        public var id: String { entry.id }
+    }
+
+    /// Logins a new passkey can be saved in (the core's `passkeySaveTargets`, as in every client):
+    /// ones you can edit whose website is this exact host, the RP ID or a subdomain of it (where
+    /// the passkey also works). Never just "the same base domain": cloudy.example.com and
+    /// bazarr.example.com are different sites; an `androidapp://` address is no website. Logins in
+    /// your own vault come first, then ones in vaults somebody shared (listed with their vault's
+    /// name, never preselected: see `defaultTarget`); within each: this exact host, then a
+    /// matching user name (or display name), then by name. `host`: the page's host when known
+    /// (nil = the RP ID: iOS and macOS don't say which page asked).
+    public static func saveChoices(_ vault: VaultData, rpId: String, userName: String, host: String? = nil, displayName: String = "") -> [SaveChoice] {
+        let logins = vault.entries.filter { $0.item.login != nil }
+        let byId = Dictionary(logins.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let records = logins.map { e in
+            PasskeyLogin(id: e.id, name: e.item.name, username: e.item.login?.username ?? "", urls: e.item.login?.urls.map(\.url) ?? [],
+                         writable: vault.canWrite(e), personal: vault.isPersonal(e), vault: vault.sharedVaultName(e))
         }
+        let targets = passkeySaveTargets(logins: records, host: host ?? rpId, rpId: rpId, userName: userName, displayName: displayName)
+        return targets.compactMap { t in byId[t.id].map { SaveChoice(entry: $0, preferred: t.preferred) } }
     }
 
-    /// Whether a login is for exactly this RP ID's host (preselected in "Save in").
-    public static func isExactSite(_ e: Entry, rpId: String) -> Bool {
-        loginHosts(e).contains(rpId.lowercased())
+    /// `saveChoices` without the preselection: the logins in their order.
+    public static func saveTargets(_ vault: VaultData, rpId: String, userName: String, host: String? = nil, displayName: String = "") -> [Entry] {
+        saveChoices(vault, rpId: rpId, userName: userName, host: host, displayName: displayName).map(\.entry)
     }
 
-    /// Logins a new passkey can be saved in (the extension's `saveTargets`): ones you can edit
-    /// whose website is the RP ID or a subdomain of it (where the passkey also works). Never just
-    /// "the same base domain": cloudy.example.com and bazarr.example.com are different sites.
-    /// Logins in your own vault come first, then ones in vaults somebody shared (listed with
-    /// their vault's name, never preselected: see `defaultTarget`); within each: the RP ID's
-    /// exact host, then a matching user name, then by name.
-    public static func saveTargets(_ vault: VaultData, rpId: String, userName: String) -> [Entry] {
-        let rp = rpId.lowercased()
-        let name = userName.trimmingCharacters(in: .whitespaces).lowercased()
-        func score(_ e: Entry) -> Int {
-            let user = (e.item.login?.username ?? "").trimmingCharacters(in: .whitespaces).lowercased()
-            let userMatch = !user.isEmpty && !name.isEmpty && (name == user || name == user.split(separator: "@").first.map(String.init))
-            return (vault.isOwn(e) ? 4 : 0) + (isExactSite(e, rpId: rp) ? 2 : 0) + (userMatch ? 1 : 0)
-        }
-        return vault.entries
-            .filter { $0.item.login != nil && vault.canWrite($0) }
-            .filter { loginHosts($0).contains { $0 == rp || $0.hasSuffix(".\(rp)") } }
-            .sorted { a, b in
-                let (sa, sb) = (score(a), score(b))
-                return sa != sb ? sa > sb : a.item.name.localizedCaseInsensitiveCompare(b.item.name) == .orderedAscending
-            }
+    /// The preselected save target (the core's `passkeyDefaultTarget`): the best login for this
+    /// exact host in the user's OWN vault, else a new login. Never a login in a shared vault:
+    /// anyone on the server can share a vault with this account and put a login for the site in
+    /// it, and the passkey's private key would then go to that vault's members by default. Such a
+    /// login can still be chosen.
+    public static func defaultTarget(_ choices: [SaveChoice]) -> String {
+        passkeyDefaultTarget(targets: choices.map { c in
+            PasskeyTarget(id: c.id, name: c.entry.item.name, username: c.entry.item.login?.username ?? "", preferred: c.preferred)
+        })
     }
 
-    /// The preselected save target: the best login for the RP ID's exact host in the user's OWN
-    /// vault, else a new login. Never a login in a shared vault: anyone on the server can share a
-    /// vault with this account and put a login for the site in it, and the passkey's private key
-    /// would then go to that vault's members by default. Such a login can still be chosen.
-    public static func defaultTarget(_ targets: [Entry], rpId: String, in vault: VaultData) -> String {
-        targets.first { vault.isOwn($0) && isExactSite($0, rpId: rpId) }?.id ?? newLogin
+    /// The sheet's warning for a "Save in" choice in a shared vault (nil for the user's own vault
+    /// or a new login): the passkey's private key goes to everyone in that vault.
+    public static func sharedWarning(_ e: Entry?, in vault: VaultData) -> String? {
+        guard let e, let name = vault.sharedVaultName(e) else { return nil }
+        return "Saving here shares this passkey with everyone in \(name)."
     }
 
     /// Where a new passkey goes: the login the user chose (still one they can edit for this

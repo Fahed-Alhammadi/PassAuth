@@ -1,17 +1,22 @@
 import Foundation
+import PassAuthCore
 
 /// Saving logins from AutoFill (`ASSavePasswordRequest`, iOS 26.2): whether to offer it and
-/// what it changes. The same rule in every PassAuth client: a login already saved for the site
-/// is updated instead of saving a second one (same user name → its password; a login of your
-/// own with only a password → its user name too; no user name typed and one login of your own
-/// for the site → its password), otherwise a new login; never when "Ask to save" is off or the
-/// site is on the never-save list (base domain). The server's own web vault counts as any other
-/// site.
+/// what it changes. The rule itself is the Rust core's (`planSave` / `chosenSaveTarget`, the
+/// same in every PassAuth client); this file feeds it the logins that match the page and keeps
+/// what is the app's own (when to offer saving, the sheet's wording, the items written). A
+/// login already saved for the site is updated instead of saving a second one (same user name
+/// → its password; a login of your own with only a password → its user name too; no user name
+/// typed and one login of your own for the site → its password), otherwise a new login; never
+/// when "Ask to save" is off or the site is on the never-save list (base domain). The server's
+/// own web vault counts as any other site.
 ///
-/// Shared vaults: anyone on the server can share a vault with this account and put a login
-/// for a site in it. Such a login is only ever updated when it has the exact user name that
-/// was typed (rule 1). The looser rules 2 and 3 use logins in the account's own vault only, so
-/// a planted login can't become the place a typed user name and password are written to.
+/// Shared vaults: anyone on the server can share a vault with this account (no consent needed)
+/// and put a login for a site in it, even one with the user's own email as its user name. So a
+/// login in a shared vault is never chosen by a rule: rule 1 only lists one with the typed user
+/// name as an extra, unselected "Save in" choice (labelled with its vault, with a warning when
+/// picked), and it is written to only when the user picks it there. The default place is always
+/// the account's own vault: one of its logins, or a new login.
 public enum SaveLogic {
     public enum Blocked: Equatable, Sendable {
         case askToSaveOff, neverSave, notWebsite, noPassword
@@ -36,16 +41,14 @@ public enum SaveLogic {
         /// A login for the site gets the typed password (and the typed user name, if one was typed).
         case update(Entry, Reason)
         /// Already saved with this password.
-        case unchanged(Entry)
-        /// Same site and user name, but in a vault the user can only view.
-        case readOnly(Entry)
+        case unchanged
         /// Nothing to save: no password.
         case noPassword
 
         public var isChange: Bool {
             switch self {
             case .create, .update: true
-            case .unchanged, .readOnly, .noPassword: false
+            case .unchanged, .noPassword: false
             }
         }
     }
@@ -72,20 +75,36 @@ public enum SaveLogic {
         (s ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// The logins that match the page, in the matcher's order.
-    private static func matching(_ page: String, _ vault: VaultData, _ defaultMatch: UrlMatch) -> [Entry] {
-        AutofillMatcher.candidates([page], vault.entries, defaultMatch: defaultMatch)
+    /// The logins that match the page, in the matcher's order (regular expressions only from the
+    /// user's own vaults, so a shared vault can't make its logins candidates for every site), and
+    /// the core's plan for them: the rule (docs/ARCHITECTURE.md "Save rule") with "Save in"
+    /// (`targets`: the user's own logins, then shared ones with the typed user name).
+    private static func corePlan(page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch) -> (SavePlan, [String: Entry]) {
+        let matching = AutofillMatcher.candidates([page], in: vault, defaultMatch: defaultMatch)
+        let candidates = matching.map { e in
+            SaveCandidate(id: e.id, name: e.item.name, username: e.item.login?.username ?? "", password: e.item.login?.password ?? "",
+                          writable: vault.canWrite(e), personal: vault.isPersonal(e), vault: vault.sharedVaultName(e))
+        }
+        let byId = Dictionary(matching.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return (planSave(candidates: candidates, typedUser: username, password: password), byId)
     }
 
-    /// What saving `username` / `password` on `page` does to the vault by default.
+    private static func targetsOf(_ plan: SavePlan) -> [SaveTarget] {
+        switch plan {
+        case .none: []
+        case .create(let targets), .update(_, _, let targets): targets
+        }
+    }
+
+    /// What saving `username` / `password` on `page` does to the vault by default (the core's
+    /// `planSave` over the logins that match the page):
     ///
     /// 0. No password → nothing to save.
-    /// 1. Logins for the page with the typed user name (`same`; with no user name typed these
-    ///    are the logins saved with only a password): one already has the password → unchanged;
-    ///    else one the user can edit → update it; else (view-only) → nothing to save. With no
-    ///    user name typed only logins in the user's OWN vault are updated this way: "the same
-    ///    user name" proves nothing when both are empty, and a login without a user name is
-    ///    exactly what somebody could plant in a shared vault.
+    /// 1. Logins for the page with the typed user name (with no user name typed: the user's OWN
+    ///    logins saved with only a password; "the same user name" proves nothing when both are
+    ///    empty): one already has the password (in any vault) → unchanged; else the first in the
+    ///    user's OWN vault → update it; none there (only shared or view-only ones) → a new login.
+    ///    Shared ones the user can edit are only offered in "Save in" (`targets`).
     /// 2. None, and a user name was typed: a login in the user's OWN vault that has no user name
     ///    (only a password was saved) → update it, preferring the one with the typed password,
     ///    else the first; none → a new login.
@@ -93,32 +112,38 @@ public enum SaveLogic {
     ///    unchanged; exactly one login in the user's OWN vault → update it; otherwise → a new login.
     public static func plan(page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch) -> Plan {
         guard !password.isEmpty else { return .noPassword }
-        let user = norm(username)
-        let all = matching(page, vault, defaultMatch)
-        let same = all.filter { norm($0.item.login?.username) == user }
-        if let e = same.first(where: { $0.item.login?.password == password }) { return .unchanged(e) }
-        let trusted = user.isEmpty ? same.filter(vault.isOwn) : same
-        if let e = trusted.first(where: vault.canWrite) { return .update(e, .same) }
-        if let e = trusted.first { return .readOnly(e) }
-        let own = all.filter(vault.isOwn)
-        if !user.isEmpty {
-            let bare = own.filter { norm($0.item.login?.username).isEmpty }
-            if let e = bare.first(where: { $0.item.login?.password == password }) ?? bare.first { return .update(e, .blank) }
+        let (plan, byId) = corePlan(page: page, username: username, password: password, vault: vault, defaultMatch: defaultMatch)
+        switch plan {
+        case .none:
+            return .unchanged
+        case .create:
             return .create
+        case .update(let reason, let target, _):
+            // Always one of the matching logins; anything else would be a new login.
+            guard let e = byId[target] else { return .create }
+            let why: Reason = switch reason {
+            case .same: .same
+            case .blank: .blank
+            case .only: .only
+            }
+            return .update(e, why)
         }
-        if let e = all.first(where: { $0.item.login?.password == password }) { return .unchanged(e) }
-        return own.count == 1 ? .update(own[0], .only) : .create
     }
 
-    /// "Save in": the logins for the page in the user's own vault, plus the login rule 1
-    /// preselects when that one is in a shared vault (so the sheet can show it as the selection,
-    /// with its vault's name). In the matcher's order; the sheet lists them above "New login".
+    /// "Save in": the logins for the page in the user's own vault, then the ones in shared vaults
+    /// the user can edit that have the typed user name (rule 1's extra choices, never preselected;
+    /// never for an empty user name). In the matcher's order; the sheet lists them above "New login".
+    /// Empty when there is nothing to save.
     public static func targets(page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch) -> [Entry] {
-        var shared: String?
-        if case .update(let e, .same) = plan(page: page, username: username, password: password, vault: vault, defaultMatch: defaultMatch), !vault.isOwn(e) {
-            shared = e.id
-        }
-        return matching(page, vault, defaultMatch).filter { vault.isOwn($0) || $0.id == shared }
+        let (plan, byId) = corePlan(page: page, username: username, password: password, vault: vault, defaultMatch: defaultMatch)
+        return targetsOf(plan).compactMap { byId[$0.id] }
+    }
+
+    /// The sheet's warning for a "Save in" choice in a shared vault (nil for the user's own vault
+    /// or a new login).
+    public static func sharedWarning(_ e: Entry?, in vault: VaultData) -> String? {
+        guard let e, let name = vault.sharedVaultName(e) else { return nil }
+        return "Saving here shares this password with everyone in \(name)."
     }
 
     /// The preselected "Save in" choice of a plan: the login it updates, else a new login.
@@ -133,11 +158,12 @@ public enum SaveLogic {
     public static func plan(target: String, page: String, username: String, password: String, vault: VaultData, defaultMatch: UrlMatch) -> Plan? {
         guard !password.isEmpty else { return .noPassword }
         if target == newLogin { return .create }
-        let offered = targets(page: page, username: username, password: password, vault: vault, defaultMatch: defaultMatch)
-        guard let e = offered.first(where: { $0.id == target }) else { return nil }
+        // Only a login this save offers (the core's `chosenSaveTarget`): never one worked out again.
+        let (plan, byId) = corePlan(page: page, username: username, password: password, vault: vault, defaultMatch: defaultMatch)
+        guard let id = chosenSaveTarget(targets: targetsOf(plan), answer: target), let e = byId[id] else { return nil }
         let user = norm(username)
         let sameUser = norm(e.item.login?.username) == user
-        if (sameUser || user.isEmpty) && e.item.login?.password == password { return .unchanged(e) }
+        if (sameUser || user.isEmpty) && e.item.login?.password == password { return .unchanged }
         return .update(e, sameUser ? .same : norm(e.item.login?.username).isEmpty ? .blank : .picked)
     }
 

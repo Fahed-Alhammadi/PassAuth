@@ -215,14 +215,7 @@ struct ItemView: View {
                 if !l.username.isEmpty { FieldRow(label: "Username", value: l.username) }
                 if !l.password.isEmpty {
                     FieldRow(label: "Password", value: l.password, mono: true, secret: true)
-                    if estimateBits(password: l.password) < 50 {
-                        HStack(spacing: 6) {
-                            Image(systemName: "exclamationmark.shield")
-                            Text("This password is easy to guess.")
-                            if canWrite { Spacer(); Button("Change it", action: onEdit).buttonStyle(.borderless) }
-                        }
-                        .font(.footnote).foregroundStyle(Color.paWarn).paRow()
-                    }
+                    PasswordNotes(entry: entry, onChange: canWrite ? onEdit : nil)
                 }
                 ForEach(Array(l.passkeys.enumerated()), id: \.offset) { _, p in
                     VStack(alignment: .leading, spacing: 2) {

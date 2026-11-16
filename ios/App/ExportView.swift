@@ -18,6 +18,21 @@ struct ExportPage: View {
     @State private var exporting = false
 
     var body: some View {
+        if PolicyRules.exportAllowed(model.state.policies) {
+            form
+        } else {
+            // The server's admin turned exporting off (policy); the entry points are hidden.
+            Section {
+                Notice(text: PolicyRules.exportDisabledMessage, kind: .error)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+                    .accessibilityIdentifier("export.disabled")
+            }
+            .paRow()
+        }
+    }
+
+    @ViewBuilder
+    private var form: some View {
         let count = model.repo.vault?.entries.count ?? 0
         Section {
             Text("Exports the \(count) item\(count == 1 ? "" : "s") in all vaults of \(model.state.email). You choose where the file is saved.")
@@ -99,6 +114,8 @@ struct ExportPage: View {
     private func export() {
         guard !busy else { return }
         error = nil
+        // The policy may have arrived while this page was open.
+        guard PolicyRules.exportAllowed(model.state.policies) else { error = PolicyRules.exportDisabledMessage; return }
         let items: (json: String, count: Int)
         do { items = try model.repo.itemsJsonForExport() } catch { self.error = errorMessage(error); return }
         if items.count == 0 { error = "Your vault has no items to export."; return }

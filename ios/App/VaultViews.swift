@@ -102,6 +102,8 @@ private struct VaultList: View {
     @State private var purging: Entry?
     /// The section of the row that asked (a favorite is listed twice; one row shows the dialog).
     @State private var askingIn = ""
+    /// A page opened from a notice (invitations, what the server's policies ask for).
+    @State private var noticeTarget: VaultNoticeTarget?
 
     var body: some View {
         let v = model.repo.vault
@@ -121,6 +123,9 @@ private struct VaultList: View {
                     Notice(text: "You're offline. Showing the copy of your vault saved on this device.")
                         .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 }
+            }
+            if q.isEmpty && !filter.active {
+                VaultNotices(target: $noticeTarget)
             }
             if filter.active {
                 Section {
@@ -168,6 +173,7 @@ private struct VaultList: View {
         .refreshable {
             do { try await model.repo.sync() } catch { model.notify("Sync failed: \(errorMessage(error))") }
         }
+        .sheet(item: $noticeTarget) { VaultNoticeSheet(target: $0) }
         .navigationTitle(filter.scope == .trash ? "Trash" : "Vault")
         .navigationBarTitleDisplayMode(.inline)
         .paNavBar()

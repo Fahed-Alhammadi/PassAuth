@@ -161,10 +161,13 @@ final class AccountSecurityUITests: UITestBase {
             notice(contains: "No app on this device opens authenticator setup links")
         }
         wait(app.staticTexts["totp.secret"], 20)
-        // A wrong code first.
+        // A wrong code first, with the master password (turning a method on needs it).
         let codeField = app.textFields["totp.code"]
         scrollTo(codeField)
         type(codeField, "000000")
+        let confirmPassword = app.secureTextFields["totp.password"]
+        scrollTo(confirmPassword)
+        type(confirmPassword, newPassword)
         let enable = app.buttons["totp.enable"]
         scrollTo(enable)
         enable.tap()

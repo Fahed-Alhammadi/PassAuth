@@ -1,25 +1,17 @@
 import Foundation
+import PassAuthCore
 
-/// Website matching for autofill: a port of the extension's `background/urls.ts` (and the
-/// Android app's `UrlMatcher`), with the same semantics, including WHATWG-style URL
-/// normalisation for "exact" and "starts with".
+/// Website matching for autofill: thin wrappers over the Rust core's site logic
+/// (`crates/core/src/site`, the one implementation every PassAuth client calls): base domains
+/// from the full Public Suffix List, every match type, the https→http downgrade rule and
+/// regular expressions on one linear-time engine. This file only adapts the app's types (the
+/// item's match type, the user's default match setting, the shared-vault regex rule) and keeps
+/// `parse`, the app's own URL reading for display, the server address and the identity store.
 public enum UrlMatcher {
-    // "domain" matching uses the shared suffix list in [PublicSuffixes]. It is not the full
-    // Public Suffix List: hosts under an unlisted multi-label suffix fall back to the last two
-    // labels, which can over-match. Use "host" matching on such items.
-
-    /// Longest regex pattern PassAuth evaluates (patterns come from shared vaults too).
-    public static let maxRegexLength = 300
-
-    /// Patterns likely to backtrack catastrophically: a quantified group that itself contains a
-    /// quantifier, e.g. "(a+)+" or "(.*a){10}". They are not evaluated.
-    public static func unsafeRegex(_ pattern: String) -> Bool {
-        pattern.count > maxRegexLength || pattern.range(of: #"\([^)]*[+*}][^)]*\)\s*[+*{]"#, options: .regularExpression) != nil
-    }
-
     static let defaultPorts: [String: Int] = ["http": 80, "https": 443, "ws": 80, "wss": 443, "ftp": 21]
 
-    /// The parts of a URL the matcher needs, normalised like the browser's `URL`.
+    /// The parts of a URL the app shows or keys on, read like the browser's `URL` (host in
+    /// ASCII). Matching never uses it: the core parses addresses itself.
     public struct Parsed: Equatable, Sendable {
         public let scheme: String
         /// Lowercase host name without port.
@@ -83,6 +75,12 @@ public enum UrlMatcher {
         }
         hostname = hostname.lowercased()
         if hostname.isEmpty && (scheme == "http" || scheme == "https") { return nil }
+        // Internationalised names in their ASCII (punycode) form, as the browser's URL has them
+        // ("bücher.de" is "xn--bcher-kva.de"): the core's host parser (UTS #46 nontransitional).
+        if !hostname.hasPrefix("["), !hostname.allSatisfy(\.isASCII) {
+            guard let ascii = idnaHost(hostname) else { return nil }
+            hostname = ascii
+        }
         var port: Int?
         if let p = portText, !p.isEmpty {
             guard let n = Int(p), p.allSatisfy(\.isASCII), n >= 0, n <= 65535 else { return nil }
@@ -98,52 +96,70 @@ public enum UrlMatcher {
         return Parsed(scheme: scheme, hostname: hostname, host: host, href: href, path: path)
     }
 
+    /// The ASCII form of an internationalised host name, as the browser's URL parser makes it
+    /// (the core's `normalizeHost`: UTS #46 nontransitional, lower case); nil if it isn't a
+    /// valid name. "straße.de" is "xn--strae-oqa.de".
+    static func idnaHost(_ host: String) -> String? {
+        guard let ascii = normalizeHost(host: host), !ascii.isEmpty, !ascii.hasPrefix("[") else { return nil }
+        return ascii
+    }
+
+    /// The site "domain" matching compares (the core's `baseDomain`): the registrable domain by
+    /// the full Public Suffix List ("home.duckdns.org", "nas.myfritz.net"); a public suffix, an IP
+    /// address or an invalid name stands for itself.
     public static func baseDomain(_ host: String) -> String {
-        var h = host.lowercased()
-        if h.hasSuffix(".") { h.removeLast() }
-        if h.allSatisfy({ $0.isNumber || $0 == "." }) || h.contains(":") || !h.contains(".") { return h }
-        let labels = h.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
-        let suffix = PublicSuffixes.suffix(of: h)
-        if suffix.isEmpty { return labels.suffix(2).joined(separator: ".") }
-        // One label more than the public suffix ("home.duckdns.org"); a bare suffix stays as it is.
-        let n = suffix.split(separator: ".").count + 1
-        return labels.suffix(min(n, labels.count)).joined(separator: ".")
+        PassAuthCore.baseDomain(host: host)
     }
 
-    /// Does the page URL match a saved website? `fallback` resolves "default" (the user's setting).
-    public static func matches(_ page: String, _ item: LoginUrl, fallback: UrlMatch = .domain) -> Bool {
-        guard let p = parse(page), p.scheme == "http" || p.scheme == "https" else { return false }
-        let match = item.match == .default ? fallback : item.match
-        if match == .never || match == .default { return false }
-        if match == .regex {
-            guard !unsafeRegex(item.url), let re = try? NSRegularExpression(pattern: item.url, options: [.caseInsensitive]) else { return false }
-            // Only the page's origin and path (no query or fragment, so "?bank.com" can't satisfy it).
-            let target = String((p.origin + (p.path.isEmpty ? "/" : p.path)).prefix(2048))
-            return re.firstMatch(in: target, range: NSRange(target.startIndex..., in: target)) != nil
-        }
-        guard let u = parse(item.url) else { return false }
-        switch match {
-        case .exact: return p.href == u.href
-        case .startsWith: return p.href.hasPrefix(u.href)
-        case .host: return p.host == u.host
-        default: return baseDomain(p.hostname) == baseDomain(u.hostname)
-        }
+    /// Does the page URL match a saved website (the core's `matchesUrl`)? `fallback` resolves
+    /// "default" (the user's setting). `allowRegex`: regular expressions count only for the
+    /// user's own items; a pattern from a vault somebody shared was written by somebody else (and
+    /// would run on every page the user visits), so it never matches, also when "default"
+    /// resolves to it. An `androidapp://` address is never a website.
+    public static func matches(_ page: String, _ item: LoginUrl, fallback: UrlMatch = .domain, allowRegex: Bool = true) -> Bool {
+        matchesUrl(page: page, url: item.url, matchType: item.match.rawValue, defaultMatch: fallback.rawValue, allowRegex: allowRegex)
     }
 
-    /// Any of the login's websites matches the page.
-    public static func matchesAny(_ page: String, _ login: Login, fallback: UrlMatch = .domain) -> Bool {
-        login.urls.contains { matches(page, $0, fallback: fallback) }
+    /// Any of the login's websites matches the page (`allowRegex`: see `matches`): one call to the
+    /// core, which reads the page address once.
+    public static func matchesAny(_ page: String, _ login: Login, fallback: UrlMatch = .domain, allowRegex: Bool = true) -> Bool {
+        guard !login.urls.isEmpty else { return false }
+        let urls = login.urls.map { SavedUrl(url: $0.url, matchType: $0.match.rawValue, allowRegex: allowRegex) }
+        return matchUrls(page: page, defaultMatch: fallback.rawValue, urls: urls).contains(true)
     }
 
-    /// Refuse to send a secret saved for an https site to an http page.
+    /// Refuse to send a secret saved for an https site to an http page (localhost excepted).
     public static func downgrade(_ page: String, _ item: LoginUrl) -> Bool {
-        if item.match == .regex {
-            func has(_ pattern: String, _ s: String) -> Bool {
-                s.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
-            }
-            return has("^http:", page) && !has("^https?://localhost[:/]", page) && has("^\\^?https:", item.url)
-        }
-        guard let p = parse(page), let u = parse(item.url) else { return false }
-        return u.scheme == "https" && p.scheme == "http" && p.hostname != "localhost"
+        PassAuthCore.downgrade(page: page, url: item.url, matchType: item.match.rawValue)
+    }
+
+    /// Why the core refuses a website pattern (longer than 300 characters, too large, or syntax
+    /// it doesn't have, such as look-around); nil when it is used. Patterns run on a linear-time
+    /// engine, so none is refused for being slow.
+    public static func regexError(_ pattern: String) -> String? {
+        PassAuthCore.regexError(pattern: pattern)
+    }
+
+    /// What an item editor says under a website that runs as a regular expression.
+    public enum PatternNote: Equatable, Sendable {
+        /// The core refuses the pattern (its reason): it never matches.
+        case error(String)
+        /// The pattern isn't tied to one website (`patternWarning`); saving is still allowed.
+        case warning
+    }
+
+    /// Under a website set to "Regular expression" (core review M2).
+    public static let patternWarning = "This pattern isn't tied to one website, so it could match other sites. Start it with ^https://example\\.com/ (your site's address)."
+
+    /// The note for one website in the editor: only when the entry runs as a pattern (the core's
+    /// `resolveMatch` is "regex": "Regular expression", or "Default" while the default setting
+    /// is "Regular expression" and the entry isn't a plain address), then the core's refusal
+    /// (`regexError`) or its warning that the pattern can match other sites (`regexWarning`).
+    /// Nil for a blank entry and for every other match type.
+    public static func patternNote(url: String, match: UrlMatch, defaultMatch: UrlMatch) -> PatternNote? {
+        let pattern = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pattern.isEmpty, resolveMatch(url: pattern, matchType: match.rawValue, defaultMatch: defaultMatch.rawValue) == UrlMatch.regex.rawValue else { return nil }
+        if let refused = regexError(pattern) { return .error(refused) }
+        return regexWarning(pattern: pattern) == nil ? nil : .warning
     }
 }

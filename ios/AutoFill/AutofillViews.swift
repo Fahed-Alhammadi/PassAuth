@@ -331,7 +331,12 @@ private struct PasskeyScreen: View {
                 } header: {
                     Text("Save in")
                 } footer: {
-                    Text(passkeyFooter)
+                    // A login in a shared vault is never preselected: only a deliberate pick, with this warning.
+                    if let warning = model.passkeyWarning {
+                        WarningNote(text: warning, identifier: "passkeyWarning")
+                    } else {
+                        Text(passkeyFooter)
+                    }
                 }
                 .paRow()
                 .disabled(model.busy)
@@ -347,12 +352,12 @@ private struct PasskeyScreen: View {
 }
 
 private extension PasskeyScreen {
-    /// Where the passkey goes; for a login in a shared vault, who else gets it.
+    /// Where the passkey goes when it stays in the user's own vault (a shared vault's login gets
+    /// `AutofillModel.passkeyWarning` instead).
     var passkeyFooter: String {
-        if let e = model.passkeyTargets.first(where: { $0.id == model.passkeyTarget }), let shared = model.sharedVaultName(e) {
-            return "The passkey is kept with that login in the shared vault \(shared); its members can use it too."
-        }
-        return "The passkey is kept with that login in your vault (\(model.state.email))."
+        model.passkeyTarget == PasskeyLogic.newLogin
+            ? "Saved as a new login for \(model.registration?.rpId ?? "this site") in your vault (\(model.state.email))."
+            : "The passkey is kept with that login in your vault (\(model.state.email))."
     }
 }
 
@@ -404,7 +409,11 @@ private struct SaveScreen: View {
                 } header: {
                     Text("Save in")
                 } footer: {
-                    summary(update, user: user, password: password)
+                    VStack(alignment: .leading, spacing: PA.Space.s) {
+                        // A login in a shared vault is never preselected: only a deliberate pick, with this warning.
+                        if let warning = model.saveWarning { WarningNote(text: warning, identifier: "saveWarning") }
+                        summary(update, user: user, password: password)
+                    }
                 }
                 .paRow()
                 .disabled(model.busy)
@@ -423,20 +432,15 @@ private struct SaveScreen: View {
     }
 
     private func summary(_ update: Entry?, user: String, password: String) -> some View {
-        Text(SaveSummary.text(update: update?.item, user: user, password: password, host: model.saveHost, account: model.state.email,
-                              sharedVault: update.flatMap(model.sharedVaultName)))
+        Text(SaveSummary.text(update: update?.item, user: user, password: password, host: model.saveHost, account: model.state.email))
             .accessibilityIdentifier("saveSummary")
     }
 }
 
 /// What the save prompt is about to do, in words (names the username and the site or login).
+/// A login in a shared vault gets the sheet's warning on top (`SaveLogic.sharedWarning`).
 enum SaveSummary {
-    /// `sharedVault`: the name of the vault the updated login is in, when somebody shared it.
-    static func text(update: Item?, user: String, password: String, host: String, account: String, sharedVault: String? = nil) -> String {
-        if let sharedVault {
-            return text(update: update, user: user, password: password, host: host, account: account)
-                + " This login is in the shared vault \(sharedVault); its members see the change."
-        }
+    static func text(update: Item?, user: String, password: String, host: String, account: String) -> String {
         guard let item = update, let login = item.login else {
             return user.isEmpty
                 ? "Saves this password as a new login for \(host) in your vault (\(account))."

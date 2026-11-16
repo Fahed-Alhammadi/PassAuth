@@ -26,16 +26,37 @@ public final class ApiClient {
     /// Called when an account's session can't be refreshed (it is signed out).
     public var onSessionLost: (@MainActor (String) -> Void)?
 
+    /// Called when the server refused a signed-in request with 403 `two_step_required` (its
+    /// policy requires two-step login and the account has no method yet).
+    public var onTwoStepRequired: (@MainActor (String) -> Void)?
+
     /// The app wraps a token refresh in a background task (it holds a shared-container lock,
     /// and iOS terminates apps suspended while holding one). Returns the function ending it.
     public var beginBackgroundWork: (@MainActor () -> (@MainActor () -> Void))?
 
     enum RefreshResult: Sendable { case refreshed, rejected, unavailable }
 
+    /// Sent with every request to a PassAuth server (API v2): which app and version is asking.
+    public nonisolated static let clientHeaderName = "X-PassAuth-Client"
+
+    /// `ios/<version>` for the iOS app and its AutoFill extension, `macos-autofill/<version>` for
+    /// the desktop app's AutoFill extension (Info.plist version).
+    public nonisolated static var clientHeader: String {
+        #if os(macOS)
+        let app = "macos-autofill"
+        #else
+        let app = "ios"
+        #endif
+        let version = AppVersion.current.name
+        return "\(app)/\(version.isEmpty ? "0" : version)"
+    }
+
     /// `configure` adjusts the session (tests register a URLProtocol).
     public init(store: SecureStore, configure: ((URLSessionConfiguration) -> Void)? = nil) {
         self.store = store
         let config = URLSessionConfiguration.ephemeral
+        // Also on requests that don't go through `execute` (website icons).
+        config.httpAdditionalHeaders = [Self.clientHeaderName: Self.clientHeader]
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -92,7 +113,12 @@ public final class ApiClient {
                 throw ApiError(status: 401, code: "unauthorized", message: "Your session ended. Sign in again.")
             }
         }
-        return try check(data, res)
+        do {
+            return try check(data, res)
+        } catch let e as ApiError where auth && TwoStepGate.isRequired(status: e.status, code: e.code) {
+            onTwoStepRequired?(accountId)
+            throw e
+        }
     }
 
     /// A request to a server URL directly (server setup check).
@@ -146,7 +172,9 @@ public final class ApiClient {
         _ = try? await execute(req)
     }
 
-    private func execute(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    private func execute(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        var req = request
+        req.setValue(Self.clientHeader, forHTTPHeaderField: Self.clientHeaderName)
         do {
             let (data, res) = try await session.data(for: req)
             guard let http = res as? HTTPURLResponse else { throw URLError(.badServerResponse) }
@@ -165,13 +193,22 @@ public final class ApiClient {
             return data
         }
         let j = try? JSON.parse(data)
+        // Every 429 says when to retry (`Retry-After`), also one from a proxy with its own body.
+        let retryAfter = res.statusCode == 429 ? retryAfterSeconds(res.value(forHTTPHeaderField: "Retry-After")) : nil
+        if j == nil && res.statusCode == 429 {
+            throw ApiError(status: 429, code: "rate_limited", message: "Too many requests", retryAfter: retryAfter)
+        }
         if j == nil && !data.isEmpty && res.statusCode != 401 {
             throw ApiError(status: res.statusCode, code: "not_passauth", message: "That address doesn't look like a PassAuth server.")
         }
+        // The request's id names it in the server's log (shown as a reference for unknown errors).
+        let requestId = ApiError.validRequestId(j?["request_id"]?.string) ?? ApiError.validRequestId(res.value(forHTTPHeaderField: "x-request-id"))
         throw ApiError(
             status: res.statusCode,
             code: j?["error"]?.string ?? "error",
-            message: j?["message"]?.string ?? "Request failed (\(res.statusCode))"
+            message: j?["message"]?.string ?? "",
+            retryAfter: retryAfter,
+            requestId: requestId
         )
     }
 }

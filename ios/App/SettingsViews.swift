@@ -10,7 +10,7 @@ private func matchHelp(_ m: UrlMatch) -> String {
     switch m {
     case .host: "Same host name and port only: login.example.com doesn't match www.example.com."
     case .startsWith: "The page address must start with the saved website address."
-    case .regex: "The saved website is a regular expression tested against the page address. Advanced."
+    case .regex: "A saved website written as a pattern (such as ^https://example\\.com/) is tested against the page address; a plain address matches by base domain. Advanced."
     case .exact: "The page address must be exactly the saved website address."
     case .never: "Never suggest or fill logins automatically. Items can still set their own matching."
     default: "login.example.com and www.example.com both match example.com."
@@ -83,6 +83,35 @@ struct SettingsTab: View {
                         .padding(.vertical, 4)
                     }
                     .accessibilityIdentifier("settings.account")
+                    .paRow()
+                }
+                Section {
+                    // Vaults shared with the user and waiting for an answer (only while there are any).
+                    if let waiting = model.repo.vault?.invitations.count, waiting > 0 {
+                        NavigationLink {
+                            InvitationsPage()
+                        } label: {
+                            HStack {
+                                Label { Text(InvitationText.pageTitle).foregroundStyle(Color.paInk) } icon: { Image(systemName: "envelope.badge").foregroundStyle(Color.paAccent) }
+                                Spacer()
+                                Text("\(waiting)")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8).padding(.vertical, 2)
+                                    .background(Color.paAccentFill, in: Capsule())
+                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("\(InvitationText.pageTitle), \(waiting) waiting")
+                        }
+                        .accessibilityIdentifier("settings.invitations")
+                        .paRow()
+                    }
+                    NavigationLink {
+                        HealthView()
+                    } label: {
+                        Label { Text("Password health").foregroundStyle(Color.paInk) } icon: { Image(systemName: "checkmark.shield").foregroundStyle(Color.paAccent) }
+                    }
+                    .accessibilityIdentifier("settings.health")
                     .paRow()
                 }
                 Section {
@@ -200,15 +229,56 @@ private struct AccountPage: View {
 
 // MARK: Security
 
+/// Items and storage against the server's limits (`GET /account`), shown only when the server's
+/// admin set a limit.
+private struct StorageSection: View {
+    @Environment(AppModel.self) private var model
+    @State private var usage: AccountUsage?
+
+    var body: some View {
+        Group {
+            if let u = usage, u.limited {
+                Section {
+                    if let line = u.itemsLine, let used = u.itemsUsed { row("Items", line, used) }
+                    if let line = u.storageLine, let used = u.storageUsed { row("Storage", line, used) }
+                    if u.full { Notice(text: quotaExceededMessage, kind: .error) }
+                } header: {
+                    Text("Storage")
+                } footer: {
+                    Text("Limits set by your server's admin. Items in the vaults you own count, including the trash.")
+                }
+                .paRow()
+            }
+        }
+        .task(id: model.state.activeId) { usage = try? await model.repo.accountUsage() }
+    }
+
+    private func row(_ title: String, _ value: String, _ used: Double) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent(title, value: value)
+            ProgressView(value: used).tint(used >= 1 ? Color.paDanger : Color.paAccent)
+        }
+        .accessibilityElement(children: .combine)
+        .padding(.vertical, 2)
+    }
+}
+
 private struct SecurityPage: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let s = model.state.settings
         let bio = BiometryKind.current
+        // The servers' longest allowed timeout (policy; the strictest of the signed-in accounts).
+        let limit = model.state.timeoutLimit
         Section {
-            Picker("Vault timeout", selection: Binding(get: { s.vaultTimeout }, set: { v in update(model) { $0.vaultTimeout = v } })) {
-                ForEach(VaultTimeout.allCases, id: \.self) { Text($0.label).tag($0) }
+            Picker("Vault timeout", selection: Binding(get: { s.vaultTimeout }, set: { v in
+                update(model) {
+                    $0.vaultTimeout = v
+                    $0.vaultTimeoutLowered = false
+                }
+            })) {
+                ForEach(PolicyRules.timeoutOptions(max: limit), id: \.self) { Text($0.label).tag($0) }
             }
             .accessibilityIdentifier("vaultTimeout")
             if s.vaultTimeout == .never {
@@ -219,9 +289,15 @@ private struct SecurityPage: View {
                 Text("Log out").tag(TimeoutAction.logout)
             }
         } footer: {
-            Text(s.timeoutAction == .lock
-                 ? "Locking keeps your encrypted vault here; unlock with your master password or \(bio.available ? bio.name : "biometrics")."
-                 : "Logging out removes the vault from this device; sign in again (with two-step login) to use it.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text(s.timeoutAction == .lock
+                     ? "Locking keeps your encrypted vault here; unlock with your master password or \(bio.available ? bio.name : "biometrics")."
+                     : "Logging out removes the vault from this device; sign in again (with two-step login) to use it.")
+                if limit > 0 {
+                    Text(PolicyRules.timeoutLimitNote(limit) + (s.vaultTimeoutLowered ? " " + PolicyRules.timeoutLoweredNote(s.vaultTimeout) : ""))
+                        .accessibilityIdentifier("vaultTimeout.limit")
+                }
+            }
         }
         .paRow()
         Section {
@@ -247,10 +323,15 @@ private struct SecurityPage: View {
                 PageRow(title: "Two-step login", help: "Authenticator app, email codes, security keys and recovery codes.", symbol: "lock.rotation")
             }
             .accessibilityIdentifier("settings.twoStep")
+            NavigationLink { SessionsPage() } label: {
+                PageRow(title: "Signed-in devices", help: "Where your account is signed in, and signing devices out.", symbol: "laptopcomputer.and.iphone")
+            }
+            .accessibilityIdentifier("settings.sessions")
         } header: {
             Text("Master password and sign-in")
         }
         .paRow()
+        StorageSection()
     }
 
     private func toggleBiometric(_ on: Bool, _ bio: BiometryKind) {
@@ -458,15 +539,25 @@ private struct VaultOptionsPage: View {
             Text("Keeps your offline copy up to date while the app is in the background. iOS decides when it runs.")
         }
         .paRow()
-        Section {
-            NavigationLink(value: SettingsPage.export) {
-                Label { Text("Export vault").foregroundStyle(Color.paInk) } icon: { Image(systemName: "square.and.arrow.up").foregroundStyle(Color.paAccent) }
+        if PolicyRules.exportAllowed(model.state.policies) {
+            Section {
+                NavigationLink(value: SettingsPage.export) {
+                    Label { Text("Export vault").foregroundStyle(Color.paInk) } icon: { Image(systemName: "square.and.arrow.up").foregroundStyle(Color.paAccent) }
+                }
+                .accessibilityIdentifier("settings.export")
+            } footer: {
+                Text("Save a copy of your items as a file, encrypted or not.")
             }
-            .accessibilityIdentifier("settings.export")
-        } footer: {
-            Text("Save a copy of your items as a file, encrypted or not.")
+            .paRow()
+        } else {
+            Section {
+                Label { Text("Export vault").foregroundStyle(Color.paMuted) } icon: { Image(systemName: "square.and.arrow.up").foregroundStyle(Color.paMuted) }
+                    .accessibilityIdentifier("settings.exportOff")
+            } footer: {
+                Text(PolicyRules.exportDisabledFooter)
+            }
+            .paRow()
         }
-        .paRow()
         Section("In the web vault") {
             WebLink(title: "Vaults & sharing", help: "Create vaults and share them with others.", path: "/settings/vaults")
             WebLink(title: "Import items", help: "From another password manager or a PassAuth export.", path: "/import")
@@ -496,7 +587,9 @@ private struct AppearancePage: View {
         Section {
             Toggle("Show website icons", isOn: Binding(get: { s.showIcons }, set: { v in update(model) { $0.showIcons = v } }))
         } footer: {
-            Text("Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents.")
+            // On, but the server's icon service is off (API 2 servers list it as a feature).
+            Text("Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents."
+                 + (s.showIcons && !model.state.showSiteIcons ? " Your server doesn't offer website icons right now." : ""))
         }
         .paRow()
     }

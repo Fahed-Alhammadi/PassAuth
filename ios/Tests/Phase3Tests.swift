@@ -12,19 +12,22 @@ final class LiveSyncTests: XCTestCase {
         XCTAssertEqual(LiveSyncProtocol.parse(#"{"type":"logout"}"#), .logout)
         XCTAssertNil(LiveSyncProtocol.parse(#"{"type":"sync"}"#))
         XCTAssertNil(LiveSyncProtocol.parse(#"{"type":"sync","revision":null}"#))
-        XCTAssertNil(LiveSyncProtocol.parse(#"{"type":"hello"}"#))
+        XCTAssertNil(LiveSyncProtocol.parse(#"{"type":"hello"}"#), "a hello without its origin")
         XCTAssertNil(LiveSyncProtocol.parse("not json"))
     }
 
+    /// Older servers (no vault numbers in the message): a newer revision syncs. The rules with
+    /// vault numbers are in `DeltaSyncTests.testLiveMessages`.
     func testActions() {
-        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 8), currentRevision: 7), .sync)
+        let have = SyncPosition(revision: 7, vaults: nil)
+        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 8), have: have), .sync)
         // Our own save already re-synced to this revision.
-        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 7), currentRevision: 7), .ignore)
-        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 6), currentRevision: 7), .ignore)
+        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 7), have: have), .ignore)
+        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 6), have: have), .ignore)
         // Locked meanwhile: nothing shown, nothing to refresh.
-        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 8), currentRevision: nil), .ignore)
-        XCTAssertEqual(LiveSyncProtocol.action(.logout, currentRevision: 7), .checkSession)
-        XCTAssertEqual(LiveSyncProtocol.action(nil, currentRevision: 7), .ignore)
+        XCTAssertEqual(LiveSyncProtocol.action(.sync(revision: 8), have: nil), .ignore)
+        XCTAssertEqual(LiveSyncProtocol.action(.logout, have: have), .checkSession)
+        XCTAssertEqual(LiveSyncProtocol.action(nil, have: have), .ignore)
     }
 
     func testBackoff() {
