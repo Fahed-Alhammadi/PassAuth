@@ -6,6 +6,14 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.10.0 (2026-11-16)
+
+- Web vault, desktop: Send, attachments, emergency access, sign-in approval, password health, invitations, activity log and item history (1fcef6b)
+- Server: delta sync, vault invitations, activity log, item history, Send, attachments, emergency access, sign-in approval, policies and limits on the admin page (ce04bb0)
+- Core: crypto for Send, attachments, emergency access and sign-in from another device; site matching with the full Public Suffix List (25e9189)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.9.0...server-0.10.0)
+
 ## 0.9.0 (2026-11-14)
 
 - Server: two-step login and allowed networks for the admin page (2c7ddc8)
