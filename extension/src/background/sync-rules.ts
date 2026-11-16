@@ -11,7 +11,8 @@
  */
 import type { Snapshot, SyncNotice } from "@web/lib/delta";
 import { readInvitations } from "@web/lib/invitations";
-import { isSyncResponse, isSyncVaultRow, type SyncItemRow, type SyncResponse } from "@web/lib/types";
+import { isSyncResponse, isSyncVaultRow, type SyncInvitation, type SyncItemRow, type SyncResponse } from "@web/lib/types";
+import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
 
 /**
  * The offline copy as IndexedDB keeps it: a full `/sync` answer (never `delta: true`) plus `own`, the vault numbers
@@ -20,6 +21,35 @@ import { isSyncResponse, isSyncVaultRow, type SyncItemRow, type SyncResponse } f
  */
 export interface StoredSync extends SyncResponse {
   own?: Record<string, number>;
+  /**
+   * Signed sharing: each vault's last verdict with the row it was made for (signed-sharing.ts `stampOf`), so an
+   * offline unlock or a service-worker restart never uses a vault that failed, and checks only rows it has no verdict for.
+   */
+  trust?: Record<string, StoredVerdict>;
+}
+
+/** Signed-sharing fields of an invitation that `readInvitations` (web) doesn't keep: the extension checks them. */
+const SIGNED_FIELDS = ["key_epoch", "share", "member_roster", "member_roster_seq"] as const;
+
+/**
+ * `list` (read by `readInvitations`) with each invitation's signed-sharing fields from `raw` (the answer's own list)
+ * put back, matched by vault id: servers with `signed_sharing` send `key_epoch`, `share`, `member_roster` and
+ * `member_roster_seq`, and the signer's keys inside `share`.
+ */
+export function withSignedFields(list: SyncInvitation[], raw: unknown): SignedInvitation[] {
+  if (!Array.isArray(raw)) return list;
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const r of raw) {
+    const v = r as Record<string, unknown> | null;
+    if (v && typeof v === "object" && typeof v.vault_id === "string" && !byId.has(v.vault_id)) byId.set(v.vault_id, v);
+  }
+  return list.map((inv) => {
+    const r = byId.get(inv.vault_id);
+    if (!r) return inv;
+    const extra: Record<string, unknown> = {};
+    for (const f of SIGNED_FIELDS) if (f in r) extra[f] = r[f];
+    return { ...inv, ...extra };
+  });
 }
 
 const isRow = (r: unknown): r is SyncItemRow => !!r && typeof r === "object" && typeof (r as SyncItemRow).id === "string" && typeof (r as SyncItemRow).vault_id === "string";
@@ -55,7 +85,7 @@ export function fromStored(v: StoredSync): Snapshot | null {
     bundle: v.bundle,
     vaults: v.vaults.filter(isSyncVaultRow),
     items: new Map(v.items.filter(isRow).map((r) => [r.id, r])),
-    invitations: readInvitations(v.invitations),
+    invitations: withSignedFields(readInvitations(v.invitations), v.invitations),
     own,
   };
 }

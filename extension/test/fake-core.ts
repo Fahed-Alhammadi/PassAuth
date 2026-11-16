@@ -18,6 +18,8 @@ export const control = {
   restored: 0,
   /** Account.rewrap calls (PIN copies made). */
   rewrapped: 0,
+  /** The account id every fake account authenticates as (the fake server's user). */
+  userId: "u-1",
 };
 
 let seq = 0;
@@ -60,8 +62,12 @@ export class FakeAccount {
   openLoginChallenge(challenge: string, requestId: string) {
     return `proof(${challenge},${requestId})`;
   }
-  openVaultKey(_id: string, wrapped: string, _kind: string) {
+  openVaultKey(_id: string, wrapped: string, _kind: string, _keyEpoch?: number, _legacyAllowed?: boolean) {
     return new FakeVaultKey(wrapped);
+  }
+  /** The account's own identity: what the background reads as "me" (the account id the core authenticated). */
+  legacyIdentity() {
+    return { user_id: control.userId, public_key: "fake-public-key", signing_key: null, identity_signature: null, x25519_signature: null };
   }
   /** Like the core: the same keys in a bundle that opens with `password` (a new "salt" each time), no Secret Key. */
   rewrap(bundle: Record<string, unknown>, password: string, withSecretKey: boolean) {

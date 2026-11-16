@@ -108,6 +108,8 @@ export interface ItemSummary {
   vaultId?: string;
   /** In a vault someone shared with the user (not one of their own). */
   shared?: boolean;
+  /** Signed sharing: "Not yet signed" (a share from before), or "Signed by <email> (account deleted)". */
+  vaultLabel?: string;
   /** Logins: the user name ("" when none). */
   username?: string;
   /** Logins: every saved website address, for search. */
@@ -123,6 +125,71 @@ export interface ItemList {
   invitations?: { count: number; key: string };
   /** Why the last fill from the page's inline menu, right-click menu or shortcut didn't work on the tab's page (no secrets). */
   fillProblem?: string;
+  /** Signed sharing: shared vaults that failed a check, account-wide warnings and invitations that can't be accepted. */
+  sharing?: SharingNotice;
+}
+
+/**
+ * Signed sharing for the active account, as the popup's notice shows it (background/signed-sharing.ts). Refused vaults
+ * are never named from their key (it failed); a pinned person whose keys changed is named by the email pinned with the
+ * old keys. Every name and email is cleaned (one line, no invisible characters, at most 128 characters).
+ */
+export interface SharingNotice {
+  refused: {
+    vaultId: string;
+    reason: string;
+    /** "changed": a pinned person's keys changed ("Trust the new key" after comparing); "email_conflict": a known email under a new account (nothing to trust here). */
+    changed?: { kind: "changed" | "email_conflict"; userId: string; email: string; fingerprint: string; newEmail: string };
+  }[];
+  /**
+   * Shared vaults the server added to this account that it never accepted: not used until the user accepts (signed
+   * ones, here or in the web vault) or declines them (in the web vault).
+   */
+  waiting: {
+    vaultId: string;
+    name: string;
+    text: string;
+    signer?: VaultSigner;
+    acceptable: boolean;
+    /** What "sharing:accept" must send: the signer's fingerprint shown, or the key id of an unsigned vault (accepting exactly what was shown). */
+    token: string;
+    /** A key replaced without a signature: Decline = leave it locked (nothing to do in the web vault). */
+    replaced: boolean;
+    note?: string;
+  }[];
+  /** Account-wide warnings (sharing paused on this device, an older list of known keys from the server). */
+  warnings: string[];
+  /** Waiting invitations that can't be accepted as they are, with why. */
+  invitations: { vaultId: string; text: string }[];
+  /** The web vault's Vaults & sharing page (accept or decline there). */
+  vaultsUrl?: string;
+  /** Identifies the set, so a dismissed notice comes back when it changes. */
+  key: string;
+}
+
+/**
+ * Who signed the share of a vault (signed sharing), for the item view and the notice: the email pinned for them first
+ * (`pinned`), else the one the server lists (first time seen); `listedAs` = what the server lists now when it differs,
+ * or its name for them. "Verified" (`verified`) only ever goes with a pinned email.
+ */
+export interface VaultSigner {
+  email: string;
+  pinned: boolean;
+  listedAs?: string;
+  /** The signer's account was deleted after signing. */
+  deleted: boolean;
+  /** Identity fingerprint, computed here from the signer's keys. */
+  fingerprint: string;
+  /** The user compared it with them ("Verified"). */
+  verified: boolean;
+}
+
+/** This account's own signing identity (Settings → Account security). */
+export interface SharingIdentity {
+  /** Computed here from the unlocked key, never the server's; null without one (older server, or not made yet). */
+  fingerprint: string | null;
+  /** The server lists a signing key that isn't this account's: sharing is paused here. */
+  paused: boolean;
 }
 
 /** A sign-in on another device waiting for this account's answer (background/sign-in-requests.ts), as the popup shows it. */
@@ -211,6 +278,9 @@ export interface ItemData {
   vaultId: string;
   canWrite: boolean;
   weakPassword: boolean;
+  /** Signed sharing: "Not yet signed", or who signed the vault's share (see `signer`). */
+  vaultLabel?: string;
+  signer?: VaultSigner;
   /** By the index of a website in `item.login.urls`: why its regular expression is refused (it never matches). */
   regexErrors?: Record<number, string>;
 }

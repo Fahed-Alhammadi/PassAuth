@@ -83,11 +83,13 @@ export const popupHandlers = {
       // Suggestions: the login used last first.
       const suggested = url ? await orderedMatches(url) : [];
       const invitations = vault.invitations();
+      const sharing = vault.sharingNotice();
       const problem = url && tabId !== undefined ? await fillProblem(tabId, url) : undefined;
       return {
         suggested: suggested.map(vault.summarize),
         all: vault.allEntries().map(vault.summarize),
         ...(invitations.count ? { invitations } : {}),
+        ...(sharing ? { sharing } : {}),
         ...(problem ? { fillProblem: problem } : {}),
       };
     },
@@ -102,6 +104,7 @@ export const popupHandlers = {
         item: e.item,
         vaultName: vault.vaultName(e.vaultId),
         vaultId: e.vaultId,
+        ...vault.vaultTrust(e.vaultId),
         canWrite: vault.canWrite(e),
         weakPassword: vault.weakPassword(e.item.login?.password ?? ""),
         ...(Object.keys(errors).length ? { regexErrors: errors } : {}),
@@ -190,6 +193,9 @@ export const popupHandlers = {
   "pin:set": { from: POPUP, unlock: true, activity: "force", run: ({ pin, password }) => setPin(pin, password) },
   "pin:unlock": { from: POPUP, activity: "force", run: ({ pin }) => unlockWithPin(pin) },
   "pin:remove": { from: POPUP, activity: "restart", run: () => removePin() },
+  sharingIdentity: { from: POPUP, unlock: true, run: () => vault.sharingIdentity() },
+  "sharing:trust": { from: POPUP, unlock: true, activity: "restart", run: ({ userId, fingerprint }) => vault.trustNewKey(userId, fingerprint) },
+  "sharing:accept": { from: POPUP, unlock: true, activity: "restart", run: ({ vaultId, token }) => vault.acceptSharedVault(vaultId, token) },
   policyNotices: { from: POPUP, run: () => accountNotices() },
   signInRequests: { from: POPUP, unlock: true, run: () => signInRequests() },
   // Answering is the user at work in PassAuth.

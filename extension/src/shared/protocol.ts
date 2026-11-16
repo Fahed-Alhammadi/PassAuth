@@ -33,6 +33,7 @@ import type {
   SavePrompt,
   SecurityKeys,
   Settings,
+  SharingIdentity,
   SignInAnswer,
   SignInApproval,
   SignInRequestList,
@@ -105,6 +106,12 @@ export interface PopupApi {
   "pin:unlock": Rpc<{ pin: string }, PinUnlockResult>;
   /** Turn PIN unlock off (the PIN-wrapped keys are deleted). */
   "pin:remove": Rpc<None, void>;
+  /** This account's signing identity fingerprint (signed sharing), computed from the unlocked key. */
+  sharingIdentity: Rpc<None, SharingIdentity>;
+  /** A pinned person's keys changed: the user compared the new fingerprint (`fingerprint`, the one shown) with them and trusts exactly that key. */
+  "sharing:trust": Rpc<{ userId: string; fingerprint: string }, void>;
+  /** Accept a shared vault waiting for consent: `token` = what was shown (the signer's fingerprint, or the key id of an unsigned one). */
+  "sharing:accept": Rpc<{ vaultId: string; token: string }, void>;
   /** What the server's policies still ask of the active account (`GET /account` `policy_violations`), as notices linking to the web vault. */
   policyNotices: Rpc<None, PolicyNotices>;
   /** Sign-ins on other devices waiting for the active account's approval, each with the five words worked out here. */

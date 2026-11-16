@@ -9,7 +9,7 @@ import { type Item, KIND_LABEL, kindOf } from "@web/lib/types";
 import { type ReactNode, useEffect, useState } from "react";
 import { callPopup } from "../shared/protocol";
 import { secondsLeft } from "../shared/totp";
-import type { ItemData, TotpCode } from "../shared/types";
+import type { ItemData, TotpCode, VaultSigner } from "../shared/types";
 import { LargeType, PasswordChars } from "./chars";
 import { activeTab, type CopyRequest, type Ctx, formatDate, hostOf, msg, splitCode } from "./ctx";
 import { Files } from "./files";
@@ -137,6 +137,21 @@ function useItem(id: string, ctx: Ctx) {
   return [data, setData] as const;
 }
 
+/**
+ * Who signed the vault's share (signed sharing). The display rule: the email pinned for them first, what the server
+ * lists now only as "listed by your server as …", and "verified" only next to a pinned email, never a server's name.
+ */
+function SignerLine({ signer }: { signer: VaultSigner }) {
+  return (
+    <p className="small muted">
+      {signer.pinned ? `Shared by ${signer.email}` : `Shared by ${signer.email || "someone"} (as your server lists them)`}
+      {signer.deleted ? " (account deleted since)" : ""}
+      {signer.pinned && signer.listedAs ? `, listed by your server as ${signer.listedAs}` : ""}, signed with fingerprint <span className="mono">{signer.fingerprint}</span>
+      {signer.verified ? " (verified)." : ". Compare it with them to be sure the share is theirs."}
+    </p>
+  );
+}
+
 export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
   const [data, setData] = useItem(id, ctx);
   const [tabId, setTabId] = useState<number | null>(null);
@@ -231,8 +246,11 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
               </span>
               <span>
                 <Icon name="vault" size={15} /> {data.vaultName}
+                {data.vaultLabel ? ` · ${data.vaultLabel}` : ""}
               </span>
             </div>
+            {/* L6: a deleted signer's vault keeps its fingerprint line (the label alone shows no fingerprint). */}
+            {data.signer && <SignerLine signer={data.signer} />}
             {canFill && (
               <button
                 type="button"

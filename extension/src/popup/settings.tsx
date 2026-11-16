@@ -5,7 +5,7 @@ import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "
 import { minutesLabel, timeoutOptions } from "@web/lib/policies";
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { callPopup } from "../shared/protocol";
-import type { PopupState, SecurityKey, SecurityKeys, Settings, VaultTimeout } from "../shared/types";
+import type { PopupState, SecurityKey, SecurityKeys, Settings, SharingIdentity, VaultTimeout } from "../shared/types";
 import { type Ctx, msg, seconds } from "./ctx";
 import { Account, Page, PopOut } from "./shell";
 import { applyTheme } from "./theme";
@@ -317,6 +317,32 @@ function Toggle({ label, help, checked, onChange }: { label: string; help?: stri
  * Two-step login security keys (registered in the web vault): list them and
  * remove one after the master password. Adding a key needs the web vault.
  */
+/**
+ * Signed sharing: this account's identity fingerprint, computed here from the unlocked key (never the server's), for
+ * the people the user shares with to compare. Nothing is shown on servers without signed sharing.
+ */
+function SharingIdentitySettings() {
+  const [data, setData] = useState<SharingIdentity | null>(null);
+  useEffect(() => {
+    callPopup("sharingIdentity").then(setData, () => {});
+  }, []);
+  if (!data || (!data.fingerprint && !data.paused)) return null;
+  return (
+    <>
+      <hr />
+      <div className="field">
+        <span>Your sharing fingerprint</span>
+        {data.fingerprint ? (
+          <p className="mono">{data.fingerprint}</p>
+        ) : (
+          <div className="alert alert-error small">Your server lists a signing key that isn't yours. Sharing is paused on this device.</div>
+        )}
+        <p className="small muted">People you share vaults with see this fingerprint for you. Compare it with them in person or on a call.</p>
+      </div>
+    </>
+  );
+}
+
 function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
   const [data, setData] = useState<SecurityKeys | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -590,6 +616,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
           <ForgetBrowser state={state} notify={notify} reload={ctx.reload} />
           <hr />
           <SecurityKeysSettings notify={notify} />
+          <SharingIdentitySettings />
         </>
       ),
     },

@@ -35,6 +35,8 @@ export interface AccountData {
   persistedKeys: SessionData | null;
   /** The account bundle says it needs a Secret Key (kept here so the lock screen needn't read the offline copy). Unknown for records from before 0.7. */
   secretKeyEnabled?: boolean;
+  /** The account id the core authenticated at unlock (signed sharing: names the trust memory removed with the account). */
+  userId?: string;
 }
 
 export interface Shared {
@@ -64,7 +66,7 @@ export interface LocalData extends Shared, AccountData {
 /** A change to shared fields and to fields of one account. */
 export type LocalPatch = Partial<Shared & AccountData>;
 
-export const ACCOUNT_FIELDS = ["server", "email", "name", "tokens", "lastSync", "persistedKeys", "secretKeyEnabled"] as const;
+export const ACCOUNT_FIELDS = ["server", "email", "name", "tokens", "lastSync", "persistedKeys", "secretKeyEnabled", "userId"] as const;
 
 export const defaultSettings: Settings = {
   vaultTimeout: 15,
@@ -234,6 +236,7 @@ export const local = {
       await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id)]);
       await forgetLastUsed(id);
       await syncCache.clear(id);
+      if (gone?.server && gone.userId) await trustMemory.clear(gone.server, gone.userId);
     }),
 
   /** One account's record without reading everything else (hot path: every API request). */
@@ -272,8 +275,24 @@ export const session = {
     await chrome.storage.session.set({ [`unlocked:${id ?? (await activeId())}`]: data });
   },
   async clear(id?: string) {
-    await chrome.storage.session.remove(`unlocked:${id ?? (await activeId())}`);
+    const aid = id ?? (await activeId());
+    await chrome.storage.session.remove([`unlocked:${aid}`, earlierKey(aid)]);
   },
+};
+
+const earlierKey = (id: string) => `earlier:${id}`;
+
+/**
+ * Signed sharing, grandfathering (docs/ARCHITECTURE.md "Grandfathering", extension re-review M1): the vault ids that
+ * were in the account's offline copy when this unlock started (from an earlier session), kept for the unlock in session
+ * storage so a worker restart doesn't count this session's own copy as an earlier one. Removed with the session keys.
+ */
+export const earlierVaults = {
+  async get(id: string): Promise<string[] | null> {
+    const v = (await chrome.storage.session.get(earlierKey(id)))[earlierKey(id)];
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
+  },
+  set: (id: string, ids: string[]) => chrome.storage.session.set({ [earlierKey(id)]: ids }),
 };
 
 /**
@@ -388,4 +407,37 @@ export const syncCache = {
     ),
   set: (accountId: string, data: StoredSync): Promise<void> => inOrder(() => tx("readwrite", (s) => s.put(data, accountId))).then(() => {}, logged("Storing the offline copy")),
   clear: (accountId: string): Promise<void> => inOrder(() => tx("readwrite", (s) => s.delete(accountId))).then(() => {}, logged("Removing the offline copy")),
+};
+
+/** The trust memory's key: the server's address as stored and the account id the core authenticated (review H1). */
+const trustKey = (server: string, userId: string) => `trust:${server}|${userId}`;
+
+/**
+ * Signed sharing (signed-sharing.ts `TrustMemory`): what this browser trusted for one account (the highest key pins
+ * version it opened and its sealed copy of them, the last trusted roster per vault, the vaults seen signed). In the
+ * same IndexedDB store as the offline copies, under its own key: the server's address plus the account id the core
+ * authenticated (never the server's `user.id`), so another account can never be handed this one's memory. Kept when
+ * the account signs out, removed with the account. Writes go through `update` (read, merge, write in one queued step:
+ * signed-sharing.ts `mergeMemory`, never a blind overwrite). A read that fails answers undefined: the checks then start
+ * as on a new device (the account's key pins and epoch pins still come from the server); writes that fail are logged.
+ * In `update`, a read that fails rejects and nothing is written.
+ */
+export const trustMemory = {
+  get: (server: string, userId: string): Promise<unknown> =>
+    inOrder(() => tx<unknown>("readonly", (s) => s.get(trustKey(server, userId)))).catch((e) => {
+      log.warn("Reading what this browser trusted for signed sharing failed:", e);
+      return undefined;
+    }),
+  /** `fn(stored)` → the record to store, in one queued step; resolves to what was stored (`fn`'s answer even if the write failed); rejects when the read fails. */
+  update: <T>(server: string, userId: string, fn: (stored: unknown) => T): Promise<T> =>
+    inOrder(async () => {
+      const key = trustKey(server, userId);
+      // A read that fails aborts the write (review L5): merging into "nothing stored" would overwrite what is there.
+      const stored = await tx<unknown>("readonly", (s) => s.get(key));
+      const next = fn(stored);
+      await tx("readwrite", (s) => s.put(next, key)).catch(logged("Storing what this browser trusted for signed sharing"));
+      return next;
+    }),
+  clear: (server: string, userId: string): Promise<void> =>
+    inOrder(() => tx("readwrite", (s) => s.delete(trustKey(server, userId)))).then(() => {}, logged("Removing what this browser trusted for signed sharing")),
 };

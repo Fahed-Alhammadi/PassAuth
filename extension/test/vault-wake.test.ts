@@ -60,7 +60,7 @@ test("three concurrent ensureUnlocked() after a worker restart: one key restore,
   // The offline copy from an earlier run of the worker.
   await storage.syncCache.set("a1", {
     revision: 1,
-    user: { id: "u1", email: "alex@example.com", name: "Alex", email_verified: true },
+    user: { id: "u-1", email: "alex@example.com", name: "Alex", email_verified: true },
     bundle: sessionKeys().bundle as never,
     vaults: server.vaults,
     items: server.items as never,
@@ -86,7 +86,7 @@ test("a request that arrives while the vault is opening waits for that open: one
   await signedIn();
   await storage.syncCache.set("a1", {
     revision: 1,
-    user: { id: "u1", email: "alex@example.com", name: "Alex", email_verified: true },
+    user: { id: "u-1", email: "alex@example.com", name: "Alex", email_verified: true },
     bundle: sessionKeys().bundle as never,
     vaults: server.vaults,
     items: server.items as never,

@@ -426,7 +426,7 @@ function ItemRow({ row, ctx, tabStop, onFocusRow, onFill }: { row: Row; ctx: Ctx
               </span>
             )}
             {i.shared && (
-              <span className="mark" title={`In ${i.vaultName}, shared with you`}>
+              <span className="mark" title={`In ${i.vaultName}, shared with you${i.vaultLabel ? ` (${i.vaultLabel})` : ""}`}>
                 Shared
               </span>
             )}

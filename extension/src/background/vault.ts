@@ -22,15 +22,65 @@ import { AppError, codeOf, EXPIRED, FAILED, lockedError, SECRET_KEY_REQUIRED, SI
 import { log, logged } from "../shared/log";
 import { POPUP_VIEW_KEY } from "../shared/storage-keys";
 import { totpExpiry } from "../shared/totp";
-import type { AccountSummary, DeviceSignIn, EditorInfo, ItemSummary, LoginResult, PopupState, SecurityKey, SecurityKeys, Status, TotpCode } from "../shared/types";
+import type {
+  AccountSummary,
+  DeviceSignIn,
+  EditorInfo,
+  ItemSummary,
+  LoginResult,
+  PopupState,
+  SecurityKey,
+  SecurityKeys,
+  SharingIdentity,
+  SharingNotice,
+  Status,
+  TotpCode,
+  VaultSigner,
+} from "../shared/types";
 import * as core from "../wasm/passauth_core";
 import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, refreshServerInfo, serverConfig, serverInfo } from "./api";
 import { initCore } from "./core";
 import { forgetLastUsed } from "./last-used";
 import { type IndexedLogin, type MatchIndex, matchIndex } from "./match-index";
 import { forgetPolicyState, noteTwoStepDone, policyState } from "./policies";
-import { type AccountData, accountKey, activeId, local, pinCopies, type SessionData, scratch, session, syncCache } from "./storage";
-import { fromStored, isStale, type RevisionAnswer, readRevision, type StoredSync, toStored } from "./sync-rules";
+import {
+  CHECK_LATER_TEXT,
+  type ChangedKey,
+  checkInvitation,
+  checkVault,
+  collectRosters,
+  contextStamp,
+  coreCode,
+  emptyMemory,
+  type InvitationCheck,
+  invitationText,
+  MEMORY_MISSING_TEXT,
+  mergeMemory,
+  NEW_DEVICE_TEXT,
+  PAUSED_TEXT,
+  PINS_ROLLBACK_TEXT,
+  pinsDigest,
+  readMemory,
+  refusedUnopened,
+  remembersSigned,
+  replacedText,
+  rosterVersion,
+  rowStamp,
+  type SignedInvitation,
+  type SignedVaultRow,
+  type SignerView,
+  type StoredVerdict,
+  signedByLabel,
+  type Trust,
+  type TrustMemory,
+  UNSIGNED_LABEL,
+  type VaultCheck,
+  WAITING_UNSIGNED_TEXT,
+  WRONG_ACCOUNT_TEXT,
+  waitingText,
+} from "./signed-sharing";
+import { type AccountData, accountKey, activeId, earlierVaults, local, pinCopies, type SessionData, scratch, session, syncCache, trustMemory } from "./storage";
+import { fromStored, isStale, type RevisionAnswer, readRevision, type StoredSync, toStored, withSignedFields } from "./sync-rules";
 
 export interface Entry {
   id: string;
@@ -81,6 +131,34 @@ let synced: Snapshot | null = null;
 let openedFrom = new Map<string, SyncVaultRow>();
 /** Per item, the row it was decrypted from and the result (null: it can't be decrypted), reused while the ciphertext stays. */
 let decrypted = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
+/**
+ * Signed sharing for the loaded account (signed-sharing.ts): checks run (`sharingOn`) on servers with `signed_sharing`
+ * and for accounts this browser has seen anything signed for. `verdicts`: each vault row's last check, which
+ * `materialize` follows (a vault without a verdict for its current row, or a refused one, is never opened).
+ */
+let sharingOn = false;
+let verdicts = new Map<string, StoredVerdict>();
+/** This account's signing identity while unlocked (freed on lock), and the `/sync` record it was opened from ("created": made here). */
+let signing: core.SigningIdentity | null = null;
+let signingRecord = "";
+/** The server lists a signing identity this account's key doesn't open. */
+let identityBroken = false;
+/** Sharing is paused here (identity broken, or not the one the account remembers): no shared vault is used. */
+let sharingPaused = false;
+/** Vaults waiting for consent the user accepted in the popup, with the consent token of what it showed (`acceptSharedVault`). */
+const accepting = new Map<string, string>();
+/** The web vault's "Vaults & sharing" page of the loaded account's server, for the popup's links. */
+let vaultsUrl = "";
+/** The account's key pins as this browser has them after the last check. */
+let keyPins: core.KeyPins | null = null;
+let sharingWarnings: string[] = [];
+let invitationChecks: InvitationCheck[] = [];
+/** A sync should follow this one (another device made the account's signing identity meanwhile). */
+let sharingResync = false;
+/** The keys were installed by a new unlock (not reloaded from the session after a worker restart): see `earlierVaultIds`. */
+let freshSession = false;
+/** The vault ids of the account's offline copy from before this unlock, once per generation (`earlierVaultIds`). */
+let earlier: { gen: number; ids: Promise<Set<string>> } | null = null;
 /** Sign-in waiting for its two-step code: the derived keys, and the Secret Key to remember once it succeeds. */
 let pendingMaster: core.MasterKeys | null = null;
 let pendingLogin: { server: string; email: string; secretKey?: string } | null = null;
@@ -94,12 +172,13 @@ export function setLockCheck(fn: () => Promise<void>) {
   lockCheck = fn;
 }
 
-/** Install the keys of `id` (after dropping whatever was loaded). */
-function install(acct: core.Account, b: Bundle, id: string) {
+/** Install the keys of `id` (after dropping whatever was loaded). `fresh`: a new unlock (false: reloaded from the session). */
+function install(acct: core.Account, b: Bundle, id: string, fresh = true) {
   unload();
   account = acct;
   bundle = b;
   currentId = id;
+  freshSession = fresh;
 }
 
 /** Set by the service worker: the user just unlocked or signed in (sign-in requests waiting for an answer are listed). */
@@ -652,7 +731,7 @@ async function restore(id: string): Promise<boolean> {
   if (stale() || (await activeId()) !== id) return false;
   const still = await session.get(id);
   if (stale() || !still || still.keys !== s.keys) return false;
-  install(core.accountFromSessionBytes(s.accountId, unb64(s.keys)), s.bundle, id);
+  install(core.accountFromSessionBytes(s.accountId, unb64(s.keys)), s.bundle, id, false);
   await openVault(id);
   return true;
 }
@@ -668,9 +747,16 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
   const p = (async () => {
     const copy = cached ?? (await syncCache.get(id));
     if (gen !== generation || currentId !== id || loaded) return;
+    // Which vaults this browser had before this unlock (signed sharing, M1), from the copy just read.
+    if (account) void earlierVaultIds(id, account, { copy });
     // The copy is checked like a server's answer (sync-rules.ts `fromStored`); one that isn't one is replaced by a sync.
-    const snap = copy ? fromStored(copy) : null;
+    const parsed = copy ? fromStored(copy) : null;
+    // A copy for another account than the one the core authenticated (review H1) is replaced by a sync.
+    const snap = parsed && account && ownSnapshot(account, parsed) ? parsed : null;
     if (snap) {
+      // Shared vaults as the copy's verdicts say (rows without one are checked here, without the network where possible).
+      await checkSharing(snap, id, "open", copy?.trust);
+      if (gen !== generation || currentId !== id || loaded) return;
       show(snap);
       void refreshIfStale().catch(logged("Checking for changes"));
       return;
@@ -748,6 +834,19 @@ function unload() {
   openedFrom = new Map();
   decrypted = new Map();
   opening = null;
+  sharingOn = false;
+  verdicts = new Map();
+  signing?.free();
+  signing = null;
+  signingRecord = "";
+  identityBroken = false;
+  sharingPaused = false;
+  accepting.clear();
+  vaultsUrl = "";
+  keyPins = null;
+  sharingWarnings = [];
+  invitationChecks = [];
+  sharingResync = false;
   account?.free();
   account = null;
   currentId = "";
@@ -939,23 +1038,682 @@ async function fetchSync(id: string, delta: boolean, base: Snapshot | null, stal
   } catch (e) {
     log.debug("A sync answer couldn't be used:", e);
   }
-  if (merged) return merged;
+  if (merged) return withSignedInvitations(merged, data);
   if (since) return "full";
   throw new AppError(FAILED, UNEXPECTED_SYNC);
 }
 
-/** A new snapshot for the loaded account: shown, kept as its offline copy, and the time noted. */
+/** `merged` with its invitations' signed-sharing fields from the answer `data` (`readInvitations` drops them). */
+function withSignedInvitations(merged: Merged, data: SyncResponse): Merged {
+  return { ...merged, snapshot: { ...merged.snapshot, invitations: withSignedFields(merged.snapshot.invitations, data.invitations) } };
+}
+
+/** A new snapshot for the loaded account: its owner checked, its shared vaults checked, shown, kept as its offline copy, and the time noted. */
 async function accept(snap: Snapshot, id: string) {
+  const gen = generation;
+  if (account && !ownSnapshot(account, snap)) {
+    // Review H1: an answer for another account than the one the core authenticated is never shown or kept.
+    log.warn("The server sent a sync answer for another account; it isn't used.");
+    throw new AppError(FAILED, WRONG_ACCOUNT_TEXT);
+  }
+  await checkSharing(snap, id, "sync");
+  if (gen !== generation || currentId !== id || !account) return;
   show(snap);
   await persist(id);
   await local.set({ lastSync: Date.now(), name: typeof snap.user?.name === "string" ? snap.user.name : "" }, id);
+  if (sharingResync) {
+    sharingResync = false;
+    void sync().catch(logged("Syncing again"));
+  }
 }
 
 /** A whole vault fetched while unlocking (no offline copy, or a newer account bundle). */
 async function acceptFull(data: SyncResponse, id: string) {
   const merged = mergeSync(null, data);
   if (!merged || !account || currentId !== id) return;
-  await accept(merged.snapshot, id);
+  await accept(withSignedInvitations(merged, data).snapshot, id);
+}
+
+/** The account id the core authenticated (the unlocked account's own), never `/sync` `user.id` (review H1). */
+const meOf = (acct: core.Account) => acct.legacyIdentity().user_id;
+
+/** Whether `snap` is the unlocked account's (its `user.id` is the id the core authenticated). */
+const ownSnapshot = (acct: core.Account, snap: Snapshot) => snap.user?.id === meOf(acct);
+
+// ------------------------------------------------------------ signed sharing
+
+/** `/sync` `user` with the signed-sharing fields (servers with `signed_sharing`). */
+type SharingUser = SyncResponse["user"] & { identity?: unknown; key_pins_seq?: unknown };
+
+/** A whole number from the server, or null. */
+const whole = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
+
+/** Every roster of `vaultId` after version `after`, oldest first, within the caps (signed-sharing.ts `collectRosters`). */
+function fetchRosters(id: string, vaultId: string, after: number): Promise<string[]> {
+  return collectRosters(after, async (from) => {
+    const r = await api<{ rosters?: unknown; more?: unknown } | null>(`/vaults/${encodeURIComponent(vaultId)}/rosters?after=${from}`, { accountId: id });
+    const list = r?.rosters;
+    if (!Array.isArray(list) || !list.every((x): x is string => typeof x === "string")) throw new AppError(FAILED, UNEXPECTED_ANSWER);
+    return { rosters: list, more: r?.more === true };
+  });
+}
+
+/** `GET /account/key-pins`: the sealed key pins (null: none yet) and their version. */
+async function fetchKeyPins(id: string): Promise<{ sealed: string | null; seq: number }> {
+  const r = await api<{ key_pins?: unknown; seq?: unknown } | null>("/account/key-pins", { accountId: id });
+  const seq = whole(r?.seq);
+  if (seq === null || (r?.key_pins !== null && typeof r?.key_pins !== "string")) throw new AppError(FAILED, UNEXPECTED_ANSWER);
+  return { sealed: (r?.key_pins as string | null) ?? null, seq };
+}
+
+/** Where the account's trust memory is kept: the server's address and the account id the core authenticated. */
+interface MemoryPlace {
+  server: string;
+  userId: string;
+}
+
+/** Two sealed copies of the key pins merged (the higher version's, with the lower one's unsent changes). */
+function mergeSealedPins(acct: core.Account, higher: TrustMemory, lower: TrustMemory): TrustMemory {
+  try {
+    if (!higher.pinsSealed || !lower.pinsSealed) return higher;
+    const merged = core.mergePins(acct.openKeyPins(higher.pinsSealed, higher.pinsSeq), acct.openKeyPins(lower.pinsSealed, lower.pinsSeq));
+    return { ...higher, pinsSealed: acct.sealKeyPins(merged, higher.pinsSeq), pinsDirty: true };
+  } catch (e) {
+    log.warn("Merging this browser's copies of the known keys failed:", coreCode(e));
+    return higher;
+  }
+}
+
+/**
+ * Store `memory` merged with what is stored (never a blind overwrite); resolves to what was stored. `basis`: the sealed
+ * key pins `memory` started from, so pins changed meanwhile (with unsent changes) are merged in, not dropped (review L7).
+ */
+function saveMemory(acct: core.Account, place: MemoryPlace, memory: TrustMemory, basis?: string | null): Promise<TrustMemory> {
+  return trustMemory.update(place.server, place.userId, (stored) => mergeMemory(readMemory(stored, place.userId), memory, (h, l) => mergeSealedPins(acct, h, l), basis));
+}
+
+/** Change the stored key pins with `fn` in one step (read, open, change, seal, mark unsent, write). */
+function updateStoredPins(acct: core.Account, place: MemoryPlace, fn: (pins: core.KeyPins | null) => core.KeyPins): Promise<TrustMemory> {
+  return trustMemory.update(place.server, place.userId, (stored) => {
+    const m = readMemory(stored, place.userId) ?? emptyMemory(place.userId);
+    const pins = m.pinsSealed ? acct.openKeyPins(m.pinsSealed, m.pinsSeq) : null;
+    return { ...m, pinsSealed: acct.sealKeyPins(fn(pins), m.pinsSeq), pinsDirty: true };
+  });
+}
+
+/**
+ * The vault ids that were in the account's offline copy when this unlock started: from an earlier session, never from
+ * this one (ARCHITECTURE "Grandfathering", extension re-review M1). Only these may be grandfathered: a browser with no
+ * earlier copy (a new install, an account added again) grandfathers nothing, so a vault a server plants at the first
+ * signed sync can only ever wait for consent. Read once per unlock, before this session writes its own copy, and kept
+ * in session storage, so a worker restart doesn't take this session's copy for an earlier one. Failing: none.
+ * `read`: the offline copy the caller already read at the start of this unlock (saves a second read).
+ */
+function earlierVaultIds(id: string, acct: core.Account, read?: { copy: StoredSync | undefined }): Promise<Set<string>> {
+  if (earlier?.gen === generation) return earlier.ids;
+  const fresh = freshSession;
+  const ids = (async () => {
+    try {
+      if (!fresh) {
+        const kept = await earlierVaults.get(id);
+        if (kept) return new Set(kept);
+      }
+      // The copy the caller just read (`openVault`), else read here.
+      const copy = read ? read.copy : await syncCache.get(id);
+      const list = copy && copy.user?.id === meOf(acct) ? copy.vaults.flatMap((v) => (typeof v.id === "string" ? [v.id] : [])) : [];
+      await earlierVaults.set(id, list);
+      return new Set(list);
+    } catch (e) {
+      log.debug("Reading which vaults this browser had before failed:", e);
+      return new Set<string>();
+    }
+  })();
+  earlier = { gen: generation, ids };
+  return ids;
+}
+
+/** This account's signing identity as far as this sync tells (`ensureIdentity`). */
+interface IdentityState {
+  /** The identity hash the server lists for this account as far as this browser can tell (null: none, or not known). */
+  listed: string | null;
+  /** This browser made the identity: now, or by an upload whose answer was lost (the listed one opens to its hash). */
+  created: boolean;
+  /** Whether the state is known (review M2): a listed identity opened, or one made now. Only then is grandfathering written. */
+  known: boolean;
+  /** The upload was answered 404: this server doesn't sign (for this sync). */
+  unsupported: boolean;
+  /** The record uploaded now: copied into the snapshot, so the offline copy lists it (review L3). */
+  record?: core.IdentityRecord;
+}
+
+/**
+ * This account's signing identity (ARCHITECTURE "Signed sharing", "App, at every unlock"): opened from `/sync`
+ * `user.identity` (a record this account's key doesn't open → `identityBroken`: sharing paused here), or, when the
+ * server lists none and the key pins don't remember one, made here on a sync with a server that has `signed_sharing`
+ * and uploaded (`PUT /account/identity`; 409 `identity_exists`: another device made one meanwhile, so sync again and
+ * open that one). Before uploading, the new identity's hash is kept in the trust memory (`pendingIdentity`): if the
+ * answer is lost, a later sync that lists an identity opening to that hash counts it as made here.
+ */
+async function ensureIdentity(
+  acct: core.Account,
+  id: string,
+  user: SharingUser,
+  mode: "sync" | "open",
+  features: ReadonlySet<string> | undefined,
+  pins: core.KeyPins | null,
+  memory: TrustMemory,
+  place: MemoryPlace,
+  mayCreate: boolean,
+  stale: () => boolean,
+): Promise<IdentityState> {
+  const unknown: IdentityState = { listed: null, created: false, known: false, unsupported: false };
+  const rec = user.identity;
+  if (rec && typeof rec === "object") {
+    const json = JSON.stringify(rec);
+    if (json !== signingRecord) {
+      signing?.free();
+      signing = null;
+      identityBroken = false;
+      signingRecord = json;
+      try {
+        signing = acct.openSigningIdentity(rec as core.IdentityRecord);
+      } catch (e) {
+        // `identity_mismatch` (keys that aren't this account's) or `decrypt_failed`: nothing is signed or trusted here.
+        log.warn("The server's signing identity for this account doesn't open:", coreCode(e));
+        identityBroken = true;
+      }
+    }
+    const listed = signing ? signing.identityHash() : null;
+    return { listed, created: !!listed && listed === memory.pendingIdentity, known: listed !== null, unsupported: false };
+  }
+  // The server lists none: whatever was opened before isn't what it lists any more.
+  signing?.free();
+  signing = null;
+  signingRecord = "";
+  identityBroken = false;
+  // Remembered one (then this is a mismatch: sharing paused), or nothing to make it with.
+  if (pins?.own_identity || mode !== "sync" || !features?.has("signed_sharing") || !mayCreate) return unknown;
+  const fresh = acct.newSigningIdentity();
+  let made: core.SigningIdentity | null = null;
+  try {
+    made = fresh.takeIdentity();
+    const hash = made.identityHash();
+    const record = fresh.record;
+    // Kept before the upload (in this check's memory too, which is written at its end).
+    memory.pendingIdentity = hash;
+    try {
+      await trustMemory.update(place.server, place.userId, (stored) => ({ ...(readMemory(stored, place.userId) ?? emptyMemory(place.userId)), pendingIdentity: hash }));
+    } catch (e) {
+      log.debug("Keeping the new signing identity's hash failed; it isn't uploaded now:", e);
+      delete memory.pendingIdentity;
+      return unknown;
+    }
+    if (stale()) return unknown;
+    try {
+      await api("/account/identity", { method: "PUT", body: record, accountId: id });
+    } catch (e) {
+      if (isCode(e, "identity_exists")) sharingResync = true;
+      else log.debug("Uploading the signing identity failed:", e);
+      return { ...unknown, unsupported: e instanceof ApiError && e.status === 404 };
+    }
+    if (stale()) return unknown;
+    // Any success: `created: true`, or `created: false` = the server already stored exactly this record (an upload of
+    // this one whose answer was lost); either way it is the identity this browser just made.
+    signing = made;
+    made = null;
+    signingRecord = JSON.stringify(record);
+    return { listed: hash, created: true, known: true, unsupported: false, record };
+  } finally {
+    made?.free();
+    fresh.free();
+  }
+}
+
+/** The key pins for a check, and whether they couldn't be fetched on a browser without a copy of its own. */
+interface LoadedPins {
+  pins: core.KeyPins | null;
+  /**
+   * The server lists key pins but this browser, which has none of its own (a new install), couldn't get them (offline,
+   * an error, an answer without them): like offline. Nothing is grandfathered or written, no identity is made, and
+   * shared vaults wait for the next sync; never read as "trust memory missing".
+   */
+  offline: boolean;
+}
+
+/**
+ * The account's key pins for this check: this browser's copy (sealed in its trust memory), replaced by the server's
+ * newer one on a sync (merged with this browser's unsent changes). A server version below the highest this browser
+ * opened is a rollback: the browser's copy stays and the popup says so. On a sync, a newer version the server lists
+ * but doesn't give (or that doesn't open) throws (review L4): the checks don't run on pins known to be incomplete
+ * (on a browser with no copy of its own: `offline`).
+ */
+async function loadKeyPins(acct: core.Account, id: string, memory: TrustMemory, user: SharingUser, mode: "sync" | "open", warnings: string[]): Promise<LoadedPins> {
+  let pins: core.KeyPins | null = null;
+  if (memory.pinsSealed) {
+    try {
+      pins = acct.openKeyPins(memory.pinsSealed, memory.pinsSeq);
+    } catch (e) {
+      log.warn("This browser's copy of the known keys doesn't open:", coreCode(e));
+      memory.pinsSealed = null;
+      memory.pinsDirty = false;
+    }
+  }
+  const ok = (p: core.KeyPins | null): LoadedPins => ({ pins: p, offline: false });
+  const serverSeq = whole(user.key_pins_seq);
+  if (serverSeq === null) return ok(pins);
+  if (serverSeq < memory.pinsSeq) {
+    warnings.push(PINS_ROLLBACK_TEXT);
+    return ok(pins);
+  }
+  if (serverSeq === 0 || (serverSeq === memory.pinsSeq && pins) || mode !== "sync") return ok(pins);
+  const own = pins !== null || memory.pinsSeq > 0;
+  let got: { sealed: string | null; seq: number };
+  try {
+    got = await fetchKeyPins(id);
+  } catch (e) {
+    if (own) throw e;
+    log.debug("The known keys couldn't be fetched; shared vaults are checked at the next sync:", e);
+    return { pins, offline: true };
+  }
+  if (got.seq < memory.pinsSeq) {
+    warnings.push(PINS_ROLLBACK_TEXT);
+    return ok(pins);
+  }
+  if (got.sealed === null) {
+    if (got.seq <= memory.pinsSeq) return ok(pins);
+    // L4: a newer version listed without its pins: never checked against older ones.
+    if (own) throw new Error("key pins listed but not given");
+    return { pins, offline: true };
+  }
+  let theirs: core.KeyPins;
+  try {
+    theirs = acct.openKeyPins(got.sealed, got.seq);
+  } catch (e) {
+    if (coreCode(e) === "rollback") {
+      warnings.push(PINS_ROLLBACK_TEXT);
+      return ok(pins);
+    }
+    throw e;
+  }
+  memory.pinsSeq = got.seq;
+  return ok(memory.pinsDirty && pins ? core.mergePins(theirs, pins) : theirs);
+}
+
+/**
+ * Write the key pins (`PUT /account/key-pins`, compare-and-swap on `seq`): on 409 `key_pins_changed` the server's are
+ * fetched, merged with these (this browser's newer decision wins for the same person) and written once more; otherwise
+ * they stay marked unsent for the next sync. Returns the pins as they are now.
+ */
+async function writeKeyPins(acct: core.Account, id: string, memory: TrustMemory, pins: core.KeyPins): Promise<core.KeyPins> {
+  let current = pins;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const seq = memory.pinsSeq + 1;
+    let sealed: string;
+    try {
+      sealed = acct.sealKeyPins(current, seq);
+    } catch (e) {
+      log.warn("Sealing the known keys failed:", coreCode(e));
+      return current;
+    }
+    try {
+      await api("/account/key-pins", { method: "PUT", body: { key_pins: sealed, seq }, accountId: id });
+      memory.pinsSeq = seq;
+      memory.pinsDirty = false;
+      return current;
+    } catch (e) {
+      if (attempt > 0 || !isCode(e, "key_pins_changed")) {
+        log.debug("Writing the known keys failed:", e);
+        return current;
+      }
+      try {
+        const got = await fetchKeyPins(id);
+        if (got.seq < memory.pinsSeq || got.sealed === null) return current;
+        current = core.mergePins(acct.openKeyPins(got.sealed, got.seq), current);
+        memory.pinsSeq = got.seq;
+      } catch (err) {
+        log.debug("Merging the known keys failed:", err);
+        return current;
+      }
+    }
+  }
+  return current;
+}
+
+/**
+ * Check every vault row of `snap` (signed-sharing.ts `checkVault`) and its invitations, and keep the verdicts for
+ * `materialize`. `mode` "sync": after an answer from the server (every row checked, the identity made if missing, the
+ * key pins fetched, grandfathered at the account's first signed sync and written); "open": the offline copy (rows
+ * whose stored verdict has the same stamp keep it; others are checked; nothing is written to the server). Locked or
+ * switched meanwhile: nothing changes.
+ *
+ * While the server's features are unknown (`/api/config` unreachable) the checks run too, but nothing that would turn
+ * them on for good (trust memory, key pins) is kept until the server has shown it signs (cross-client review A).
+ */
+async function checkSharing(snap: Snapshot, id: string, mode: "sync" | "open", stored?: Record<string, StoredVerdict>): Promise<void> {
+  const acct = account;
+  if (!acct) return;
+  const gen = generation;
+  const stale = () => gen !== generation || currentId !== id || account !== acct;
+  try {
+    // Before anything of this session is kept (M1): what the offline copy held when this unlock started.
+    const before = await earlierVaultIds(id, acct);
+    if (stale()) return;
+    const legacy = acct.legacyIdentity();
+    const data = (await local.account(id)).data;
+    const server = data?.server ?? "";
+    const place: MemoryPlace = { server, userId: legacy.user_id };
+    // Unknown (the server can't be reached): never read as "off" for an account that has signed state here.
+    const features = server ? (await serverInfo(server))?.features : undefined;
+    const user = snap.user as SharingUser;
+    const rows = snap.vaults as SignedVaultRow[];
+    const invitations = snap.invitations as SignedInvitation[];
+    let memory = readMemory(await trustMemory.get(server, place.userId), place.userId);
+    if (stale()) return;
+    if (data && data.userId !== place.userId) await local.set({ userId: place.userId }, id);
+    // What this answer itself shows of signing (besides the features list).
+    const signedData =
+      (!!user.identity && typeof user.identity === "object") ||
+      (whole(user.key_pins_seq) ?? 0) > 0 ||
+      rows.some((r) => (r.share !== undefined && r.share !== null) || (r.member_roster !== undefined && r.member_roster !== null)) ||
+      invitations.some((i) => i.share !== undefined && i.share !== null);
+    const remembered = remembersSigned(memory);
+    // Features unknown: checked, unless the rows can't be from a signing server (they always name key epochs).
+    const unknownOn = features === undefined && rows.some((r) => r.key_epoch !== undefined && r.key_epoch !== null);
+    const on = !!features?.has("signed_sharing") || remembered || signedData || unknownOn;
+    if (!on) {
+      sharingOn = false;
+      verdicts = new Map();
+      sharingWarnings = [];
+      invitationChecks = [];
+      return;
+    }
+    memory ??= emptyMemory(place.userId);
+    const unchanged = JSON.stringify(memory);
+    // The sealed copy this check starts from (review L7: pins changed meanwhile are merged in when it is stored).
+    const basis = memory.pinsSealed;
+    const seqBefore = memory.pinsSeq;
+    const warnings: string[] = [];
+    const loadedPins = await loadKeyPins(acct, id, memory, user, mode, warnings);
+    let pins = loadedPins.pins;
+    const pinsOffline = loadedPins.offline;
+    if (stale()) return;
+    const loaded = JSON.stringify(pins);
+    const ident = await ensureIdentity(acct, id, user, mode, features, pins, memory, place, !pinsOffline, stale);
+    if (stale()) return;
+    // L3: the identity made now is in the snapshot (and so in the offline copy), or an offline open would see none.
+    if (ident.record) snap.user = { ...snap.user, identity: ident.record } as Snapshot["user"];
+    const { listed, created } = ident;
+    // Kept only once the server has shown it signs (review A); a 404 for the upload says it doesn't (this sync).
+    const keep = remembered || signedData || ident.created || (!!features?.has("signed_sharing") && !ident.unsupported);
+    // The identity the server lists for me against the one the account remembers (review L4).
+    let paused = identityBroken;
+    if (!paused) {
+      const own = core.pinsCheckOwnIdentity(pins, listed);
+      if (own === "mismatch") paused = true;
+      else if (own === "new" && listed) pins = core.pinsSetOwnIdentity(pins, listed);
+    }
+    if (paused) warnings.push(PAUSED_TEXT);
+    const me = signing && !paused ? signing.publicIdentity() : legacy;
+    const meHash = core.verifyIdentity(me).hash;
+    // The account's first signed sync: `grandfathered` written once, only when the identity state is known (M2: never
+    // after a failed or unanswered upload; tried again at the next sync) and the key pins are (not offline). Only an
+    // unlock that made the signing identity grandfathers, and only the vaults this browser already had in its offline
+    // copy from an earlier session (M1): the shares from before, unsigned, stay usable without consent. The other
+    // shared vaults wait for consent and may be accepted here (by the key shown), like with a lost trust memory: an
+    // identity that exists with no key pins anywhere grandfathers nothing (remembered in `missing`).
+    if (mode === "sync" && keep && !pinsOffline && ident.known && features?.has("signed_sharing") && (pins?.grandfathered ?? null) === null) {
+      const sealedIds = rows.flatMap((r) => (typeof r.id === "string" && r.key_kind === "sealed" ? [r.id] : []));
+      if (!created && loaded === "null" && memory.pinsSeq === 0) {
+        memory.missing = sealedIds;
+        delete memory.missingWhy;
+      } else if (created) {
+        const unseen = sealedIds.filter((v) => !before.has(v));
+        if (unseen.length) {
+          memory.missing = unseen;
+          memory.missingWhy = "device";
+        }
+      }
+      pins = core.pinsGrandfather(
+        pins,
+        rows.flatMap((r) => (typeof r.id === "string" && before.has(r.id) ? [r.id] : [])),
+        created,
+      );
+    }
+    if (ident.known) delete memory.pendingIdentity;
+    const missing = new Set(memory.missing ?? []);
+    const now = Math.floor(Date.now() / 1000);
+    // Observed removals (cross-client review): an accepted shared vault this browser used, gone from a verified sync,
+    // is tombstoned with its remembered roster version, so a server can't bring it back later without a newer signed
+    // member list and the user's consent.
+    if (mode === "sync" && keep && !pinsOffline && !paused && synced && currentId === id) {
+      const present = new Set(rows.map((r) => r.id));
+      for (const old of synced.vaults) {
+        if (typeof old.id !== "string" || old.key_kind !== "sealed" || present.has(old.id)) continue;
+        const was = verdicts.get(old.id);
+        if (!was || was.row !== rowStamp(old as SignedVaultRow) || (was.trust.state !== "ok" && was.trust.state !== "unsigned")) continue;
+        try {
+          pins = core.pinsLeave(pins, old.id, rosterVersion(memory.rosters[old.id] ?? "") ?? 0, now);
+        } catch (e) {
+          log.debug("Remembering a removed shared vault failed:", coreCode(e));
+        }
+      }
+    }
+    const startDigest = await pinsDigest(pins);
+    const rosters = { ...memory.rosters };
+    const signed = new Set(memory.signed);
+    const results = new Map<string, { row: SignedVaultRow; trust: Trust }>();
+    for (const row of rows) {
+      if (typeof row.id !== "string" || typeof row.wrapped_key !== "string" || typeof row.key_kind !== "string") continue;
+      if (mode === "open") {
+        const kept = stored?.[row.id];
+        const ctx = { pins: startDigest, remembered: rosters[row.id] ?? null, seenSigned: signed.has(row.id), paused, me: meHash };
+        if (kept && typeof kept.stamp === "string" && kept.trust && kept.stamp === (await contextStamp(row, ctx))) {
+          results.set(row.id, { row, trust: kept.trust });
+          continue;
+        }
+      }
+      const epoch = whole(row.key_epoch);
+      let r: VaultCheck;
+      if (epoch === null || (row.key_kind === "sealed" && paused)) {
+        r = { trust: refusedUnopened(epoch === null ? "missing_epoch" : "paused"), pins, roster: null, signed: false };
+      } else if (row.key_kind === "sealed" && pinsOffline) {
+        // The key pins couldn't be had on a browser without its own: shared vaults wait for the next sync.
+        r = { trust: { state: "refused", reason: CHECK_LATER_TEXT, why: "key pins not fetched" }, pins, roster: null, signed: false };
+      } else {
+        let key: core.VaultKey;
+        try {
+          key = acct.openVaultKey(row.id, row.wrapped_key, row.key_kind, epoch, core.pinsLegacyWrapAllowed(pins, row.id));
+        } catch {
+          continue; // a key this account can't open: the vault stays hidden anyway
+        }
+        try {
+          r = await checkVault({
+            row,
+            key,
+            me,
+            pins,
+            remembered: rosters[row.id] ?? null,
+            seenSigned: signed.has(row.id),
+            paused,
+            fetchRosters: (after) => fetchRosters(id, row.id, after),
+            now,
+            ...(accepting.has(row.id) ? { accept: accepting.get(row.id) } : {}),
+            ...(missing.has(row.id) ? { memoryMissing: true } : {}),
+          });
+        } finally {
+          key.free();
+        }
+      }
+      if (stale()) return;
+      if (r.trust.state === "refused") log.warn(`A shared vault failed its check and isn't used (${r.trust.why}).`);
+      pins = r.pins;
+      if (r.roster !== null) rosters[row.id] = r.roster;
+      if (r.signed) signed.add(row.id);
+      results.set(row.id, { row, trust: r.trust });
+    }
+    memory.rosters = rosters;
+    memory.signed = [...signed];
+    // The lost-memory (or new-browser) state lasts while a vault it covers still waits for the user.
+    const stillMissing = [...missing].filter((v) => results.get(v)?.trust.state === "waiting");
+    if (stillMissing.length) {
+      memory.missing = stillMissing;
+      warnings.push(memory.missingWhy === "device" ? NEW_DEVICE_TEXT : MEMORY_MISSING_TEXT);
+    } else {
+      delete memory.missing;
+      delete memory.missingWhy;
+    }
+    if (keep && !pinsOffline) {
+      const changedPins = JSON.stringify(pins) !== loaded;
+      if (changedPins) memory.pinsDirty = true;
+      if (pins && memory.pinsDirty && mode === "sync") pins = await writeKeyPins(acct, id, memory, pins);
+      if (stale()) return;
+      // The browser's sealed copy follows whenever the pins or their version changed (sealing isn't deterministic).
+      if (pins && (changedPins || memory.pinsSeq !== seqBefore || memory.pinsSealed === null)) {
+        try {
+          memory.pinsSealed = acct.sealKeyPins(pins, memory.pinsSeq);
+        } catch (e) {
+          log.warn("Keeping the known keys failed:", coreCode(e));
+        }
+      }
+      if (JSON.stringify(memory) !== unchanged) memory = await saveMemory(acct, place, memory, basis);
+    }
+    if (stale()) return;
+    // Stamps with the state the verdicts now rest on (an offline open compares them before reusing a verdict).
+    const digest = await pinsDigest(pins);
+    const next = new Map<string, StoredVerdict>();
+    for (const [vaultId, { row, trust }] of results) {
+      const ctx = { pins: digest, remembered: rosters[vaultId] ?? null, seenSigned: signed.has(vaultId), paused, me: meHash };
+      next.set(vaultId, { row: rowStamp(row), stamp: await contextStamp(row, ctx), trust });
+    }
+    if (stale()) return;
+    const signedServer = !!features?.has("signed_sharing") || invitations.some((i) => i.share !== undefined);
+    invitationChecks = signedServer ? invitations.map((i) => checkInvitation(i, me, pins, paused)) : [];
+    sharingOn = true;
+    sharingPaused = paused;
+    keyPins = pins;
+    verdicts = next;
+    sharingWarnings = warnings;
+    vaultsUrl = server ? `${server.replace(/\/+$/, "")}/settings/vaults` : "";
+  } catch (e) {
+    // Unexpected (storage, the core, pins the server lists but didn't give): the verdicts stay as they were, so a
+    // vault without one stays closed.
+    log.warn("Checking shared vaults failed:", e);
+    if (!stale()) sharingOn = true;
+  }
+}
+
+/** The loaded account's verdict for a vault (undefined: none, or checks are off for the account). */
+function trustOf(vaultId: string): Trust | undefined {
+  return sharingOn ? verdicts.get(vaultId)?.trust : undefined;
+}
+
+/** How a signer shows in the popup (the display rule: pinned email first; "Verified" only with a pinned email). */
+const signerOut = (s: SignerView): VaultSigner => ({
+  email: s.email,
+  pinned: s.pinned,
+  ...(s.listedAs ? { listedAs: s.listedAs } : {}),
+  deleted: s.deleted,
+  fingerprint: s.fingerprint,
+  verified: s.verified && s.pinned,
+});
+
+/** Signed sharing as the popup's notice shows it; null when there is nothing to say. */
+export function sharingNotice(): SharingNotice | null {
+  if (!sharingOn) return null;
+  const live = new Set((synced?.vaults ?? []).map((v) => v.id));
+  const refused: SharingNotice["refused"] = [];
+  const waiting: SharingNotice["waiting"] = [];
+  for (const [vaultId, v] of verdicts) {
+    if (!live.has(vaultId)) continue;
+    const t = v.trust;
+    if (t.state === "refused") {
+      const c = t.changed;
+      refused.push({
+        vaultId,
+        reason: t.reason,
+        ...(c ? { changed: { kind: c.kind, userId: c.userId, email: c.email, fingerprint: c.fingerprint, newEmail: c.newEmail } } : {}),
+      });
+    } else if (t.state === "waiting") {
+      waiting.push({
+        vaultId,
+        name: t.name,
+        text: t.replaced ? replacedText(t.name) : waitingText(t.name),
+        ...(t.signer ? { signer: signerOut(t.signer) } : {}),
+        acceptable: t.acceptable,
+        token: t.token,
+        replaced: t.replaced,
+        ...(t.acceptable ? (t.signer ? {} : { note: UNSIGNED_LABEL }) : { note: WAITING_UNSIGNED_TEXT }),
+      });
+    }
+  }
+  const invitations = invitationChecks.flatMap((c) => {
+    const text = invitationText(c);
+    return text ? [{ vaultId: c.vaultId, text }] : [];
+  });
+  if (!refused.length && !waiting.length && !sharingWarnings.length && !invitations.length) return null;
+  const key = JSON.stringify([refused.map((r) => [r.vaultId, r.reason]), waiting.map((w) => [w.vaultId, w.token]), sharingWarnings, invitations.map((i) => [i.vaultId, i.text])]);
+  return { refused, waiting, warnings: sharingWarnings, invitations, key, ...(vaultsUrl ? { vaultsUrl } : {}) };
+}
+
+/** This account's signing identity, as Settings shows it. */
+export function sharingIdentity(): SharingIdentity {
+  return { fingerprint: signing && !sharingPaused ? signing.fingerprint() : null, paused: sharingPaused };
+}
+
+/** A vault's label and signer for the popup: "Not yet signed", or who signed its share. */
+export function vaultTrust(vaultId: string): { vaultLabel?: string; signer?: VaultSigner } {
+  const t = trustOf(vaultId);
+  if (t?.state === "unsigned") return { vaultLabel: UNSIGNED_LABEL };
+  if (t?.state !== "ok" || !t.signer) return {};
+  const s = t.signer;
+  // L6: an email that isn't the pinned one is the server's claim, also in the label of a deleted signer's vault.
+  return { ...(s.deleted ? { vaultLabel: signedByLabel(s.email, true, s.pinned) } : {}), signer: signerOut(s) };
+}
+
+/**
+ * "Trust the new key": the user compared the new fingerprint of `userId` (whose pinned keys changed) with them. Only
+ * the identity the popup showed (`fingerprint`) is pinned, as verified, with the email pinned before (in this browser's
+ * copy, written to the server at the sync that follows), and the vaults it signed are checked again.
+ */
+export async function trustNewKey(userId: string, fingerprint: string): Promise<void> {
+  await syncIdle();
+  const acct = account;
+  const id = currentId;
+  if (!acct || !id || !synced) throw lockedError();
+  let changed: ChangedKey | undefined;
+  for (const v of verdicts.values()) {
+    const c = v.trust.state === "refused" ? v.trust.changed : undefined;
+    if (c?.kind === "changed" && c.userId === userId && c.fingerprint === fingerprint) changed = c;
+  }
+  if (!changed) throw new Error("Their keys changed again, or there's nothing to trust any more. Compare the fingerprint shown now.");
+  const c = changed;
+  const server = (await local.account(id)).data?.server ?? "";
+  if (account !== acct || currentId !== id) throw lockedError();
+  await updateStoredPins(acct, { server, userId: meOf(acct) }, (pins) => core.pinSet(pins, c.identity, c.email || c.newEmail, true, Math.floor(Date.now() / 1000)));
+  await sync();
+}
+
+/**
+ * Accept a shared vault the server added to this account without the account ever accepting it (it waits for consent):
+ * only exactly what the popup showed (`token` = signed-sharing.ts `consentToken`: key id and epoch, signer identity,
+ * roster, role; review L1). The next check pins its key, its signer and its roster (ARCHITECTURE "Vault admission",
+ * consent), after every check of the row passed again, and only if that row still has the same token: a row the
+ * server changed meanwhile keeps waiting, with what it is now.
+ */
+export async function acceptSharedVault(vaultId: string, token: string): Promise<void> {
+  await syncIdle();
+  if (!account || !currentId) throw lockedError();
+  const t = trustOf(vaultId);
+  if (t?.state !== "waiting" || !t.acceptable || !token || t.token !== token) throw new Error("This vault changed. Check what the popup shows now.");
+  accepting.set(vaultId, token);
+  try {
+    await sync();
+  } finally {
+    accepting.delete(vaultId);
+  }
+  const after = trustOf(vaultId);
+  if (after?.state === "waiting" && after.token !== token) throw new Error("This vault changed just now, so it wasn't accepted. Check what the popup shows now.");
+  if (after?.state !== "ok" && after?.state !== "unsigned") throw new Error("PassAuth couldn't accept this vault. Check what the popup shows now.");
 }
 
 /** Called whenever the loaded account's vault was opened or changed (live-sync.ts keeps its socket up then). */
@@ -983,7 +1741,7 @@ function persist(id: string): Promise<void> {
   const gen = generation;
   const p = storing.then(async () => {
     if (gen !== generation || currentId !== id || !synced) return;
-    await syncCache.set(id, toStored(synced));
+    await syncCache.set(id, sharingOn ? { ...toStored(synced), trust: Object.fromEntries(verdicts) } : toStored(synced));
   });
   storing = p.catch(() => {});
   return p;
@@ -1021,6 +1779,12 @@ function materialize(snap: Snapshot) {
   for (const v of snap.vaults) {
     // What the core takes as text must be text (serverText): a row that isn't stays closed, like a key it can't open.
     if (typeof v.id !== "string" || typeof v.wrapped_key !== "string" || typeof v.key_kind !== "string") continue;
+    // Signed sharing: only a vault whose current row passed its check (or is a share from before) is opened at all.
+    if (sharingOn) {
+      const verdict = verdicts.get(v.id);
+      const state = verdict?.row === rowStamp(v) ? verdict.trust.state : null;
+      if (state !== "ok" && state !== "unsigned") continue;
+    }
     const old = previous.get(v.id);
     const from = openedFrom.get(v.id);
     let key: core.VaultKey;
@@ -1031,7 +1795,9 @@ function materialize(snap: Snapshot) {
       if (from.meta === v.meta) name = old.name;
     } else {
       try {
-        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind);
+        // Account wraps open with the row's key epoch; a v1 wrap only where the account's pins allow it.
+        const legacyOk = sharingOn ? core.pinsLegacyWrapAllowed(keyPins, v.id) : true;
+        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, Number.isSafeInteger(v.key_epoch) && (v.key_epoch as number) >= 0 ? (v.key_epoch as number) : 0, legacyOk);
       } catch {
         continue; // vault key unavailable (replaced): its items stay hidden
       }
@@ -1211,6 +1977,7 @@ export function subtitleOf(i: Item): string {
 export function summarize(e: Entry): ItemSummary {
   const i = e.item;
   const host = siteHost(i);
+  const { vaultLabel } = vaultTrust(e.vaultId);
   return {
     id: e.id,
     name: i.name || "Untitled",
@@ -1226,6 +1993,7 @@ export function summarize(e: Entry): ItemSummary {
     vaultName: vaultName(e.vaultId),
     vaultId: e.vaultId,
     shared: !isPersonal(e),
+    ...(vaultLabel ? { vaultLabel } : {}),
     username: i.login?.username ?? "",
     websites: (i.login?.urls ?? []).map((u) => u.url).filter(Boolean),
     tags: i.tags ?? [],
