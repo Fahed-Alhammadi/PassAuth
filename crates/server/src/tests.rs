@@ -21,6 +21,25 @@ mod attachments;
 mod device_login;
 mod emergency;
 mod hardening;
+mod signing;
+
+/// Undoes migration 14 (signed sharing), for tests that go back to an older schema.
+const UNDO_MIGRATION_14: &[&str] = &[
+    "DROP TABLE vault_rosters",
+    "ALTER TABLE vaults DROP COLUMN member_roster",
+    "ALTER TABLE vaults DROP COLUMN member_roster_seq",
+    "ALTER TABLE vault_members DROP COLUMN share_signature",
+    "ALTER TABLE vault_members DROP COLUMN share_signer",
+    "ALTER TABLE vault_members DROP COLUMN share_signer_identity",
+    "ALTER TABLE users DROP COLUMN signing_key",
+    "ALTER TABLE users DROP COLUMN identity_signature",
+    "ALTER TABLE users DROP COLUMN x25519_signature",
+    "ALTER TABLE users DROP COLUMN wrapped_signing_key",
+    "ALTER TABLE users DROP COLUMN identity_at",
+    "ALTER TABLE users DROP COLUMN key_pins",
+    "ALTER TABLE users DROP COLUMN key_pins_seq",
+    "DELETE FROM schema_version WHERE version = 14",
+];
 
 fn fast_kdf() -> KdfParams {
     KdfParams {
@@ -293,7 +312,7 @@ async fn items_sync_and_trash() {
         data: row["data"].as_str().unwrap().into(),
     };
     let wk = sync["vaults"][0]["wrapped_key"].as_str().unwrap();
-    let vk = c.unlocked.open_vault_key(&c.vault_id, wk).unwrap();
+    let vk = c.unlocked.open_vault_key(&c.vault_id, 0, wk, true).unwrap();
     assert_eq!(back.decrypt(&vk).unwrap(), item);
 
     let stale = row["revision"].as_i64().unwrap() - 1;
@@ -2412,6 +2431,7 @@ async fn config_lists_the_api_version_and_features() {
             "policies",
             "forget_device",
             "emergency_vault_keys",
+            "signed_sharing",
             "breach_check",
             "item_history",
             "sends",
@@ -4231,10 +4251,13 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
             "id",
             "key_epoch",
             "key_kind",
+            "member_roster",
+            "member_roster_seq",
             "meta",
             "role",
             "rotation_pending",
             "seq",
+            "share",
             "wrapped_key"
         ]
     );
@@ -4253,7 +4276,14 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
     );
     assert_eq!(
         keys(&full["user"]),
-        ["email", "email_verified", "id", "name"]
+        [
+            "email",
+            "email_verified",
+            "id",
+            "identity",
+            "key_pins_seq",
+            "name"
+        ]
     );
 }
 
@@ -5432,7 +5462,11 @@ async fn an_invited_vault_stays_out_of_sync_until_accepted() {
     .await;
     assert_eq!(
         inv["invited_by"],
-        json!({ "id": a, "email": "inv-a@example.com", "name": "Test", "public_key": found["public_key"] })
+        json!({
+            "id": a, "email": "inv-a@example.com", "name": "Test",
+            "public_key": found["public_key"], "signing_key": null, "identity_signature": null,
+            "x25519_signature": null,
+        })
     );
     assert!(inv["invited_at"].is_i64());
     let poll = ok(&app, Method::GET, "/api/sync/revision", &tb, json!(null)).await;
@@ -6090,7 +6124,7 @@ async fn event_pages_go_back_in_time_and_show_only_ones_own_addresses() {
         (
             &json!({ "id": a, "email": "ev-a@example.com", "name": "Test" }),
             &json!({ "id": b, "email": "ev-b@example.com" }),
-            &json!({ "role": "write" })
+            &json!({ "role": "write", "signed": false })
         )
     );
     assert_eq!(

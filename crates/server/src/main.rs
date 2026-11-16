@@ -18,6 +18,7 @@ mod policies;
 mod privileges;
 mod sends;
 mod settings;
+mod signing;
 mod state;
 mod twofactor;
 mod vault;
@@ -584,6 +585,7 @@ const FEATURES: &[&str] = &[
     "policies",
     "forget_device",
     "emergency_vault_keys",
+    "signed_sharing",
 ];
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {

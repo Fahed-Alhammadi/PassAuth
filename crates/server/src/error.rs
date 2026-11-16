@@ -89,6 +89,27 @@ pub mod code {
     /// (`min_free_disk_mb`); nothing new is stored until space is freed. Reading,
     /// syncing and deleting still work.
     pub const INSUFFICIENT_STORAGE: &str = "insufficient_storage";
+    /// 400: a signature (share, member roster or identity) doesn't verify against the
+    /// keys the server has for its signer.
+    pub const BAD_SIGNATURE: &str = "bad_signature";
+    /// 400: signing (a share or a member roster) needs the caller's signing identity
+    /// first (`PUT /account/identity`).
+    pub const SIGNING_IDENTITY_REQUIRED: &str = "signing_identity_required";
+    /// 409: the account already has another signing identity (it is set once).
+    pub const IDENTITY_EXISTS: &str = "identity_exists";
+    /// 409: the key pins changed since the app read them (`PUT /account/key-pins`
+    /// with a stale `seq`).
+    pub const KEY_PINS_CHANGED: &str = "key_pins_changed";
+    /// 409: the vault's member roster changed since the app read it (a roster whose
+    /// `version` isn't the stored one + 1).
+    pub const MEMBER_ROSTER_CHANGED: &str = "member_roster_changed";
+    /// 409: the member roster sent doesn't list exactly the vault's members after the
+    /// change (user ids, roles, identities) or not its key epoch.
+    pub const MEMBERS_CHANGED: &str = "members_changed";
+    /// 403: signed sharing: a member roster that doesn't follow the vault's stored one
+    /// (signed by someone who may not make the change, or the hierarchy broken: only
+    /// the owner changes the owner entry and admins).
+    pub const ROSTER_UNAUTHORIZED: &str = "roster_unauthorized";
 }
 
 #[derive(Debug, thiserror::Error)]

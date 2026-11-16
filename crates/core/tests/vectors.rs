@@ -4,9 +4,467 @@
 //! builds, or a vectors.json that is out of date with the code, fails here). Every client runs
 //! the same file through its own bindings (extension, iOS and macOS AutoFill, Android).
 
+use std::collections::BTreeMap;
+
+use passauth_core::crypto::{KeyPair, SymmetricKey};
 use passauth_core::device_login;
+use passauth_core::item::{b64, unb64};
+use passauth_core::keys::UnlockedAccount;
+use passauth_core::sharing::{
+    self, EpochPin, IdentityRecord, KeyPins, PublicIdentity, RosterMemberInput, SignedRoster,
+    SigningIdentity, VaultObservation,
+};
 use passauth_core::site::{self, PasskeyLogin, SaveCandidate, SavePlan, UrlMatch};
 use serde_json::{Value, json};
+
+fn code(e: passauth_core::Error) -> String {
+    e.code().map_or_else(|| e.to_string(), str::to_owned)
+}
+
+fn outcome<T: serde::Serialize>(r: passauth_core::Result<T>) -> Value {
+    match r {
+        Ok(v) => json!({ "expected": v }),
+        Err(e) => json!({ "error": code(e) }),
+    }
+}
+
+/// The `signedSharing` section: every identity, signature, roster, review and check, natively.
+#[test]
+fn signed_sharing_vectors() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let s = &v["signedSharing"];
+    let mut accounts: BTreeMap<String, UnlockedAccount> = BTreeMap::new();
+    let mut signers: BTreeMap<String, SigningIdentity> = BTreeMap::new();
+    for a in s["accounts"].as_array().unwrap() {
+        let name = a["name"].as_str().unwrap().to_owned();
+        let bytes = unb64(a["sessionBytes"].as_str().unwrap()).unwrap();
+        let account = UnlockedAccount {
+            account_id: a["id"].as_str().unwrap().into(),
+            account_key: SymmetricKey::from_slice(&bytes[..32]).unwrap(),
+            keypair: KeyPair::from_secret_bytes(bytes[32..].try_into().unwrap()),
+        };
+        let record: IdentityRecord = serde_json::from_value(a["record"].clone()).unwrap();
+        signers.insert(
+            name.clone(),
+            account.open_signing_identity(&record).unwrap(),
+        );
+        accounts.insert(name, account);
+    }
+    let who = |name: &Value, legacy: bool| -> PublicIdentity {
+        let name = name.as_str().unwrap();
+        if legacy {
+            accounts[name].legacy_identity()
+        } else {
+            signers[name].public()
+        }
+    };
+    let vault_id = s["vault"]["id"].as_str().unwrap();
+    let alice = &accounts["alice"];
+    let wrap = |name: &str| s["vault"][name].as_str().unwrap();
+    let vault_key = alice
+        .open_vault_key(vault_id, 0, wrap("wrappedKeyV2"), false)
+        .unwrap();
+    let second_key = alice
+        .open_vault_key(vault_id, 0, wrap("secondKeyV2"), false)
+        .unwrap();
+    for c in s["openings"].as_array().unwrap() {
+        let got = outcome(
+            alice
+                .open_vault_key(
+                    vault_id,
+                    c["keyEpoch"].as_u64().unwrap(),
+                    wrap(c["wrap"].as_str().unwrap()),
+                    c["legacyAllowed"].as_bool().unwrap(),
+                )
+                .and_then(|k| sharing::key_id(&k, vault_id)),
+        );
+        assert_eq!(got, only_result(c), "opening {c}");
+    }
+    assert_eq!(
+        json!(sharing::key_id(&vault_key, vault_id).unwrap()),
+        s["keyIds"]["first"]
+    );
+    assert_eq!(
+        json!(sharing::key_id(&second_key, vault_id).unwrap()),
+        s["keyIds"]["second"]
+    );
+
+    // XEdDSA: the fixed-nonce vector computed independently by the generator.
+    let x = &s["xeddsa"];
+    let secret: [u8; 32] = unhex(x["secret"].as_str().unwrap()).try_into().unwrap();
+    let z: [u8; 64] = unhex(x["z"].as_str().unwrap()).try_into().unwrap();
+    let message = x["message"].as_str().unwrap().as_bytes();
+    let sig = sharing::xeddsa_sign(&secret, message, &z);
+    assert_eq!(json!(b64(&sig)), x["signature"]);
+    let u: [u8; 32] = unb64(x["publicKey"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        json!(b64(&sharing::xeddsa_public_key(&u).unwrap())),
+        x["edwardsKey"]
+    );
+    assert!(sharing::xeddsa_verify(&u, message, &sig));
+
+    for i in s["identities"].as_array().unwrap() {
+        let name = &i["name"];
+        let public = who(name, false);
+        assert_eq!(json!(public), i["publicIdentity"], "{name}");
+        assert_eq!(json!(who(name, true)), i["legacyIdentity"], "{name}");
+        let v = public.verify().unwrap();
+        assert_eq!(json!(v.hash_b64()), i["hash"]);
+        assert_eq!(json!(b64(&v.legacy_hash())), i["legacyHash"]);
+        assert_eq!(json!(v.fingerprint()), i["fingerprint"]);
+        let pk: [u8; 32] = v.public_key();
+        assert_eq!(
+            json!(b64(&sharing::xeddsa_public_key(&pk).unwrap())),
+            i["edwardsKey"]
+        );
+        let ed: [u8; 32] = unb64(public.signing_key.as_deref().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            json!(hex(&sharing::identity_statement(v.user_id(), &pk, &ed))),
+            i["statement"]
+        );
+    }
+    let forged: PublicIdentity = serde_json::from_value(s["forgedUpgrade"].clone()).unwrap();
+    assert!(matches!(
+        forged.verify(),
+        Err(passauth_core::Error::BadSignature)
+    ));
+    for c in s["shares"].as_array().unwrap() {
+        let to = who(&c["recipient"], c["recipientLegacy"].as_bool().unwrap());
+        let signer = &signers[c["signer"].as_str().unwrap()];
+        let (role, epoch, sealed) = (
+            c["role"].as_str().unwrap(),
+            c["keyEpoch"].as_u64().unwrap(),
+            c["sealedKey"].as_str().unwrap(),
+        );
+        let sig = signer
+            .sign_share(vault_id, &to, role, epoch, sealed)
+            .unwrap();
+        assert_eq!(json!(sig), c["signature"]);
+        let bytes = sharing::share_statement(&sharing::ShareStatement {
+            vault_id,
+            recipient_id: &to.user_id,
+            recipient_identity: &to.verify().unwrap().hash(),
+            role,
+            key_epoch: epoch,
+            sealed_key: sealed,
+            signer_id: signer.user_id(),
+        })
+        .unwrap();
+        assert_eq!(json!(hex(&bytes)), c["statement"]);
+        sharing::verify_share(vault_id, &to, role, epoch, sealed, &signer.public(), &sig).unwrap();
+    }
+
+    // Rosters: valid ones signed again through review + sign; rogue ones only parsed.
+    let mut rosters: BTreeMap<String, String> = BTreeMap::new();
+    let pins: KeyPins = serde_json::from_value(s["keyPins"].clone()).unwrap();
+    let inputs = |members: &Value| -> Vec<RosterMemberInput> {
+        members
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| RosterMemberInput {
+                identity: who(&m[0], m[2].as_bool().unwrap_or(false)),
+                role: m[1].as_str().unwrap().into(),
+                email: m[3].as_str().map(str::to_owned),
+            })
+            .collect()
+    };
+    for r in s["rosters"].as_array().unwrap() {
+        let name = r["name"].as_str().unwrap().to_owned();
+        let parsed = SignedRoster::parse(r["json"].as_str().unwrap()).unwrap();
+        let signer = &signers[r["signer"].as_str().unwrap()];
+        assert_eq!(
+            json!(hex(&parsed.signed_bytes(&signer.identity_hash()).unwrap())),
+            r["signedBytes"]
+        );
+        assert_eq!(
+            json!(parsed.hash().unwrap()),
+            r["hash"],
+            "roster {name}'s hash"
+        );
+        if !r["rogue"].as_bool().unwrap() {
+            let previous = r["previous"]
+                .as_str()
+                .map(|p| SignedRoster::parse(&rosters[p]).unwrap());
+            let members = inputs(&r["members"]);
+            let review = sharing::roster_review(
+                vault_id,
+                previous.as_ref(),
+                &signer.public(),
+                &members,
+                &KeyPins::default(),
+            )
+            .unwrap();
+            let signed = signer
+                .sign_roster(
+                    &vault_key,
+                    vault_id,
+                    previous.as_ref(),
+                    r["keyEpoch"].as_u64().unwrap(),
+                    &members,
+                    &review.digest,
+                )
+                .unwrap();
+            assert_eq!(json!(signed.to_json().unwrap()), r["json"], "{name}");
+            assert!(signed.commits_to(vault_id, &vault_key).unwrap());
+        }
+        rosters.insert(name, r["json"].as_str().unwrap().into());
+    }
+    let parse = |name: &Value| -> Option<SignedRoster> {
+        name.as_str()
+            .map(|n| SignedRoster::parse(&rosters[n]).unwrap())
+    };
+    let name_of = |json: &str| -> String {
+        rosters
+            .iter()
+            .find(|(_, j)| j.as_str() == json)
+            .map_or_else(|| json.to_owned(), |(n, _)| n.clone())
+    };
+    for c in s["commitments"].as_array().unwrap() {
+        assert_eq!(
+            json!(
+                sharing::key_commitment(&vault_key, vault_id, c["keyEpoch"].as_u64().unwrap())
+                    .unwrap()
+            ),
+            c["commitment"]
+        );
+    }
+    for c in s["chains"].as_array().unwrap() {
+        let newer: Vec<SignedRoster> = c["newer"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| parse(n).unwrap())
+            .collect();
+        let got = outcome(
+            sharing::verify_roster_chain(
+                c["vault"].as_str().unwrap(),
+                parse(&c["trusted"]).as_ref(),
+                &newer,
+                &parse(&c["latest"]).unwrap(),
+            )
+            .and_then(|r| r.to_json())
+            .map(|j| name_of(&j)),
+        );
+        assert_eq!(got, only_result(c), "chain {c}");
+    }
+    for c in s["heads"].as_array().unwrap() {
+        let got = outcome(sharing::roster_head(
+            c["vault"].as_str().unwrap(),
+            parse(&c["remembered"]).as_ref(),
+            parse(&c["latest"]).as_ref(),
+        ));
+        assert_eq!(got, only_result(c), "head {c}");
+    }
+    let plain = |members: &Value| -> Vec<RosterMemberInput> {
+        members
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| RosterMemberInput {
+                identity: who(&m[0], m[2].as_bool().unwrap_or(false)),
+                role: m[1].as_str().unwrap().into(),
+                email: None,
+            })
+            .collect()
+    };
+    for c in s["memberDiffs"].as_array().unwrap() {
+        let roster = parse(&c["roster"]).unwrap();
+        assert_eq!(
+            json!(sharing::compare_members(&roster, &plain(&c["members"]))),
+            c["expected"]
+        );
+    }
+    for c in s["rosterRoles"].as_array().unwrap() {
+        let roster = parse(&c["roster"]).unwrap();
+        let id = who(&c["identity"][0], c["identity"][1].as_bool().unwrap());
+        assert_eq!(json!(roster.member_role(&id).unwrap()), c["member"], "{c}");
+        assert_eq!(json!(roster.signer_role(&id).unwrap()), c["signer"], "{c}");
+    }
+
+    // Key pins.
+    let rebuilt = KeyPins::default()
+        .set(&who(&json!("bob"), false), "bob@example.com", true, 1000)
+        .unwrap()
+        .set(
+            &who(&json!("carol"), true),
+            "carol@example.com",
+            false,
+            1000,
+        )
+        .unwrap();
+    assert_eq!(rebuilt, pins);
+    for c in s["pinChecks"].as_array().unwrap() {
+        let id = who(&c["identity"][0], c["identity"][1].as_bool().unwrap());
+        assert_eq!(
+            json!(pins.check_identity(&id, c["email"].as_str()).unwrap()),
+            c["expected"]
+        );
+    }
+    for c in s["emails"].as_array().unwrap() {
+        assert_eq!(
+            json!(sharing::normalize_email(c["email"].as_str().unwrap())),
+            c["expected"]
+        );
+    }
+    for c in s["reviews"].as_array().unwrap() {
+        let previous = parse(&c["previous"]);
+        let signer = &signers[c["signer"].as_str().unwrap()];
+        let review = sharing::roster_review(
+            vault_id,
+            previous.as_ref(),
+            &signer.public(),
+            &inputs(&c["members"]),
+            &pins,
+        )
+        .unwrap();
+        assert_eq!(json!(review), c["expected"], "review {}", c["name"]);
+    }
+
+    // Key epochs.
+    for c in s["epochChecks"].as_array().unwrap() {
+        let pinned: Option<EpochPin> = serde_json::from_value(c["pinned"].clone()).unwrap();
+        let current: EpochPin = serde_json::from_value(c["current"].clone()).unwrap();
+        assert_eq!(
+            json!(sharing::epoch_check(pinned.as_ref(), &current)),
+            c["expected"]
+        );
+    }
+    let ep = |k: &SymmetricKey, e: u64| EpochPin::of(k, vault_id, e).unwrap();
+    let with_epoch = pins
+        .set_epoch(vault_id, &ep(&vault_key, 1), Some(2))
+        .unwrap();
+    assert_eq!(json!(with_epoch), s["keyPinsWithEpoch"]);
+    for c in s["pinsEpochChecks"].as_array().unwrap() {
+        let current: EpochPin = serde_json::from_value(c["current"].clone()).unwrap();
+        assert_eq!(
+            json!(with_epoch.check_epoch(vault_id, &current, c["rosterVersion"].as_u64())),
+            c["expected"]
+        );
+    }
+    let raised = with_epoch
+        .set_epoch(vault_id, &ep(&second_key, 2), Some(3))
+        .unwrap();
+    assert_eq!(json!(raised), s["keyPinsRaised"]);
+    let other_device = KeyPins::default()
+        .set_epoch(vault_id, &ep(&second_key, 2), None)
+        .unwrap();
+    assert_eq!(
+        json!(with_epoch.merge(&other_device).unwrap().epochs),
+        s["mergedEpochs"]
+    );
+    let left = raised.leave(vault_id, 3, 2000).unwrap();
+    assert_eq!(json!(left), s["keyPinsLeft"]);
+    let grandfathered = pins.grandfather(&[vault_id.to_owned()], true).unwrap();
+    assert_eq!(json!(grandfathered), s["keyPinsGrandfathered"]);
+    let withheld = pins.grandfather(&[vault_id.to_owned()], false).unwrap();
+    assert_eq!(json!(withheld), s["keyPinsWithheld"]);
+    let unsigned = grandfathered
+        .set_epoch(vault_id, &ep(&vault_key, 1), None)
+        .unwrap();
+    assert_eq!(json!(unsigned), s["keyPinsUnsigned"]);
+    let roster_hash = |name: &str| {
+        s["rosters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["hash"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let roster_max = with_epoch
+        .observe(&VaultObservation {
+            vault_id: vault_id.to_owned(),
+            key_kind: "sealed".into(),
+            key: Some(ep(&vault_key, 1)),
+            roster_version: Some(3),
+            roster_hash: Some(roster_hash("v3")),
+            signed_share: true,
+            paused: false,
+        })
+        .unwrap()
+        .pins;
+    assert_eq!(json!(roster_max), s["keyPinsRosterMax"]);
+    let sets: BTreeMap<&str, KeyPins> = [
+        ("none", KeyPins::default()),
+        ("withEpoch", with_epoch),
+        ("raised", raised),
+        ("left", left),
+        ("grandfathered", grandfathered),
+        ("withheld", withheld),
+        ("unsigned", unsigned),
+        ("rosterMax", roster_max),
+    ]
+    .into_iter()
+    .collect();
+    for c in s["admissions"].as_array().unwrap() {
+        let o: VaultObservation = serde_json::from_value(c["observation"].clone()).unwrap();
+        assert_eq!(
+            json!(sets[c["pins"].as_str().unwrap()].admit(&o).unwrap()),
+            c["expected"],
+            "admission {c}"
+        );
+    }
+    let mut step = sets["grandfathered"].clone();
+    for c in s["observations"].as_array().unwrap() {
+        let o: VaultObservation = serde_json::from_value(c["observation"].clone()).unwrap();
+        let observed = step.observe(&o).unwrap();
+        assert_eq!(json!(observed), c["expected"], "observation {c}");
+        step = observed.pins;
+    }
+    for c in s["legacyWraps"].as_array().unwrap() {
+        assert_eq!(
+            json!(sets[c["pins"].as_str().unwrap()].legacy_wrap_allowed(vault_id)),
+            c["expected"]
+        );
+    }
+    let own = &s["ownIdentity"];
+    assert_eq!(json!(b64(&signers["alice"].identity_hash())), own["hash"]);
+    let with_own = pins
+        .set_own_identity(own["hash"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(json!(with_own), own["pins"]);
+    for c in own["checks"].as_array().unwrap() {
+        let p = if c["pins"] == "withOwn" {
+            &with_own
+        } else {
+            &sets["none"]
+        };
+        assert_eq!(
+            json!(p.check_own_identity(c["listed"].as_str())),
+            c["expected"]
+        );
+    }
+}
+
+/// A case's `expected` or `error`, as [`outcome`] gives it.
+fn only_result(c: &Value) -> Value {
+    let mut want = c.clone();
+    want.as_object_mut()
+        .unwrap()
+        .retain(|k, _| k == "expected" || k == "error");
+    want
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or_default()

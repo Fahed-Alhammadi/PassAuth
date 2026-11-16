@@ -917,7 +917,10 @@ async fn migration_12_retires_the_ids_of_vaults_deleted_before_it() {
         json!({ "access_salt": "sendpw-v1$salt-salt", "access_verifier": "right-verifier-1" }),
     )
     .await;
-    // Back to the schema of migration 11 (13 undone first).
+    // Back to the schema of migration 11 (14 and 13 undone first).
+    for &stmt in UNDO_MIGRATION_14 {
+        sqlx::query(stmt).execute(&state.db).await.unwrap();
+    }
     for stmt in [
         "DROP TABLE emergency_vault_keys",
         "ALTER TABLE emergency_access DROP COLUMN key_version",

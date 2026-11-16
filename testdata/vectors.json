@@ -4235,5 +4235,2958 @@
         "trench wavy rippling sufferer certified"
       ]
     }
-  ]
+  ],
+  "signedSharing": {
+    "accounts": [
+      {
+        "name": "alice",
+        "id": "00000000-0000-4000-8000-00000000000a",
+        "sessionBytes": "EREREREREREREREREREREREREREREREREREREREREREhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhIQ",
+        "record": {
+          "signing_key": "4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI",
+          "identity_signature": "c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag",
+          "x25519_signature": "fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw",
+          "wrapped_signing_key": "ARPdisrbaBMgaNRUUtOFI9l7vCzcYTWSmaHoxeTCvYIJsnQJ790EbSBQObZ8wbckwYkwTVL7uYzIvgNLU1VjH0uQA2aUFJLLpw"
+        }
+      },
+      {
+        "name": "bob",
+        "id": "00000000-0000-4000-8000-00000000000b",
+        "sessionBytes": "EhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg",
+        "record": {
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity_signature": "IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA",
+          "x25519_signature": "KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA",
+          "wrapped_signing_key": "AVWC5aaBvBAtJMX-IGX-UJSwvdHMK7qbpXHcoQJdvm-kyFmyr4UUhygrzA6YWDSXYnwoN-Bnl3m0Arl-ksPTcj4S3W9CnCQk5A"
+        }
+      },
+      {
+        "name": "carol",
+        "id": "00000000-0000-4000-8000-00000000000c",
+        "sessionBytes": "ExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw",
+        "record": {
+          "signing_key": "1PpeglDfMKuLluHLdSxb0Ezx8RDTQJlbjyDmBJTtl9g",
+          "identity_signature": "TgUz8_dAPImnkIPOTdDSXEn0j9fO-uFu-LV1G3AVSo_D_mf6MZBvVdRrH2fhet0YBPDz8Ewbi5OXjje5iolECw",
+          "x25519_signature": "uXNmm8P0CLBFKkWNOfjP4atSXHm0hLNS2tjMe4TGtVKl4Jg_lAa3IMFfktgOk7KACt5AV5bp2wA5IjveLcz2Ag",
+          "wrapped_signing_key": "AX5aGLDq_vX9HN-6Oe3dovOzkNVYQEbxpdCZnd-OX6xGKU2waluSD2y4oktYEkf9K3ChY27R-UVXnuTuCYG3U-tub3zLVj2Eug"
+        }
+      },
+      {
+        "name": "dave",
+        "id": "00000000-0000-4000-8000-00000000000d",
+        "sessionBytes": "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJA",
+        "record": {
+          "signing_key": "wYHJl2-xdKtNPgkwuBDJjYb-NM9sCzLOKmm-zJSVQ04",
+          "identity_signature": "cf4dNwGfkH9JSY6Dlgw4bxsKJPdHROMe7qwNOeZXWq3YbkAGOxFuJHEAqHvWW13HCA61a5HPcJJzwvBs9UYOCw",
+          "x25519_signature": "1hE-TqLL76zolykglRv1QxFE2fHaGpCPH86e1g0ChTWHdFm0o1qqESTIH6Za7qhStMYpvgcq-3_R8HrM3QzfBw",
+          "wrapped_signing_key": "AWfph2KYDZSTwYU3xmL4F08Ao6AEAqueEW_QmnCGssL-0dWQ6pN4HKYiXwQKTj6BdXLHJqVR_xHShVngGaEAaFj24LR38xZRPw"
+        }
+      }
+    ],
+    "vault": {
+      "id": "00000000-0000-4000-8000-0000000000f1",
+      "wrappedKey": "AQs7dp_yGNEe99qnqxT8pN9dvgEhLyJRcWpUjBluEUFH3CVdXlMfITiXXpNTEV9fHjEmGhQSNerShBKEOFIPOXbaDLwqbR7P-w",
+      "wrappedKeyV2": "AgGEHEeD0CxCeYFbiwpGGMuD15WYUlW8GNg-UDzS6GdMGzViWqsNjOwuh6T9SG1pkNu3bsOlJM4_f70RBmdL3HWZ_T1R-q7kAPw",
+      "secondKeyV2": "AgG2cM-1aLbVhPZ9Rfx-0DwxTd37hQH1r8skoQWRYUhd7cWkzQMuotYHJgOZDq02HV613pwUBjuyUkmjtFT50AX8Udh9guNIdYg"
+    },
+    "openings": [
+      {
+        "wrap": "wrappedKey",
+        "keyEpoch": 0,
+        "legacyAllowed": false,
+        "error": "decrypt_failed"
+      },
+      {
+        "wrap": "wrappedKey",
+        "keyEpoch": 0,
+        "legacyAllowed": true,
+        "expected": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y"
+      },
+      {
+        "wrap": "wrappedKey",
+        "keyEpoch": 5,
+        "legacyAllowed": true,
+        "expected": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y"
+      },
+      {
+        "wrap": "wrappedKeyV2",
+        "keyEpoch": 0,
+        "legacyAllowed": false,
+        "expected": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y"
+      },
+      {
+        "wrap": "wrappedKeyV2",
+        "keyEpoch": 1,
+        "legacyAllowed": true,
+        "error": "decrypt_failed"
+      }
+    ],
+    "keyIds": {
+      "first": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+      "second": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM"
+    },
+    "xeddsa": {
+      "message": "passauth XEdDSA test vector",
+      "z": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "secret": "2323232323232323232323232323232323232323232323232323232323232323",
+      "publicKey": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+      "edwardsKey": "ekrUJdO5VLmOAnFOYkfkM9E8kMUOGFH9GWqGZMSm83w",
+      "signature": "8GocJGjmzEi6RIoWoq8hVTXbfTeCYJbEaRt_onaf4MLCYQ08gNfBQSaeeZCvLOcq3mQTSkItafPgqCZKVIwuAg"
+    },
+    "identities": [
+      {
+        "name": "alice",
+        "publicIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000a",
+          "public_key": "fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ",
+          "signing_key": "4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI",
+          "identity_signature": "c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag",
+          "x25519_signature": "fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw"
+        },
+        "legacyIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000a",
+          "public_key": "fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ",
+          "signing_key": null,
+          "identity_signature": null,
+          "x25519_signature": null
+        },
+        "statement": "0000001470617373617574682f6964656e746974792f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030303061000000207d34a4815fa6b982535e60af3bd9b49556816080f1641ff81d2b7c8ae8268a4400000020e3fb1ee3d7ea81f13ba55352ab54a321f285ca10edede956adbdac07792e2812",
+        "edwardsKey": "Bzm6maQRbte3Dttf62UW8l2joPSc5pJ4AL_PrwmAaWM",
+        "hash": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+        "legacyHash": "BT8WezuGVDMY7A2n6Vs2irMvNv0daXdjW4Sa7UqRf4c",
+        "fingerprint": "ZDS4-Y7VH-OK7K-7VCF-PSW6-O6F6"
+      },
+      {
+        "name": "bob",
+        "publicIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity_signature": "IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA",
+          "x25519_signature": "KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA"
+        },
+        "legacyIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": null,
+          "identity_signature": null,
+          "x25519_signature": null
+        },
+        "statement": "0000001470617373617574682f6964656e746974792f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030303062000000200faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f2000000020f019d21c21b18dab04b6677abf9f5c47f80873d8d83430870563b741eee3c24e",
+        "edwardsKey": "s6sZdmB4CAi71ZFZkQqALfxmN1OTVwe_hZABdwSG5wA",
+        "hash": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+        "legacyHash": "qGqsydIg9Rz9keK_lj3ZPczJ7jkTdWQ-s-D8UpXZ7gU",
+        "fingerprint": "OUMJ-YO34-ETUZ-XJWL-267S-5LAX"
+      },
+      {
+        "name": "carol",
+        "publicIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": "1PpeglDfMKuLluHLdSxb0Ezx8RDTQJlbjyDmBJTtl9g",
+          "identity_signature": "TgUz8_dAPImnkIPOTdDSXEn0j9fO-uFu-LV1G3AVSo_D_mf6MZBvVdRrH2fhet0YBPDz8Ewbi5OXjje5iolECw",
+          "x25519_signature": "uXNmm8P0CLBFKkWNOfjP4atSXHm0hLNS2tjMe4TGtVKl4Jg_lAa3IMFfktgOk7KACt5AV5bp2wA5IjveLcz2Ag"
+        },
+        "legacyIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity_signature": null,
+          "x25519_signature": null
+        },
+        "statement": "0000001470617373617574682f6964656e746974792f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030303063000000209a4503a98ab10fe8d354c9c42cbd0c9d7944f52e7d14d8ea59775e7dc9e3bf4b00000020d4fa5e8250df30ab8b96e1cb752c5bd04cf1f110d340995b8f20e60494ed97d8",
+        "edwardsKey": "ekrUJdO5VLmOAnFOYkfkM9E8kMUOGFH9GWqGZMSm83w",
+        "hash": "UnMxvXy1w_VbrGxDQDFaoJ0kcmUZPj9Vj1niTaQ3kvA",
+        "legacyHash": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+        "fingerprint": "KJZT-DPL4-WXB7-KW5M-NRBU-AMK2"
+      },
+      {
+        "name": "dave",
+        "publicIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000d",
+          "public_key": "BLzS4NAPLM5f6PHGwvvsXAf6VuOqXIilaJl12Is_zgU",
+          "signing_key": "wYHJl2-xdKtNPgkwuBDJjYb-NM9sCzLOKmm-zJSVQ04",
+          "identity_signature": "cf4dNwGfkH9JSY6Dlgw4bxsKJPdHROMe7qwNOeZXWq3YbkAGOxFuJHEAqHvWW13HCA61a5HPcJJzwvBs9UYOCw",
+          "x25519_signature": "1hE-TqLL76zolykglRv1QxFE2fHaGpCPH86e1g0ChTWHdFm0o1qqESTIH6Za7qhStMYpvgcq-3_R8HrM3QzfBw"
+        },
+        "legacyIdentity": {
+          "user_id": "00000000-0000-4000-8000-00000000000d",
+          "public_key": "BLzS4NAPLM5f6PHGwvvsXAf6VuOqXIilaJl12Is_zgU",
+          "signing_key": null,
+          "identity_signature": null,
+          "x25519_signature": null
+        },
+        "statement": "0000001470617373617574682f6964656e746974792f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303030640000002004bcd2e0d00f2cce5fe8f1c6c2fbec5c07fa56e3aa5c88a5689975d88b3fce0500000020c181c9976fb174ab4d3e0930b810c98d86fe34cf6c0b32ce2a69becc9495434e",
+        "edwardsKey": "TP143i0bNQIfO6IuyThIGXuq63rTG5KhmG3XnIO74Q0",
+        "hash": "wcSXIOPxiSKiu7Ou5FYHrjuMHZVJLSSDRcQKfutR38E",
+        "legacyHash": "TiTOUytO8Zo6PXZ41yKdgr66FpPTmKtA3AL25gJUrbI",
+        "fingerprint": "YHCJ-OIHD-6GES-FIV3-WOXO-IVQH"
+      }
+    ],
+    "forgedUpgrade": {
+      "user_id": "00000000-0000-4000-8000-00000000000b",
+      "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+      "signing_key": "1PpeglDfMKuLluHLdSxb0Ezx8RDTQJlbjyDmBJTtl9g",
+      "identity_signature": "TgUz8_dAPImnkIPOTdDSXEn0j9fO-uFu-LV1G3AVSo_D_mf6MZBvVdRrH2fhet0YBPDz8Ewbi5OXjje5iolECw",
+      "x25519_signature": "uXNmm8P0CLBFKkWNOfjP4atSXHm0hLNS2tjMe4TGtVKl4Jg_lAa3IMFfktgOk7KACt5AV5bp2wA5IjveLcz2Ag"
+    },
+    "shares": [
+      {
+        "signer": "alice",
+        "recipient": "bob",
+        "recipientLegacy": false,
+        "vaultId": "00000000-0000-4000-8000-0000000000f1",
+        "role": "write",
+        "keyEpoch": 0,
+        "sealedKey": "c2VhbGVkLWtleS0x",
+        "statement": "0000001170617373617574682f73686172652f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be000000057772697465000000080000000000000000000000206d838e6cfe724da23c965e535b249c136487f2deb2d47a126947f255ef6222090000002430303030303030302d303030302d343030302d383030302d303030303030303030303061",
+        "signature": "4zBl3dd2HcS1QdlLwgCzHgj8cXfBtRDGe_F-BTwWptOlLY-VjAY_0ZRQitwK2H35lVVI1hE9R-XRSZnZ7i3kDA"
+      },
+      {
+        "signer": "alice",
+        "recipient": "bob",
+        "recipientLegacy": true,
+        "vaultId": "00000000-0000-4000-8000-0000000000f1",
+        "role": "read",
+        "keyEpoch": 0,
+        "sealedKey": "c2VhbGVkLWtleS0x",
+        "statement": "0000001170617373617574682f73686172652f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000002430303030303030302d303030302d343030302d383030302d30303030303030303030306200000020a86aacc9d220f51cfd91e2bf963dd93dccc9ee391375643eb3e0fc5295d9ee050000000472656164000000080000000000000000000000206d838e6cfe724da23c965e535b249c136487f2deb2d47a126947f255ef6222090000002430303030303030302d303030302d343030302d383030302d303030303030303030303061",
+        "signature": "FZMd9s6yOoSXL9HeYdNK9AFqoOaFtBsNYNgcMN41WtEDP9OlK7y-lC084QMK8-WFg2axq-RzK2GNZ6kGaZsZDg"
+      },
+      {
+        "signer": "alice",
+        "recipient": "carol",
+        "recipientLegacy": false,
+        "vaultId": "00000000-0000-4000-8000-0000000000f1",
+        "role": "admin",
+        "keyEpoch": 7,
+        "sealedKey": "AQID",
+        "statement": "0000001170617373617574682f73686172652f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020527331bd7cb5c3f55bac6c4340315aa09d247265193e3f558f59e24da43792f00000000561646d696e00000008000000000000000700000020b70035bb783a47bf61ac3ff70b005308e167ee984365690e638c1481b8ca29360000002430303030303030302d303030302d343030302d383030302d303030303030303030303061",
+        "signature": "hTHE_zDjwe7pcrOHGY3IoEqKsABxBb3hYR-etkUSTAXd7cLDIlUyrQf82rf4KO7yacsNJI8KRRaCPvIggwdoBA"
+      },
+      {
+        "signer": "bob",
+        "recipient": "carol",
+        "recipientLegacy": true,
+        "vaultId": "00000000-0000-4000-8000-0000000000f1",
+        "role": "read",
+        "keyEpoch": 9007199254740991,
+        "sealedKey": "",
+        "statement": "0000001170617373617574682f73686172652f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde3000000047265616400000008001fffffffffffff00000020e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8550000002430303030303030302d303030302d343030302d383030302d303030303030303030303062",
+        "signature": "BwqWkU_mvacrShmHaXrOjHa7LhH5QeIqXvz9r2T69w12imlBOptKtl6VARbheIJRwB9zXoLgKSw1pLRwdJpYDA"
+      },
+      {
+        "signer": "bob",
+        "recipient": "alice",
+        "recipientLegacy": false,
+        "vaultId": "00000000-0000-4000-8000-0000000000f1",
+        "role": "owner",
+        "keyEpoch": 1,
+        "sealedKey": "c2VhbGVkLWtleS0y",
+        "statement": "0000001170617373617574682f73686172652f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000000800000000000000010000002090f36834d9c096f8c1dcf5506a3e804440e4a0432e688d6c71ebd96c33ba697f0000002430303030303030302d303030302d343030302d383030302d303030303030303030303062",
+        "signature": "OfpD4m9dxCFrgVJRan5urOZi58IsX1RTW2u5-4B2l5JkIJFQtk2U0rlBK3p8fz0DTmaGtUNqba_IFIQo8Iq9CA"
+      }
+    ],
+    "rosters": [
+      {
+        "name": "v1",
+        "signer": "alice",
+        "previous": null,
+        "version": 1,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "write"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ]
+        ],
+        "rogue": false,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":1,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"write\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM\",\"role\":\"read\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"public_key\":\"fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ\",\"signing_key\":\"4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI\",\"identity_signature\":\"c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag\",\"x25519_signature\":\"fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw\"},\"signature\":\"ej6HrhuqSOca2HHE1vDvIZPFNYM9-p7Owe6JqtfuwCe0RRoQVxo9C1y8aWpDhFg9AGbE1-63FlJAsMzVjl9YAA\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000001000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000030000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000577726974650000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde300000004726561640000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2",
+        "hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI"
+      },
+      {
+        "name": "v2",
+        "signer": "alice",
+        "previous": "v1",
+        "version": 2,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ]
+        ],
+        "rogue": false,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":2,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM\",\"role\":\"read\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"public_key\":\"fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ\",\"signing_key\":\"4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI\",\"identity_signature\":\"c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag\",\"x25519_signature\":\"fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw\"},\"signature\":\"e7wMq-nJE1dd6YhigImdwJ_EO2LSc7Zo6RU4z555UkUSQ6OqGVQyqQMVfFVT2wG0biNtSbWr4eMnrHN8FGdmDA\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000002000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000030000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde300000004726561640000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2",
+        "hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+      },
+      {
+        "name": "v3",
+        "signer": "bob",
+        "previous": "v2",
+        "version": 3,
+        "keyEpoch": 1,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ]
+        ],
+        "rogue": false,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":3,\"key_epoch\":1,\"key_commitment\":\"5QkVi7uiP8F5WUri9uAtVYiipW14cocLuEhGqKRwAyw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"xno-p1pKTtXDCeQkTuP6IVAqBQ6Mor-lLDwwmefd5tvChLN-ezxgnSvkwdun2sJF8YoDRm9FrzyImxm2DXjvBg\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d30303030303030303030663100000008000000000000000300000008000000000000000100000020e509158bbba23fc179594ae2f6e02d5588a2a56d7872870bb84846a8a470032c0000000800000000000000020000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "2h_H1zAVUcQYyLco7hr6gDGsW4mjIn7oNQeYKH7Oc-E"
+      },
+      {
+        "name": "v3-dave",
+        "signer": "bob",
+        "previous": "v2",
+        "version": 3,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            false,
+            true
+          ],
+          [
+            "dave",
+            "write"
+          ]
+        ],
+        "rogue": false,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":3,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM\",\"role\":\"read\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000d\",\"identity\":\"wcSXIOPxiSKiu7Ou5FYHrjuMHZVJLSSDRcQKfutR38E\",\"role\":\"write\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"40e30SejE3DurQk6vAl3UP22xjMobcvU9I31m4-QS1nVd4MFnFP0jCjdwkbK72XQERe-WtPaDoBmTfsCcrJ7Bw\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000003000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000040000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde300000004726561640000002430303030303030302d303030302d343030302d383030302d30303030303030303030306400000020c1c49720e3f18922a2bbb3aee45607ae3b8c1d95492d248345c40a7eeb51dfc10000000577726974650000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI"
+      },
+      {
+        "name": "v4-upgrade",
+        "signer": "alice",
+        "previous": "v3-dave",
+        "version": 4,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read"
+          ],
+          [
+            "dave",
+            "write"
+          ]
+        ],
+        "rogue": false,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"UnMxvXy1w_VbrGxDQDFaoJ0kcmUZPj9Vj1niTaQ3kvA\",\"role\":\"read\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000d\",\"identity\":\"wcSXIOPxiSKiu7Ou5FYHrjuMHZVJLSSDRcQKfutR38E\",\"role\":\"write\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"public_key\":\"fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ\",\"signing_key\":\"4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI\",\"identity_signature\":\"c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag\",\"x25519_signature\":\"fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw\"},\"signature\":\"1W96mhYubUEhIG6JdM2aXNJNCGoynKdl_ufg_20dcHEjKUXxuP-6Ulns1lCT5vK8VBhPDtpHGZcLPCeN9c6fCg\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000004000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000040000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020527331bd7cb5c3f55bac6c4340315aa09d247265193e3f558f59e24da43792f000000004726561640000002430303030303030302d303030302d343030302d383030302d30303030303030303030306400000020c1c49720e3f18922a2bbb3aee45607ae3b8c1d95492d248345c40a7eeb51dfc10000000577726974650000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2",
+        "hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0"
+      },
+      {
+        "name": "v2-by-bob",
+        "signer": "bob",
+        "previous": null,
+        "version": 2,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":2,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM\",\"role\":\"read\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"iGMdFue8oBUWBE6W5TpiCF-ANxUHyjMnOcqBX09ufQ7ROXoOKCqNfHzbjwxMWfC3g0jzzBDA8IDVhcaf-PkKBw\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000002000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000030000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde300000004726561640000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "jiSfWvTbRgWW7Lq5JOXgrdW5l6HgvUw-COOeNm7ZuEM"
+      },
+      {
+        "name": "v2-other",
+        "signer": "alice",
+        "previous": null,
+        "version": 2,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":2,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"public_key\":\"fTSkgV-muYJTXmCvO9m0lVaBYIDxZB_4HSt8iugmikQ\",\"signing_key\":\"4_se49fqgfE7pVNSq1SjIfKFyhDt7elWrb2sB3kuKBI\",\"identity_signature\":\"c-nWl4l8aKoBU0Ia3puW08ER0YvZQdamOFdRWu80e6rqvhWVCEKpBBJ3XRYQb62PmQLTbqZW7eThBpbc00F8Ag\",\"x25519_signature\":\"fp4q4qE6_iuQC3SNfJnHl0XV4n2RkL0KltJ6SjHJcL4eA4VERe_VBroSxnZ1t0SpxouVUj8AaRsmllcI-UE_Bw\"},\"signature\":\"nNj2AdKtTKzDXXyMLtQsVj_VvhpJ-tweTfnHLvW0-ynDgfZ8bGfq1FmbeX2aIh-Kepc2zxuCBX4aolbgKHN-Ag\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000002000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000020000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2",
+        "hash": "t46BIqdp0BsqRo6AO3BaU-l9VW0Kgl-qbywKv8FEdWg"
+      },
+      {
+        "name": "v4-new-owner",
+        "signer": "bob",
+        "previous": null,
+        "version": 4,
+        "keyEpoch": 1,
+        "members": [
+          [
+            "bob",
+            "owner"
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":1,\"key_commitment\":\"5QkVi7uiP8F5WUri9uAtVYiipW14cocLuEhGqKRwAyw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"owner\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"QVQgj3-fYon-vg_4RDY2hOOG4m1lILw_TrRLNCLMUj-GGJVua8NtVEYu22JM7cMGLWZLPhCf7Am8XFvjPGZ8Bw\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d30303030303030303030663100000008000000000000000400000008000000000000000100000020e509158bbba23fc179594ae2f6e02d5588a2a56d7872870bb84846a8a470032c0000000800000000000000010000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "0w1nSLhZON0ynkvS-OWIaDjT98NiSuGW_WCSbzdolUc"
+      },
+      {
+        "name": "v4-older-epoch",
+        "signer": "bob",
+        "previous": null,
+        "version": 4,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"-TMslgnTO_Hy-fFK_O3B6QZortD-dNQdPk1H9gnx6bpzIvm18NeTFkUIrv1rM3k-ig__Zbx6_L7GaD05ZBLVBQ\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000004000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000020000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "yHsRDRLLB0vOhoAtJraEetXS-o1ZIQrz2bfthR1PPkY"
+      },
+      {
+        "name": "v4-bob-adds-admin",
+        "signer": "bob",
+        "previous": null,
+        "version": 4,
+        "keyEpoch": 1,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "admin"
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":1,\"key_commitment\":\"5QkVi7uiP8F5WUri9uAtVYiipW14cocLuEhGqKRwAyw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"UnMxvXy1w_VbrGxDQDFaoJ0kcmUZPj9Vj1niTaQ3kvA\",\"role\":\"admin\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"nM06IFk71BDd8EFU-yY3LZCeDTqn8awvugajhhJt9JhTzX9DpY7a8afa8yFVZUQHXDFIqmy8a-eVmg1LIRlzCA\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d30303030303030303030663100000008000000000000000400000008000000000000000100000020e509158bbba23fc179594ae2f6e02d5588a2a56d7872870bb84846a8a470032c0000000800000000000000030000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020527331bd7cb5c3f55bac6c4340315aa09d247265193e3f558f59e24da43792f00000000561646d696e0000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "uy_znoW9YnLfWot8IfgtC7pPIWgGIyIpnIoHh9RejNY"
+      },
+      {
+        "name": "v4-bob-swaps-dave",
+        "signer": "bob",
+        "previous": null,
+        "version": 4,
+        "keyEpoch": 0,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ],
+          "fake-dave"
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":0,\"key_commitment\":\"hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000c\",\"identity\":\"Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM\",\"role\":\"read\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000d\",\"identity\":\"ZezxlUE_FK6-FlWARzs-p5PLdRjvSMDp1eAjIrPak-w\",\"role\":\"write\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"_mV0kStfxApdCJCjhMQj_hl6C9l4g7ZCy60IY13ceMdbTY6QDFqHTAmzeS2COSWOCB9gXCk-gvDDVRYNCA3dDg\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d303030303030303030306631000000080000000000000004000000080000000000000000000000208513de95f93f682dd4724dd091dd0b20ad04a68ae6f7974fe80b5fc82375cadc0000000800000000000000040000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d30303030303030303030306300000020130a2daf0ec84e33e1e485ef393f6c41cb222f83116f29fc38fa212d5e9ddde300000004726561640000002430303030303030302d303030302d343030302d383030302d3030303030303030303030640000002065ecf195413f14aebe165580473b3ea793cb7518ef48c0e9d5e02322b3da93ec0000000577726974650000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "J6XN7LdqgaeZgcDjR95UHh8rJ32NiadT6xrZY3Q0rF4"
+      },
+      {
+        "name": "v4-new-key-same-epoch",
+        "signer": "bob",
+        "previous": null,
+        "version": 4,
+        "keyEpoch": 1,
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ]
+        ],
+        "rogue": true,
+        "json": "{\"format\":1,\"vault_id\":\"00000000-0000-4000-8000-0000000000f1\",\"version\":4,\"key_epoch\":1,\"key_commitment\":\"MJJch0Uzcd-5KMyqaKbnxhMLBKex4q4foj7nwcVrNpM\",\"members\":[{\"user_id\":\"00000000-0000-4000-8000-00000000000a\",\"identity\":\"yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI\",\"role\":\"owner\"},{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"identity\":\"dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4\",\"role\":\"admin\"}],\"signer\":{\"user_id\":\"00000000-0000-4000-8000-00000000000b\",\"public_key\":\"D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA\",\"signing_key\":\"8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4\",\"identity_signature\":\"IIqZ2m--CWOr98EXA-jTPlsNYb8EwQXP6wCC9yFFwxFzVd35KdcCaJwL4e76Z2172nk130NPXnvm3uCbeN2PCA\",\"x25519_signature\":\"KSnEsftdqL39YN9Xsj3WuJhsnDHlJjOutSjpJo9Hcvy-sV2A0IkRpJJBMmzBM6dsSuItDgg2uM2aM6X0MgTPBA\"},\"signature\":\"NTYsJLucC1zSyGeHrykuROBmCSeiRaqmiArzALx6OAio2dvJ4DkCRauELfkuiXVx8GbJaX7Tbv2hQCpXimgUAw\"}",
+        "signedBytes": "0000001970617373617574682f6d656d6265722d726f737465722f76310000002430303030303030302d303030302d343030302d383030302d3030303030303030303066310000000800000000000000040000000800000000000000010000002030925c87453371dfb928ccaa68a6e7c6130b04a7b1e2ae1fa23ee7c1c56b36930000000800000000000000020000002430303030303030302d303030302d343030302d383030302d30303030303030303030306100000020c8e5cc7ea772beafd4457cade778be943ec663feea0fd6ea6b5ce83a3a580de2000000056f776e65720000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be0000000561646d696e0000002430303030303030302d303030302d343030302d383030302d3030303030303030303030620000002075189c3b7c24e99ba6cbd7bf2eac17a0df6092a192ae2e4165662de8d076e1be",
+        "hash": "2stOukWLLwZdCj7PS0yIY4WEVfbNFeIZ5u1RvtU0i6A"
+      }
+    ],
+    "commitments": [
+      {
+        "keyEpoch": 0,
+        "commitment": "hRPelfk_aC3Uck3Qkd0LIK0Eporm95dP6AtfyCN1ytw"
+      },
+      {
+        "keyEpoch": 1,
+        "commitment": "5QkVi7uiP8F5WUri9uAtVYiipW14cocLuEhGqKRwAyw"
+      },
+      {
+        "keyEpoch": 2,
+        "commitment": "xYk56xeXlLXDcTXctHWV9qnxrdXXKG2y0zg3-uacs_I"
+      },
+      {
+        "keyEpoch": 9007199254740991,
+        "commitment": "yrGWpXz11CCcz0uE-7Z-RwnAe9LMLvP6jBckX5b2dqg"
+      }
+    ],
+    "chains": [
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": null,
+        "newer": [
+          "v1",
+          "v2",
+          "v3"
+        ],
+        "latest": "v3",
+        "expected": "v3"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v1",
+        "newer": [
+          "v2",
+          "v3"
+        ],
+        "latest": "v3",
+        "expected": "v3"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v3",
+        "newer": [],
+        "latest": "v3",
+        "expected": "v3"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": null,
+        "newer": [
+          "v2"
+        ],
+        "latest": "v2",
+        "error": "malformed data: the member roster chain starts at version 1"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v1",
+        "newer": [
+          "v3"
+        ],
+        "latest": "v3",
+        "error": "malformed data: a member roster version is missing"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v2",
+        "newer": [
+          "v1"
+        ],
+        "latest": "v1",
+        "error": "rollback"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v1",
+        "newer": [
+          "v2-by-bob"
+        ],
+        "latest": "v2-by-bob",
+        "error": "roster_unauthorized"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v2",
+        "newer": [
+          "v3",
+          "v4-new-owner"
+        ],
+        "latest": "v4-new-owner",
+        "error": "roster_unauthorized"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v2",
+        "newer": [
+          "v3",
+          "v4-older-epoch"
+        ],
+        "latest": "v4-older-epoch",
+        "error": "rollback"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": null,
+        "newer": [],
+        "latest": "v1",
+        "error": "malformed data: no member roster"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v2",
+        "newer": [
+          "v3-dave",
+          "v4-upgrade"
+        ],
+        "latest": "v4-upgrade",
+        "expected": "v4-upgrade"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v3",
+        "newer": [
+          "v4-bob-adds-admin"
+        ],
+        "latest": "v4-bob-adds-admin",
+        "error": "roster_unauthorized"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v3-dave",
+        "newer": [
+          "v4-bob-swaps-dave"
+        ],
+        "latest": "v4-bob-swaps-dave",
+        "error": "roster_unauthorized"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v3",
+        "newer": [
+          "v4-new-key-same-epoch"
+        ],
+        "latest": "v4-new-key-same-epoch",
+        "error": "malformed data: a member roster changed the key commitment without a new key epoch"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v1",
+        "newer": [
+          "v2"
+        ],
+        "latest": "v3",
+        "error": "malformed data: the member roster chain stops before the vault's roster"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": "v2",
+        "newer": [
+          "v3"
+        ],
+        "latest": "v3-dave",
+        "error": "roster_forked"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "trusted": null,
+        "newer": [
+          "v1",
+          "v2"
+        ],
+        "latest": "v2-other",
+        "error": "roster_forked"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f2",
+        "trusted": null,
+        "newer": [
+          "v1"
+        ],
+        "latest": "v1",
+        "error": "malformed data: member rosters of another vault"
+      }
+    ],
+    "heads": [
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": null,
+        "latest": null,
+        "expected": {
+          "status": "unsigned"
+        }
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": null,
+        "latest": "v2",
+        "expected": {
+          "status": "fetch",
+          "after": 0
+        }
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": "v1",
+        "latest": "v3",
+        "expected": {
+          "status": "fetch",
+          "after": 1
+        }
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": "v2",
+        "latest": "v2",
+        "expected": {
+          "status": "same"
+        }
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": "v2",
+        "latest": "v1",
+        "error": "rollback"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": "v2",
+        "latest": null,
+        "error": "rollback"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f1",
+        "remembered": "v2",
+        "latest": "v2-other",
+        "error": "roster_forked"
+      },
+      {
+        "vault": "00000000-0000-4000-8000-0000000000f2",
+        "remembered": "v2",
+        "latest": "v3",
+        "error": "malformed data: member rosters of another vault"
+      }
+    ],
+    "memberDiffs": [
+      {
+        "roster": "v2",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ]
+        ],
+        "expected": {
+          "unknown": [],
+          "identity_changed": [],
+          "role_changed": [],
+          "missing": []
+        }
+      },
+      {
+        "roster": "v2",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read"
+          ]
+        ],
+        "expected": {
+          "unknown": [],
+          "identity_changed": [],
+          "role_changed": [],
+          "missing": []
+        }
+      },
+      {
+        "roster": "v2",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin",
+            true
+          ],
+          [
+            "carol",
+            "write",
+            true
+          ]
+        ],
+        "expected": {
+          "unknown": [],
+          "identity_changed": [
+            "00000000-0000-4000-8000-00000000000b"
+          ],
+          "role_changed": [
+            "00000000-0000-4000-8000-00000000000c"
+          ],
+          "missing": []
+        }
+      },
+      {
+        "roster": "v2",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ]
+        ],
+        "expected": {
+          "unknown": [],
+          "identity_changed": [],
+          "role_changed": [],
+          "missing": [
+            "00000000-0000-4000-8000-00000000000c"
+          ]
+        }
+      }
+    ],
+    "rosterRoles": [
+      {
+        "roster": "v2",
+        "identity": [
+          "alice",
+          false
+        ],
+        "member": "owner",
+        "signer": "owner"
+      },
+      {
+        "roster": "v2",
+        "identity": [
+          "bob",
+          false
+        ],
+        "member": "admin",
+        "signer": "admin"
+      },
+      {
+        "roster": "v2",
+        "identity": [
+          "bob",
+          true
+        ],
+        "member": null,
+        "signer": null
+      },
+      {
+        "roster": "v2",
+        "identity": [
+          "carol",
+          true
+        ],
+        "member": "read",
+        "signer": null
+      },
+      {
+        "roster": "v2",
+        "identity": [
+          "carol",
+          false
+        ],
+        "member": "read",
+        "signer": null
+      },
+      {
+        "roster": "v3-dave",
+        "identity": [
+          "alice",
+          false
+        ],
+        "member": "owner",
+        "signer": "owner"
+      },
+      {
+        "roster": "v3-dave",
+        "identity": [
+          "bob",
+          false
+        ],
+        "member": "admin",
+        "signer": "admin"
+      },
+      {
+        "roster": "v3-dave",
+        "identity": [
+          "bob",
+          true
+        ],
+        "member": null,
+        "signer": null
+      },
+      {
+        "roster": "v3-dave",
+        "identity": [
+          "carol",
+          true
+        ],
+        "member": "read",
+        "signer": null
+      },
+      {
+        "roster": "v3-dave",
+        "identity": [
+          "carol",
+          false
+        ],
+        "member": "read",
+        "signer": null
+      },
+      {
+        "roster": "v4-upgrade",
+        "identity": [
+          "alice",
+          false
+        ],
+        "member": "owner",
+        "signer": "owner"
+      },
+      {
+        "roster": "v4-upgrade",
+        "identity": [
+          "bob",
+          false
+        ],
+        "member": "admin",
+        "signer": "admin"
+      },
+      {
+        "roster": "v4-upgrade",
+        "identity": [
+          "bob",
+          true
+        ],
+        "member": null,
+        "signer": null
+      },
+      {
+        "roster": "v4-upgrade",
+        "identity": [
+          "carol",
+          true
+        ],
+        "member": null,
+        "signer": null
+      },
+      {
+        "roster": "v4-upgrade",
+        "identity": [
+          "carol",
+          false
+        ],
+        "member": "read",
+        "signer": "read"
+      }
+    ],
+    "keyPins": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {},
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
+    "pinChecks": [
+      {
+        "identity": [
+          "alice",
+          false
+        ],
+        "email": null,
+        "expected": "new"
+      },
+      {
+        "identity": [
+          "bob",
+          false
+        ],
+        "email": null,
+        "expected": "match"
+      },
+      {
+        "identity": [
+          "bob",
+          true
+        ],
+        "email": null,
+        "expected": "changed"
+      },
+      {
+        "identity": [
+          "carol",
+          true
+        ],
+        "email": null,
+        "expected": "match"
+      },
+      {
+        "identity": [
+          "carol",
+          false
+        ],
+        "email": "carol@example.com",
+        "expected": "upgraded"
+      },
+      {
+        "identity": [
+          "dave",
+          false
+        ],
+        "email": "dave@example.com",
+        "expected": "new"
+      },
+      {
+        "identity": [
+          "dave",
+          false
+        ],
+        "email": " Bob@Example.COM",
+        "expected": "email_conflict"
+      },
+      {
+        "identity": [
+          "dave",
+          false
+        ],
+        "email": "ＢＯＢ@example.com",
+        "expected": "email_conflict"
+      },
+      {
+        "identity": [
+          "dave",
+          false
+        ],
+        "email": "bob@ｅｘａｍｐｌｅ.com",
+        "expected": "email_conflict"
+      }
+    ],
+    "reviews": [
+      {
+        "name": "first",
+        "previous": null,
+        "signer": "alice",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "write",
+            false,
+            "bob@new.example"
+          ],
+          [
+            "carol",
+            "read",
+            true,
+            "carol@example.com"
+          ]
+        ],
+        "expected": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "version": 1,
+          "first": true,
+          "blocked": false,
+          "members": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000a",
+              "role": "owner",
+              "identity": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+              "fingerprint": "ZDS4-Y7VH-OK7K-7VCF-PSW6-O6F6",
+              "is_self": true,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": null,
+              "listed_email": null,
+              "change": "added"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "role": "write",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "fingerprint": "OUMJ-YO34-ETUZ-XJWL-267S-5LAX",
+              "is_self": false,
+              "pin": "match",
+              "verified": true,
+              "pinned_email": "bob@example.com",
+              "listed_email": "bob@new.example",
+              "change": "added"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "role": "read",
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "fingerprint": "CMFC-3LYO-ZBHD-HYPE-QXXT-SP3M",
+              "is_self": false,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": "carol@example.com",
+              "listed_email": "carol@example.com",
+              "change": "added"
+            }
+          ],
+          "missing": [],
+          "digest": "I1_J72Dy-KRzBkmWiJ7d1LExnNuKk3KTUDayEevLL2E"
+        }
+      },
+      {
+        "name": "role change",
+        "previous": "v1",
+        "signer": "alice",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin",
+            false,
+            "bob@example.com"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ]
+        ],
+        "expected": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "version": 2,
+          "first": false,
+          "blocked": false,
+          "members": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000a",
+              "role": "owner",
+              "identity": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+              "fingerprint": "ZDS4-Y7VH-OK7K-7VCF-PSW6-O6F6",
+              "is_self": true,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": null,
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "role": "admin",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "fingerprint": "OUMJ-YO34-ETUZ-XJWL-267S-5LAX",
+              "is_self": false,
+              "pin": "match",
+              "verified": true,
+              "pinned_email": "bob@example.com",
+              "listed_email": "bob@example.com",
+              "change": "role_changed"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "role": "read",
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "fingerprint": "CMFC-3LYO-ZBHD-HYPE-QXXT-SP3M",
+              "is_self": false,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": "carol@example.com",
+              "listed_email": null,
+              "change": "same"
+            }
+          ],
+          "missing": [],
+          "digest": "UGxP1X-PnEu8Z4Ht_guRF9KPhh6sjBIFWXVX5fY95hk"
+        }
+      },
+      {
+        "name": "email conflict",
+        "previous": "v2",
+        "signer": "alice",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read",
+            true
+          ],
+          [
+            "dave",
+            "write",
+            false,
+            "BOB@example.com"
+          ]
+        ],
+        "expected": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "version": 3,
+          "first": false,
+          "blocked": true,
+          "members": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000a",
+              "role": "owner",
+              "identity": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+              "fingerprint": "ZDS4-Y7VH-OK7K-7VCF-PSW6-O6F6",
+              "is_self": true,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": null,
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "role": "admin",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "fingerprint": "OUMJ-YO34-ETUZ-XJWL-267S-5LAX",
+              "is_self": false,
+              "pin": "match",
+              "verified": true,
+              "pinned_email": "bob@example.com",
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "role": "read",
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "fingerprint": "CMFC-3LYO-ZBHD-HYPE-QXXT-SP3M",
+              "is_self": false,
+              "pin": "match",
+              "verified": false,
+              "pinned_email": "carol@example.com",
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000d",
+              "role": "write",
+              "identity": "wcSXIOPxiSKiu7Ou5FYHrjuMHZVJLSSDRcQKfutR38E",
+              "fingerprint": "YHCJ-OIHD-6GES-FIV3-WOXO-IVQH",
+              "is_self": false,
+              "pin": "email_conflict",
+              "verified": false,
+              "pinned_email": null,
+              "listed_email": "BOB@example.com",
+              "change": "added"
+            }
+          ],
+          "missing": [],
+          "digest": ""
+        }
+      },
+      {
+        "name": "admin keeps legacy",
+        "previous": "v2",
+        "signer": "bob",
+        "members": [
+          [
+            "alice",
+            "owner"
+          ],
+          [
+            "bob",
+            "admin"
+          ],
+          [
+            "carol",
+            "read"
+          ]
+        ],
+        "expected": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "version": 3,
+          "first": false,
+          "blocked": false,
+          "members": [
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000a",
+              "role": "owner",
+              "identity": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+              "fingerprint": "ZDS4-Y7VH-OK7K-7VCF-PSW6-O6F6",
+              "is_self": false,
+              "pin": "new",
+              "verified": false,
+              "pinned_email": null,
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000b",
+              "role": "admin",
+              "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+              "fingerprint": "OUMJ-YO34-ETUZ-XJWL-267S-5LAX",
+              "is_self": true,
+              "pin": "match",
+              "verified": true,
+              "pinned_email": null,
+              "listed_email": null,
+              "change": "same"
+            },
+            {
+              "user_id": "00000000-0000-4000-8000-00000000000c",
+              "role": "read",
+              "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+              "fingerprint": "KJZT-DPL4-WXB7-KW5M-NRBU-AMK2",
+              "is_self": false,
+              "pin": "upgraded",
+              "verified": false,
+              "pinned_email": "carol@example.com",
+              "listed_email": null,
+              "change": "same"
+            }
+          ],
+          "missing": [],
+          "digest": "UGxP1X-PnEu8Z4Ht_guRF9KPhh6sjBIFWXVX5fY95hk"
+        }
+      }
+    ],
+    "epochChecks": [
+      {
+        "pinned": null,
+        "current": {
+          "key_epoch": 0,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "new"
+      },
+      {
+        "pinned": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "same"
+      },
+      {
+        "pinned": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "newer"
+      },
+      {
+        "pinned": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "older"
+      },
+      {
+        "pinned": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 2,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "conflict"
+      },
+      {
+        "pinned": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 2,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "conflict"
+      },
+      {
+        "pinned": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [
+            "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y"
+          ],
+          "signed_since": null
+        },
+        "current": {
+          "key_epoch": 3,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "expected": "older"
+      }
+    ],
+    "keyPinsWithEpoch": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": 2,
+          "roster_version_max": 2
+        }
+      },
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
+    "pinsEpochChecks": [
+      {
+        "current": {
+          "key_epoch": 0,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": 2,
+        "expected": "older"
+      },
+      {
+        "current": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": 2,
+        "expected": "same"
+      },
+      {
+        "current": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": null,
+        "expected": "downgraded"
+      },
+      {
+        "current": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": 1,
+        "expected": "downgraded"
+      },
+      {
+        "current": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": 3,
+        "expected": "newer"
+      },
+      {
+        "current": {
+          "key_epoch": 2,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        },
+        "rosterVersion": 3,
+        "expected": "conflict"
+      }
+    ],
+    "keyPinsRaised": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 2,
+          "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+          "retired": [
+            "b7oV2a1UFfA_lB8x"
+          ],
+          "signed_since": 2,
+          "roster_version_max": 3
+        }
+      },
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
+    "mergedEpochs": {
+      "00000000-0000-4000-8000-0000000000f1": {
+        "key_epoch": 2,
+        "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+        "retired": [
+          "b7oV2a1UFfA_lB8x"
+        ],
+        "signed_since": 2,
+        "roster_version_max": 2
+      }
+    },
+    "keyPinsLeft": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {},
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "pin": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [
+              "b7oV2a1UFfA_lB8x"
+            ],
+            "signed_since": 2,
+            "roster_version_max": 3
+          },
+          "roster_version": 3,
+          "left_at": 2000
+        }
+      }
+    },
+    "keyPinsGrandfathered": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {},
+      "own_identity": null,
+      "grandfathered": [
+        "00000000-0000-4000-8000-0000000000f1"
+      ],
+      "left": {}
+    },
+    "keyPinsWithheld": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {},
+      "own_identity": null,
+      "grandfathered": [],
+      "left": {}
+    },
+    "keyPinsUnsigned": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null
+        }
+      },
+      "own_identity": null,
+      "grandfathered": [
+        "00000000-0000-4000-8000-0000000000f1"
+      ],
+      "left": {}
+    },
+    "keyPinsRosterMax": {
+      "version": 0,
+      "pins": [
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000b",
+          "email": "bob@example.com",
+          "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+          "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+          "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "verified": true,
+          "first_seen": 1000
+        },
+        {
+          "user_id": "00000000-0000-4000-8000-00000000000c",
+          "email": "carol@example.com",
+          "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+          "signing_key": null,
+          "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+          "verified": false,
+          "first_seen": 1000
+        }
+      ],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": 2,
+          "roster_version_max": 3,
+          "roster_hash": "2h_H1zAVUcQYyLco7hr6gDGsW4mjIn7oNQeYKH7Oc-E"
+        }
+      },
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
+    "admissions": [
+      {
+        "pins": "none",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "new",
+          "trust": "own",
+          "pin": true
+        }
+      },
+      {
+        "pins": "none",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": null,
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "missing_epoch"
+        }
+      },
+      {
+        "pins": "none",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": false
+        }
+      },
+      {
+        "pins": "none",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": false
+        }
+      },
+      {
+        "pins": "grandfathered",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "new",
+          "trust": "unsigned",
+          "pin": true
+        }
+      },
+      {
+        "pins": "grandfathered",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "grandfathered",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": false
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "newer",
+          "trust": "signed",
+          "pin": true
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "withEpoch",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "own",
+          "pin": false
+        }
+      },
+      {
+        "pins": "raised",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 3,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "older"
+        }
+      },
+      {
+        "pins": "raised",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "signed_share": true,
+          "paused": true
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "paused"
+        }
+      },
+      {
+        "pins": "raised",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "signed_share": false,
+          "paused": true
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "own",
+          "pin": false
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "left"
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": true,
+          "replaced": false
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 3,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "left"
+        }
+      },
+      {
+        "pins": "left",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "left"
+        }
+      },
+      {
+        "pins": "grandfathered",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 1,
+          "roster_hash": "BwLNxp1ylBjcUAs-EYLisGZaesSkbQk-7WvRpo1W8KI",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": false
+        }
+      },
+      {
+        "pins": "withheld",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 0,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": false
+        }
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "unsigned",
+          "pin": false
+        }
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": true
+        }
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "consent",
+          "rejoin": false,
+          "replaced": true
+        }
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "newer",
+          "trust": "signed",
+          "pin": true
+        }
+      },
+      {
+        "pins": "unsigned",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "newer",
+          "trust": "own",
+          "pin": true
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "roster_hash": "2h_H1zAVUcQYyLco7hr6gDGsW4mjIn7oNQeYKH7Oc-E",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": false
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "roster_hash": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "roster_forked"
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": false
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "downgraded"
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 4,
+          "roster_hash": "OcDW0PPKms9-YkB4fD2dmNNgxcGHt4G7L1Z3gNH_rr0",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "status": "ok",
+          "epoch": "same",
+          "trust": "signed",
+          "pin": true
+        }
+      },
+      {
+        "pins": "rosterMax",
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "account",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 3,
+          "roster_hash": "YEeEuG-bqyPdv0dqDRylh5A4CdQ3fV_aPBOZMnhbIvI",
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "status": "refused",
+          "reason": "roster_forked"
+        }
+      }
+    ],
+    "observations": [
+      {
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "admission": {
+            "status": "ok",
+            "epoch": "new",
+            "trust": "unsigned",
+            "pin": true
+          },
+          "pins": {
+            "version": 0,
+            "pins": [
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000b",
+                "email": "bob@example.com",
+                "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+                "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+                "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+                "verified": true,
+                "first_seen": 1000
+              },
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000c",
+                "email": "carol@example.com",
+                "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+                "signing_key": null,
+                "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+                "verified": false,
+                "first_seen": 1000
+              }
+            ],
+            "epochs": {
+              "00000000-0000-4000-8000-0000000000f1": {
+                "key_epoch": 1,
+                "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+                "retired": [],
+                "signed_since": null
+              }
+            },
+            "own_identity": null,
+            "grandfathered": [
+              "00000000-0000-4000-8000-0000000000f1"
+            ],
+            "left": {}
+          },
+          "changed": true
+        }
+      },
+      {
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "admission": {
+            "status": "ok",
+            "epoch": "same",
+            "trust": "signed",
+            "pin": true
+          },
+          "pins": {
+            "version": 0,
+            "pins": [
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000b",
+                "email": "bob@example.com",
+                "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+                "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+                "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+                "verified": true,
+                "first_seen": 1000
+              },
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000c",
+                "email": "carol@example.com",
+                "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+                "signing_key": null,
+                "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+                "verified": false,
+                "first_seen": 1000
+              }
+            ],
+            "epochs": {
+              "00000000-0000-4000-8000-0000000000f1": {
+                "key_epoch": 1,
+                "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+                "retired": [],
+                "signed_since": 2,
+                "roster_version_max": 2,
+                "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+              }
+            },
+            "own_identity": null,
+            "grandfathered": [
+              "00000000-0000-4000-8000-0000000000f1"
+            ],
+            "left": {}
+          },
+          "changed": true
+        }
+      },
+      {
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": 2,
+          "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54",
+          "signed_share": true,
+          "paused": false
+        },
+        "expected": {
+          "admission": {
+            "status": "ok",
+            "epoch": "same",
+            "trust": "signed",
+            "pin": false
+          },
+          "pins": {
+            "version": 0,
+            "pins": [
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000b",
+                "email": "bob@example.com",
+                "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+                "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+                "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+                "verified": true,
+                "first_seen": 1000
+              },
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000c",
+                "email": "carol@example.com",
+                "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+                "signing_key": null,
+                "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+                "verified": false,
+                "first_seen": 1000
+              }
+            ],
+            "epochs": {
+              "00000000-0000-4000-8000-0000000000f1": {
+                "key_epoch": 1,
+                "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+                "retired": [],
+                "signed_since": 2,
+                "roster_version_max": 2,
+                "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+              }
+            },
+            "own_identity": null,
+            "grandfathered": [
+              "00000000-0000-4000-8000-0000000000f1"
+            ],
+            "left": {}
+          },
+          "changed": false
+        }
+      },
+      {
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 1,
+            "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "admission": {
+            "status": "refused",
+            "reason": "downgraded"
+          },
+          "pins": {
+            "version": 0,
+            "pins": [
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000b",
+                "email": "bob@example.com",
+                "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+                "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+                "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+                "verified": true,
+                "first_seen": 1000
+              },
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000c",
+                "email": "carol@example.com",
+                "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+                "signing_key": null,
+                "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+                "verified": false,
+                "first_seen": 1000
+              }
+            ],
+            "epochs": {
+              "00000000-0000-4000-8000-0000000000f1": {
+                "key_epoch": 1,
+                "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+                "retired": [],
+                "signed_since": 2,
+                "roster_version_max": 2,
+                "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+              }
+            },
+            "own_identity": null,
+            "grandfathered": [
+              "00000000-0000-4000-8000-0000000000f1"
+            ],
+            "left": {}
+          },
+          "changed": false
+        }
+      },
+      {
+        "observation": {
+          "vault_id": "00000000-0000-4000-8000-0000000000f1",
+          "key_kind": "sealed",
+          "key": {
+            "key_epoch": 2,
+            "key_id": "rIhylZwb4VOoFLfqlKVGrgukzsR2YpOmZx1vlUTjodM",
+            "retired": [],
+            "signed_since": null
+          },
+          "roster_version": null,
+          "signed_share": false,
+          "paused": false
+        },
+        "expected": {
+          "admission": {
+            "status": "refused",
+            "reason": "downgraded"
+          },
+          "pins": {
+            "version": 0,
+            "pins": [
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000b",
+                "email": "bob@example.com",
+                "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+                "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+                "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+                "verified": true,
+                "first_seen": 1000
+              },
+              {
+                "user_id": "00000000-0000-4000-8000-00000000000c",
+                "email": "carol@example.com",
+                "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+                "signing_key": null,
+                "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+                "verified": false,
+                "first_seen": 1000
+              }
+            ],
+            "epochs": {
+              "00000000-0000-4000-8000-0000000000f1": {
+                "key_epoch": 1,
+                "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+                "retired": [],
+                "signed_since": 2,
+                "roster_version_max": 2,
+                "roster_hash": "wDHXgkcDzlGZQ-1emNivpmeTo7oUxPByPc0ySsy4w54"
+              }
+            },
+            "own_identity": null,
+            "grandfathered": [
+              "00000000-0000-4000-8000-0000000000f1"
+            ],
+            "left": {}
+          },
+          "changed": false
+        }
+      }
+    ],
+    "emails": [
+      {
+        "email": " Bob@Example.COM ",
+        "expected": "bob@example.com"
+      },
+      {
+        "email": "ＢＯＢ@ｅｘａｍｐｌｅ.com",
+        "expected": "bob@example.com"
+      },
+      {
+        "email": "erin@Bücher.example",
+        "expected": "erin@xn--bcher-kva.example"
+      },
+      {
+        "email": "erin@xn--bcher-kva.example",
+        "expected": "erin@xn--bcher-kva.example"
+      },
+      {
+        "email": "ﬁona@EXAMPLE.org",
+        "expected": "fiona@example.org"
+      },
+      {
+        "email": "no-at-sign",
+        "expected": "no-at-sign"
+      },
+      {
+        "email": "x@",
+        "expected": "x@"
+      }
+    ],
+    "legacyWraps": [
+      {
+        "pins": "none",
+        "expected": true
+      },
+      {
+        "pins": "withEpoch",
+        "expected": true
+      },
+      {
+        "pins": "raised",
+        "expected": true
+      },
+      {
+        "pins": "left",
+        "expected": true
+      },
+      {
+        "pins": "grandfathered",
+        "expected": true
+      },
+      {
+        "pins": "withheld",
+        "expected": true
+      },
+      {
+        "pins": "unsigned",
+        "expected": true
+      },
+      {
+        "pins": "rosterMax",
+        "expected": true
+      }
+    ],
+    "ownIdentity": {
+      "hash": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+      "pins": {
+        "version": 0,
+        "pins": [
+          {
+            "user_id": "00000000-0000-4000-8000-00000000000b",
+            "email": "bob@example.com",
+            "public_key": "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyA",
+            "signing_key": "8BnSHCGxjasEtmd6v59cR_gIc9jYNDCHBWO3Qe7jwk4",
+            "identity": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+            "verified": true,
+            "first_seen": 1000
+          },
+          {
+            "user_id": "00000000-0000-4000-8000-00000000000c",
+            "email": "carol@example.com",
+            "public_key": "mkUDqYqxD-jTVMnELL0MnXlE9S59FNjqWXdefcnjv0s",
+            "signing_key": null,
+            "identity": "Ewotrw7ITjPh5IXvOT9sQcsiL4MRbyn8OPohLV6d3eM",
+            "verified": false,
+            "first_seen": 1000
+          }
+        ],
+        "epochs": {},
+        "own_identity": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+        "grandfathered": null,
+        "left": {}
+      },
+      "checks": [
+        {
+          "pins": "none",
+          "listed": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+          "expected": "new"
+        },
+        {
+          "pins": "withOwn",
+          "listed": "yOXMfqdyvq_URXyt53i-lD7GY_7qD9bqa1zoOjpYDeI",
+          "expected": "match"
+        },
+        {
+          "pins": "withOwn",
+          "listed": null,
+          "expected": "mismatch"
+        },
+        {
+          "pins": "withOwn",
+          "listed": "dRicO3wk6Zumy9e_LqwXoN9gkqGSri5BZWYt6NB24b4",
+          "expected": "mismatch"
+        }
+      ]
+    }
+  }
 }

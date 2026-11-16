@@ -26,6 +26,7 @@ use crate::error::{ApiError, ApiResult, code};
 use crate::events::Event;
 use crate::mail::Email;
 use crate::state::{AppState, Class, normalize_email};
+use passauth_core::sharing::PublicIdentity;
 
 /// Create vault `v` with `user_id` as its first member. Its id (chosen by the app)
 /// is taken for good in `vault_ids` first: an id any vault ever had, also one
@@ -146,6 +147,7 @@ pub(super) async fn delete_vault(
         "DELETE FROM items WHERE vault_id = $1",
         "DELETE FROM item_versions WHERE vault_id = $1",
         "DELETE FROM item_tombstones WHERE vault_id = $1",
+        "DELETE FROM vault_rosters WHERE vault_id = $1",
         "DELETE FROM vault_members WHERE vault_id = $1",
         "DELETE FROM vaults WHERE id = $1",
     ] {
@@ -174,15 +176,33 @@ pub(super) async fn lookup_user(
     state
         .limiter
         .limit(Class::Target, &format!("lookup:{}", user.user_id), 30, 600)?;
-    let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT id, name, public_key FROM users WHERE email = $1 AND email_verified = 1 AND disabled = 0")
-            .bind(normalize_email(&q.email))
-            .fetch_optional(&state.db)
-            .await?;
-    let (id, name, public_key) = row.ok_or(ApiError::NotFound)?;
-    Ok(Json(
-        json!({ "user_id": id, "name": name, "public_key": public_key }),
-    ))
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT id, name, public_key, signing_key, identity_signature, x25519_signature FROM users
+         WHERE email = $1 AND email_verified = 1 AND disabled = 0",
+    )
+    .bind(normalize_email(&q.email))
+    .fetch_optional(&state.db)
+    .await?;
+    let (id, name, public_key, signing_key, identity_signature, x25519_signature) =
+        row.ok_or(ApiError::NotFound)?;
+    // `signing_key` / `identity_signature` / `x25519_signature`: null for an account
+    // without a signing identity yet (signed sharing).
+    Ok(Json(json!({
+        "user_id": id,
+        "name": name,
+        "public_key": public_key,
+        "signing_key": signing_key,
+        "identity_signature": identity_signature,
+        "x25519_signature": x25519_signature,
+    })))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -192,11 +212,26 @@ struct MemberRow {
     name: String,
     role: String,
     public_key: String,
+    /// Signed sharing: the member's signing identity (null without one).
+    signing_key: Option<String>,
+    identity_signature: Option<String>,
+    x25519_signature: Option<String>,
     /// `active`, or `invited` until they accept.
     status: String,
     /// Who shared the vault with them (`null` for members from before invitations).
     invited_by: Option<String>,
     invited_at: Option<i64>,
+    /// `account` (the owner's own wrap) or `sealed`.
+    key_kind: String,
+    #[serde(skip)]
+    share_signature: Option<String>,
+    #[serde(skip)]
+    share_signer_identity: Option<String>,
+    #[serde(skip)]
+    signer_gone: i64,
+    /// Signed sharing: the share signature and its signer (see `signed::share_json`).
+    #[sqlx(skip)]
+    share: Value,
 }
 
 /// Every member, invitations included (`status`): a key replacement must seal
@@ -207,15 +242,45 @@ pub(super) async fn list_members(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     require(&state, &user.user_id, &id, Role::Read).await?;
-    let members: Vec<MemberRow> = sqlx::query_as(
-        "SELECT m.user_id, u.email, u.name, m.role, u.public_key, m.status, m.invited_by, m.invited_at
+    // One snapshot: the members and the roster they are compared with.
+    let mut tx = state.db.begin().await?;
+    if crate::db::is_postgres(&state.config.database_url) {
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *tx)
+            .await?;
+    }
+    let mut members: Vec<MemberRow> = sqlx::query_as(
+        "SELECT m.user_id, u.email, u.name, m.role, u.public_key, u.signing_key, u.identity_signature,
+                u.x25519_signature, m.status, m.invited_by, m.invited_at, m.key_kind, m.share_signature,
+                m.share_signer_identity,
+                CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone
          FROM vault_members m JOIN users u ON u.id = m.user_id
+         LEFT JOIN users s ON s.id = m.share_signer
          WHERE m.vault_id = $1 ORDER BY m.created_at",
     )
     .bind(&id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(Json(json!({ "members": members })))
+    let (key_epoch, roster, roster_seq): (i64, Option<String>, i64) = sqlx::query_as(
+        "SELECT key_epoch, member_roster, member_roster_seq FROM vaults WHERE id = $1",
+    )
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    for m in &mut members {
+        m.share = super::signed::share_json(
+            m.share_signature.take(),
+            m.share_signer_identity.take(),
+            m.signer_gone != 0,
+        );
+    }
+    Ok(Json(json!({
+        "members": members,
+        "key_epoch": key_epoch,
+        "member_roster": roster,
+        "member_roster_seq": roster_seq,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -226,6 +291,13 @@ pub(super) struct AddMember {
     sealed_key: String,
     /// Epoch of the vault key that was sealed.
     key_epoch: Option<i64>,
+    /// Signed sharing: the share signature (with `roster`).
+    #[serde(default)]
+    signature: Option<String>,
+    /// Signed sharing: the vault's next member roster, listing this member (with
+    /// `signature`).
+    #[serde(default)]
+    roster: Option<String>,
 }
 
 /// New invitations one user may send per hour.
@@ -253,6 +325,17 @@ pub(super) async fn add_member(
     }
     check_id(&b.user_id)?;
     check_blob(&b.sealed_key)?;
+    if b.signature.is_some() != b.roster.is_some() {
+        return Err(ApiError::bad(
+            "send the share signature and the member roster together",
+        ));
+    }
+    if let Some(s) = &b.signature {
+        super::signed::check_signature(s)?;
+        if b.key_epoch.is_none() {
+            return Err(ApiError::bad("a signed share needs its key_epoch"));
+        }
+    }
     let target: Option<String> = sqlx::query_scalar(
         "SELECT email FROM users WHERE id = $1 AND email_verified = 1 AND disabled = 0",
     )
@@ -278,6 +361,29 @@ pub(super) async fn add_member(
             "you can't change the access of a member at or above your own role".into(),
         ));
     }
+    // Signed sharing: the caller signs the share, checked against the stored
+    // identities; a vault with a member roster takes signed changes only.
+    let key_epoch = w.locked(&id).key_epoch;
+    let signer =
+        super::signed::signer_for_change(w.conn(), &id, &user.user_id, b.roster.is_some()).await?;
+    if let (Some(signer), Some(signature)) = (&signer, &b.signature) {
+        super::signed::check_share(
+            w.conn(),
+            &id,
+            &b.user_id,
+            &b.role,
+            key_epoch,
+            &b.sealed_key,
+            signer,
+            signature,
+        )
+        .await?;
+    }
+    let share_signer = signer.as_ref().map(|_| user.user_id.as_str());
+    let snapshot = match &signer {
+        Some(_) => Some(super::signed::signer_snapshot(w.conn(), &user.user_id).await?),
+        None => None,
+    };
     let invited = match current {
         None => {
             state.limiter.limit(
@@ -288,8 +394,8 @@ pub(super) async fn add_member(
             )?;
             let t = now();
             sqlx::query(
-                "INSERT INTO vault_members (vault_id, user_id, role, wrapped_key, key_kind, created_at, status, invited_by, invited_at)
-                 VALUES ($1, $2, $3, $4, 'sealed', $5, 'invited', $6, $5)",
+                "INSERT INTO vault_members (vault_id, user_id, role, wrapped_key, key_kind, created_at, status, invited_by, invited_at, share_signature, share_signer, share_signer_identity)
+                 VALUES ($1, $2, $3, $4, 'sealed', $5, 'invited', $6, $5, $7, $8, $9)",
             )
             .bind(&id)
             .bind(&b.user_id)
@@ -297,24 +403,31 @@ pub(super) async fn add_member(
             .bind(&b.sealed_key)
             .bind(t)
             .bind(&user.user_id)
+            .bind(&b.signature)
+            .bind(share_signer)
+            .bind(&snapshot)
             .execute(w.conn())
             .await?;
             w.log(
                 Event::new("member.invited")
                     .vault(&id)
                     .target(&b.user_id)
-                    .data(json!({ "role": b.role })),
+                    .data(json!({ "role": b.role, "signed": signer.is_some() })),
             )
             .await?;
             true
         }
         Some((was, invited)) => {
             sqlx::query(
-                "UPDATE vault_members SET role = $1, wrapped_key = $2, key_kind = 'sealed'
-                 WHERE vault_id = $3 AND user_id = $4",
+                "UPDATE vault_members SET role = $1, wrapped_key = $2, key_kind = 'sealed',
+                     share_signature = $3, share_signer = $4, share_signer_identity = $5
+                 WHERE vault_id = $6 AND user_id = $7",
             )
             .bind(&b.role)
             .bind(&b.sealed_key)
+            .bind(&b.signature)
+            .bind(share_signer)
+            .bind(&snapshot)
             .bind(&id)
             .bind(&b.user_id)
             .execute(w.conn())
@@ -341,6 +454,12 @@ pub(super) async fn add_member(
             .execute(w.conn())
             .await?;
     }
+    let roster_seq = match (&signer, &b.roster) {
+        (Some(signer), Some(roster)) => {
+            Some(super::signed::store_roster(w.conn(), &id, roster, signer, key_epoch).await?)
+        }
+        _ => None,
+    };
     if invited {
         // Their invitation (new, or its role or key) is in their `/sync`.
         w.tell(&b.user_id);
@@ -356,6 +475,9 @@ pub(super) async fn add_member(
     if rekey {
         // The sharing app replaces the key now, sealing the new one to everyone.
         answer["rotation_pending"] = true.into();
+    }
+    if let Some(seq) = roster_seq {
+        answer["member_roster_seq"] = seq.into();
     }
     Ok(Json(answer))
 }
@@ -538,6 +660,10 @@ struct RotateKey {
     user_id: String,
     wrapped_key: String,
     key_kind: String,
+    /// Signed sharing: the share signature of a sealed key (with the body's `roster`),
+    /// over the new key epoch.
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -551,6 +677,10 @@ pub(super) struct Rotate {
     /// The epoch of the key being replaced: a rotation that raced another one
     /// gets 409 `vault_key_changed`.
     key_epoch: Option<i64>,
+    /// Signed sharing: the vault's next member roster at the new key epoch, listing
+    /// the members who remain; every sealed key then carries its `signature`.
+    #[serde(default)]
+    roster: Option<String>,
 }
 
 /// Replace the vault key for every member and re-encrypted items atomically.
@@ -570,11 +700,9 @@ pub(super) async fn rotate_vault(
     // Invitations carry the sealed key and the encrypted name: both change.
     w.tell_invitees(&id);
     let seq = w.seq(&id);
-    let key_epoch = apply_rotation(&mut w, &id, &b, seq).await?;
+    let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
     let revision = w.commit(&state).await?;
-    Ok(Json(
-        json!({ "revision": revision, "key_epoch": key_epoch, "vault_seq": seq }),
-    ))
+    Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
 }
 
 /// Remove a member and replace the vault key in one transaction, so a removal
@@ -625,17 +753,37 @@ pub(super) async fn remove_member_and_rotate(
     )
     .await?;
     let seq = w.seq(&id);
-    let key_epoch = apply_rotation(&mut w, &id, &b, seq).await?;
+    let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
     let revision = w.commit(&state).await?;
-    Ok(Json(
-        json!({ "revision": revision, "key_epoch": key_epoch, "vault_seq": seq }),
-    ))
+    Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
+}
+
+/// A rotation's answer: `{"revision", "key_epoch", "vault_seq"}`, plus
+/// `"member_roster_seq"` when a roster was stored.
+fn rotated(revision: i64, key_epoch: i64, seq: i64, roster_seq: Option<i64>) -> Value {
+    let mut answer = json!({ "revision": revision, "key_epoch": key_epoch, "vault_seq": seq });
+    if let Some(r) = roster_seq {
+        answer["member_roster_seq"] = r.into();
+    }
+    answer
 }
 
 /// Shape checks of a rotation body that need no database.
 fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
     for k in &b.keys {
         check_blob(&k.wrapped_key)?;
+        if let Some(s) = &k.signature {
+            if b.roster.is_none() || k.key_kind != "sealed" {
+                return Err(ApiError::bad(
+                    "share signatures go on sealed keys, with the member roster",
+                ));
+            }
+            super::signed::check_signature(s)?;
+        } else if b.roster.is_some() && k.key_kind == "sealed" {
+            return Err(ApiError::bad(
+                "with a member roster, every sealed key needs its signature",
+            ));
+        }
         match k.key_kind.as_str() {
             // Only the member themselves can wrap a key with their account key.
             "account" if k.user_id == me => {}
@@ -655,6 +803,13 @@ fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
                 "every item in the vault must be re-encrypted exactly once",
             ));
         }
+        // Apps that sign also send each item's revision, so an edit made meanwhile is
+        // a 409 `revision_conflict`, never overwritten by the re-encrypted copy.
+        if b.roster.is_some() && i.revision.is_none() {
+            return Err(ApiError::bad(
+                "a signed key replacement sends every item's revision",
+            ));
+        }
     }
     if let Some(meta) = &b.meta {
         check_blob(meta)?;
@@ -670,28 +825,53 @@ fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
 /// with the old key, which the new one is meant to replace; so are the vault's
 /// emergency-access wraps (the owner's apps wrap the new key). Attachments stay as
 /// they are: each file has its own key, kept inside its (re-encrypted) item.
-/// Returns the new epoch. The caller tells the invitees (their invitation's key
-/// and name change).
-async fn apply_rotation(w: &mut VaultWrite, id: &str, b: &Rotate, seq: i64) -> ApiResult<i64> {
-    let key_epoch = rotate_rows(w.conn(), id, b, seq).await?;
+/// Signed sharing: the share signatures are checked against the new epoch and the
+/// roster (listing the members after the change, at the new epoch) is stored; a
+/// vault with a roster takes signed rotations only. Returns the new epoch and the
+/// roster's version. The caller tells the invitees (their invitation's key and name
+/// change).
+async fn apply_rotation(
+    w: &mut VaultWrite,
+    id: &str,
+    b: &Rotate,
+    seq: i64,
+) -> ApiResult<(i64, Option<i64>)> {
+    let caller = w.me.as_ref().expect("a caller's rotation").user_id.clone();
+    let signer =
+        super::signed::signer_for_change(w.conn(), id, &caller, b.roster.is_some()).await?;
+    let new_epoch = w.locked(id).key_epoch + 1;
+    let key_epoch = rotate_rows(w.conn(), id, b, seq, signer.as_ref(), new_epoch).await?;
+    let roster_seq = match (&signer, &b.roster) {
+        (Some(signer), Some(roster)) => {
+            Some(super::signed::store_roster(w.conn(), id, roster, signer, key_epoch).await?)
+        }
+        _ => None,
+    };
     w.log(
         Event::new("vault.key_rotated")
             .vault(id)
-            .data(json!({ "key_epoch": key_epoch })),
+            .data(json!({ "key_epoch": key_epoch, "signed": signer.is_some() })),
     )
     .await?;
-    Ok(key_epoch)
+    Ok((key_epoch, roster_seq))
 }
 
-async fn rotate_rows(conn: &mut AnyConnection, id: &str, b: &Rotate, seq: i64) -> ApiResult<i64> {
-    let members: Vec<String> =
-        sqlx::query_scalar("SELECT user_id FROM vault_members WHERE vault_id = $1")
+async fn rotate_rows(
+    conn: &mut AnyConnection,
+    id: &str,
+    b: &Rotate,
+    seq: i64,
+    signer: Option<&PublicIdentity>,
+    new_epoch: i64,
+) -> ApiResult<i64> {
+    let members: Vec<(String, String)> =
+        sqlx::query_as("SELECT user_id, role FROM vault_members WHERE vault_id = $1")
             .bind(id)
             .fetch_all(&mut *conn)
             .await?;
     let mut given: Vec<&str> = b.keys.iter().map(|k| k.user_id.as_str()).collect();
     given.sort_unstable();
-    let mut expected: Vec<&str> = members.iter().map(String::as_str).collect();
+    let mut expected: Vec<&str> = members.iter().map(|(u, _)| u.as_str()).collect();
     expected.sort_unstable();
     if given != expected {
         return Err(ApiError::bad(
@@ -708,14 +888,44 @@ async fn rotate_rows(conn: &mut AnyConnection, id: &str, b: &Rotate, seq: i64) -
         ));
     }
     let rev = now_ms();
+    let snapshot = match signer {
+        Some(s) => Some(super::signed::signer_snapshot(&mut *conn, &s.user_id).await?),
+        None => None,
+    };
     for k in &b.keys {
-        sqlx::query("UPDATE vault_members SET wrapped_key = $1, key_kind = $2 WHERE vault_id = $3 AND user_id = $4")
-            .bind(&k.wrapped_key)
-            .bind(&k.key_kind)
-            .bind(id)
-            .bind(&k.user_id)
-            .execute(&mut *conn)
+        if let (Some(signer), Some(signature)) = (signer, &k.signature) {
+            let role = &members
+                .iter()
+                .find(|(u, _)| *u == k.user_id)
+                .expect("checked above")
+                .1;
+            super::signed::check_share(
+                &mut *conn,
+                id,
+                &k.user_id,
+                role,
+                new_epoch,
+                &k.wrapped_key,
+                signer,
+                signature,
+            )
             .await?;
+        }
+        let signed = signer.is_some() && k.signature.is_some();
+        sqlx::query(
+            "UPDATE vault_members SET wrapped_key = $1, key_kind = $2, share_signature = $3, share_signer = $4,
+                 share_signer_identity = $5
+             WHERE vault_id = $6 AND user_id = $7",
+        )
+        .bind(&k.wrapped_key)
+        .bind(&k.key_kind)
+        .bind(k.signature.as_deref().filter(|_| signed))
+        .bind(signer.map(|s| s.user_id.as_str()).filter(|_| signed))
+        .bind(snapshot.as_deref().filter(|_| signed))
+        .bind(id)
+        .bind(&k.user_id)
+        .execute(&mut *conn)
+        .await?;
     }
     for i in &b.items {
         let done = match i.revision {

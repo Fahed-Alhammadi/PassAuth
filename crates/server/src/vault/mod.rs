@@ -25,6 +25,7 @@ mod attachments;
 mod history;
 mod items;
 mod sharing;
+mod signed;
 mod sync;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,6 +103,8 @@ pub fn routes() -> Router<AppState> {
             post(sharing::accept_invitation),
         )
         .route("/vaults/{id}/events", get(vault_events))
+        .route("/vaults/{id}/rosters", get(signed::rosters))
+        .route("/vaults/{id}/resign", post(signed::resign).layer(bulk()))
         .route("/users/lookup", get(sharing::lookup_user))
         .route("/items", post(items::create_item))
         .route("/items/import", post(items::import_items).layer(bulk()))

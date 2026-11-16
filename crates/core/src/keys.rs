@@ -249,16 +249,81 @@ fn derive(pw: &str, kdf: &KdfParams, sk: Option<&SecretKey>, id: &str) -> Result
     }
 }
 
+/// Whether apps write epoch-bound (v2) account wraps. Off until every client reads
+/// them (planned for a later release): released apps open only v1 wraps, and the apps
+/// of one account update days apart, so a personal vault re-keyed by a new app would
+/// become unreadable on the account's older apps. Old-key replay is stopped by key ids
+/// and retired key ids in the account's key pins (`sharing`), which don't depend on the
+/// wrap format.
+pub const ACCOUNT_WRAPS_BOUND: bool = false;
+
+/// The marker byte before a v2 account wrap (`0x02 ‖ version ‖ nonce ‖ ciphertext`);
+/// a v1 wrap starts with the cipher's version byte (`0x01`).
+const BOUND_WRAP: u8 = 0x02;
+
+/// Associated data of a v2 account wrap: `passauth/vault-key/v2/<vault id>/<key epoch>`,
+/// bound to the epoch it was written for (the epoch is the last part and a number, so
+/// the bytes are unambiguous). v1 is `passauth/vault-key/v1/<vault id>`.
+fn vault_key_aad_v2(vault_id: &str, key_epoch: u64) -> Vec<u8> {
+    format!("passauth/vault-key/v2/{vault_id}/{key_epoch}").into_bytes()
+}
+
 impl UnlockedAccount {
+    /// A new vault key and its `account` wrap ([`wrap_vault_key`](Self::wrap_vault_key)).
     pub fn new_vault_key(&self, vault_id: &str) -> Result<(SymmetricKey, String)> {
         let key = SymmetricKey::generate()?;
-        let wrapped = b64(&self.account_key.wrap(&key, &aad("vault-key", vault_id))?);
+        let wrapped = self.wrap_vault_key(&key, vault_id)?;
         Ok((key, wrapped))
     }
 
-    pub fn open_vault_key(&self, vault_id: &str, wrapped: &str) -> Result<SymmetricKey> {
-        self.account_key
-            .unwrap_key(&unb64(wrapped)?, &aad("vault-key", vault_id))
+    /// Wrap `key` as `vault_id`'s key with this account's key (`key_kind` `account`,
+    /// base64url): the v1 format every released app reads, while
+    /// [`ACCOUNT_WRAPS_BOUND`] is off.
+    pub fn wrap_vault_key(&self, key: &SymmetricKey, vault_id: &str) -> Result<String> {
+        Ok(b64(&self
+            .account_key
+            .wrap(key, &aad("vault-key", vault_id))?))
+    }
+
+    /// Wrap `key` as `vault_id`'s key at `key_epoch` in the epoch-bound v2 format
+    /// (`0x02` marker, associated data with the epoch). Not written by the apps yet (see
+    /// [`ACCOUNT_WRAPS_BOUND`]); [`open_vault_key`](Self::open_vault_key) reads it.
+    pub fn wrap_vault_key_bound(
+        &self,
+        key: &SymmetricKey,
+        vault_id: &str,
+        key_epoch: u64,
+    ) -> Result<String> {
+        let mut out = vec![BOUND_WRAP];
+        out.extend(
+            self.account_key
+                .wrap(key, &vault_key_aad_v2(vault_id, key_epoch))?,
+        );
+        Ok(b64(&out))
+    }
+
+    /// Open an `account` wrap of `vault_id`'s key; `key_epoch` is the row's `key_epoch`.
+    /// The format is told by its first byte (no trial decryption): a v2 wrap (`0x02`)
+    /// opens only for the epoch it was written for; a v1 wrap (no epoch) only with
+    /// `legacy_allowed` (`KeyPins::legacy_wrap_allowed`, always true while
+    /// [`ACCOUNT_WRAPS_BOUND`] is off).
+    pub fn open_vault_key(
+        &self,
+        vault_id: &str,
+        key_epoch: u64,
+        wrapped: &str,
+        legacy_allowed: bool,
+    ) -> Result<SymmetricKey> {
+        let wrapped = unb64(wrapped)?;
+        match wrapped.split_first() {
+            Some((&BOUND_WRAP, rest)) => self
+                .account_key
+                .unwrap_key(rest, &vault_key_aad_v2(vault_id, key_epoch)),
+            _ if legacy_allowed => self
+                .account_key
+                .unwrap_key(&wrapped, &aad("vault-key", vault_id)),
+            _ => Err(Error::Decrypt),
+        }
     }
 
     /// Open a vault key that another member sealed to this account's public key.
@@ -558,12 +623,40 @@ mod tests {
     fn vault_sharing() {
         let alice = new(false).unlocked;
         let bob = new(false).unlocked;
+        // Written as v1 (what released apps read): opens under any epoch, when allowed.
         let (vk, wrapped) = alice.new_vault_key("v1").unwrap();
-        assert_eq!(
-            alice.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
-            vk.as_bytes()
-        );
-        assert!(alice.open_vault_key("v2", &wrapped).is_err());
+        assert_eq!(unb64(&wrapped).unwrap()[0], 1);
+        for epoch in [0, 3] {
+            assert_eq!(
+                alice
+                    .open_vault_key("v1", epoch, &wrapped, true)
+                    .unwrap()
+                    .as_bytes(),
+                vk.as_bytes()
+            );
+        }
+        assert!(matches!(
+            alice.open_vault_key("v1", 0, &wrapped, false),
+            Err(Error::Decrypt)
+        ));
+        assert!(alice.open_vault_key("v2", 0, &wrapped, true).is_err());
+        // v2 (epoch-bound, marked 0x02): only for its epoch, whatever `legacy_allowed`.
+        let bound = alice.wrap_vault_key_bound(&vk, "v1", 7).unwrap();
+        assert_eq!(unb64(&bound).unwrap()[0], BOUND_WRAP);
+        for legacy in [false, true] {
+            assert_eq!(
+                alice
+                    .open_vault_key("v1", 7, &bound, legacy)
+                    .unwrap()
+                    .as_bytes(),
+                vk.as_bytes()
+            );
+            assert!(alice.open_vault_key("v1", 6, &bound, legacy).is_err());
+            assert!(alice.open_vault_key("v2", 7, &bound, legacy).is_err());
+        }
+        // A v2 ciphertext without its marker is read as v1 and fails.
+        let unmarked = b64(&unb64(&bound).unwrap()[1..]);
+        assert!(alice.open_vault_key("v1", 7, &unmarked, true).is_err());
         let sealed = share_vault_key("v1", &vk, &b64(&bob.keypair.public_bytes())).unwrap();
         assert_eq!(
             bob.open_shared_vault_key("v1", &sealed).unwrap().as_bytes(),
@@ -606,8 +699,8 @@ mod tests {
         );
         assert!(matches!(bob.unwrap_send_key(&wrapped), Err(Error::Decrypt)));
         // A wrapped send key is not a vault key, nor the other way round.
-        assert!(alice.open_vault_key("", &wrapped).is_err());
-        assert!(alice.open_vault_key("send", &wrapped).is_err());
+        assert!(alice.open_vault_key("", 0, &wrapped, true).is_err());
+        assert!(alice.open_vault_key("send", 0, &wrapped, true).is_err());
         let (_, vault) = alice.new_vault_key("v1").unwrap();
         assert!(matches!(alice.unwrap_send_key(&vault), Err(Error::Decrypt)));
         let mut bad = unb64(&wrapped).unwrap();
@@ -779,8 +872,12 @@ mod tests {
             .unwrap();
         assert!(theirs.open_vault_key("v1", &account_wrapped).is_err());
         assert!(theirs.open_vault_key("v1", &grantor_key).is_err());
-        assert!(grantor.open_vault_key("v1", &wrapped).is_err());
-        assert!(grantor.open_vault_key("grant-1", &grantor_key).is_err());
+        assert!(grantor.open_vault_key("v1", 0, &wrapped, true).is_err());
+        assert!(
+            grantor
+                .open_vault_key("grant-1", 0, &grantor_key, true)
+                .is_err()
+        );
         assert!(grantor.open_emergency_key("grant-1", &wrapped).is_err());
         assert!(grantor.unwrap_send_key(&grantor_key).is_err());
     }
@@ -854,7 +951,7 @@ mod tests {
             assert!(alice.open_emergency_roster(other).is_err());
         }
         let key_sized = alice.seal_emergency_roster(&"k".repeat(32)).unwrap();
-        assert!(alice.open_vault_key("v1", &key_sized).is_err());
+        assert!(alice.open_vault_key("v1", 0, &key_sized, true).is_err());
         assert!(alice.unwrap_send_key(&key_sized).is_err());
         assert!(alice.open_emergency_key("g1", &key_sized).is_err());
     }

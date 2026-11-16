@@ -179,7 +179,12 @@ fn sealed_box_key(shared: &SharedSecret, epk: &[u8; 32], recipient: &[u8; 32]) -
 /// Short, human-comparable fingerprint of a public key (for out-of-band verification).
 pub fn fingerprint(public: &[u8; 32]) -> String {
     use sha2::Digest;
-    let digest = Sha256::digest(public);
+    fingerprint_digest(&Sha256::digest(public).into())
+}
+
+/// The fingerprint format of a SHA-256 digest: its first 15 bytes in base32, in groups
+/// of four (`XXXX-XXXX-XXXX-XXXX-XXXX-XXXX`).
+pub fn fingerprint_digest(digest: &[u8; 32]) -> String {
     let enc = data_encoding::BASE32_NOPAD.encode(&digest[..15]);
     enc.as_bytes()
         .chunks(4)

@@ -154,6 +154,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (11, SCHEMA_V11),
     (12, SCHEMA_V12),
     (13, SCHEMA_V13),
+    (14, SCHEMA_V14),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -398,6 +399,39 @@ const SCHEMA_V13: &[&str] = &[
         created_at BIGINT NOT NULL,
         PRIMARY KEY (access_id, vault_id))",
     "CREATE INDEX IF NOT EXISTS emergency_vault_keys_vault ON emergency_vault_keys (vault_id)",
+];
+
+/// Signed sharing (`signing.rs`, `vault/signed.rs`): each account's signing identity
+/// (`users.signing_key`, `identity_signature`, the X25519 key's XEdDSA cross-signature
+/// `x25519_signature`, the private key `wrapped_signing_key` by the account key; set
+/// once, `identity_at`), its key pins (`users.key_pins`,
+/// sealed by its apps, changed by compare-and-swap on `key_pins_seq`), each
+/// membership's share signature, who made it and their identity then
+/// (`vault_members.share_signature`, `share_signer`, `share_signer_identity`: JSON,
+/// so the share still verifies once the signer's account is gone; NULL = not
+/// signed), and each vault's signed member roster: the
+/// latest in `vaults.member_roster` (version `member_roster_seq`, 0 = none) and every
+/// version in `vault_rosters`, so apps can check the chain of who changed it.
+const SCHEMA_V14: &[&str] = &[
+    "ALTER TABLE users ADD COLUMN signing_key TEXT",
+    "ALTER TABLE users ADD COLUMN identity_signature TEXT",
+    "ALTER TABLE users ADD COLUMN x25519_signature TEXT",
+    "ALTER TABLE users ADD COLUMN wrapped_signing_key TEXT",
+    "ALTER TABLE users ADD COLUMN identity_at BIGINT",
+    "ALTER TABLE users ADD COLUMN key_pins TEXT",
+    "ALTER TABLE users ADD COLUMN key_pins_seq BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE vault_members ADD COLUMN share_signature TEXT",
+    "ALTER TABLE vault_members ADD COLUMN share_signer TEXT",
+    "ALTER TABLE vault_members ADD COLUMN share_signer_identity TEXT",
+    "ALTER TABLE vaults ADD COLUMN member_roster TEXT",
+    "ALTER TABLE vaults ADD COLUMN member_roster_seq BIGINT NOT NULL DEFAULT 0",
+    "CREATE TABLE IF NOT EXISTS vault_rosters (
+        vault_id TEXT NOT NULL,
+        version BIGINT NOT NULL,
+        roster TEXT NOT NULL,
+        signer_id TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (vault_id, version))",
 ];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still

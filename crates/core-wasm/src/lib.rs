@@ -26,6 +26,8 @@ use passauth_core::{Error, device_login, export, generator, import, opaque, totp
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
+mod sharing;
+
 type R<T> = Result<T, JsError>;
 
 /// The thrown `Error`: its message is the error's code (`decrypt_failed`, `weak_kdf`,
@@ -102,18 +104,28 @@ impl Account {
         })
     }
 
-    /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to us).
+    /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to
+    /// us). `keyEpoch` = the row's `key_epoch`: an epoch-bound v2 `account` wrap opens only
+    /// for it; a v1 wrap (what the apps write for now) only with `legacyAllowed`
+    /// (`pinsLegacyWrapAllowed`, true while v1 is written). Both are ignored for "sealed".
     #[wasm_bindgen(js_name = openVaultKey)]
     pub fn open_vault_key(
         &self,
         #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
         #[wasm_bindgen(unchecked_param_type = "string")] wrapped: JsValue,
         #[wasm_bindgen(unchecked_param_type = "string")] kind: JsValue,
+        #[wasm_bindgen(js_name = "keyEpoch")] key_epoch: f64,
+        #[wasm_bindgen(js_name = "legacyAllowed")] legacy_allowed: bool,
     ) -> R<VaultKey> {
         let (vault_id, wrapped, kind) = (string(vault_id)?, string(wrapped)?, string(kind)?);
         let key = match kind.as_str() {
             "sealed" => self.0.open_shared_vault_key(&vault_id, &wrapped),
-            _ => self.0.open_vault_key(&vault_id, &wrapped),
+            _ => {
+                let key_epoch =
+                    sharing::whole(key_epoch).ok_or_else(|| JsError::new("invalid key epoch"))?;
+                self.0
+                    .open_vault_key(&vault_id, key_epoch, &wrapped, legacy_allowed)
+            }
         };
         key.map(VaultKey).map_err(js_err)
     }
@@ -668,7 +680,9 @@ impl VaultKey {
         keys::share_vault_key(&vault_id, &self.0, &recipient_public_key).map_err(js_err)
     }
 
-    /// Wrap this key for the owner's own account (used after rotation).
+    /// Wrap this key for the owner's own account (`key_kind` `account`; used after a key
+    /// replacement). The v1 format every released app reads (epoch-bound v2 wraps are
+    /// read by `Account.openVaultKey` but not written yet).
     #[wasm_bindgen(js_name = wrapFor)]
     pub fn wrap_for(
         &self,
@@ -676,15 +690,7 @@ impl VaultKey {
         #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
     ) -> R<String> {
         let vault_id = string(vault_id)?;
-        let wrapped = account
-            .0
-            .account_key
-            .wrap(
-                &self.0,
-                format!("passauth/vault-key/v1/{vault_id}").as_bytes(),
-            )
-            .map_err(js_err)?;
-        Ok(passauth_core::item::b64(&wrapped))
+        account.0.wrap_vault_key(&self.0, &vault_id).map_err(js_err)
     }
 }
 
@@ -1425,5 +1431,18 @@ mod tests {
         let id = super::uuid_v4();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+    }
+
+    /// Key epochs, versions and times from JavaScript: whole numbers 0 to 2^53 − 1
+    /// only (the bindings themselves run in Node: testdata/generate-vectors.mjs).
+    #[test]
+    fn whole_numbers() {
+        use super::sharing::whole;
+        assert_eq!(whole(0.0), Some(0));
+        assert_eq!(whole(258.0), Some(258));
+        assert_eq!(whole(9_007_199_254_740_991.0), Some(9_007_199_254_740_991));
+        for bad in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
+            assert_eq!(whole(bad), None, "{bad}");
+        }
     }
 }

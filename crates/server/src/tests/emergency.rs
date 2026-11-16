@@ -1659,6 +1659,9 @@ async fn migration_13_asks_to_confirm_contacts_again() {
             .await
             .unwrap();
     }
+    for &stmt in UNDO_MIGRATION_14 {
+        sqlx::query(stmt).execute(&mut *conn).await.unwrap();
+    }
     for stmt in [
         V1_UPDATE,
         "DROP TABLE emergency_vault_keys",

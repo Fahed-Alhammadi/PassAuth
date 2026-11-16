@@ -90,6 +90,13 @@ struct SyncUser {
     email: String,
     name: String,
     email_verified: bool,
+    /// Signed sharing: the account's signing identity `{signing_key,
+    /// identity_signature, x25519_signature, wrapped_signing_key}`, or `null` until its
+    /// apps make one.
+    identity: Option<Value>,
+    /// Signed sharing: the version of the account's key pins (`GET
+    /// /account/key-pins` when it differs from the copy the app has; 0 = none).
+    key_pins_seq: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -108,6 +115,30 @@ struct VaultRow {
     /// Tombstones up to this `seq` are forgotten.
     #[serde(skip)]
     horizon: i64,
+    /// Signed sharing: the vault's latest signed member roster (JSON text as the
+    /// app signed it) and its version (0 = none).
+    member_roster: Option<String>,
+    member_roster_seq: i64,
+    #[serde(skip)]
+    share_signature: Option<String>,
+    #[serde(skip)]
+    share_signer_identity: Option<String>,
+    #[serde(skip)]
+    signer_gone: i64,
+    /// Signed sharing: `{signature, signer, signer_deleted}` of a sealed key, or
+    /// `null` (not signed; always for `key_kind` `account`).
+    #[sqlx(skip)]
+    share: Value,
+}
+
+impl VaultRow {
+    fn fill_share(&mut self) {
+        self.share = super::signed::share_json(
+            self.share_signature.take(),
+            self.share_signer_identity.take(),
+            self.signer_gone != 0,
+        );
+    }
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -140,10 +171,20 @@ struct Invitation {
     wrapped_key: String,
     /// The vault's name etc., encrypted with that key.
     meta: String,
-    /// Who shared it, with their public key so the app can show its fingerprint;
-    /// `null` once their account is deleted.
+    /// Who shared it (`id`, read by the core as `user_id`), with their public key so
+    /// the app can show its fingerprint (and their signing identity: `signing_key`,
+    /// `identity_signature`, `x25519_signature`, null without one); `null` once their
+    /// account is deleted. For display only: the share's `signer` is what is verified.
     invited_by: Option<Value>,
     invited_at: Option<i64>,
+    /// The vault's key epoch (signed into the share).
+    key_epoch: i64,
+    /// Signed sharing: `{signature, signer}` or `null` (not signed: apps refuse to
+    /// accept a new unsigned invitation from a server with `signed_sharing`).
+    share: Value,
+    /// Signed sharing: the vault's latest member roster and its version (0 = none).
+    member_roster: Option<String>,
+    member_roster_seq: i64,
 }
 
 /// What a `cursor` holds: the database's sync generation and each vault's
@@ -273,20 +314,59 @@ pub(super) async fn sync(
             .execute(&mut *tx)
             .await?;
     }
-    let (revision, name, verified, bundle): (i64, String, i64, String) =
-        sqlx::query_as("SELECT revision, name, email_verified, bundle FROM users WHERE id = $1")
-            .bind(&user.user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-    let vaults: Vec<VaultRow> = sqlx::query_as(
+    type UserRow = (
+        i64,
+        String,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+    );
+    let (
+        revision,
+        name,
+        verified,
+        bundle,
+        signing_key,
+        identity_signature,
+        x25519,
+        wrapped,
+        pins_seq,
+    ): UserRow = sqlx::query_as(
+        "SELECT revision, name, email_verified, bundle, signing_key, identity_signature,
+                    x25519_signature, wrapped_signing_key, key_pins_seq
+             FROM users WHERE id = $1",
+    )
+    .bind(&user.user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let identity = match (signing_key, identity_signature, x25519, wrapped) {
+        (Some(k), Some(s), Some(x), Some(w)) => Some(json!({
+            "signing_key": k,
+            "identity_signature": s,
+            "x25519_signature": x,
+            "wrapped_signing_key": w,
+        })),
+        _ => None,
+    };
+    let mut vaults: Vec<VaultRow> = sqlx::query_as(
         "SELECT v.id, v.meta, m.role, m.wrapped_key, m.key_kind, v.rotation_pending, v.key_epoch,
-                v.seq, v.horizon
+                v.seq, v.horizon, v.member_roster, v.member_roster_seq, m.share_signature,
+                m.share_signer_identity,
+                CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone
          FROM vaults v JOIN vault_members m ON m.vault_id = v.id
+         LEFT JOIN users s ON s.id = m.share_signer
          WHERE m.user_id = $1 AND m.status = 'active' ORDER BY v.created_at",
     )
     .bind(&user.user_id)
     .fetch_all(&mut *tx)
     .await?;
+    for v in &mut vaults {
+        v.fill_share();
+    }
     let invitations = invitations(&mut tx, &user.user_id).await?;
     let (items, deleted, reset) = match &since {
         None => (
@@ -313,6 +393,8 @@ pub(super) async fn sync(
             email: user.email,
             name,
             email_verified: verified != 0,
+            identity,
+            key_pins_seq: pins_seq,
         },
         bundle: RawValue::from_string(bundle).map_err(anyhow::Error::from)?,
         vaults,
@@ -326,22 +408,37 @@ pub(super) async fn sync(
 
 /// The account's pending invitations, oldest first.
 async fn invitations(conn: &mut AnyConnection, user_id: &str) -> ApiResult<Vec<Invitation>> {
-    type Row = (
-        String,
-        String,
-        String,
-        String,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        vault_id: String,
+        role: String,
+        wrapped_key: String,
+        meta: String,
+        invited_at: Option<i64>,
+        key_epoch: i64,
+        member_roster: Option<String>,
+        member_roster_seq: i64,
+        share_signature: Option<String>,
+        by_id: Option<String>,
+        by_email: Option<String>,
+        by_name: Option<String>,
+        by_public_key: Option<String>,
+        by_signing_key: Option<String>,
+        by_identity_signature: Option<String>,
+        by_x25519_signature: Option<String>,
+        share_signer_identity: Option<String>,
+        signer_gone: i64,
+    }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT m.vault_id, m.role, m.wrapped_key, v.meta, m.invited_at,
-                s.id, s.email, s.name, s.public_key
+        "SELECT m.vault_id, m.role, m.wrapped_key, v.meta, m.invited_at, v.key_epoch,
+                v.member_roster, v.member_roster_seq, m.share_signature,
+                b.id AS by_id, b.email AS by_email, b.name AS by_name, b.public_key AS by_public_key,
+                b.signing_key AS by_signing_key, b.identity_signature AS by_identity_signature,
+                b.x25519_signature AS by_x25519_signature, m.share_signer_identity,
+                CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone
          FROM vault_members m JOIN vaults v ON v.id = m.vault_id
-         LEFT JOIN users s ON s.id = m.invited_by
+         LEFT JOIN users b ON b.id = m.invited_by
+         LEFT JOIN users s ON s.id = m.share_signer
          WHERE m.user_id = $1 AND m.status = 'invited'
          ORDER BY m.invited_at, m.vault_id",
     )
@@ -350,20 +447,32 @@ async fn invitations(conn: &mut AnyConnection, user_id: &str) -> ApiResult<Vec<I
     .await?;
     Ok(rows
         .into_iter()
-        .map(
-            |(vault_id, role, wrapped_key, meta, invited_at, id, email, name, public_key)| {
-                Invitation {
-                    vault_id,
-                    role,
-                    wrapped_key,
-                    meta,
-                    invited_by: id.map(|id| {
-                        json!({ "id": id, "email": email, "name": name, "public_key": public_key })
-                    }),
-                    invited_at,
-                }
-            },
-        )
+        .map(|r| Invitation {
+            vault_id: r.vault_id,
+            role: r.role,
+            wrapped_key: r.wrapped_key,
+            meta: r.meta,
+            invited_by: r.by_id.map(|id| {
+                json!({
+                    "id": id,
+                    "email": r.by_email,
+                    "name": r.by_name,
+                    "public_key": r.by_public_key,
+                    "signing_key": r.by_signing_key,
+                    "identity_signature": r.by_identity_signature,
+                    "x25519_signature": r.by_x25519_signature,
+                })
+            }),
+            invited_at: r.invited_at,
+            key_epoch: r.key_epoch,
+            share: super::signed::share_json(
+                r.share_signature,
+                r.share_signer_identity,
+                r.signer_gone != 0,
+            ),
+            member_roster: r.member_roster,
+            member_roster_seq: r.member_roster_seq,
+        })
         .collect())
 }
 

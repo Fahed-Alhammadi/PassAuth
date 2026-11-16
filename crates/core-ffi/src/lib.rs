@@ -21,6 +21,9 @@ use passauth_core::{Error, device_login, export, generator, import, opaque, pass
 
 uniffi::setup_scaffolding!();
 
+mod sharing;
+pub use sharing::*;
+
 /// The core's errors. Each variant's message is its code in snake_case (`decrypt_failed`,
 /// `weak_kdf`…), the same string the WASM build throws; `Invalid` carries a description.
 #[derive(Debug, uniffi::Error)]
@@ -42,6 +45,20 @@ pub enum CoreError {
     TooManyWrongCodes,
     /// Sign-in from another device: the code hasn't been confirmed yet.
     NotConfirmed,
+    /// Signed sharing: a signature (identity, share or member roster) doesn't verify.
+    BadSignature,
+    /// Signed sharing: the server lists a signing identity that isn't this account's.
+    IdentityMismatch,
+    /// Signed sharing: older than what this device already trusted (roster, key pins).
+    Rollback,
+    /// Signed sharing: two different member rosters with the same version.
+    RosterForked,
+    /// Signed sharing: a member roster signed by someone who may not change it.
+    RosterUnauthorized,
+    /// Key pins over their size limit, or a roster chain too long (refused, never trimmed).
+    TooLarge,
+    /// Signed sharing: the member list to sign isn't the one reviewed.
+    ReviewMismatch,
     Invalid(String),
 }
 
@@ -56,6 +73,13 @@ impl std::fmt::Display for CoreError {
             Self::WrongCode => "wrong_code",
             Self::TooManyWrongCodes => "too_many_wrong_codes",
             Self::NotConfirmed => "not_confirmed",
+            Self::BadSignature => "bad_signature",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::Rollback => "rollback",
+            Self::RosterForked => "roster_forked",
+            Self::RosterUnauthorized => "roster_unauthorized",
+            Self::TooLarge => "too_large",
+            Self::ReviewMismatch => "review_mismatch",
             Self::Invalid(m) => m,
         })
     }
@@ -74,6 +98,13 @@ impl From<Error> for CoreError {
             Error::WrongCode => Self::WrongCode,
             Error::TooManyWrongCodes => Self::TooManyWrongCodes,
             Error::NotConfirmed => Self::NotConfirmed,
+            Error::BadSignature => Self::BadSignature,
+            Error::IdentityMismatch => Self::IdentityMismatch,
+            Error::Rollback => Self::Rollback,
+            Error::RosterForked => Self::RosterForked,
+            Error::RosterUnauthorized => Self::RosterUnauthorized,
+            Error::TooLarge => Self::TooLarge,
+            Error::ReviewMismatch => Self::ReviewMismatch,
             other => Self::Invalid(other.to_string()),
         }
     }
@@ -124,16 +155,24 @@ impl Account {
         })
     }
 
-    /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to us).
+    /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to
+    /// us). `key_epoch` = the row's `key_epoch`: an epoch-bound v2 `account` wrap opens
+    /// only for it; a v1 wrap (what the apps write for now) only with `legacy_allowed`
+    /// (`pins_legacy_wrap_allowed`, true while v1 is written). Both are ignored for
+    /// "sealed".
     pub fn open_vault_key(
         &self,
         vault_id: String,
         wrapped: String,
         kind: String,
+        key_epoch: u64,
+        legacy_allowed: bool,
     ) -> R<Arc<VaultKey>> {
         let key = match kind.as_str() {
             "sealed" => self.0.open_shared_vault_key(&vault_id, &wrapped)?,
-            _ => self.0.open_vault_key(&vault_id, &wrapped)?,
+            _ => self
+                .0
+                .open_vault_key(&vault_id, key_epoch, &wrapped, legacy_allowed)?,
         };
         Ok(Arc::new(VaultKey(key)))
     }
@@ -1329,7 +1368,13 @@ mod tests {
             .encrypt_item(item.into(), "item-1".into(), "vault-1".into())
             .unwrap();
         let reopened = account
-            .open_vault_key("vault-1".into(), vk.wrapped.clone(), "account".into())
+            .open_vault_key(
+                "vault-1".into(),
+                vk.wrapped.clone(),
+                "account".into(),
+                0,
+                true,
+            )
             .unwrap();
         let json = reopened.decrypt_item(enc).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1356,7 +1401,7 @@ mod tests {
         assert!(matches!(
             other
                 .account
-                .open_vault_key("v".into(), vk.wrapped, "account".into()),
+                .open_vault_key("v".into(), vk.wrapped, "account".into(), 0, true),
             Err(CoreError::DecryptFailed)
         ));
         assert!(matches!(

@@ -50,6 +50,7 @@ pub fn routes() -> Router<AppState> {
         .route("/events", get(events::account_events))
         .route("/auth-requests", get(crate::auth_requests::list))
         .route("/auth-requests/{id}", post(crate::auth_requests::answer))
+        .merge(crate::signing::routes())
 }
 
 fn reauth_header(headers: &HeaderMap) -> Option<&str> {
@@ -843,6 +844,7 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
             "DELETE FROM items WHERE vault_id = $1",
             "DELETE FROM item_versions WHERE vault_id = $1",
             "DELETE FROM item_tombstones WHERE vault_id = $1",
+            "DELETE FROM vault_rosters WHERE vault_id = $1",
             "DELETE FROM vault_members WHERE vault_id = $1",
             "DELETE FROM vaults WHERE id = $1",
         ] {

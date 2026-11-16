@@ -517,7 +517,10 @@ mod tests {
         // It opens the account's vaults, also those shared with it.
         let (vk, wrapped) = alice.unlocked.new_vault_key("v1").unwrap();
         assert_eq!(
-            unlocked.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
+            unlocked
+                .open_vault_key("v1", 0, &wrapped, true)
+                .unwrap()
+                .as_bytes(),
             vk.as_bytes()
         );
         let shared = share_vault_key("v2", &vk, &alice.bundle.public_key).unwrap();
