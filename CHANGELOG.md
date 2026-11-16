@@ -6,6 +6,17 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.12.0 (2026-11-16)
+
+- Apps: adopt core round 5 — authenticated session restore, last-known pin merges, safe declines, unsent pins kept (fa84a4b)
+- Core, server: pinned rosters always carry their hash, first signatures need consent, no merge across own identities (20c162d)
+- Apps: accept what was shown, never offer Decline for unsigned vaults, tombstone only confirmed removals (a30a2ff)
+- Core, server: key pins never un-retire a key, re-joins are explicit, keys first signed by an unknown account need consent (ad22a28)
+- Web vault, desktop: check and sign shared vaults (1b23e3a)
+- Core, server: signed vault sharing (423142f)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.11.0...server-0.12.0)
+
 ## 0.11.0 (2026-11-16)
 
 - Web vault, desktop: emergency access with a key per contact, a sealed contact list and new keys on removal (1a2e06d)
