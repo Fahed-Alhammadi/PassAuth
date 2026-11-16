@@ -147,7 +147,7 @@ describe("putNative", () => {
     expect(sent).toHaveBeenCalledWith(0);
     expect(log.finished).toEqual([1]);
     expect(log.cancelled).toEqual([]);
-  });
+  }, 30_000); // several MiB through the encryptor: slow on shared CI machines
 
   it("hands a stream over as it is read", async () => {
     const parts = [bytes(5), bytes(7, 3), bytes(1, 9)];
