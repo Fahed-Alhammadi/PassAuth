@@ -26,7 +26,11 @@
 - **Your server, your data.** One small container with the web vault built in. SQLite by default, PostgreSQL if you prefer.
 - **Zero knowledge.** Items are encrypted on your device. The server never sees your master password and can't read your vault, including item names and website addresses.
 - **Everything in one place.** Logins, verification codes, passkeys, cards, identities and notes.
-- **Made for sharing.** Share vaults with family or a team; each vault key is sealed to each member.
+- **Made for sharing.** Share vaults with family or a team. Each share is signed by the person who made it and checked by your apps, so your server can't add people or slip in a vault of its own.
+- **Files and Send.** Attach files to items, and share text through encrypted links that expire.
+- **Emergency access.** Let someone you trust ask for view-only access to your personal vaults after a waiting period you choose.
+- **Password health.** Find weak and reused passwords, and check them against known breaches without sending the passwords anywhere.
+- **Sign in with another device.** Approve a new device from one where you're already signed in, with a matching phrase and code.
 - **Easy to switch.** Import exports from other password managers, read and encrypted in your browser.
 - **Works offline.** The extension and the apps keep an encrypted copy of your vault on the device, so you can unlock it and fill logins when your server is out of reach.
 - **Yours to take with you.** Export your vault at any time, and print an Emergency Kit (Settings → Account) with what you need to get back in: your server's address, your email and your Secret Key.
@@ -83,7 +87,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 - **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code, security key or passkey (WebAuthn, web vault), or recovery code.
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
-- **Sharing:** vault keys are sealed to each member's X25519 key; fingerprints let you confirm who you share with.
+- **Sharing:** vault keys are sealed to each member's X25519 key, and every share and member list is signed (Ed25519, bound to the X25519 key). Apps check the signatures, remember the keys they've seen and refuse an older vault key, so a server can't plant a vault, add a member or roll a key back. Fingerprints let you confirm who you share with.
 - **Server:** runs as your PUID:PGID user on a read-only filesystem with no Linux capabilities (it starts as root only to prepare its data folder).
 - **Admin page:** user name and password, optional two-step login with an authenticator app and recovery codes, and optionally reachable only from your own networks (`PASSAUTH_ADMIN_ALLOWED_NETWORKS`).
 
