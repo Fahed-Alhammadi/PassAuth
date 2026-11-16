@@ -33,6 +33,9 @@ import kotlinx.coroutines.launch
 class AutofillAuthActivity : ServiceActivity() {
     private val engine by lazy { AutofillEngine(this, graph) }
 
+    /** The id a new login saved from this sheet gets, however often Save is tapped. */
+    private val saveItemId = java.util.UUID.randomUUID().toString()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState != null) return
@@ -143,6 +146,8 @@ class AutofillAuthActivity : ServiceActivity() {
      */
     private fun askSave(p: AutofillEngine.Companion.PendingSave, candidates: List<SaveRule.Candidate<String>>, plan: SaveRule.Plan<String>, notice: String?) {
         val targets = SaveRule.targets(candidates, p.username, p.password)
+        // A new login's id, the same for every tap on Save in this sheet (an attempt whose answer was lost isn't saved twice).
+        val newItemId = saveItemId
         val place = engine.placeName(p.target, p.appLabel)
         val here = if (p.target is FillTarget.App) "app" else "site"
         fun target(choice: String?) = targets.firstOrNull { it.id == choice }
@@ -159,6 +164,8 @@ class AutofillAuthActivity : ServiceActivity() {
             } + ServiceActivity.Choice(SAVE_NEW, "New login", place, ServiceActivity.Symbol.New),
             initialChoice = (plan as? SaveRule.Plan.Update)?.id ?: SAVE_NEW,
             error = notice,
+            // A login in a shared vault is only ever chosen here, by the user, with this warning.
+            warning = { SaveRule.sharedWarning(target(it)) },
             quiet = listOf(
                 ServiceActivity.Quiet("Never for this $here") {
                     engine.addNeverSave(AutofillMatcher.neverSaveKey(p.target))
@@ -174,7 +181,7 @@ class AutofillAuthActivity : ServiceActivity() {
                 // The login the sheet showed is no longer one this save may go to: ask again.
                 askSave(p, now, SaveRule.plan(now, p.username, p.password), "That login is no longer in your vault. Choose where to save.")
             } else {
-                saved(engine.applySave(current, p.target, p.username, p.password, p.appLabel, chosenPlan) ?: "This login is already saved in PassAuth.")
+                saved(engine.applySave(current, p.target, p.username, p.password, p.appLabel, chosenPlan, newItemId) ?: "This login is already saved in PassAuth.")
             }
         }
     }

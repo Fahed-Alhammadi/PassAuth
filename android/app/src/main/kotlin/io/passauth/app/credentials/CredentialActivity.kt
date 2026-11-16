@@ -123,7 +123,7 @@ class CredentialActivity : ServiceActivity() {
             val host = PasskeyTargets.hostOf(checked.origin, checked.rpId)
             val targets = PasskeyTargets.saveTargets(vault, host, checked.rpId, options.userName, options.userDisplayName)
             val choices = targets.map {
-                ServiceActivity.Choice(it.id, it.item.name.ifEmpty { host }, PasskeyTargets.detail(vault, it))
+                ServiceActivity.Choice(it.id, it.entry.item.name.ifEmpty { host }, PasskeyTargets.detail(vault, it.entry))
             } + ServiceActivity.Choice(PasskeyTargets.NEW_LOGIN, "New login", host, ServiceActivity.Symbol.New)
             val email = graph.repo.state.value.email
             confirm(
@@ -133,8 +133,9 @@ class CredentialActivity : ServiceActivity() {
                 action = { "Save passkey" },
                 choicesLabel = "Save in",
                 choices = if (targets.isEmpty()) emptyList() else choices,
-                initialChoice = PasskeyTargets.defaultTarget(vault, targets, host),
+                initialChoice = PasskeyTargets.defaultTarget(targets),
                 footnote = if (targets.isEmpty()) "Saved as a new login for $host in your vault ($email)." else "The passkey is kept with that login in your vault ($email).",
+                warning = { choice -> PasskeyTargets.sharedWarning(vault, targets.firstOrNull { it.id == choice }?.entry) },
             ) {
                 if (!unlockedHere && deviceAuthAvailable(this)) {
                     if (!verifyUser("Save passkey", "$who · ${checked.rpId}")) return@confirm
@@ -235,7 +236,10 @@ class CredentialActivity : ServiceActivity() {
             val login = entry?.item?.login
             val fallback = graph.repo.state.value.settings.defaultMatch
             // Checked again: the login must still belong to this app or site.
-            if (target == null || login == null || !io.passauth.app.autofill.AutofillMatcher.matches(target, login, fallback)) {
+            // Regular expressions count only for logins in the user's own vaults (as autofill).
+            if (target == null || entry == null || login == null ||
+                !io.passauth.app.autofill.AutofillMatcher.matches(target, login, fallback, allowRegex = vault.isPersonal(entry))
+            ) {
                 val r = Intent()
                 PendingIntentHandler.setGetCredentialException(r, GetCredentialUnknownException("This login isn't available for this app."))
                 return@withVault done(r)

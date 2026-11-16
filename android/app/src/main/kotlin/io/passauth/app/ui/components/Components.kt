@@ -251,12 +251,12 @@ fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit, help
 }
 
 @Composable
-fun CheckRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit, help: String? = null) {
+fun CheckRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit, help: String? = null, enabled: Boolean = true) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onChange(!checked) }.padding(vertical = 4.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(enabled = enabled) { onChange(!checked) }.padding(vertical = 4.dp),
         verticalAlignment = Alignment.Top,
     ) {
-        Checkbox(checked = checked, onCheckedChange = onChange)
+        Checkbox(checked = checked, onCheckedChange = onChange, enabled = enabled)
         Column(Modifier.weight(1f).padding(top = 12.dp)) {
             Text(label, style = MaterialTheme.typography.bodyLarge)
             if (help != null) Text(help, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)

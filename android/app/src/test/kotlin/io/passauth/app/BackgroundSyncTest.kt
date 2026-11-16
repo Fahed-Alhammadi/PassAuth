@@ -3,46 +3,62 @@ package io.passauth.app
 import io.passauth.app.data.BACKGROUND_SYNC_DEFAULT
 import io.passauth.app.data.BACKGROUND_SYNC_OPTIONS
 import io.passauth.app.data.BackgroundSync
-import io.passauth.app.data.CacheRefresh
+import io.passauth.app.data.DeltaSync
+import io.passauth.app.data.SyncSnapshot
+import io.passauth.app.data.UserException
 import io.passauth.app.data.Settings
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class BackgroundSyncTest {
     private fun snapshot(revision: Any) =
         """{"revision":$revision,"user":{"name":"A"},"bundle":{"secret_key_enabled":false},"vaults":[],"items":[]}"""
 
+    /** The locked refresh without delta sync: [fetched] as the server's `/sync`, [cached] as the copy on the device. */
+    private fun refresh(fetched: String, cached: String?): DeltaSync.CacheRefresh = runBlocking {
+        DeltaSync.refresh(cached?.let { SyncSnapshot.decode(it) }, delta = false, trashSummary = true) { path ->
+            assertEquals("/sync?trash=summary", path)
+            fetched
+        }
+    }
+
+    private fun written(r: DeltaSync.CacheRefresh) = (r as? DeltaSync.CacheRefresh.Write)?.snapshot
+
     @Test
-    fun validSnapshotYieldsItsRevision() {
-        assertEquals(7L, CacheRefresh.revisionOf(snapshot(7)))
-        assertEquals(0L, CacheRefresh.revisionOf(snapshot(0)))
+    fun validSnapshotIsWrittenWithItsRevision() {
+        assertEquals(7L, written(refresh(snapshot(7), null))?.revision)
+        assertEquals(0L, written(refresh(snapshot(0), null))?.revision)
     }
 
     @Test
     fun malformedBodiesAreRejected() {
-        assertNull(CacheRefresh.revisionOf(""))
-        assertNull(CacheRefresh.revisionOf("<html>Sign in</html>"))
-        assertNull(CacheRefresh.revisionOf("[]"))
-        assertNull(CacheRefresh.revisionOf("""{"error":"unauthorized"}"""))
-        assertNull(CacheRefresh.revisionOf(snapshot("\"7\""))) // string revision
-        assertNull(CacheRefresh.revisionOf(snapshot(-1)))
-        assertNull(CacheRefresh.revisionOf("""{"revision":3,"bundle":{},"vaults":[]}""")) // items missing
-        assertNull(CacheRefresh.revisionOf("""{"revision":3,"bundle":"x","vaults":[],"items":[]}""")) // bundle not an object
-        assertNull(CacheRefresh.revisionOf(snapshot(7).dropLast(1))) // truncated
+        for (body in listOf(
+            "",
+            "<html>Sign in</html>",
+            "[]",
+            """{"error":"unauthorized"}""",
+            snapshot("\"7\""), // string revision
+            snapshot(-1),
+            """{"revision":3,"bundle":{},"vaults":[]}""", // items missing
+            """{"revision":3,"bundle":"x","vaults":[],"items":[]}""", // bundle not an object
+            """{"revision":3,"vaults":[],"items":[]}""", // no bundle: the next unlock needs it
+            """{"revision":3,"bundle":{},"vaults":[],"items":[{"id":"i1","vault_id":"v1"}]}""", // a live item without its data
+            snapshot(7).dropLast(1), // truncated
+        )) {
+            assertThrows(body, UserException::class.java) { refresh(body, null) }
+        }
     }
 
     @Test
     fun writesOnlyValidAndNotOlder() {
-        assertTrue(CacheRefresh.shouldWrite(fetched = 5, cached = null))
-        assertTrue(CacheRefresh.shouldWrite(fetched = 5, cached = 5))
-        assertTrue(CacheRefresh.shouldWrite(fetched = 6, cached = 5))
-        assertFalse(CacheRefresh.shouldWrite(fetched = 4, cached = 5))
-        assertFalse(CacheRefresh.shouldWrite(fetched = null, cached = 5))
-        assertFalse(CacheRefresh.shouldWrite(fetched = null, cached = null))
+        assertEquals(5L, written(refresh(snapshot(5), snapshot(5)))?.revision)
+        assertEquals(6L, written(refresh(snapshot(6), snapshot(5)))?.revision)
+        assertEquals(DeltaSync.CacheRefresh.Keep, refresh(snapshot(4), snapshot(5)))
+        // An unreadable copy is replaced.
+        assertEquals(3L, written(refresh(snapshot(3), "garbage"))?.revision)
     }
 
     @Test

@@ -91,10 +91,13 @@ class LockManager(private val repo: VaultRepository, private val scope: Coroutin
             }
             return
         }
-        if (repo.state.value.settings.vaultTimeout == VaultTimeout.Immediately) fire() else schedule()
+        if (timeout() == VaultTimeout.Immediately) fire() else schedule()
     }
 
-    private fun minutes(): Int? = repo.state.value.settings.vaultTimeout.minutes?.takeIf { it > 0 }
+    /** The vault timeout that applies: the setting, within the servers' longest one (it is lowered when a policy arrives). */
+    private fun timeout(): VaultTimeout = repo.state.value.let { PolicyRules.clampTimeout(it.settings.vaultTimeout, it.timeoutLimit) }
+
+    private fun minutes(): Int? = timeout().minutes?.takeIf { it > 0 }
 
     private fun expired(): Boolean {
         val m = minutes() ?: return false

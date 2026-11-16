@@ -22,6 +22,8 @@ import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteForever
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.GroupAdd
+import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +42,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,15 +53,20 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.BuildConfig
+import io.passauth.app.data.AccountUsage
 import io.passauth.app.data.BACKGROUND_SYNC_DEFAULT
+import io.passauth.app.data.QUOTA_EXCEEDED_MESSAGE
 import io.passauth.app.data.BACKGROUND_SYNC_OPTIONS
+import io.passauth.app.data.PolicyRules
 import io.passauth.app.data.Settings
 import io.passauth.app.data.ThemeMode
 import io.passauth.app.data.TimeoutAction
@@ -71,6 +80,7 @@ import io.passauth.app.ui.components.PromptText
 import io.passauth.app.ui.components.QuietActions
 import io.passauth.app.ui.components.QuietButton
 import io.passauth.app.ui.components.Tile
+import io.passauth.app.ui.HEALTH
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.permissions.PermissionsSettings
@@ -90,6 +100,7 @@ import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.Brand
 import io.passauth.app.ui.theme.PassAuthTheme
 import io.passauth.app.ui.theme.Space
+import io.passauth.app.ui.vault.HealthScreen
 import kotlinx.coroutines.launch
 
 private val MATCHES = listOf(
@@ -136,10 +147,40 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
     if (section == "export") return ExportScreen(ctx)
     if (section == "password") return ChangePasswordScreen(ctx)
     if (section == "two-step") return TwoStepScreen(ctx)
+    if (section == "sessions") return SessionsScreen(ctx)
+    if (section == HEALTH) return HealthScreen(ctx)
     val open = SECTIONS.firstOrNull { it.key == section }
     if (open == null) {
         Scaffold(topBar = { PageBar("Settings", brand = true) { AccountMenu(ctx) } }) { padding ->
-            Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                CardSection(null) {
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(HEALTH)) }.padding(vertical = Space.m),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(Space.m),
+                    ) {
+                        Icon(Icons.Outlined.HealthAndSafety, null, tint = MaterialTheme.colorScheme.primary)
+                        Text("Password health", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+                    }
+                    // Vaults shared with the account, waiting for an answer (servers with invitations).
+                    val vault by ctx.repo.vault.collectAsStateWithLifecycle()
+                    val waiting = vault?.invitations.orEmpty().size
+                    if (waiting > 0) {
+                        HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Invitations()) }.padding(vertical = Space.m)
+                                .semantics(mergeDescendants = true) { contentDescription = "Vault invitations, $waiting waiting" },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(Space.m),
+                        ) {
+                            Icon(Icons.Outlined.GroupAdd, null, tint = MaterialTheme.colorScheme.primary)
+                            Text("Vault invitations", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                            CountBadge(waiting)
+                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+                        }
+                    }
+                }
                 CardSection(null) {
                     SECTIONS.forEachIndexed { n, s ->
                         // Inset to the text column, like every list in the app.
@@ -182,13 +223,32 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
 
 private fun UiCtx.update(f: (Settings) -> Settings) = launch { repo.updateSettings(f) }
 
+/** A small count in the accent colour (invitations waiting). */
+@Composable
+private fun CountBadge(n: Int) {
+    androidx.compose.material3.Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(50), color = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
+        Text("$n", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+    }
+}
+
 @Composable
 internal fun Muted(text: String) = Text(text, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
 
 @Composable
 private fun ColumnScope.Security(ctx: UiCtx) {
     val s = ctx.state.settings
-    SelectField("Vault timeout", VaultTimeout.entries.map { it to it.label }, s.vaultTimeout, { v -> ctx.update { it.copy(vaultTimeout = v) } })
+    // The servers' longest vault timeout: only the choices within it (a saved one above it was lowered).
+    val limit = ctx.state.timeoutLimit
+    SelectField(
+        "Vault timeout",
+        PolicyRules.timeoutOptions(limit).map { it to it.label },
+        s.vaultTimeout,
+        { v -> ctx.update { it.copy(vaultTimeout = v, vaultTimeoutLowered = false) } },
+    )
+    if (limit > 0) {
+        Muted(PolicyRules.limitNote(limit))
+        if (s.vaultTimeoutLowered) Alert(PolicyRules.loweredNote(s.vaultTimeout))
+    }
     if (s.vaultTimeout == VaultTimeout.Never) {
         Alert(
             "With \"Never\", your vault key is stored on this device without the master password protecting it. Anyone who can unlock this phone and open PassAuth can open your vault.",
@@ -225,6 +285,37 @@ private fun ColumnScope.Security(ctx: UiCtx) {
     }
     HorizontalDivider(color = PassAuthTheme.colors.line)
     AccountSecurityLinks(ctx)
+    StorageUsage(ctx)
+}
+
+/** Items and storage against the server's limits (`GET /account`), shown only when the server's admin set a limit. */
+@Composable
+private fun ColumnScope.StorageUsage(ctx: UiCtx) {
+    val account = ctx.state.activeId
+    var usage by remember(account) { mutableStateOf<AccountUsage?>(null) }
+    LaunchedEffect(account) { usage = runCatching { ctx.repo.accountUsage() }.getOrNull() }
+    val u = usage?.takeIf { it.limited } ?: return
+    HorizontalDivider(color = PassAuthTheme.colors.line)
+    Text("Storage", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+    u.itemsLine?.let { UsageRow("Items", it, u.itemsUsed ?: 0f) }
+    u.storageLine?.let { UsageRow("Storage used", it, u.storageUsed ?: 0f) }
+    if (u.full) Alert(QUOTA_EXCEEDED_MESSAGE, AlertKind.Error)
+    Muted("Limits set by your server's admin. Items in the vaults you own count, including the trash.")
+}
+
+@Composable
+private fun UsageRow(title: String, value: String, used: Float) {
+    Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Text(value, style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted)
+        }
+        LinearProgressIndicator(
+            progress = { used },
+            modifier = Modifier.fillMaxWidth(),
+            color = if (used >= 1f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+        )
+    }
 }
 
 /** A shortcut to a page of the account's web vault (path routes). */
@@ -357,17 +448,21 @@ private fun ColumnScope.VaultOptions(ctx: UiCtx) {
     )
     Muted("Keeps your offline copy up to date while the app is closed.")
     HorizontalDivider(color = PassAuthTheme.colors.line)
-    Row(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings("export")) }.padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Icon(Icons.Outlined.Download, null, tint = MaterialTheme.colorScheme.primary)
-        Column(Modifier.weight(1f)) {
-            Text("Export vault", style = MaterialTheme.typography.bodyLarge)
-            Muted("Save a copy of your items to a file.")
+    if (PolicyRules.exportAllowed(ctx.state.policies)) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { ctx.go(Route.Settings("export")) }.padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(Icons.Outlined.Download, null, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.weight(1f)) {
+                Text("Export vault", style = MaterialTheme.typography.bodyLarge)
+                Muted("Save a copy of your items to a file.")
+            }
+            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
         }
-        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+    } else {
+        Muted(PolicyRules.EXPORT_OFF_NOTE)
     }
     HorizontalDivider(color = PassAuthTheme.colors.line)
     Text("In the web vault", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
@@ -387,7 +482,9 @@ private fun ColumnScope.Appearance(ctx: UiCtx) {
     )
     ToggleRow(
         "Show website icons", s.showIcons, { v -> ctx.update { it.copy(showIcons = v) } },
-        help = "Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents.",
+        help = "Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents." +
+            // On, but the server's icon service is off: say why there are only letters.
+            if (s.showIcons && !ctx.state.showSiteIcons) " Your server doesn't offer website icons right now." else "",
     )
 }
 

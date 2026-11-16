@@ -9,12 +9,18 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
-    <!-- Browsers must be visible to check their signing certificates against the privileged allowlist (autofill). -->
+    <!-- Browsers must be visible to check their signing certificates against the privileged allowlist (autofill).
+         Apps with a launcher icon must be visible for their names: a login saved from an app is named after
+         it, and passkey prompts say which app asks (else Android hides them and the package name shows). -->
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
         </intent>
     </queries>
 

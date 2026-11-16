@@ -52,11 +52,14 @@ import io.passauth.app.data.OtpAuth
 import io.passauth.app.data.OtpParse
 import io.passauth.app.data.SshKey
 import io.passauth.app.data.UrlMatch
+import io.passauth.app.data.UrlMatcher
 import io.passauth.app.ui.components.DecisionSheet
+import io.passauth.app.ui.components.WarningNote
 import io.passauth.app.ui.components.PrimaryButton
 import io.passauth.app.ui.components.PromptText
 import io.passauth.app.ui.components.QuietActions
 import io.passauth.app.ui.components.QuietButton
+import io.passauth.app.ui.HEALTH
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.auth.StrengthMeter
@@ -84,14 +87,15 @@ val MATCH_OPTIONS = listOf(
 
 /** New item or edit an existing one (the web vault's item editor). */
 @Composable
-fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
+fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null, fromHealth: Boolean = false) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
     val v = vault ?: return
     // The item as it was when editing started: if live sync brings a newer version meanwhile,
     // saving reports the conflict (revision check) instead of silently overwriting it.
     val current = id?.let { v.get(it) }
     val entry = remember(id, current == null) { current }
-    val done = { to: String? -> ctx.go(if (to != null) Route.ItemView(to) else Route.Vault) }
+    // Opened from Password health: saving or leaving goes back there.
+    val done = { to: String? -> ctx.go(if (fromHealth) Route.Settings(HEALTH) else if (to != null) Route.ItemView(to) else Route.Vault) }
     // Live sync can remove the item while it's open: say so instead of closing silently.
     val gone = id != null && (current == null || entry == null)
     LaunchedEffect(gone) {
@@ -116,11 +120,16 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
     fun ssh(f: (SshKey) -> SshKey) = set(item.copy(sshKey = f(item.sshKey!!)))
 
     val writable = v.writable
+    // What "Default" resolves to for the pattern notes under the websites.
+    val defaultMatch = ctx.state.settings.defaultMatch
     // New items go to the account's own vault unless the user picks another one.
     var vaultId by rememberSaveable { mutableStateOf(entry?.vaultId ?: v.defaultVault?.id.orEmpty()) }
     var busy by remember { mutableStateOf(false) }
     var conflict by remember { mutableStateOf<Item?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    // A new item's id, the same for every Save of this editor: if an earlier Save reached the
+    // server but its answer didn't come back, the next one doesn't add the item twice.
+    val newItemId = rememberSaveable { java.util.UUID.randomUUID().toString() }
     val label = item.kind.label.lowercase()
 
     fun save() {
@@ -141,7 +150,7 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                     ctx.notify("Changes saved.")
                     done(entry.id)
                 } else {
-                    val newId = ctx.repo.createItem(clean, vaultId)
+                    val newId = ctx.repo.createItem(clean, vaultId, id = newItemId)
                     ctx.notify("Item saved.")
                     done(newId)
                 }
@@ -240,6 +249,9 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null) {
                         SelectField("Match detection", MATCH_OPTIONS, u.match, { m ->
                             login { it.copy(urls = it.urls.mapIndexed { j, x -> if (j == n) x.copy(match = m) else x }) }
                         })
+                        // A website run as a regular expression: why the core refuses it, or that it isn't tied to one site.
+                        val note = remember(u.url, u.match, defaultMatch) { UrlMatcher.patternNote(u.url, u.match, defaultMatch) }
+                        if (note != null) WarningNote(note)
                     }
                     TextButton(onClick = { login { it.copy(urls = it.urls + LoginUrl()) } }) {
                         Icon(Icons.Outlined.Add, null)

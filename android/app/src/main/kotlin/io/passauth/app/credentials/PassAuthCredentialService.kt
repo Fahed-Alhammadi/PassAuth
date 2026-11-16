@@ -152,7 +152,8 @@ class PassAuthCredentialService : CredentialProviderService() {
                         val logins = vault.entries.mapNotNull { e -> e.item.login?.takeIf { it.password.isNotEmpty() }?.let { e to it } }
                         val fallback = graph(context).repo.state.value.settings.defaultMatch
                         for ((e, l) in logins) {
-                            if (!AutofillMatcher.matches(target, l, fallback)) continue
+                            // Regular expressions only from the user's own vaults (as autofill).
+                            if (!AutofillMatcher.matches(target, l, fallback, allowRegex = vault.isPersonal(e))) continue
                             out += PasswordCredentialEntry.Builder(
                                 context,
                                 l.username.ifEmpty { e.item.name },

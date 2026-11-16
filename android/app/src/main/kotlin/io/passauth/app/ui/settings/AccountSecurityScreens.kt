@@ -38,6 +38,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.ContentCopy
+import io.passauth.app.data.SessionText
+import io.passauth.app.data.SessionInfo
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.PhoneIphone
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.Laptop
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Devices
+import androidx.compose.material.icons.outlined.DesktopWindows
+import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Lock
@@ -60,6 +71,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -87,10 +99,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.passauth.app.data.EmergencyKit
 import io.passauth.app.data.MasterPasswordRules
+import io.passauth.app.data.PolicyRules
 import io.passauth.app.data.QrEncoder
+import io.passauth.app.data.TwoStepGate
 import io.passauth.app.data.SecretKeyChoice
 import io.passauth.app.data.ShowOnce
 import io.passauth.app.data.TwoFactor
+import io.passauth.app.data.Violation
 import io.passauth.app.ui.components.DecisionSheet
 import io.passauth.app.ui.components.LocalOnSheet
 import io.passauth.app.ui.components.PrimaryButton
@@ -148,6 +163,9 @@ internal fun AccountSecurityLinks(ctx: UiCtx) {
     }
     NavRow(Icons.Outlined.PhonelinkLock, "Two-step login", "Authenticator app, email codes, security keys and recovery codes.") {
         ctx.go(Route.Settings("two-step"))
+    }
+    NavRow(Icons.Outlined.Devices, "Signed-in devices", "Where your account is signed in, and signing devices out.") {
+        ctx.go(Route.Settings("sessions"))
     }
 }
 
@@ -214,6 +232,17 @@ fun ChangePasswordScreen(ctx: UiCtx) {
     val skOn = ctx.state.secretKeyRequired
     val needsSecretKey = skOn && !ctx.state.secretKeyStored
     val saveKit = rememberKitSaver(ctx)
+    val policies = ctx.state.policies
+    val minLength = PolicyRules.minPasswordLength(policies)
+    // The server requires a Secret Key: the change keeps it on (or turns it on), never off.
+    val skRequired = policies.requireSecretKey
+    // The server asks for stronger encryption settings: new keys follow them, the same password is fine.
+    val violations by ctx.repo.violations.collectAsState()
+    val kdfFix = Violation.Kdf in violations[ctx.state.activeId].orEmpty()
+    LaunchedEffect(skRequired, skOn) {
+        if (skRequired && !skOn && vm.choice != SecretKeyChoice.TurnOn) vm.choice = SecretKeyChoice.TurnOn
+        if (skRequired && skOn && vm.choice == SecretKeyChoice.TurnOff) vm.choice = SecretKeyChoice.Keep
+    }
 
     SecurityPage(ctx, "Master password", vm) {
         Card("Change master password") {
@@ -228,9 +257,10 @@ fun ChangePasswordScreen(ctx: UiCtx) {
             }
             PasswordField(vm.next, vm::updateNext, "New master password", imeAction = ImeAction.Next)
             StrengthMeter(vm.next, master = true)
-            Muted("At least ${MasterPasswordRules.MIN_LENGTH} characters. A few unrelated words are easy to remember and hard to guess.")
+            Muted("At least $minLength characters. A few unrelated words are easy to remember and hard to guess.")
+            if (kdfFix) Muted(PolicyRules.KDF_SAME_PASSWORD_NOTE)
             PasswordField(vm.confirm, { vm.confirm = it }, "Confirm new master password", onImeAction = { vm.changePassword(::estimateBits) })
-            SecretKeyChoices(skOn, vm.choice) { vm.choice = it }
+            SecretKeyChoices(skOn, vm.choice, skRequired) { vm.choice = it }
             ErrorText(vm.error)
             Muted("Changing your master password signs out all your other devices. This phone stays signed in.")
             Button(onClick = { vm.changePassword(::estimateBits) }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) {
@@ -254,11 +284,15 @@ fun ChangePasswordScreen(ctx: UiCtx) {
                     else -> "This phone doesn't have your Secret Key saved. Use the Emergency Kit you saved when you turned it on."
                 },
             )
+            if (skRequired) Muted(PolicyRules.SECRET_KEY_POLICY_NOTE)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { vm.openDialog(SecurityDialog.SecretKeyToggle) }, enabled = !vm.working) {
-                    Icon(Icons.Outlined.Key, null, Modifier.size(18.dp))
-                    Spacer(Modifier.size(8.dp))
-                    Text(if (skOn) "Turn off Secret Key" else "Turn on Secret Key")
+                // Turning it off isn't offered while the server requires it.
+                if (!(skOn && skRequired)) {
+                    OutlinedButton(onClick = { vm.openDialog(SecurityDialog.SecretKeyToggle) }, enabled = !vm.working) {
+                        Icon(Icons.Outlined.Key, null, Modifier.size(18.dp))
+                        Spacer(Modifier.size(8.dp))
+                        Text(if (skOn) "Turn off Secret Key" else "Turn on Secret Key")
+                    }
                 }
                 if (skOn && ctx.state.secretKeyStored) {
                     OutlinedButton(onClick = { ctx.launch { ctx.repo.storedSecretKey()?.let(saveKit) } }) {
@@ -284,9 +318,10 @@ fun ChangePasswordScreen(ctx: UiCtx) {
     }
 }
 
+/** [required]: the server requires a Secret Key, so only the choices that keep (or turn on) one are offered. */
 @Composable
-private fun SecretKeyChoices(on: Boolean, selected: SecretKeyChoice, onSelect: (SecretKeyChoice) -> Unit) {
-    val options = if (on) {
+private fun SecretKeyChoices(on: Boolean, selected: SecretKeyChoice, required: Boolean, onSelect: (SecretKeyChoice) -> Unit) {
+    val all = if (on) {
         listOf(
             SecretKeyChoice.Keep to ("Keep my Secret Key" to "Your Secret Key and Emergency Kit keep working."),
             SecretKeyChoice.TurnOff to ("Turn off Secret Key" to "Your master password alone will open your vault on a new device."),
@@ -297,7 +332,9 @@ private fun SecretKeyChoices(on: Boolean, selected: SecretKeyChoice, onSelect: (
             SecretKeyChoice.TurnOn to ("Turn on Secret Key" to "PassAuth creates a Secret Key and shows it once, to save in an Emergency Kit."),
         )
     }
+    val options = if (required) all.filter { (choice, _) -> choice.enabledAfter(on) } else all
     Text("Secret Key", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
+    if (required) Muted(PolicyRules.SECRET_KEY_POLICY_NOTE)
     Column(Modifier.selectableGroup()) {
         options.forEach { (choice, text) ->
             Row(
@@ -483,7 +520,7 @@ fun TwoStepScreen(ctx: UiCtx) {
             return@SecurityPage
         }
         TotpCard(ctx, vm, status.totpOn)
-        EmailCard(vm, status.emailOn, status.emailAvailable, status.email)
+        EmailCard(vm, status.emailOn, status.emailAvailable, status.email, needsSecretKey(ctx))
         SecurityKeysCard(vm, status.securityKeys)
         Card("Recovery codes") {
             if (status.anyOn) {
@@ -567,6 +604,11 @@ private fun TotpCard(ctx: UiCtx, vm: SecurityViewModel, on: Boolean) {
                 }
                 Text("2. Enter the code the app shows.", style = MaterialTheme.typography.bodyMedium)
                 CodeField(vm.totpCode, { vm.totpCode = it; vm.totpError = null }, onDone = vm::enableTotp)
+                ConfirmFields(
+                    vm.totpPassword, { vm.totpPassword = it; vm.totpError = null },
+                    vm.totpSecretKey, { vm.totpSecretKey = it },
+                    needsSecretKey(ctx), onDone = vm::enableTotp,
+                )
                 ErrorText(vm.totpError)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = vm::enableTotp, enabled = !vm.totpBusy) { Text(if (vm.totpBusy) "Checking code…" else "Turn on authenticator app") }
@@ -592,7 +634,7 @@ private fun openAuthenticator(ctx: UiCtx, uri: String) {
 }
 
 @Composable
-private fun EmailCard(vm: SecurityViewModel, on: Boolean, available: Boolean, email: String) {
+private fun EmailCard(vm: SecurityViewModel, on: Boolean, available: Boolean, email: String, needsSecretKey: Boolean) {
     Card("Email codes", on = on) {
         Text("Get a one-time code by email at $email when you sign in.", style = MaterialTheme.typography.bodyMedium)
         when {
@@ -604,6 +646,11 @@ private fun EmailCard(vm: SecurityViewModel, on: Boolean, available: Boolean, em
             vm.emailSent -> {
                 Text("We sent a code to $email. Enter it below.", style = MaterialTheme.typography.bodyMedium)
                 CodeField(vm.emailCode, { vm.emailCode = it; vm.emailError = null }, onDone = vm::enableEmail)
+                ConfirmFields(
+                    vm.emailPassword, { vm.emailPassword = it; vm.emailError = null },
+                    vm.emailSecretKey, { vm.emailSecretKey = it },
+                    needsSecretKey, onDone = vm::enableEmail,
+                )
                 ErrorText(vm.emailError)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = vm::enableEmail, enabled = !vm.emailBusy) { Text(if (vm.emailBusy) "Checking code…" else "Turn on email codes") }
@@ -665,6 +712,31 @@ private fun DangerButton(text: String, enabled: Boolean = true, onClick: () -> U
     ) { Text(text) }
 }
 
+/** Whether confirming with the master password also needs the Secret Key typed (the account uses one and this device doesn't keep it). */
+private fun needsSecretKey(ctx: UiCtx) = ctx.state.secretKeyRequired && !ctx.state.secretKeyStored
+
+/**
+ * The master password (and the Secret Key when [needsSecretKey]) that confirms turning a two-step
+ * method on: the server takes it only with a fresh confirmation, so a stolen session alone can't
+ * add a second step of its own.
+ */
+@Composable
+private fun ConfirmFields(
+    password: String,
+    onPassword: (String) -> Unit,
+    secretKey: String,
+    onSecretKey: (String) -> Unit,
+    needsSecretKey: Boolean,
+    onDone: () -> Unit,
+) {
+    PasswordField(
+        password, onPassword, "Master password",
+        imeAction = if (needsSecretKey) ImeAction.Next else ImeAction.Done, onImeAction = { if (!needsSecretKey) onDone() },
+    )
+    if (needsSecretKey) TextInput(secretKey, onSecretKey, "Secret Key", mono = true, imeAction = ImeAction.Done, onImeAction = onDone)
+    Muted("Confirms that it's you turning on two-step login.")
+}
+
 /** A verification code: number keyboard, offered to the keyboard's one-time-code suggestions. */
 @Composable
 private fun CodeField(value: String, onChange: (String) -> Unit, onDone: () -> Unit) {
@@ -697,6 +769,174 @@ private fun QrCode(text: String, modifier: Modifier = Modifier) {
     }
 }
 
+// ---------------------------------------------------- signed-in devices
+
+/**
+ * Settings → Account security → Signed-in devices (the web vault's Sessions tab): every session
+ * of the account with the app it signed in with, "Sign out" for each other one, and "Sign out
+ * other sessions" on servers with the `revoke_others` feature; both confirmed in a decision sheet.
+ */
+@Composable
+fun SessionsScreen(ctx: UiCtx) {
+    val vm = securityViewModel(ctx)
+    SecurityScreenEffects(ctx, vm)
+    LaunchedEffect(vm) { vm.loadSessions() }
+    val list = vm.sessions
+
+    SecurityPage(ctx, "Signed-in devices", vm) {
+        Text(SessionText.intro(list?.canForget == true), style = MaterialTheme.typography.bodyMedium)
+        if (list == null) {
+            if (vm.sessionsError != null) {
+                ErrorText(vm.sessionsError)
+                OutlinedButton(onClick = vm::loadSessions, enabled = !vm.sessionsLoading) { Text(if (vm.sessionsLoading) "Loading…" else "Try again") }
+            } else {
+                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(Modifier.semantics { contentDescription = "Loading signed-in devices" })
+                }
+            }
+            return@SecurityPage
+        }
+        Card("Signed in") {
+            list.sessions.forEachIndexed { n, session ->
+                if (n > 0) HorizontalDivider(color = PassAuthTheme.colors.line)
+                SessionRow(
+                    session,
+                    enabled = !vm.signOutBusy && !vm.forgetBusy,
+                    canForget = list.canForget && session.deviceId.isNotEmpty(),
+                    onSignOut = { vm.askSignOut(SignOutTarget.One(session)) },
+                    onForget = { vm.askForget(session) },
+                )
+            }
+            if (list.others.isEmpty()) Muted("You're not signed in anywhere else.")
+        }
+        if (list.canRevokeOthers && list.others.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+                DangerButton("Sign out other sessions", enabled = !vm.signOutBusy) { vm.askSignOut(SignOutTarget.Others(list.others.size)) }
+                Muted("Signs out every other device and app at once. This device stays signed in.")
+            }
+        }
+    }
+
+    vm.signingOut?.let { target -> SignOutSheet(ctx, vm, target) }
+    vm.forgetting?.let { session -> ForgetSheet(ctx, vm, session, list) }
+}
+
+/** A session: its device, the app it signed in with, when; "This device" or "Sign out", and "Forget…" (servers with `forget_device`). */
+@Composable
+private fun SessionRow(session: SessionInfo, enabled: Boolean, canForget: Boolean, onSignOut: () -> Unit, onForget: () -> Unit) {
+    val name = session.deviceName.ifEmpty { "Unknown device" }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(sessionIcon(session), null, tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.size(12.dp))
+        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
+            Text(name, style = MaterialTheme.typography.bodyLarge)
+            Text(SessionText.app(session), style = MaterialTheme.typography.bodyMedium)
+            Text(SessionText.detail(session), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            if (session.current) {
+                Surface(shape = RoundedCornerShape(50), color = PassAuthTheme.colors.okSoft, contentColor = PassAuthTheme.colors.ok) {
+                    Text("This device", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp))
+                }
+            } else {
+                TextButton(
+                    onClick = onSignOut,
+                    enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Sign out $name" },
+                ) { Text("Sign out") }
+            }
+            if (canForget) {
+                TextButton(
+                    onClick = onForget,
+                    enabled = enabled,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Forget $name" },
+                ) { Text("Forget…") }
+            }
+        }
+    }
+}
+
+/** "Forget this device?": every session of the device ends; this device's own sign-out follows. */
+@Composable
+private fun ForgetSheet(ctx: UiCtx, vm: SecurityViewModel, session: SessionInfo, list: io.passauth.app.data.SessionList?) {
+    val here = session.current || list?.isThisDevice(session.deviceId) == true
+    val count = list?.sessionsOn(session.deviceId) ?: 1
+    DecisionSheet(
+        onDismiss = vm::cancelForget,
+        title = "Forget this device?",
+        subtitle = session.deviceName.ifEmpty { "Unknown device" },
+        tile = { Tile(icon = Icons.AutoMirrored.Outlined.Logout, danger = true) },
+        error = vm.forgetError,
+        dismissable = !vm.forgetBusy,
+        actions = {
+            PrimaryButton(
+                if (vm.forgetBusy) "Forgetting…" else SessionText.forgetAction(here),
+                { vm.confirmForget(ctx.notify) },
+                busy = vm.forgetBusy,
+                danger = true,
+            )
+            QuietActions { QuietButton("Cancel", vm::cancelForget, enabled = !vm.forgetBusy) }
+        },
+    ) {
+        PromptText(SessionText.forgetBody(count, here))
+    }
+}
+
+/** The row's icon: the app's device type, else the session's device kind. */
+private fun sessionIcon(s: SessionInfo): ImageVector = when (s.client.orEmpty().substringBefore('/').lowercase()) {
+    "web" -> Icons.Outlined.Language
+    "desktop" -> Icons.Outlined.DesktopWindows
+    "extension", "chrome", "chrome-extension" -> Icons.Outlined.Extension
+    "android" -> Icons.Outlined.PhoneAndroid
+    "ios", "iphone", "ipad", "ios-autofill" -> Icons.Outlined.PhoneIphone
+    "macos-autofill", "mac-autofill" -> Icons.Outlined.Laptop
+    "cli" -> Icons.Outlined.Terminal
+    else -> when (s.deviceKind) {
+        "web" -> Icons.Outlined.Language
+        "extension" -> Icons.Outlined.Extension
+        "desktop" -> Icons.Outlined.DesktopWindows
+        "mobile" -> Icons.Outlined.PhoneAndroid
+        "cli" -> Icons.Outlined.Terminal
+        else -> Icons.Outlined.Devices
+    }
+}
+
+/** The decision sheet for signing out one device or every other session. */
+@Composable
+private fun SignOutSheet(ctx: UiCtx, vm: SecurityViewModel, target: SignOutTarget) {
+    val (title, subtitle, text, action) = when (target) {
+        is SignOutTarget.One -> listOf(
+            "Sign out this device?",
+            "${target.session.deviceName.ifEmpty { "Unknown device" }} · ${SessionText.app(target.session)}",
+            "PassAuth on that device is signed out at once. It needs your master password to sign in again.",
+            "Sign out device",
+        )
+        is SignOutTarget.Others -> listOf(
+            "Sign out other sessions?",
+            "${target.count} other ${if (target.count == 1) "session" else "sessions"} · ${ctx.state.email}",
+            "Every other device and app signed in to your account is signed out at once, including any you don't recognize. " +
+                "Each one needs your master password to sign in again. This device stays signed in.",
+            "Sign out other sessions",
+        )
+    }
+    DecisionSheet(
+        onDismiss = vm::cancelSignOut,
+        title = title,
+        subtitle = subtitle,
+        tile = { Tile(icon = Icons.AutoMirrored.Outlined.Logout, danger = true) },
+        error = vm.signOutError,
+        dismissable = !vm.signOutBusy,
+        actions = {
+            PrimaryButton(if (vm.signOutBusy) "Signing out…" else action, vm::confirmSignOut, busy = vm.signOutBusy, danger = true)
+            QuietActions { QuietButton("Cancel", vm::cancelSignOut, enabled = !vm.signOutBusy) }
+        },
+    ) {
+        PromptText(text)
+    }
+}
+
 // --------------------------------------------- password-confirmed actions
 
 /** Confirms a sensitive action with the master password (server re-authentication), like the web vault's ConfirmPassword. */
@@ -725,4 +965,83 @@ private fun ConfirmPasswordDialog(ctx: UiCtx, vm: SecurityViewModel, title: Stri
             if (needsSecretKey) TextInput(secretKey, { secretKey = it }, "Secret Key", mono = true)
         }
     }
+}
+
+// --------------------------------------------------- two-step login required
+
+/**
+ * The server requires two-step login (an account policy) and this account has no method yet, so
+ * the server refuses everything else ([TwoStepGate]). This screen offers only the methods this app
+ * can set up (the cards of Settings → Two-step login), security keys through the web vault, and
+ * signing out; once a method is on, its recovery codes are shown and "Continue" opens the vault
+ * (or the unlock screen when the account was locked).
+ */
+@Composable
+fun TwoStepRequiredScreen(ctx: UiCtx) {
+    val vm = securityViewModel(ctx)
+    SecurityScreenEffects(ctx, vm)
+    // Also when coming back from the web vault, where a security key may have been added.
+    androidx.lifecycle.compose.LifecycleResumeEffect(vm) {
+        vm.load()
+        onPauseOrDispose { }
+    }
+    val status = vm.status
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var signingOut by remember { mutableStateOf(false) }
+
+    fun proceed() {
+        if (busy) return
+        busy = true
+        error = null
+        ctx.scope.launch {
+            try {
+                ctx.repo.continueAfterTwoStep()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = io.passauth.app.ui.errorMessage(e)
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    io.passauth.app.ui.auth.AuthFrame(TwoStepGate.TITLE, TwoStepGate.intro(ctx.state.email)) {
+        when {
+            status == null -> {
+                if (vm.loadError != null) {
+                    ErrorText(vm.loadError)
+                    OutlinedButton(onClick = vm::load, enabled = !vm.loading) { Text(if (vm.loading) "Loading…" else "Try again") }
+                } else {
+                    CircularProgressIndicator(Modifier.semantics { contentDescription = "Loading two-step login" })
+                }
+            }
+            status.anyOn -> {
+                Card(TwoStepGate.DONE_TITLE, on = true) {
+                    Text(TwoStepGate.DONE_TEXT, style = MaterialTheme.typography.bodyMedium)
+                }
+                ErrorText(error)
+                PrimaryButton(if (busy) "Opening vault…" else "Continue", ::proceed, busy = busy)
+            }
+            else -> {
+                TotpCard(ctx, vm, on = false)
+                if (status.emailAvailable) EmailCard(vm, on = false, available = true, email = status.email, needsSecretKey = needsSecretKey(ctx))
+                Card("Security keys") {
+                    Text(
+                        "You can also add a hardware security key or a passkey in the web vault. This app can't use one to sign in yet, so set up another method too if you sign in here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    OutlinedButton(onClick = { ctx.openUrl(ctx.state.server.trimEnd('/') + "/settings/two-step") }) {
+                        Icon(Icons.AutoMirrored.Outlined.OpenInNew, null, Modifier.size(18.dp))
+                        Spacer(Modifier.size(8.dp))
+                        Text("Open web vault")
+                    }
+                }
+                Muted(TwoStepGate.HINT)
+            }
+        }
+        QuietActions { QuietButton("Sign out", { signingOut = true }, enabled = !busy && !vm.working) }
+    }
+    if (signingOut) io.passauth.app.ui.auth.LogoutSheet(ctx) { signingOut = false }
 }

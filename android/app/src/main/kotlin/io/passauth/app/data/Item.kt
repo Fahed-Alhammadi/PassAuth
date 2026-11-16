@@ -62,15 +62,16 @@ data class Item(
     }
 }
 
+/** A website's match type; [wire] is its name in items and in the core's site functions. */
 @Serializable
-enum class UrlMatch {
-    @SerialName("default") Default,
-    @SerialName("domain") Domain,
-    @SerialName("host") Host,
-    @SerialName("starts_with") StartsWith,
-    @SerialName("exact") Exact,
-    @SerialName("regex") Regex,
-    @SerialName("never") Never,
+enum class UrlMatch(val wire: String) {
+    @SerialName("default") Default("default"),
+    @SerialName("domain") Domain("domain"),
+    @SerialName("host") Host("host"),
+    @SerialName("starts_with") StartsWith("starts_with"),
+    @SerialName("exact") Exact("exact"),
+    @SerialName("regex") Regex("regex"),
+    @SerialName("never") Never("never"),
 }
 
 @Serializable

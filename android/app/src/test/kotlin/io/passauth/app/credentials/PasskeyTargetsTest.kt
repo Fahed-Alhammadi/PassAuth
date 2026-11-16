@@ -38,10 +38,10 @@ class PasskeyTargetsTest {
     fun anotherSubdomainOfTheSameBaseDomainIsNeverOffered() {
         val t = PasskeyTargets.saveTargets(vault, "cloudy.example.com", "cloudy.example.com", "fahed")
         assertEquals(listOf("c"), t.map { it.id })
-        assertEquals("c", PasskeyTargets.defaultTarget(vault, t, "cloudy.example.com"))
+        assertEquals("c", PasskeyTargets.defaultTarget(t))
         val n = PasskeyTargets.saveTargets(vault, "new.example.com", "new.example.com", "fahed")
         assertTrue(n.isEmpty())
-        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(vault, n, "new.example.com"))
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(n))
     }
 
     @Test
@@ -55,7 +55,7 @@ class PasskeyTargetsTest {
     fun githubUserNameMatchesTheEmailsUserPart() {
         val t = PasskeyTargets.saveTargets(vault, "github.com", "github.com", "fahed", "Fahed")
         assertEquals(listOf("g", "g2"), t.map { it.id })
-        assertEquals("g", PasskeyTargets.defaultTarget(vault, t, "github.com"))
+        assertEquals("g", PasskeyTargets.defaultTarget(t))
     }
 
     @Test
@@ -86,7 +86,7 @@ class PasskeyTargetsTest {
         val onlyPlanted = withPlanted.copy(entries = listOf(planted))
         val t = PasskeyTargets.saveTargets(onlyPlanted, "cloudy.example.com", "cloudy.example.com", "fahed")
         assertEquals(listOf("p"), t.map { it.id })
-        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(onlyPlanted, t, "cloudy.example.com"))
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(t))
         assertEquals("fahed · Team", PasskeyTargets.detail(onlyPlanted, planted))
     }
 
@@ -95,13 +95,13 @@ class PasskeyTargetsTest {
         // Same host and user name in both vaults: the user's own login wins, the shared one follows.
         val t = PasskeyTargets.saveTargets(withPlanted, "cloudy.example.com", "cloudy.example.com", "fahed")
         assertEquals(listOf("c", "p"), t.map { it.id })
-        assertEquals("c", PasskeyTargets.defaultTarget(withPlanted, t, "cloudy.example.com"))
+        assertEquals("c", PasskeyTargets.defaultTarget(t))
         assertEquals("fahed", PasskeyTargets.detail(withPlanted, cloudy))
         // Your own login for another host of the RP still isn't preselected over "New login"...
         val sub = PasskeyTargets.saveTargets(withPlanted.copy(entries = listOf(planted, apex)), "cloudy.example.com", "example.com", "fahed")
         assertEquals(listOf("a", "p"), sub.map { it.id })
         // ...and neither is the planted exact-host one.
-        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(withPlanted, sub, "cloudy.example.com"))
+        assertEquals(PasskeyTargets.NEW_LOGIN, PasskeyTargets.defaultTarget(sub))
     }
 
     @Test

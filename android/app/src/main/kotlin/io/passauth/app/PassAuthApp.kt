@@ -5,11 +5,15 @@ import android.util.Log
 import androidx.lifecycle.ProcessLifecycleOwner
 import io.passauth.app.credentials.AssetLinksVerifier
 import io.passauth.app.data.ApiClient
+import io.passauth.app.data.AuthRequestInbox
 import io.passauth.app.data.BackgroundSync
+import io.passauth.app.data.BreachChecker
 import io.passauth.app.data.ClipboardHelper
+import io.passauth.app.data.HealthSession
 import io.passauth.app.data.IconLoader
 import io.passauth.app.data.LiveSync
 import io.passauth.app.data.LockManager
+import io.passauth.app.data.PwnedPasswords
 import io.passauth.app.data.SecureStore
 import io.passauth.app.data.Status
 import io.passauth.app.data.VaultData
@@ -35,7 +39,16 @@ class AppGraph(app: Application) {
     val lock = LockManager(repo, scope)
     val clipboard = ClipboardHelper(app, scope) { repo.state.value.settings.clearClipboard }
     val icons = IconLoader(api.http)
-    val live = LiveSync(repo, store, api.http)
+
+    /** Sign-in requests from new devices waiting for this app's answer (shown while unlocked). */
+    val inbox = AuthRequestInbox(repo)
+    val live = LiveSync(repo, store, api.http, inbox)
+
+    /**
+     * Password health of the unlocked vault (Settings → Password health, notes on item pages). The
+     * breach check has its own client: never the PassAuth server's headers, tokens or cookies.
+     */
+    val health = HealthSession(repo, BreachChecker(PwnedPasswords.fetcher(PwnedPasswords.client(api.http))), scope)
 
     /** Digital Asset Links checks for apps (passkeys, WebViews). Debug builds can point it at a local test server. */
     val assetLinks = AssetLinksVerifier(api.http).let { default ->

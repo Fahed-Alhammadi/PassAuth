@@ -143,9 +143,28 @@ dependencies {
     implementation(libs.zxing.core)
 
     testImplementation(libs.junit)
+    // The JVM unit tests call the real Rust core: a host build of crates/core-ffi (see below). JNA's
+    // jar carries the desktop jnidispatch libraries, which the Android aar of :core doesn't.
+    testImplementation(libs.jna)
 }
 
+// The core for the JVM unit tests: scripts/build-android-core.sh builds it for the host too
+// (target/debug/libpassauth_ffi.dylib or .so, the build the Kotlin bindings are generated from).
+val hostCore = rootProject.file("../target/debug")
+
 tasks.withType<Test>().configureEach {
+    // Golden vectors shared with the other clients (GoldenVectorsTest finds the file from the
+    // working directory); declared so a change to them re-runs the tests instead of a cache hit.
+    inputs.file(rootProject.file("../testdata/vectors.json")).withPropertyName("goldenVectors").withPathSensitivity(PathSensitivity.RELATIVE)
+    // The host core the bindings load (JNA); a rebuilt core re-runs the tests too.
+    val coreLibs = listOf("libpassauth_ffi.dylib", "libpassauth_ffi.so").map { File(hostCore, it) }
+    systemProperty("jna.library.path", hostCore.absolutePath)
+    inputs.files(provider { coreLibs.filter { it.isFile } }).withPropertyName("hostCore").withPathSensitivity(PathSensitivity.NONE)
+    doFirst {
+        check(coreLibs.any { it.isFile }) {
+            "The unit tests need the core built for this computer: run scripts/build-android-core.sh from the repository root first."
+        }
+    }
     testLogging {
         events("failed", "skipped")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL

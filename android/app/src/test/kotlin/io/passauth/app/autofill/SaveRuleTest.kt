@@ -4,7 +4,6 @@ import io.passauth.app.autofill.SaveRule.Plan
 import io.passauth.app.autofill.SaveRule.Reason
 import io.passauth.app.autofill.SaveRule.asks
 import io.passauth.app.autofill.SaveRule.updates
-import io.passauth.app.autofill.SaveRule.viewOnly
 import io.passauth.app.data.Login
 import io.passauth.app.data.LoginUrl
 import io.passauth.app.data.UrlMatch
@@ -25,103 +24,33 @@ class SaveRuleTest {
 
     private fun plan(list: List<SaveRule.Candidate<String>>, user: String, pw: String) = SaveRule.plan(list, user, pw)
 
-    // ---- 1. a login with the typed user name
+    // The rule's branches are the core's (crates/core/src/site/save_plan.rs) and are pinned by the
+    // golden vectors (GoldenVectorsTest.savePlan, through this wrapper). Here: the wrapper itself.
 
     @Test
-    fun sameUserNameWithThePasswordIsUnchanged() {
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "pw")), "alex", "pw"))
-        // Any of them: a second login with the same user name already has it.
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "old"), c("b", "alex", "pw")), "alex", "pw"))
-    }
-
-    @Test
-    fun sameUserNameGetsTheNewPassword() {
-        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(c("a", "alex", "old")), "alex", "new"))
-        // Compared trimmed and without case.
-        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(c("a", "Alex@Example.com", "old")), "  alex@example.COM ", "new"))
-        // The first one the user can edit.
-        assertEquals(Plan.Update("b", Reason.Same), plan(listOf(c("a", "alex", "old", writable = false), c("b", "alex", "older")), "alex", "new"))
-    }
-
-    @Test
-    fun onlyTheUserNameWasSaved() {
-        // An empty password is just a different password: the login is completed, not duplicated.
-        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(c("a", "alex", "")), "alex", "new"))
-    }
-
-    @Test
-    fun sameUserNameInAViewOnlyVaultIsLeftAlone() {
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "old", writable = false)), "alex", "new"))
-        // Even when another login could be edited: it belongs to someone else.
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "old", writable = false), c("b", "sam", "x")), "alex", "new"))
-    }
-
-    @Test
-    fun noUserNameTypedAndALoginWithOnlyAPassword() {
-        // `same` for an empty user name = the logins saved with only a password.
-        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(c("a", "", "old"), c("b", "alex", "x")), "", "new"))
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "", "pw")), "", "pw"))
-        // A view-only login without a user name is not "the same login": the typed password is a new login.
-        assertEquals(Plan.New, plan(listOf(c("a", "", "old", writable = false)), "", "new"))
-        // ...unless it already has that password.
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "", "pw", writable = false)), "", "pw"))
-    }
-
-    // ---- 2. a new user name
-
-    @Test
-    fun onlyThePasswordWasSaved() {
-        // The user's complaint: the login gets the user name (and password), no second item.
+    fun theCoresPlanInTheAppsTerms() {
+        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(c("b", "sam", "x"), c("a", "alex", "old")), " ALEX ", "new"))
         assertEquals(Plan.Update("a", Reason.Blank), plan(listOf(c("a", "", "old")), "alex", "new"))
-        // An update even when the password is unchanged: the user name gets filled in.
-        assertEquals(Plan.Update("a", Reason.Blank), plan(listOf(c("a", "", "pw")), "alex", "pw"))
-    }
-
-    @Test
-    fun severalLoginsWithoutAUserName() {
-        // The one whose password was typed, else the first.
-        assertEquals(Plan.Update("b", Reason.Blank), plan(listOf(c("a", "", "one"), c("b", "", "two")), "alex", "two"))
-        assertEquals(Plan.Update("a", Reason.Blank), plan(listOf(c("a", "", "one"), c("b", "", "two")), "alex", "three"))
-        // View-only ones are never picked.
-        assertEquals(Plan.Update("b", Reason.Blank), plan(listOf(c("a", "", "pw", writable = false), c("b", "", "two")), "alex", "pw"))
-    }
-
-    @Test
-    fun aNewUserNameIsANewLogin() {
-        assertEquals(Plan.New, plan(emptyList(), "alex", "pw"))
-        assertEquals(Plan.New, plan(listOf(c("a", "sam", "x")), "alex", "pw"))
-        // The same password under another user name is still another account.
-        assertEquals(Plan.New, plan(listOf(c("a", "sam", "pw")), "alex", "pw"))
-        // A login without a user name that can't be edited doesn't count.
-        assertEquals(Plan.New, plan(listOf(c("a", "", "x", writable = false)), "alex", "pw"))
-    }
-
-    // ---- 3. no user name typed, none saved without one
-
-    @Test
-    fun noUserNameTypedAndThePasswordIsAlreadySaved() {
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "pw"), c("b", "sam", "x")), "", "pw"))
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "pw", writable = false)), "", "pw"))
-    }
-
-    @Test
-    fun noUserNameTypedAndExactlyOneLogin() {
-        // The password belongs to the site's only login; its user name is kept.
         assertEquals(Plan.Update("a", Reason.Only), plan(listOf(c("a", "alex", "old")), "", "new"))
-        assertEquals(Plan.Update("b", Reason.Only), plan(listOf(c("a", "sam", "x", writable = false), c("b", "alex", "old")), "", "new"))
-    }
-
-    @Test
-    fun noUserNameTypedAndNoOrSeveralLogins() {
-        assertEquals(Plan.New, plan(emptyList(), "", "pw"))
-        assertEquals(Plan.New, plan(listOf(c("a", "alex", "old"), c("b", "sam", "x")), "", "new"))
-        assertEquals(Plan.New, plan(listOf(c("a", "alex", "old", writable = false)), "", "new"))
-    }
-
-    @Test
-    fun noPasswordIsNeverSaved() {
-        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "old")), "alex", ""))
+        assertEquals(Plan.New, plan(listOf(c("a", "sam", "pw")), "alex", "pw"))
+        assertEquals(Plan.Nothing, plan(listOf(c("a", "alex", "pw")), "alex", "pw"))
         assertEquals(Plan.Nothing, plan(emptyList(), "alex", ""))
+        // Any id type: the core only sees the candidates' positions.
+        val ints = listOf(SaveRule.Candidate(7, "Seven", "", "x", writable = true), SaveRule.Candidate(3, "Three", "alex", "y", writable = true))
+        assertEquals(Plan.Update(3, Reason.Same), SaveRule.plan(ints, "alex", "new"))
+        assertEquals(listOf(7, 3), SaveRule.targets(ints, "alex", "new").map { it.id })
+        assertEquals(Plan.Update(7, Reason.Blank), SaveRule.planFor(ints, 7, "alex", "new"))
+        // Nothing to save: nothing offered either.
+        assertEquals(emptyList<Int>(), SaveRule.targets(ints, "alex", "y").map { it.id })
+    }
+
+    @Test
+    fun aChoiceAfterThePasswordWasSavedMeanwhileChangesNothing() {
+        // The sheet offered "a"; by the time the user confirms, the password is saved (another device).
+        val now = listOf(c("a", "alex", "old"), c("b", "alex", "new"))
+        assertEquals(Plan.Nothing, SaveRule.planFor(now, "a", "alex", "new"))
+        // "New login" stays what the user chose.
+        assertEquals(Plan.New, SaveRule.planFor(now, null, "alex", "new"))
     }
 
     // ---- applying
@@ -143,37 +72,27 @@ class SaveRuleTest {
     // ---- shared vaults: a login somebody else can plant never becomes the default place
 
     @Test
-    fun aPlantedBlankLoginInASharedVaultIsNeverCompleted() {
-        // Rule 2: the typed user name and password would go to the vault's other members.
-        assertEquals(Plan.New, plan(listOf(shared("s", "", "x")), "alex", "new"))
-        // The user's own blank login is chosen even when the planted one comes first or has the password.
-        assertEquals(Plan.Update("a", Reason.Blank), plan(listOf(shared("s", "", "new"), c("a", "", "old")), "alex", "new"))
-    }
-
-    @Test
-    fun aSharedVaultLoginIsNeverTheOnlyLogin() {
-        // Rule 3: no user name typed, the one login for the place is in a shared vault.
-        assertEquals(Plan.New, plan(listOf(shared("s", "alex", "x")), "", "new"))
-        // It doesn't count towards "exactly one" either.
-        assertEquals(Plan.Update("a", Reason.Only), plan(listOf(shared("s", "sam", "x"), c("a", "alex", "old")), "", "new"))
-    }
-
-    @Test
-    fun noUserNameTypedNeverUpdatesABlankLoginInASharedVault() {
-        // Rule 1 with an empty user name: "the same user name" proves nothing when both are empty.
-        assertEquals(Plan.New, plan(listOf(shared("s", "", "x")), "", "new"))
-        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(shared("s", "", "x"), c("a", "", "old")), "", "new"))
-        // Rule 3 then still applies to the user's own single login.
-        assertEquals(Plan.Update("a", Reason.Only), plan(listOf(shared("s", "", "x"), c("a", "alex", "old")), "", "new"))
-        // It still counts for "already saved": nothing to offer.
-        assertEquals(Plan.Nothing, plan(listOf(shared("s", "", "new")), "", "new"))
-    }
-
-    @Test
-    fun aSharedVaultLoginWithTheTypedUserNameIsStillUpdated() {
-        // Rule 1 with a user name is unchanged: it needs the exact user name.
-        assertEquals(Plan.Update("s", Reason.Same), plan(listOf(shared("s", "alex", "old")), "ALEX", "new"))
-        assertEquals(Plan.Nothing, plan(listOf(shared("s", "alex", "new")), "alex", "new"))
+    fun aSharedVaultLoginWithTheTypedUserNameIsOnlyOffered() {
+        // Anyone can share a vault with the user and plant a login with the user's own email as
+        // its user name: it is never selected, so a tap on "Update" can't send the password there.
+        val planted = shared("s", "alex", "old")
+        assertEquals(Plan.New, plan(listOf(planted), "ALEX", "new"))
+        assertEquals(Plan.New, plan(listOf(planted, c("b", "", "x")), "alex", "new"))
+        // The user's own login with the user name is the selection, wherever the shared one comes.
+        assertEquals(Plan.Update("a", Reason.Same), plan(listOf(planted, c("a", "alex", "older")), "alex", "new"))
+        // It is listed after the user's own logins, labelled with its vault...
+        val targets = SaveRule.targets(listOf(planted, c("a", "alex", "older"), c("b", "sam", "x")), "alex", "new")
+        assertEquals(listOf("a", "b", "s"), targets.map { it.id })
+        assertEquals("Team", targets.last().vault)
+        // ...and applied only when the user picks it, with a warning naming the vault.
+        assertEquals(Plan.Update("s", Reason.Same), SaveRule.planFor(listOf(planted), "s", "alex", "new"))
+        assertEquals("Saving here shares this password with everyone in Team.", SaveRule.sharedWarning(planted))
+        assertNull(SaveRule.sharedWarning(c("a", "alex", "x")))
+        assertNull(SaveRule.sharedWarning(null))
+        // Already saved there: nothing to offer.
+        assertEquals(Plan.Nothing, plan(listOf(planted.copy(password = "new")), "alex", "new"))
+        // A view-only one with the user name is never offered.
+        assertEquals(emptyList<String>(), SaveRule.targets(listOf(c("r", "alex", "old", writable = false)), "alex", "new").map { it.id })
     }
 
     // ---- saving without PassAuth's own sheet
@@ -197,13 +116,13 @@ class SaveRuleTest {
         val list = listOf(c("a", "alex", "pw"), c("b", "sam", "x", writable = false), c("c", "", "y"), shared("s", "kim", "z"), shared("t", "", "z"))
         // The user's own logins; shared-vault ones are not offered...
         assertEquals(listOf("a", "c"), SaveRule.targets(list, "robin", "new").map { it.id })
-        // ...except the one rule 1 preselects (the typed user name), shown with its vault's name.
+        // ...except, after them, those with the typed user name (rule 1), shown with their vault's name.
         val withShared = SaveRule.targets(list, "kim", "new")
         assertEquals(listOf("a", "c", "s"), withShared.map { it.id })
         assertEquals("Team", withShared.last().vault)
         assertFalse(withShared.last().personal)
-        // No shared login is offered once it already has the typed password (nothing to update).
-        assertEquals(listOf("a", "c"), SaveRule.targets(list, "kim", "z").map { it.id })
+        // Never for an empty user name: a shared login without one is exactly what can be planted.
+        assertEquals(listOf("a", "c"), SaveRule.targets(list, "", "new").map { it.id })
 
         assertEquals(Plan.New, SaveRule.planFor(list, null, "alex", "new"))
         assertEquals(Plan.Update("c", Reason.Blank), SaveRule.planFor(list, "c", "alex", "new"))
@@ -312,13 +231,11 @@ class SaveRuleTest {
                 val silent = plan is Plan.Update && plan.reason != Reason.Only
                 assertEquals(where, silent, hint?.updates(t) == true)
                 assertEquals(where, SaveRule.needsSheet(plan), hint?.asks(t) == true)
-                assertEquals(where, plan == Plan.Nothing, hint?.viewOnly(t) == true)
+                // A password nobody saved is always saved somewhere (a view-only login doesn't block it).
+                assertTrue(where, plan != Plan.Nothing)
                 if (plan is Plan.Update && hint?.onlyTarget != null) assertEquals(where, "Item ${plan.id}", hint.onlyTarget)
-                // No plan ever updates a shared-vault login unless it has the typed user name.
-                if (plan is Plan.Update) {
-                    val target = set.first { it.id == plan.id }
-                    assertTrue(where, target.own || (t.isNotBlank() && target.username == t.trim().lowercase()))
-                }
+                // No plan ever writes to a login outside the user's own vault: only the user's pick in "Save in" does.
+                if (plan is Plan.Update) assertTrue(where, set.first { it.id == plan.id }.own)
             }
         }
     }

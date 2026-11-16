@@ -8,7 +8,6 @@ import java.net.URLEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
-import okhttp3.Request
 
 /**
  * Website icons from the user's PassAuth server (`/api/icons/{host}`), which
@@ -26,7 +25,7 @@ class IconLoader(private val http: OkHttpClient) {
         val result = withContext(Dispatchers.IO) {
             runCatching {
                 val url = "$server/api/icons/${URLEncoder.encode(host, "UTF-8")}"
-                http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+                http.newCall(serverRequest(url).build()).execute().use { r ->
                     check(r.isSuccessful)
                     val bytes = r.body.bytes()
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)!!.asImageBitmap()

@@ -11,38 +11,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import io.passauth.app.graph
 import kotlinx.coroutines.flow.first
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.TimeUnit
-
-/**
- * Pure decisions for the locked cache refresh: which `/sync` bodies are a valid
- * offline copy, and whether a fetched copy may replace the cached one.
- */
-object CacheRefresh {
-    /**
-     * The revision of a `/sync` response, or null when the body isn't a vault
-     * snapshot (must be a JSON object with a numeric `revision`, a `bundle`
-     * object and `vaults` + `items` arrays). Nothing is decrypted.
-     */
-    fun revisionOf(json: String): Long? {
-        val o = runCatching { AppJson.parseToJsonElement(json) }.getOrNull() as? JsonObject ?: return null
-        val rev = (o["revision"] as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull() ?: return null
-        if (rev < 0) return null
-        if (o["bundle"] !is JsonObject) return null
-        if (o["vaults"] !is JsonArray || o["items"] !is JsonArray) return null
-        return rev
-    }
-
-    /**
-     * Write the fetched copy only when it parsed ([fetched] not null) and is not
-     * older than the cached one. A missing or unreadable cache ([cached] null)
-     * is always replaced by a valid response.
-     */
-    fun shouldWrite(fetched: Long?, cached: Long?): Boolean =
-        fetched != null && (cached == null || fetched >= cached)
-}
 
 /** Periodic refresh of every account's encrypted offline copy while the app is closed. */
 object BackgroundSync {

@@ -39,14 +39,14 @@ import io.passauth.app.ui.theme.PassAuthTheme
 
 /** An item's previous passwords, newest first: masked, with reveal and copy. */
 @Composable
-fun PasswordHistoryScreen(ctx: UiCtx, id: String) {
+fun PasswordHistoryScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
     val entry = vault?.get(id)
     LaunchedEffect(vault, entry) { if (vault != null && entry == null) ctx.go(Route.Vault) }
     if (entry == null) return
     val history = PasswordHistory.entries(entry.item.passwordHistory)
 
-    Scaffold(topBar = { PageBar("Password history", onBack = { ctx.go(Route.ItemView(id)) }) }) { padding ->
+    Scaffold(topBar = { PageBar("Password history", onBack = { ctx.go(Route.ItemView(id, fromHealth)) }) }) { padding ->
         Column(
             Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

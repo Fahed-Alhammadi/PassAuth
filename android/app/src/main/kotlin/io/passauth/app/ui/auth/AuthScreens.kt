@@ -26,7 +26,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Fingerprint
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
@@ -38,13 +41,18 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,8 +60,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import io.passauth.app.data.AccountSummary
+import io.passauth.app.data.CodeCheck
+import io.passauth.app.data.DeviceCodeRequest
+import io.passauth.app.data.DeviceLogin
 import io.passauth.app.data.Keystore
 import io.passauth.app.data.LoginResult
+import io.passauth.app.data.PolicyRules
 import io.passauth.app.data.Status
 import io.passauth.app.data.UrlMatcher
 import io.passauth.app.data.VaultRepository
@@ -80,6 +92,8 @@ import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.PassAuthTheme
 import io.passauth.app.ui.theme.Radius
 import io.passauth.core.estimateBits
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Centered, scrollable column for the sign-in screens. */
@@ -151,6 +165,7 @@ fun LoginScreen(ctx: UiCtx) {
     val state = ctx.state
     var changingServer by rememberSaveable { mutableStateOf(false) }
     var creating by rememberSaveable { mutableStateOf(false) }
+    var withDevice by rememberSaveable { mutableStateOf(false) }
     var email by rememberSaveable { mutableStateOf(state.email) }
     var password by remember { mutableStateOf("") }
     var secretKey by remember { mutableStateOf("") }
@@ -158,7 +173,35 @@ fun LoginScreen(ctx: UiCtx) {
     var challenge by remember { mutableStateOf<LoginResult.TwoFactor?>(null) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    // "Sign in with another device" only where the server has it.
+    var deviceLoginOffered by remember { mutableStateOf(false) }
+    LaunchedEffect(state.server) {
+        deviceLoginOffered = try {
+            ctx.repo.deviceLoginAvailable()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+    }
+    val deviceRequest by ctx.repo.deviceLogin.collectAsState()
+    val deviceCode by ctx.repo.deviceCode.collectAsState()
 
+    // An approved device sign-in: the approving app's code comes before anything is unlocked or kept.
+    deviceCode?.takeIf { it.record == state.activeId }?.let { pending ->
+        return DeviceCodeScreen(
+            ctx, pending,
+            onStopped = { message ->
+                challenge = null
+                withDevice = false
+                error = message
+            },
+            onCancel = {
+                challenge = null
+                withDevice = false
+            },
+        )
+    }
     if (changingServer) return SetupScreen(ctx, initial = state.server, onCancel = { changingServer = false })
     if (creating) {
         return RegisterScreen(ctx, onSignIn = { e, p, sk ->
@@ -177,7 +220,23 @@ fun LoginScreen(ctx: UiCtx) {
             }
         }, onBack = { creating = false })
     }
-    challenge?.let { c -> return TwoStepScreen(ctx, c, email) { challenge = null } }
+    challenge?.let { c ->
+        return TwoStepScreen(ctx, c, email) {
+            challenge = null
+            ctx.scope.launch { ctx.repo.cancelTwoFactor() }
+        }
+    }
+    if (withDevice || deviceRequest?.record == state.activeId) {
+        return DeviceLoginScreen(
+            ctx, email,
+            onBack = { withDevice = false },
+            onTwoFactor = { r, e ->
+                email = e
+                withDevice = false
+                challenge = r
+            },
+        )
+    }
 
     fun submit() {
         if (busy || email.isBlank() || password.isEmpty()) return
@@ -187,7 +246,7 @@ fun LoginScreen(ctx: UiCtx) {
             try {
                 when (val r = ctx.repo.login(email, password, secretKey.ifBlank { null })) {
                     is LoginResult.TwoFactor -> challenge = r
-                    LoginResult.Done -> Unit
+                    LoginResult.Done, LoginResult.CodeNeeded -> Unit
                 }
             } catch (e: Exception) {
                 if (e.message == VaultRepository.SECRET_KEY_REQUIRED) needKey = true
@@ -208,6 +267,13 @@ fun LoginScreen(ctx: UiCtx) {
         }
         ErrorText(error)
         PrimaryButton(if (busy) "Signing in…" else "Sign in", ::submit, enabled = email.isNotBlank() && password.isNotEmpty(), busy = busy)
+        if (deviceLoginOffered) {
+            OutlinedButton(onClick = { error = null; withDevice = true }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Outlined.Devices, null, Modifier.size(18.dp))
+                Spacer(Modifier.size(8.dp))
+                Text(DeviceLogin.LINK)
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(host(state.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
             TextButton(onClick = { changingServer = true }) { Text("Change server") }
@@ -217,6 +283,147 @@ fun LoginScreen(ctx: UiCtx) {
             TextButton(onClick = { creating = true }) { Text("Create account") }
         }
         OtherAccounts(ctx)
+    }
+}
+
+// ------------------------------------------------- sign in with another device
+
+/**
+ * Sign in with another device: the email, then the five words to compare and a countdown while
+ * the other device decides. The request lives in the repository ([VaultRepository.deviceLogin]),
+ * so a new screen (a rotation) keeps waiting for the same one.
+ */
+@Composable
+private fun DeviceLoginScreen(ctx: UiCtx, initialEmail: String, onBack: () -> Unit, onTwoFactor: (LoginResult.TwoFactor, String) -> Unit) {
+    val pending by ctx.repo.deviceLogin.collectAsState()
+    val request = pending?.takeIf { it.record == ctx.state.activeId }
+    var email by rememberSaveable { mutableStateOf(initialEmail) }
+    var busy by remember { mutableStateOf(false) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+
+    if (request != null) {
+        LaunchedEffect(request) {
+            try {
+                when (val r = ctx.repo.awaitDeviceLogin(request)) {
+                    is LoginResult.TwoFactor -> onTwoFactor(r, request.email)
+                    // The code screen takes over (the repository's deviceCode).
+                    LoginResult.CodeNeeded, LoginResult.Done -> Unit
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = errorMessage(e)
+            }
+        }
+        var now by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
+        LaunchedEffect(request) {
+            while (true) {
+                now = System.currentTimeMillis() / 1000
+                delay(1_000)
+            }
+        }
+        AuthFrame(DeviceLogin.WAIT_TITLE) {
+            Text(DeviceLogin.waitText(request.email), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
+            Surface(
+                shape = RoundedCornerShape(Radius.control),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, PassAuthTheme.colors.line),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    request.phrase,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(16.dp).semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+            Text(DeviceLogin.expiresIn(request.expiresAt, now), style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text(DeviceLogin.WAITING, style = MaterialTheme.typography.bodyMedium)
+            }
+            QuietActions { QuietButton("Cancel", { ctx.repo.cancelDeviceLogin() }) }
+        }
+        return
+    }
+
+    fun send() {
+        if (busy || email.isBlank()) return
+        busy = true
+        error = null
+        ctx.scope.launch {
+            try {
+                ctx.repo.beginDeviceLogin(email)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = errorMessage(e)
+            }
+            busy = false
+        }
+    }
+
+    AuthFrame(DeviceLogin.TITLE) {
+        Text(DeviceLogin.INTRO, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
+        TextInput(email, { email = it }, "Email", keyboardType = KeyboardType.Email, imeAction = ImeAction.Go, onImeAction = ::send)
+        ErrorText(error)
+        PrimaryButton(if (busy) "Sending…" else DeviceLogin.SEND, ::send, enabled = email.isNotBlank(), busy = busy)
+        QuietActions { QuietButton("Back", onBack, enabled = !busy) }
+    }
+}
+
+/**
+ * "Enter the 6-digit code shown on your other device." The approving app shows it once the user
+ * picked the right words there; nothing is unlocked or kept here before it is confirmed. A wrong
+ * code says how many tries are left; the third stops the sign-in ([onStopped] with what to do) and
+ * signs its session out; "Cancel" drops it too.
+ */
+@Composable
+private fun DeviceCodeScreen(ctx: UiCtx, pending: DeviceCodeRequest, onStopped: (String) -> Unit, onCancel: () -> Unit) {
+    var code by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun submit() {
+        if (busy || code.isBlank()) return
+        busy = true
+        error = null
+        ctx.scope.launch {
+            try {
+                when (val r = ctx.repo.confirmDeviceCode(pending, code)) {
+                    // Signed in and unlocked: the app moves on.
+                    CodeCheck.Confirmed -> Unit
+                    is CodeCheck.Wrong -> {
+                        error = r.message
+                        code = ""
+                    }
+                    is CodeCheck.NotACode -> error = r.message
+                    is CodeCheck.Stopped -> onStopped(r.message)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = errorMessage(e)
+            }
+            busy = false
+        }
+    }
+
+    AuthFrame(DeviceLogin.CODE_TITLE, pending.email) {
+        Text(DeviceLogin.CODE_INTRO, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
+        TextInput(
+            code, { v -> code = v.filter { it.isDigit() || it == ' ' || it == '-' }.take(9); error = null }, DeviceLogin.CODE_LABEL,
+            mono = true, keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done, onImeAction = ::submit,
+        )
+        ErrorText(error)
+        PrimaryButton(if (busy) "Checking…" else "Sign in", ::submit, enabled = code.isNotBlank(), busy = busy)
+        QuietActions {
+            QuietButton("Cancel", {
+                ctx.repo.cancelDeviceCode()
+                onCancel()
+            }, enabled = !busy)
+        }
     }
 }
 
@@ -315,7 +522,15 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
     var done by remember { mutableStateOf<io.passauth.app.data.Registered?>(null) }
     var saved by remember { mutableStateOf(false) }
     var closed by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { closed = ctx.repo.signupsAllowed() == false }
+    // The server's policies: master password length, and whether a Secret Key is required.
+    var policies by remember { mutableStateOf(io.passauth.app.data.Policies()) }
+    LaunchedEffect(Unit) {
+        val config = ctx.repo.publicConfig()
+        closed = config?.signupsAllowed == false
+        config?.policies?.let { policies = it }
+    }
+    LaunchedEffect(policies.requireSecretKey) { if (policies.requireSecretKey) withSecretKey = true }
+    val minLength = PolicyRules.minPasswordLength(policies)
 
     val saveKit = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         val sk = done?.secretKey ?: return@rememberLauncherForActivityResult
@@ -362,7 +577,7 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
 
     fun submit() {
         error = null
-        if (password.length < 10) return run { error = "Use at least 10 characters for your master password." }
+        if (password.length < minLength) return run { error = "Use at least $minLength characters for your master password." }
         if (password != confirm) return run { error = "The two passwords don't match." }
         if (estimateBits(password) < 50 && !hint) {
             hint = true
@@ -371,7 +586,7 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
         busy = true
         ctx.scope.launch {
             try {
-                done = ctx.repo.register(email, name, password, withSecretKey)
+                done = ctx.repo.register(email, name, password, withSecretKey || policies.requireSecretKey)
             } catch (e: Exception) {
                 error = errorMessage(e)
             }
@@ -390,8 +605,10 @@ private fun RegisterScreen(ctx: UiCtx, onSignIn: (String, String?, String?) -> U
         PasswordField(confirm, { confirm = it }, "Confirm master password", imeAction = ImeAction.Next)
         Alert("Your master password can't be reset. If you forget it, the data in your vault can't be recovered by anyone, including the server administrator.")
         CheckRow(
-            "Add a Secret Key", withSecretKey, { withSecretKey = it },
-            help = "A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password. You'll enter it once on each new device.",
+            "Add a Secret Key", withSecretKey || policies.requireSecretKey, { withSecretKey = it },
+            help = "A second, random key that never leaves your devices. Even if the server is breached, your vault can't be cracked by guessing your password. You'll enter it once on each new device." +
+                if (policies.requireSecretKey) " ${PolicyRules.SECRET_KEY_POLICY_NOTE}" else "",
+            enabled = !policies.requireSecretKey,
         )
         ErrorText(error)
         PrimaryButton(if (busy) "Creating account…" else "Create account", ::submit, enabled = email.isNotBlank() && password.isNotEmpty(), busy = busy)

@@ -130,8 +130,7 @@ class AutofillResponses(private val context: Context, private val inline: Inline
         /**
          * One line under the save dialog's title. The dialog is Android's, so the text is
          * chosen by conditions on the typed user name that Android checks itself (the same
-         * ones as [SaveRule.updates] / [SaveRule.asks] / [SaveRule.viewOnly]); saved passwords
-         * are not part of it.
+         * ones as [SaveRule.updates] / [SaveRule.asks]); saved passwords are not part of it.
          */
         private fun saveDescription(context: Context, username: AutofillId?, hint: SaveRule.Hint): CustomDescription {
             fun line(text: String) = RemoteViews(context.packageName, R.layout.autofill_save_hint).apply { setTextViewText(R.id.text, text) }
@@ -142,7 +141,6 @@ class AutofillResponses(private val context: Context, private val inline: Inline
             // No user name typed and one login of the user's own: PassAuth's sheet follows.
             val ask = one?.let { "PassAuth will ask before it updates your saved login “$it”." }
                 ?: "PassAuth will ask before it updates a saved login."
-            val viewOnly = "This login is in a vault you can only view, so PassAuth won't change it."
             // A form without a user-name field: the typed user name is always empty.
             if (username == null) {
                 return CustomDescription.Builder(line(if (hint.updateWhenBlank) update else if (hint.askWhenBlank) ask else create)).build()
@@ -159,7 +157,6 @@ class AutofillResponses(private val context: Context, private val inline: Inline
                 else -> null
             }?.let { b.batchUpdate(it, BatchUpdates.Builder().updateTemplate(line(update)).build()) }
             if (hint.askWhenBlank) b.batchUpdate(blank, BatchUpdates.Builder().updateTemplate(line(ask)).build())
-            named(hint.viewOnlyUser)?.let { b.batchUpdate(it, BatchUpdates.Builder().updateTemplate(line(viewOnly)).build()) }
             return b.build()
         }
 

@@ -42,9 +42,12 @@ class CoreSecurityCrypto(private val account: Account?) : SecurityCrypto {
         }
     }
 
-    override fun rewrap(bundleJson: String, newPassword: String, withSecretKey: Boolean, existingSecretKey: String?): Rewrapped {
+    override fun rewrap(bundleJson: String, newPassword: String, withSecretKey: Boolean, existingSecretKey: String?, kdf: KdfMinimums?): Rewrapped {
         val unlocked = account ?: throw UserException("Unlock your vault first.")
-        val next: NewAccount = unlocked.rewrap(bundleJson, newPassword, withSecretKey, existingSecretKey)
+        val next: NewAccount = unlocked.rewrapWithKdf(
+            bundleJson, newPassword, withSecretKey, existingSecretKey,
+            kdf?.memoryMib?.toUInt(), kdf?.iterations?.toUInt(),
+        )
         return CoreRewrapped(next)
     }
 }

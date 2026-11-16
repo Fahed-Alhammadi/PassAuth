@@ -23,8 +23,66 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 
-/** An error response from the server (`{ "error": code, "message": … }`). */
-class ApiException(val status: Int, val code: String, message: String) : Exception(message)
+/**
+ * An error response from the server (`{ "error": code, "message": …, "request_id": … }`).
+ * [retryAfter]: seconds to wait before trying again, from a 429's `Retry-After` (null when it
+ * didn't say). [requestId]: the server's id for the request (it names it in the server's log),
+ * shown as a reference with errors the app has no wording for ([ServerErrors]).
+ */
+class ApiException(
+    val status: Int,
+    val code: String,
+    message: String,
+    val retryAfter: Long? = null,
+    val requestId: String? = null,
+) : Exception(message) {
+    /** The server (or a proxy in front of it) refused because of too many requests. */
+    val isRateLimited: Boolean get() = status == 429 || code == "rate_limited"
+
+    /**
+     * Is this the server's [reason]? Servers since API v2 put it in `error`; older ones answer
+     * some of them with a generic code and the reason as the message
+     * (`{"error":"forbidden","message":"reauth_required"}`), or only with a message text
+     * ([fallback], compared without case).
+     */
+    fun hasCode(reason: String, fallback: String? = null): Boolean =
+        code == reason || message == reason || (fallback != null && message.orEmpty().equals(fallback, ignoreCase = true))
+}
+
+/**
+ * "Too many attempts. Try again in 30 seconds." for a rate-limited request that said when to
+ * retry (`Retry-After`), worded as the extension does; null otherwise (callers keep their own
+ * text for a limit without a time).
+ */
+fun tooManyAttemptsMessage(e: ApiException): String? {
+    val s = e.retryAfter?.takeIf { e.isRateLimited && it > 0 } ?: return null
+    return "Too many attempts. Try again in ${waitText(s)}."
+}
+
+/** A wait in plain words, never shorter than the real one: "a moment" (a second), "45 seconds" (under a minute and a half), else whole minutes rounded up. */
+fun waitText(seconds: Long): String = when {
+    seconds <= 1 -> "a moment"
+    seconds < 90 -> "$seconds seconds"
+    else -> "${(seconds + 59) / 60} minutes"
+}
+
+/** Seconds from a `Retry-After` header: a number of seconds, or an HTTP date (RFC 9110); null if absent or unreadable. */
+fun retryAfterSeconds(value: String?, nowMs: Long = System.currentTimeMillis()): Long? {
+    val v = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (v.all { it in '0'..'9' }) return v.toLongOrNull()
+    val at = runCatching { java.time.ZonedDateTime.parse(v, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME) }.getOrNull() ?: return null
+    val ms = at.toInstant().toEpochMilli() - nowMs
+    return if (ms <= 0) 0 else (ms + 999) / 1000
+}
+
+/** Sent with every request to a PassAuth server (API v2): which app and version is asking. */
+const val CLIENT_HEADER = "X-PassAuth-Client"
+
+/** `android/<version>` (debug builds without their "-debug" suffix). */
+val CLIENT_ID: String = "android/" + io.passauth.app.BuildConfig.VERSION_NAME.removeSuffix("-debug").ifEmpty { "0" }
+
+/** A request to a PassAuth server, with [CLIENT_HEADER]. Never for other hosts (asset links). */
+fun serverRequest(url: String): Request.Builder = Request.Builder().url(url).header(CLIENT_HEADER, CLIENT_ID)
 
 /** A user-facing error from the app itself (shown as is). */
 open class UserException(message: String) : Exception(message)
@@ -67,16 +125,30 @@ class ApiClient(private val store: SecureStore) {
         method: String = if (body == null) "GET" else "POST",
         auth: Boolean = true,
         headers: Map<String, String> = emptyMap(),
-    ): JsonElement = parse(respond(accountId, path, body, method, auth, headers))
+    ): JsonElement = gate(accountId, auth) { parse(respond(accountId, path, body, method, auth, headers)) }
 
     /**
      * Like [call] for a large GET response kept as text (`/sync`, which is cached as is):
      * the body isn't parsed here, so it's parsed only once, by the caller, off the main thread.
      */
-    suspend fun callText(accountId: String, path: String): String {
+    suspend fun callText(accountId: String, path: String): String = gate(accountId, true) {
         val res = respond(accountId, path, null, "GET", true, emptyMap())
         if (!res.isSuccessful) parse(res) // throws the server's error
-        return withContext(Dispatchers.IO) { res.use { it.body.string() } }
+        withContext(Dispatchers.IO) { res.use { it.body.string() } }
+    }
+
+    /**
+     * Called when the server refuses a signed-in request of an account because it requires
+     * two-step login and the account has no method yet (403 `two_step_required`, [TwoStepGate]).
+     */
+    var onTwoStepRequired: suspend (accountId: String) -> Unit = {}
+
+    /** Runs a request; a "set up two-step login first" answer is reported to [onTwoStepRequired], then thrown as usual. */
+    private suspend inline fun <T> gate(accountId: String, auth: Boolean, block: () -> T): T = try {
+        block()
+    } catch (e: ApiException) {
+        if (auth && TwoStepGate.blocks(e)) onTwoStepRequired(accountId)
+        throw e
     }
 
     private suspend fun respond(
@@ -90,8 +162,7 @@ class ApiClient(private val store: SecureStore) {
         suspend fun send(): Response {
             val a = store.get().accounts[accountId]
             val server = a?.server?.takeIf { it.isNotEmpty() } ?: throw UserException("Set your PassAuth server address first.")
-            val req = Request.Builder()
-                .url("$server/api$path")
+            val req = serverRequest("$server/api$path")
                 .method(method, body?.toString()?.toRequestBody(jsonType) ?: if (method == "GET") null else ByteArray(0).toRequestBody())
                 .apply { if (auth && a.tokens != null) header("Authorization", "Bearer ${a.tokens.access}") }
                 .apply { headers.forEach { (k, v) -> header(k, v) } }
@@ -117,7 +188,7 @@ class ApiClient(private val store: SecureStore) {
     }
 
     /** Request against a server URL directly (server setup check). */
-    suspend fun get(url: String): Response = execute(Request.Builder().url(url).build())
+    suspend fun get(url: String): Response = execute(serverRequest(url).build())
 
     private suspend fun refresh(accountId: String): RefreshResult {
         val mine = CompletableDeferred<RefreshResult>()
@@ -131,7 +202,7 @@ class ApiClient(private val store: SecureStore) {
             } else {
                 val body = buildJsonObject { put("refresh_token", tokens.refresh) }
                 val res = execute(
-                    Request.Builder().url("${a.server}/api/auth/refresh")
+                    serverRequest("${a.server}/api/auth/refresh")
                         .post(body.toString().toRequestBody(jsonType)).build(),
                 )
                 when (val outcome = refreshOutcome(res.code)) {
@@ -167,7 +238,7 @@ class ApiClient(private val store: SecureStore) {
         if (server.isEmpty() || tokens == null) return
         runCatching {
             execute(
-                Request.Builder().url("$server/api/auth/logout")
+                serverRequest("$server/api/auth/logout")
                     .header("Authorization", "Bearer ${tokens.access}")
                     .post(ByteArray(0).toRequestBody()).build(),
             ).close()
@@ -183,27 +254,45 @@ class ApiClient(private val store: SecureStore) {
     private suspend fun parse(res: Response): JsonElement = withContext(Dispatchers.IO) {
         res.use {
             val text = it.body.string()
-            val json = try {
+            if (!it.isSuccessful) throw failedResponse(it.code, text, it.header("Retry-After"), it.header("x-request-id"))
+            try {
                 if (text.isEmpty()) JsonNull else AppJson.parseToJsonElement(text)
             } catch (_: Exception) {
                 throw ApiException(it.code, "not_passauth", "That address doesn't look like a PassAuth server.")
             }
-            if (!it.isSuccessful) {
-                val o = json as? JsonObject
-                throw ApiException(
-                    it.code,
-                    o?.get("error")?.jsonPrimitive?.contentOrNull ?: "error",
-                    o?.get("message")?.jsonPrimitive?.contentOrNull ?: "Request failed (${it.code})",
-                )
-            }
-            json
         }
     }
 }
 
+/**
+ * The error for a failed response: the server's `error` code and message, with a 429's
+ * `Retry-After` ([retryAfterHeader]) and the request's id (the body's `request_id`, else the
+ * `x-request-id` header). A body that isn't JSON means another server answered, except for a 429,
+ * which is a rate limit whoever sent it (a proxy in front of PassAuth).
+ */
+fun failedResponse(status: Int, body: String, retryAfterHeader: String?, requestIdHeader: String? = null): ApiException {
+    val retryAfter = if (status == 429) retryAfterSeconds(retryAfterHeader) else null
+    val json = try {
+        if (body.isEmpty()) JsonNull else AppJson.parseToJsonElement(body)
+    } catch (_: Exception) {
+        return if (status == 429) ApiException(429, "rate_limited", "Too many requests", retryAfter)
+        else ApiException(status, "not_passauth", "That address doesn't look like a PassAuth server.")
+    }
+    val o = json as? JsonObject
+    fun text(key: String) = (o?.get(key) as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+    return ApiException(
+        status,
+        text("error") ?: "error",
+        text("message") ?: "Request failed ($status)",
+        retryAfter,
+        text("request_id") ?: requestIdHeader,
+    )
+}
+
 const val UNREACHABLE = "Can't reach your PassAuth server. Check the server address and your connection."
 
-private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
+/** Sends the call and waits for its response; cancelling the coroutine cancels the call. */
+internal suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
     enqueue(object : Callback {
         override fun onResponse(call: Call, response: Response) = cont.resume(response) { _, r, _ -> r.close() }
         override fun onFailure(call: Call, e: IOException) {

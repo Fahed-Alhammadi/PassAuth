@@ -31,10 +31,11 @@ class ReviewFixesTest {
     fun regexIsBoundedAndIgnoresTheQuery() {
         assertFalse(m("https://evil.com/?bank.com", "bank\\.com", UrlMatch.Regex))
         assertTrue(m("https://bank.com/login?x=1", "^https://bank\\.com/", UrlMatch.Regex))
-        assertTrue(UrlMatcher.unsafeRegex("(a+)+$"))
-        assertTrue(UrlMatcher.unsafeRegex("a".repeat(UrlMatcher.MAX_REGEX_LENGTH + 1)))
-        assertFalse(m("https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com/", "(a+)+$", UrlMatch.Regex))
-        assertFalse(UrlMatcher.unsafeRegex("^https://accounts\\.example\\.com/"))
+        // The core's engine runs in linear time: a nested quantifier on a long address returns at once.
+        val start = System.nanoTime()
+        assertFalse(m("https://${"a".repeat(1900)}.com/", "(a+)+$", UrlMatch.Regex))
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 2_000_000_000L)
+        assertFalse(m("https://example.com/", "x".repeat(301), UrlMatch.Regex))
     }
 
     @Test

@@ -1,9 +1,13 @@
 package io.passauth.app.autofill
 
+import io.passauth.app.data.Entry
 import io.passauth.app.data.Login
 import io.passauth.app.data.LoginUrl
 import io.passauth.app.data.UrlMatch
 import io.passauth.app.data.UrlMatcher
+import io.passauth.app.data.VaultData
+import io.passauth.core.SavedUrl
+import io.passauth.core.matchUrls
 import java.util.Locale
 
 /** Where a request comes from: a website (in a browser or verified WebView) or a native app. */
@@ -72,23 +76,41 @@ object AutofillMatcher {
     }
 
     /**
-     * Is [login] allowed for [target]? Web: a website matches the page (default match
-     * from settings) and no website would be an https → http downgrade (the extension's
-     * refusal). App: one of its websites is `androidapp://<package>`. Web logins never
-     * match apps and app logins never match websites.
+     * Is [login] allowed for [target]? Web: a website matches the page (default match from
+     * settings; the core never takes an `androidapp://` address for a website) and no website
+     * would be an https → http downgrade (the extension's refusal). App: one of its websites is
+     * `androidapp://<package>`. [allowRegex]: the login is in one of the user's own vaults
+     * ([VaultData.isPersonal]), the only place its regular expressions count: anyone can share a
+     * vault with the user and plant a slow or catch-all pattern.
      */
-    fun matches(target: FillTarget, login: Login, defaultMatch: UrlMatch): Boolean = when (target) {
+    fun matches(target: FillTarget, login: Login, defaultMatch: UrlMatch, allowRegex: Boolean): Boolean =
+        matching(target, listOf(login), defaultMatch) { allowRegex }.isNotEmpty()
+
+    /**
+     * The indices of [logins] allowed for [target], in order. Websites are matched in one call
+     * into the core for all of them; only logins that match are checked for a downgrade.
+     */
+    private fun matching(target: FillTarget, logins: List<Login>, defaultMatch: UrlMatch, allowRegex: (Int) -> Boolean): List<Int> = when (target) {
+        is FillTarget.App -> logins.indices.filter { i -> logins[i].urls.any { isAppUrl(it, target.packageName) } }
         is FillTarget.Web -> {
             val page = target.pageUrl
-            login.urls.any { !it.url.trim().startsWith(FillTarget.ANDROID_APP_SCHEME, ignoreCase = true) && UrlMatcher.matches(page, it, defaultMatch) } &&
-                login.urls.none { UrlMatcher.downgrade(page, it) }
+            val saved = logins.flatMapIndexed { i, l -> val allow = allowRegex(i); l.urls.map { SavedUrl(it.url, it.match.wire, allow) } }
+            val hits = if (saved.isEmpty()) emptyList() else matchUrls(page, defaultMatch.wire, saved)
+            var at = 0
+            logins.indices.filter { i ->
+                val urls = logins[i].urls
+                val matched = (at until at + urls.size).any { hits[it] }
+                at += urls.size
+                matched && urls.none { UrlMatcher.downgrade(page, it) }
+            }
         }
-        is FillTarget.App -> login.urls.any { isAppUrl(it, target.packageName) }
     }
 
-    /** Matching logins as (id, login) pairs, keeping order. */
-    fun <K> candidates(target: FillTarget, logins: List<Pair<K, Login>>, defaultMatch: UrlMatch): List<Pair<K, Login>> =
-        logins.filter { (_, l) -> matches(target, l, defaultMatch) }
+    /** The vault's logins for [target], keeping order (regular expressions only from the user's own vaults). */
+    fun candidates(target: FillTarget, vault: VaultData, defaultMatch: UrlMatch): List<Entry> {
+        val entries = vault.entries.filter { it.item.login != null }
+        return matching(target, entries.map { it.item.login!! }, defaultMatch) { vault.isPersonal(entries[it]) }.map { entries[it] }
+    }
 
     /** The never-save key: a website's base domain, or `androidapp://<package>`. */
     fun neverSaveKey(target: FillTarget): String = when (target) {
@@ -105,13 +127,22 @@ object AutofillMatcher {
     /** Where a login lives, for the save rule: can it be edited, is it in the user's own vault, and the vault's name. */
     data class Place(val writable: Boolean, val personal: Boolean, val vault: String = "")
 
-    /** The matching logins of [target] as [SaveRule] candidates (id, name, login), keeping the matcher's order. */
+    /**
+     * The matching logins of [target] as [SaveRule] candidates (id, name, login), keeping the
+     * matcher's order. Regular expressions count only for logins in the user's own vaults
+     * ([Place.personal]), so a shared vault can't make its logins candidates for every site.
+     */
     fun <K> saveCandidates(
         target: FillTarget,
         logins: List<Triple<K, String, Login>>,
         defaultMatch: UrlMatch,
         place: (K) -> Place,
-    ): List<SaveRule.Candidate<K>> =
-        logins.filter { (_, _, l) -> matches(target, l, defaultMatch) }
-            .map { (id, name, l) -> place(id).let { SaveRule.Candidate(id, name, l.username, l.password, it.writable, it.personal, it.vault) } }
+    ): List<SaveRule.Candidate<K>> {
+        val places = logins.map { place(it.first) }
+        return matching(target, logins.map { it.third }, defaultMatch) { places[it].personal }.map { i ->
+            val (id, name, l) = logins[i]
+            val p = places[i]
+            SaveRule.Candidate(id, name, l.username, l.password, p.writable, p.personal, p.vault)
+        }
+    }
 }

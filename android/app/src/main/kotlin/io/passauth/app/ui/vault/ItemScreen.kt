@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -42,7 +41,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +63,7 @@ import io.passauth.app.data.Role
 import io.passauth.app.data.VaultInfo
 import io.passauth.app.data.UrlMatch
 import io.passauth.app.data.UrlMatcher
+import io.passauth.app.ui.HEALTH
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.components.CardSection
@@ -86,7 +85,6 @@ import io.passauth.app.ui.components.SiteIcon
 import io.passauth.app.ui.components.TotpRing
 import io.passauth.app.ui.components.ValueText
 import io.passauth.app.ui.theme.PassAuthTheme
-import io.passauth.core.estimateBits
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.delay
@@ -98,11 +96,11 @@ fun formatDate(unixSeconds: Long): String =
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ItemScreen(ctx: UiCtx, id: String) {
+fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
     val v = vault
     val entry = v?.get(id)
-    val back = { ctx.go(Route.Vault) }
+    val back = { ctx.go(if (fromHealth) Route.Settings(HEALTH) else Route.Vault) }
     LaunchedEffect(v, entry) { if (v != null && entry == null) back() }
     if (v == null || entry == null) return
     val i = entry.item
@@ -113,7 +111,6 @@ fun ItemScreen(ctx: UiCtx, id: String) {
     var moving by remember { mutableStateOf(false) }
     // Vaults this item can move to: only ones where the user may add items (owner, admin, write).
     val targets = v.vaults.filter { it.id != entry.vaultId && it.role in setOf(Role.Owner, Role.Admin, Role.Write) }
-    val weak = remember(l?.password) { l?.password?.let { it.isNotEmpty() && estimateBits(it) < 50 } ?: false }
 
     var code by remember { mutableStateOf<TotpCodeView?>(null) }
     LaunchedEffect(l?.totp) {
@@ -129,7 +126,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
             onDismiss = { confirmDelete = false },
             title = "Move to trash?",
             subtitle = i.name.ifEmpty { "Untitled" },
-            tile = { SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 40.dp) },
+            tile = { SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp) },
             actions = {
                 PrimaryButton("Move to trash", {
                     confirmDelete = false
@@ -174,7 +171,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
             if (canWrite) {
                 Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 2.dp) {
                     Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Button(onClick = { ctx.go(Route.Edit(id)) }) { Text("Edit") }
+                        Button(onClick = { ctx.go(Route.Edit(id, fromHealth)) }) { Text("Edit") }
                         Spacer(Modifier.weight(1f))
                         IconButton(onClick = { confirmDelete = true }) {
                             Icon(Icons.Outlined.Delete, "Move to trash", tint = MaterialTheme.colorScheme.error)
@@ -190,7 +187,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
         ) {
             CardSection(null) {
                 Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 44.dp)
+                    SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 44.dp)
                     Text(i.name.ifEmpty { "Untitled" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).semantics { heading() })
                     if (i.favorite) Icon(Icons.Filled.Star, "Favorite", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -208,14 +205,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
                     }
                     if (l.password.isNotEmpty()) {
                         Secret(ctx, "Password", l.password)
-                        if (weak) {
-                            Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Outlined.Shield, null, Modifier.size(16.dp), tint = PassAuthTheme.colors.warn)
-                                Spacer(Modifier.size(6.dp))
-                                Text("This password is easy to guess.", style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.warn)
-                                if (canWrite) TextButton(onClick = { ctx.go(Route.Edit(id)) }) { Text("Change it") }
-                            }
-                        }
+                        PasswordNotes(ctx, v, entry, onChange = if (canWrite) ({ ctx.go(Route.Edit(id, fromHealth)) }) else null)
                     }
                     l.passkeys.forEach { p ->
                         KeyValue("Passkey") {
@@ -323,7 +313,7 @@ fun ItemScreen(ctx: UiCtx, id: String) {
                     HorizontalDivider(color = PassAuthTheme.colors.line)
                     Row(
                         Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Open password history") { ctx.go(Route.History(id)) }
+                            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Open password history") { ctx.go(Route.History(id, fromHealth)) }
                             .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {

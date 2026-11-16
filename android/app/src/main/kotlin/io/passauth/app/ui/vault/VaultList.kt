@@ -1,6 +1,8 @@
 package io.passauth.app.ui.vault
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,8 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.GroupAdd
+import androidx.compose.material.icons.outlined.Policy
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.StarBorder
@@ -35,6 +39,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -55,7 +60,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.data.Entry
+import io.passauth.app.data.InvitationText
 import io.passauth.app.data.ItemKind
+import io.passauth.app.data.PolicyFix
+import io.passauth.app.data.PolicyRules
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.components.AccountMenu
@@ -66,6 +74,7 @@ import io.passauth.app.ui.components.SiteIcon
 import io.passauth.app.ui.components.cardSegment
 import io.passauth.app.ui.errorMessage
 import io.passauth.app.ui.theme.PassAuthTheme
+import io.passauth.app.ui.theme.Radius
 import io.passauth.app.ui.theme.Space
 import io.passauth.core.totpCode
 import kotlinx.coroutines.launch
@@ -111,6 +120,8 @@ fun currentTotp(secret: String) = totpCode(secret, (System.currentTimeMillis() /
 @Composable
 fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> Unit) {
     val vault by ctx.repo.vault.collectAsStateWithLifecycle()
+    val dismissed by ctx.repo.dismissed.collectAsStateWithLifecycle()
+    val violationsByAccount by ctx.repo.violations.collectAsStateWithLifecycle()
     var showFilter by rememberSaveable { mutableStateOf(filter.kind != null || filter.folder != null || filter.favorites) }
     var refreshing by remember { mutableStateOf(false) }
     var newMenu by remember { mutableStateOf(false) }
@@ -198,6 +209,35 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                 if (v?.offline == true) {
                     item { Alert("You're offline. Showing the copy of your vault saved on this device.", modifier = Modifier.padding(top = 8.dp)) }
                 }
+                // Vaults shared with the account, waiting for an answer: one quiet line (dismissed until a new one arrives).
+                val invitations = v?.invitations.orEmpty()
+                val inviteKey = "inv:" + InvitationText.noticeKey(invitations)
+                val inviteText = InvitationText.notice(invitations)
+                if (inviteText != null && inviteKey !in dismissed) {
+                    item(key = "notice:invitations") {
+                        NoticeCard(
+                            Icons.Outlined.GroupAdd,
+                            listOf(NoticeLine(inviteText, InvitationText.noticeAction(invitations)) { ctx.go(Route.Invitations(fromVault = true)) }),
+                            onDismiss = { ctx.repo.dismissNotice(inviteKey) },
+                        )
+                    }
+                }
+                // What the account still has to change for the server's policies.
+                val violations = violationsByAccount[ctx.state.activeId].orEmpty()
+                val policyKey = "pol:${ctx.state.activeId}:" + PolicyRules.violationsKey(violations)
+                if (violations.isNotEmpty() && policyKey !in dismissed) {
+                    item(key = "notice:policies") {
+                        NoticeCard(
+                            Icons.Outlined.Policy,
+                            PolicyRules.notices(violations).map { n ->
+                                NoticeLine(n.text, n.action) {
+                                    ctx.go(Route.Settings(if (n.fix == PolicyFix.TwoStep) "two-step" else "password"))
+                                }
+                            },
+                            onDismiss = { ctx.repo.dismissNotice(policyKey) },
+                        )
+                    }
+                }
                 if (v == null) return@LazyColumn
                 if (filter.active) {
                     val q = filter.query.trim().lowercase()
@@ -268,7 +308,7 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
             .padding(start = Space.l, end = Space.xs, top = Space.s, bottom = Space.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.settings.showIcons, ctx.graph.icons, 40.dp)
+        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp)
         Column(Modifier.weight(1f).padding(start = Space.m, end = Space.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(s.name, style = MaterialTheme.typography.bodyLarge, maxLines = if (roomy) 1 else 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
@@ -320,6 +360,35 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
                     },
                 )
             }
+        }
+    }
+}
+
+/** One line of a [NoticeCard], with the action that deals with it (none: [action] null). */
+private class NoticeLine(val text: String, val action: String?, val onAction: () -> Unit)
+
+/** A quiet, dismissible notice above the items: icon, its lines with their actions, and a close mark. */
+@Composable
+private fun NoticeCard(icon: androidx.compose.ui.graphics.vector.ImageVector, lines: List<NoticeLine>, onDismiss: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(Radius.card),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, PassAuthTheme.colors.line),
+        modifier = Modifier.fillMaxWidth().padding(top = Space.s),
+    ) {
+        Row(Modifier.padding(start = Space.l, top = Space.s, bottom = Space.xs), verticalAlignment = Alignment.Top) {
+            Icon(icon, null, Modifier.padding(top = Space.s).size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.weight(1f).padding(start = Space.m, top = Space.s)) {
+                lines.forEach { line ->
+                    Text(line.text, style = MaterialTheme.typography.bodyMedium)
+                    if (line.action != null) {
+                        TextButton(onClick = line.onAction, modifier = Modifier.heightIn(min = 48.dp)) { Text(line.action) }
+                    } else {
+                        Spacer(Modifier.size(Space.s))
+                    }
+                }
+            }
+            IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, contentDescription = "Dismiss", tint = PassAuthTheme.colors.muted) }
         }
     }
 }

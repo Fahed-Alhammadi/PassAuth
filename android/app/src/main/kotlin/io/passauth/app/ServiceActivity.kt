@@ -45,6 +45,7 @@ import io.passauth.app.ui.components.QuietButton
 import io.passauth.app.ui.components.RowDivider
 import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.components.TileRowInset
+import io.passauth.app.ui.components.WarningNote
 import io.passauth.app.ui.components.largeText
 import io.passauth.app.ui.theme.PassAuthTheme
 import io.passauth.app.ui.theme.Space
@@ -78,6 +79,8 @@ abstract class ServiceActivity : SecureActivity() {
             val quiet: List<Quiet> = emptyList(),
             /** The account that was active when the sheet opened. */
             val account: String = "",
+            /** A warning for the current choice (e.g. it is in a shared vault), shown under the choices. */
+            val warning: (String?) -> String? = { null },
         ) : Screen
         data class Message(val title: String, val body: String, val openApp: Boolean) : Screen
     }
@@ -101,8 +104,8 @@ abstract class ServiceActivity : SecureActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // These sheets ask for consent (save, sign in, unlock): no other app may draw over them
-        // to hide what is being agreed to or to pass a tap through.
-        window.setHideOverlayWindows(true)
+        // to hide what is being agreed to or to pass a tap through. Held for the activity's life.
+        hideOverlays(true)
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (!busy) cancel()
@@ -226,6 +229,7 @@ abstract class ServiceActivity : SecureActivity() {
                             ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol))
                         }
                     }
+                    s.warning(chosen)?.let { WarningNote(it) }
                     s.footnote?.let { PromptText(it, Modifier) }
                 }
             } else {
@@ -285,11 +289,12 @@ abstract class ServiceActivity : SecureActivity() {
         footnote: String? = null,
         quiet: List<Quiet> = emptyList(),
         error: String? = null,
+        warning: (String?) -> String? = { null },
         onConfirm: suspend () -> Unit,
     ) {
         this.error = error
         chosen = initialChoice
-        screen = Screen.Confirm(title, place, body, action, onConfirm, choicesLabel, choices, footnote, quiet, graph.repo.state.value.activeId)
+        screen = Screen.Confirm(title, place, body, action, onConfirm, choicesLabel, choices, footnote, quiet, graph.repo.state.value.activeId, warning)
     }
 
     /** Show a message with a Close button (the request fails when closed). */

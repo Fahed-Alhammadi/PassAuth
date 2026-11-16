@@ -66,21 +66,43 @@ class WebAuthnTest {
         assertThrows(WebAuthnException::class.java) { WebAuthn.parseGet("not json") }
     }
 
+    /** The core decides (full Public Suffix List, browser host parsing); refusals are security errors with its message. */
     @Test
     fun rpIdMustFitTheOrigin() {
         assertEquals("webauthn.io", WebAuthn.effectiveRpId(null, "https://webauthn.io"))
         assertEquals("example.com", WebAuthn.effectiveRpId("example.com", "https://login.example.com"))
         assertEquals("example.com", WebAuthn.effectiveRpId("Example.COM", "https://login.example.com:8443"))
         assertEquals("localhost", WebAuthn.effectiveRpId(null, "http://localhost:8080"))
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId("evil.com", "https://example.com") }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId("com", "https://example.com") }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId("co.uk", "https://example.co.uk") }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId(null, "http://example.com") }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId(null, "https://10.0.0.1") }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId(null, "android:apk-key-hash:abc") }
+        assertEquals("xn--strae-oqa.de", WebAuthn.effectiveRpId("straße.de", "https://xn--strae-oqa.de"))
+        fun refused(requested: String?, origin: String): WebAuthnException =
+            assertThrows(WebAuthnException::class.java) { WebAuthn.effectiveRpId(requested, origin) }
+        assertEquals(WebAuthnException.Kind.Security, refused("evil.com", "https://example.com").kind)
+        assertEquals("The RP ID is not a registrable domain suffix of the origin.", refused("com", "https://example.com").message)
+        refused("co.uk", "https://example.co.uk")
+        // Private suffixes of the full list: a dynamic-DNS name can't claim the whole suffix.
+        refused("myfritz.net", "https://nas.myfritz.net")
+        assertEquals("WebAuthn requires a secure (https) origin.", refused(null, "http://example.com").message)
+        assertEquals("The origin's host is not a valid domain.", refused(null, "https://10.0.0.1").message)
+        assertEquals("Invalid origin.", refused(null, "android:apk-key-hash:abc").message)
+        assertEquals("Invalid RP ID.", refused("example.com.", "https://login.example.com").message)
+    }
+
+    @Test
+    fun webOriginsAndAppRpIds() {
+        assertEquals("login.example.com", WebAuthn.webOriginHost("https://login.example.com:8443"))
+        assertEquals("localhost", WebAuthn.webOriginHost("http://localhost:3000"))
+        assertThrows(WebAuthnException::class.java) { WebAuthn.webOriginHost("http://example.com") }
+        assertThrows(WebAuthnException::class.java) { WebAuthn.webOriginHost("https://example.com/") }
+        // Apps name their RP ID; it must be a domain that isn't a public suffix.
         assertEquals("example.com", WebAuthn.appRpId("example.com"))
-        assertThrows(WebAuthnException::class.java) { WebAuthn.appRpId(null) }
-        assertThrows(WebAuthnException::class.java) { WebAuthn.appRpId("https://example.com") }
+        assertEquals("example.com", WebAuthn.appRpId("Example.COM"))
+        assertEquals("xn--bcher-kva.de", WebAuthn.appRpId("bücher.de"))
+        assertEquals("nas.myfritz.net", WebAuthn.appRpId("nas.myfritz.net"))
+        assertEquals("localhost", WebAuthn.appRpId("localhost"))
+        for (bad in listOf(null, "", "https://example.com", "example.com.", "com", "co.uk", "myfritz.net", "1.2.3.4", "[::1]", "*.example.com", "exa mple.com")) {
+            val e = assertThrows("$bad", WebAuthnException::class.java) { WebAuthn.appRpId(bad) }
+            assertEquals("Invalid RP ID.", e.message)
+        }
     }
 
     @Test

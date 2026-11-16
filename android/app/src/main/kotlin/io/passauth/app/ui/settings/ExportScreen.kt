@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.passauth.app.data.ExportFormat
+import io.passauth.app.data.PolicyRules
 import io.passauth.app.data.UserException
 import io.passauth.app.data.VaultExport
 import io.passauth.app.ui.Route
@@ -93,9 +94,13 @@ fun ExportScreen(ctx: UiCtx) {
     val saveJson = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { write(it) }
     val saveCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { write(it) }
 
+    // The server's admin can turn exporting off (policy `disable_export`).
+    val allowed = PolicyRules.exportAllowed(ctx.state.policies)
+
     fun export() {
         if (busy) return
         error = null
+        if (!allowed) return run { error = PolicyRules.EXPORT_OFF_PAGE }
         if (count == 0) return run { error = "Your vault has no items to export." }
         if (format.encrypted) VaultExport.passwordProblem(exportPassword, confirm)?.let { return run { error = it } }
         if (master.isEmpty()) return run { error = "Enter your master password to export." }
@@ -124,7 +129,11 @@ fun ExportScreen(ctx: UiCtx) {
             Modifier.padding(padding).fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            CardSection(null) {
+            if (!allowed) {
+                CardSection(null) {
+                    Column(Modifier.padding(vertical = 10.dp)) { Alert(PolicyRules.EXPORT_OFF_PAGE) }
+                }
+            } else CardSection(null) {
                 Column(Modifier.padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
                         "Exports the $count item${if (count == 1) "" else "s"} in all vaults of ${ctx.state.email}. " +

@@ -46,11 +46,12 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
 
     private fun settings() = graph.repo.state.value.settings
 
-    /** Matching logins for the target (the PassAuth server's own web vault is an ordinary website). */
-    fun matches(vault: VaultData, target: FillTarget): List<Entry> {
-        val logins = vault.entries.mapNotNull { e -> e.item.login?.let { e to it } }
-        return AutofillMatcher.candidates(target, logins, settings().defaultMatch).map { it.first }
-    }
+    /**
+     * Matching logins for the target (the PassAuth server's own web vault is an ordinary website;
+     * regular expressions only from the user's own vaults).
+     */
+    fun matches(vault: VaultData, target: FillTarget): List<Entry> =
+        AutofillMatcher.candidates(target, vault, settings().defaultMatch)
 
     /** Offer to save on this target? ("Ask to save" on and not on the never-save list.) */
     fun offerSave(target: FillTarget): Boolean {
@@ -99,10 +100,19 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
 
     /**
      * Carry out [plan]: update the chosen login (password, and the user name if one was typed)
-     * or create a new one. Returns a short notice that names the login that changed, or null
-     * if nothing changed.
+     * or create a new one ([newItemId]: kept by a sheet across its retries, see
+     * `VaultRepository.createItem`). Returns a short notice that names the login that changed,
+     * or null if nothing changed.
      */
-    suspend fun applySave(vault: VaultData, target: FillTarget, username: String, password: String, appLabel: String?, plan: SaveRule.Plan<String>): String? =
+    suspend fun applySave(
+        vault: VaultData,
+        target: FillTarget,
+        username: String,
+        password: String,
+        appLabel: String?,
+        plan: SaveRule.Plan<String>,
+        newItemId: String? = null,
+    ): String? =
         when (plan) {
             SaveRule.Plan.Nothing -> null
             is SaveRule.Plan.Update -> {
@@ -124,6 +134,7 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
                         login = Login(username = username.trim(), password = password, urls = listOf(LoginUrl(AutofillMatcher.saveUrl(target), UrlMatch.Default))),
                     ),
                     null,
+                    newItemId,
                 )
                 "New login saved: $name"
             }

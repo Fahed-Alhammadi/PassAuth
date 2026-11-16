@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -55,8 +56,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -65,14 +68,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.passauth.app.SecureActivity
 import io.passauth.app.ui.theme.PassAuthTheme
 import io.passauth.app.ui.theme.Radius
 import io.passauth.app.ui.theme.Space
@@ -234,9 +240,16 @@ fun QuietActions(modifier: Modifier = Modifier, content: @Composable RowScope.()
 
 /** One quiet action: a text button with a full-size touch target. */
 @Composable
-fun QuietButton(text: String, onClick: () -> Unit, enabled: Boolean = true, icon: ImageVector? = null, danger: Boolean = false) {
+fun QuietButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    icon: ImageVector? = null,
+    danger: Boolean = false,
+) {
     TextButton(
-        onClick = onClick, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp),
+        onClick = onClick, enabled = enabled, modifier = modifier.heightIn(min = 48.dp),
         colors = if (danger) ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error) else ButtonDefaults.textButtonColors(),
     ) {
         if (icon != null) {
@@ -325,9 +338,24 @@ fun PromptSheet(
 }
 
 /**
+ * Keeps other apps' overlays off the screen while this is in the composition
+ * ([SecureActivity.hideOverlays]): every decision sheet uses it, so nothing drawn over PassAuth can
+ * hide what is being decided or pass a tap through to it.
+ */
+@Composable
+fun HideOverlays() {
+    val activity = LocalActivity.current as? SecureActivity
+    DisposableEffect(activity) {
+        activity?.hideOverlays(true)
+        onDispose { activity?.hideOverlays(false) }
+    }
+}
+
+/**
  * A decision inside the app (confirmations, pickers, re-entering the master password): a
  * Material bottom sheet with the context row, the content, and the actions beneath it.
- * [dismissable] false keeps it open while work is running.
+ * [dismissable] false keeps it open while work is running. Other apps' overlays are hidden while
+ * it shows ([HideOverlays]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -341,6 +369,7 @@ fun DecisionSheet(
     actions: @Composable ColumnScope.() -> Unit,
     content: @Composable ColumnScope.() -> Unit = {},
 ) {
+    HideOverlays()
     val c = PassAuthTheme.colors
     // While work is running the sheet can't be swiped, tapped or backed away.
     val open = rememberUpdatedState(dismissable)
@@ -385,4 +414,19 @@ fun DecisionSheet(
 @Composable
 fun PromptText(text: String, modifier: Modifier = Modifier) {
     Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = modifier)
+}
+
+/**
+ * A warning about the current choice (e.g. a login in a shared vault): icon and text in the
+ * error colour, announced when it appears.
+ */
+@Composable
+fun WarningNote(text: String, modifier: Modifier = Modifier) {
+    Row(
+        modifier.fillMaxWidth().semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.spacedBy(Space.s),
+    ) {
+        Icon(Icons.Outlined.Warning, contentDescription = "Warning", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+    }
 }

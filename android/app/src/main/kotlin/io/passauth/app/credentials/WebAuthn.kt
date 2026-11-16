@@ -1,8 +1,9 @@
 package io.passauth.app.credentials
 
 import io.passauth.app.data.Passkey
-import java.net.IDN
-import java.util.Locale
+import io.passauth.core.RpIdException
+import io.passauth.core.isPublicSuffix
+import io.passauth.core.normalizeHost
 import kotlin.io.encoding.Base64
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -142,35 +143,20 @@ object WebAuthn {
 
     // ------------------------------------------------------- origin / RP ID
 
-    private fun isPublicSuffix(domain: String) =
-        if (!domain.contains('.')) domain != "localhost" else domain in io.passauth.app.data.PublicSuffixes.MULTI_LABEL
-
-    private fun isIpHost(host: String) = host.startsWith("[") || Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$").matches(host)
-
     private fun security(message: String) = WebAuthnException(WebAuthnException.Kind.Security, message)
 
-    /** Lower-case, punycoded domain, or null if [s] isn't a valid domain. */
-    fun canonicalDomain(s: String): String? {
-        if (s.isEmpty() || s.length > 253 || Regex("[\\s/\\\\?#@:\\[\\]%*]").containsMatchIn(s)) return null
-        val host = try {
-            IDN.toASCII(s, IDN.ALLOW_UNASSIGNED).lowercase(Locale.ROOT)
-        } catch (_: Exception) {
-            return null
-        }
-        if (host.isEmpty() || host.startsWith('.') || host.endsWith('.') || host.contains("..") || isIpHost(host)) return null
-        return host
+    /** The core's verdict as the error the page gets (a WebAuthn `SecurityError`). */
+    private inline fun <T> checked(block: () -> T): T = try {
+        block()
+    } catch (e: RpIdException) {
+        throw security(e.message ?: "Invalid RP ID.")
     }
 
-    /** A web origin `https://host[:port]` (or http://localhost); returns the host. */
-    fun webOriginHost(origin: String): String {
-        val m = Regex("^(https?)://([^/:?#@]+)(:\\d{1,5})?$", RegexOption.IGNORE_CASE).matchEntire(origin)
-            ?: throw security("Invalid origin.")
-        val scheme = m.groupValues[1].lowercase(Locale.ROOT)
-        val host = canonicalDomain(m.groupValues[2]) ?: throw security("The origin's host is not a valid domain.")
-        val localhost = host == "localhost" || host.endsWith(".localhost")
-        if (!(scheme == "https" || (scheme == "http" && localhost))) throw security("WebAuthn requires a secure (https) origin.")
-        return host
-    }
+    /**
+     * The host of a web origin `https://host[:port]` (or http://localhost): the origin must be in
+     * its serialised form and its host a domain (the core's `effectiveRpId` without a requested ID).
+     */
+    fun webOriginHost(origin: String): String = checked { io.passauth.core.effectiveRpId(null, origin) }
 
     fun isAppOrigin(origin: String) = origin.startsWith(APK_KEY_HASH_PREFIX)
 
@@ -178,22 +164,25 @@ object WebAuthn {
     fun appOrigin(certSha256: ByteArray) = APK_KEY_HASH_PREFIX + B64Url.encode(certSha256)
 
     /**
-     * The RP ID for a request from a web [origin]: [requested] if it equals the origin's
-     * host or is a registrable-domain suffix of it; defaults to the host.
+     * The RP ID for a request from a web [origin] (the core's `effectiveRpId`): [requested] if it
+     * equals the origin's host or is a registrable-domain suffix of it by the full Public Suffix
+     * List; defaults to the host.
      */
-    fun effectiveRpId(requested: String?, origin: String): String {
-        val host = webOriginHost(origin)
-        if (requested == null) return host
-        val rpId = canonicalDomain(requested) ?: throw security("Invalid RP ID.")
-        if (rpId == host) return rpId
-        if (!host.endsWith(".$rpId") || isPublicSuffix(rpId)) throw security("The RP ID is not a registrable domain suffix of the origin.")
-        return rpId
-    }
+    fun effectiveRpId(requested: String?, origin: String): String = checked { io.passauth.core.effectiveRpId(requested, origin) }
 
-    /** RP ID for a native app: must be given and be a domain (checked against its asset links). */
+    /**
+     * RP ID for a native app: must be given and be a domain that isn't a public suffix ("localhost"
+     * aside); the app is then checked against its asset links. The core validates the requested
+     * ID as it would for a page served from that very host.
+     */
     fun appRpId(requested: String?): String {
-        val rpId = requested?.let(::canonicalDomain) ?: throw security("Invalid RP ID.")
-        if (isPublicSuffix(rpId)) throw security("Invalid RP ID.")
+        val host = requested?.let(::normalizeHost) ?: throw security("Invalid RP ID.")
+        val rpId = try {
+            io.passauth.core.effectiveRpId(requested, "https://$host")
+        } catch (_: RpIdException) {
+            throw security("Invalid RP ID.")
+        }
+        if (rpId != "localhost" && isPublicSuffix(rpId)) throw security("Invalid RP ID.")
         return rpId
     }
 

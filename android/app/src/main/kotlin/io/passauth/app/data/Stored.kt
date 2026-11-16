@@ -56,6 +56,11 @@ data class Settings(
      * One of [BACKGROUND_SYNC_OPTIONS]; older stored settings lack the key and get the default.
      */
     val backgroundSyncMinutes: Int = BACKGROUND_SYNC_DEFAULT,
+    /**
+     * The server's longest vault timeout (`max_vault_timeout_minutes`) made PassAuth lower
+     * [vaultTimeout]; Settings says so until the user picks a timeout again.
+     */
+    val vaultTimeoutLowered: Boolean = false,
 )
 
 const val BACKGROUND_SYNC_DEFAULT = 120
@@ -91,6 +96,13 @@ data class AccountData(
     val biometric: Sealed? = null,
     /** Unlocked keys (base64), only while the vault timeout is "never". */
     val persistedKeys: String? = null,
+    /** The server's `/api/config` `features` when last asked ([featuresAt], epoch ms); null until then. */
+    val features: List<String>? = null,
+    val featuresAt: Long = 0,
+    /** The server's API version (`/api/config` `api`) asked with [features]; null until then and for servers before API 2. */
+    val api: Int? = null,
+    /** The server's account policies when last asked (with [features]); null until then or from servers without them. */
+    val policies: Policies? = null,
 )
 
 /**
@@ -127,4 +139,17 @@ data class Stored(
      */
     val showPermissionsIntro: Boolean
         get() = !onboarding.permissionsShown && accounts.values.none { it.server.isNotEmpty() }
+
+    /** The longest vault timeout the signed-in accounts' servers allow (the strictest; 0 = no limit). */
+    val timeoutLimit: Int
+        get() = PolicyRules.timeoutLimit(accounts.values.filter { it.tokens != null }.map { it.policies })
+
+    /**
+     * Account [id]'s two-step "remember this device" token removed (the server forgot it: the
+     * device was forgotten, or the keys changed).
+     */
+    fun withoutRememberToken(id: String): Stored {
+        val a = accounts[id] ?: return this
+        return copy(rememberTokens = rememberTokens - "${a.server}|${a.email.lowercase()}")
+    }
 }

@@ -3,6 +3,7 @@ package io.passauth.app.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -32,13 +33,18 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import io.passauth.app.AppGraph
 import io.passauth.app.MainActivity
 import io.passauth.app.SecureActivity
 import io.passauth.app.data.ApiException
 import io.passauth.app.data.AppState
+import io.passauth.app.data.DeviceApprovals
+import io.passauth.app.data.DeviceLogin
+import io.passauth.app.data.ServerErrors
+import io.passauth.app.data.ShownText
+import io.passauth.app.data.UserException
+import io.passauth.core.CoreException
 import io.passauth.app.data.ItemKind
 import io.passauth.app.data.Status
 import io.passauth.app.data.VaultRepository
@@ -48,7 +54,10 @@ import io.passauth.app.ui.auth.SetupScreen
 import io.passauth.app.ui.auth.UnlockScreen
 import io.passauth.app.ui.permissions.BiometricOffer
 import io.passauth.app.ui.permissions.PermissionsIntroScreen
+import io.passauth.app.data.TwoStepGate
+import io.passauth.app.ui.settings.InvitationsScreen
 import io.passauth.app.ui.settings.SettingsScreen
+import io.passauth.app.ui.settings.TwoStepRequiredScreen
 import io.passauth.app.ui.vault.EditScreen
 import io.passauth.app.ui.vault.ItemScreen
 import io.passauth.app.ui.vault.ListFilter
@@ -60,12 +69,17 @@ import kotlinx.coroutines.launch
 
 sealed interface Route {
     data object Vault : Route
-    data class ItemView(val id: String) : Route
-    data class Edit(val id: String) : Route
-    data class History(val id: String) : Route
+
+    /** [fromHealth]: opened from Settings → Password health, where Back (and Save) returns. */
+    data class ItemView(val id: String, val fromHealth: Boolean = false) : Route
+    data class Edit(val id: String, val fromHealth: Boolean = false) : Route
+    data class History(val id: String, val fromHealth: Boolean = false) : Route
     data class New(val kind: ItemKind) : Route
     data object Generator : Route
     data class Settings(val section: String? = null) : Route
+
+    /** Vault invitations; [fromVault]: opened from the vault list's notice, where Back returns. */
+    data class Invitations(val fromVault: Boolean = false) : Route
 }
 
 /** What every screen gets: state, navigation, notices, copy. */
@@ -101,25 +115,39 @@ class UiCtx(
     }
 }
 
+/**
+ * One wording for errors across the app. A server's answer always gets the app's own words
+ * ([ServerErrors]: its text only as a labelled, cleaned and shortened detail of an error the app
+ * doesn't know); the app's own errors ([UserException]) are shown as they are.
+ */
 fun errorMessage(e: Throwable): String {
+    // The server's policies (400 secret_key_required / kdf_too_weak, 403 two_step_required).
+    io.passauth.app.data.PolicyRules.errorMessage(e)?.let { return it }
     val m = e.message.orEmpty()
     return when {
         m == VaultRepository.SECRET_KEY_REQUIRED -> "This account uses a Secret Key. Enter it from your Emergency Kit."
         m == "email_not_verified" -> "Confirm your email address first, then sign in."
-        e is ApiException && e.code == "invalid_credentials" -> "Wrong email, master password or Secret Key."
-        e is ApiException && e.code == "rate_limited" -> "Too many attempts. Wait a moment and try again."
-        e is io.passauth.core.CoreException.DecryptFailed -> "Wrong master password or Secret Key."
-        e is io.passauth.core.CoreException -> "Something went wrong: $m"
+        e is ApiException -> ServerErrors.text(e)
+        e is CoreException.DecryptFailed -> "Wrong master password or Secret Key."
+        e is CoreException.WeakKdf -> "Your server asked for weaker encryption settings than PassAuth allows, so nothing was done. Ask your server's admin."
+        e is CoreException.KdfTooStrong -> "Your server asked for stronger encryption settings than PassAuth supports, so nothing was done. Ask your server's admin."
+        e is CoreException.PhraseMismatch -> DeviceApprovals.MISMATCH
+        e is CoreException.WrongCode -> "That code doesn't match."
+        e is CoreException.TooManyWrongCodes -> DeviceLogin.TOO_MANY_CODES
+        e is CoreException.NotConfirmed -> DeviceLogin.CODE_PROMPT
+        e is CoreException -> "Something went wrong: ${ShownText.clean(m, ServerErrors.MESSAGE_MAX)}"
+        // Its message quotes the answer it couldn't read.
+        e is kotlinx.serialization.SerializationException -> "Your PassAuth server sent an answer PassAuth couldn't read. Try again."
         m.isEmpty() -> "Something went wrong."
-        e is ApiException -> m.replaceFirstChar { it.uppercase() }.let { if (it.endsWith('.')) it else "$it." }
-        else -> m
+        e is UserException -> m
+        else -> ShownText.clean(m, ServerErrors.MESSAGE_MAX)
     }
 }
 
 /** Keeps the window secure (FLAG_SECURE) while this is in the composition. */
 @Composable
 fun SecureWindow() {
-    val activity = LocalContext.current as? SecureActivity
+    val activity = LocalActivity.current as? SecureActivity
     DisposableEffect(activity) {
         activity?.setSecure(true)
         onDispose { activity?.setSecure(false) }
@@ -140,12 +168,24 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
     }
     var route by rememberSaveable(state.activeId, stateSaver = RouteSaver) { mutableStateOf<Route>(Route.Vault) }
     val ctx = UiCtx(graph, state, activity, scope, notify) { route = it }
-    LaunchedEffect(state.status) { if (state.status != Status.Unlocked) route = Route.Vault }
+    LaunchedEffect(state.status, state.twoStepRequired) { if (state.status != Status.Unlocked || state.twoStepRequired) route = Route.Vault }
+    // Sign-in requests from new devices: asked for whenever the vault is open here (and by live sync).
+    val vaultOpen = state.status == Status.Unlocked && !state.twoStepRequired
+    LaunchedEffect(state.activeId, vaultOpen) {
+        if (!vaultOpen) return@LaunchedEffect graph.inbox.clear()
+        try {
+            graph.inbox.refresh()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Offline or the server said no: live sync asks again when it connects.
+        }
+    }
     // Opened from Android's autofill / passkey settings: show Settings → Autofill once unlocked.
     val requested by activity.requestedRoute
-    LaunchedEffect(requested, state.status) {
+    LaunchedEffect(requested, state.status, state.twoStepRequired) {
         val r = requested ?: return@LaunchedEffect
-        if (state.status == Status.Unlocked) {
+        if (state.status == Status.Unlocked && !state.twoStepRequired) {
             route = r
             activity.requestedRoute.value = null
         }
@@ -162,11 +202,11 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
     Scaffold(
         snackbarHost = {
             // Item pages have their own footer (Edit, trash): keep notices above it.
-            val aboveFooter = state.status == Status.Unlocked && route is Route.ItemView
+            val aboveFooter = state.status == Status.Unlocked && !state.twoStepRequired && route is Route.ItemView
             SnackbarHost(snackbar, Modifier.padding(bottom = if (aboveFooter) 72.dp else 0.dp))
         },
         bottomBar = {
-            if (state.status == Status.Unlocked && (route is Route.Vault || route is Route.Generator || route is Route.Settings)) {
+            if (state.status == Status.Unlocked && !state.twoStepRequired && (route is Route.Vault || route is Route.Generator || route is Route.Settings)) {
                 NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                     // The selected tab uses the brand accent (#0866ED light, #3D8BFF dark), as in the extension.
                     val navColors = NavigationBarItemDefaults.colors(
@@ -197,14 +237,17 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
             }
             // Keyed by account so switching accounts starts each screen fresh.
             key(state.activeId) {
-                when (state.status) {
-                    Status.Setup -> if (state.showPermissionsIntro) PermissionsIntroScreen(ctx) else SetupScreen(ctx)
-                    Status.LoggedOut -> LoginScreen(ctx)
-                    Status.Locked -> UnlockScreen(ctx)
-                    Status.Unlocked -> {
+                when {
+                    // The server requires two-step login first: only setting a method up, or signing out.
+                    TwoStepGate.shows(state.status, state.twoStepRequired) -> TwoStepRequiredScreen(ctx)
+                    state.status == Status.Setup -> if (state.showPermissionsIntro) PermissionsIntroScreen(ctx) else SetupScreen(ctx)
+                    state.status == Status.LoggedOut -> LoginScreen(ctx)
+                    state.status == Status.Locked -> UnlockScreen(ctx)
+                    else -> {
                         SecureWindow()
                         Main(ctx, route) { route = it }
                         BiometricOffer(ctx)
+                        AuthRequestPrompt(ctx)
                     }
                 }
             }
@@ -218,14 +261,16 @@ private fun Main(ctx: UiCtx, route: Route, go: (Route) -> Unit) {
     BackHandler(enabled = route != Route.Vault) {
         go(
             when (route) {
-                is Route.Edit -> Route.ItemView(route.id)
-                is Route.History -> Route.ItemView(route.id)
+                is Route.Edit -> if (route.fromHealth) Route.Settings(HEALTH) else Route.ItemView(route.id)
+                is Route.History -> Route.ItemView(route.id, route.fromHealth)
+                is Route.ItemView -> if (route.fromHealth) Route.Settings(HEALTH) else Route.Vault
                 is Route.Settings -> when (route.section) {
                     null -> Route.Vault
                     "export" -> Route.Settings("vault")
-                    "password", "two-step" -> Route.Settings("security")
+                    "password", "two-step", "sessions" -> Route.Settings("security")
                     else -> Route.Settings()
                 }
+                is Route.Invitations -> if (route.fromVault) Route.Vault else Route.Settings()
                 else -> Route.Vault
             },
         )
@@ -233,26 +278,31 @@ private fun Main(ctx: UiCtx, route: Route, go: (Route) -> Unit) {
     LaunchedEffect(Unit) { runCatching { ctx.repo.refreshIfStale() } }
     when (route) {
         Route.Vault -> VaultListScreen(ctx, filter) { filter = it }
-        is Route.ItemView -> ItemScreen(ctx, route.id)
-        is Route.Edit -> EditScreen(ctx, id = route.id)
-        is Route.History -> PasswordHistoryScreen(ctx, route.id)
+        is Route.ItemView -> ItemScreen(ctx, route.id, route.fromHealth)
+        is Route.Edit -> EditScreen(ctx, id = route.id, fromHealth = route.fromHealth)
+        is Route.History -> PasswordHistoryScreen(ctx, route.id, route.fromHealth)
         is Route.New -> EditScreen(ctx, kind = route.kind)
         Route.Generator -> GeneratorScreen(ctx)
         is Route.Settings -> SettingsScreen(ctx, route.section)
+        is Route.Invitations -> InvitationsScreen(ctx, route.fromVault)
     }
 }
+
+/** The Settings section of Password health. */
+const val HEALTH = "health"
 
 /** Saves the current route across configuration changes (rotation). */
 private val RouteSaver = androidx.compose.runtime.saveable.Saver<Route, String>(
     save = { r ->
         when (r) {
             Route.Vault -> "vault"
-            is Route.ItemView -> "item:${r.id}"
-            is Route.Edit -> "edit:${r.id}"
-            is Route.History -> "history:${r.id}"
+            is Route.ItemView -> "${if (r.fromHealth) "h" else ""}item:${r.id}"
+            is Route.Edit -> "${if (r.fromHealth) "h" else ""}edit:${r.id}"
+            is Route.History -> "${if (r.fromHealth) "h" else ""}history:${r.id}"
             is Route.New -> "new:${r.kind.name}"
             Route.Generator -> "generator"
             is Route.Settings -> "settings:${r.section.orEmpty()}"
+            is Route.Invitations -> "invitations:${if (r.fromVault) "vault" else ""}"
         }
     },
     restore = { v ->
@@ -261,9 +311,13 @@ private val RouteSaver = androidx.compose.runtime.saveable.Saver<Route, String>(
             "item" -> Route.ItemView(arg)
             "edit" -> Route.Edit(arg)
             "history" -> Route.History(arg)
+            "hitem" -> Route.ItemView(arg, fromHealth = true)
+            "hedit" -> Route.Edit(arg, fromHealth = true)
+            "hhistory" -> Route.History(arg, fromHealth = true)
             "new" -> Route.New(ItemKind.valueOf(arg))
             "generator" -> Route.Generator
             "settings" -> Route.Settings(arg.ifEmpty { null })
+            "invitations" -> Route.Invitations(fromVault = arg == "vault")
             else -> Route.Vault
         }
     },

@@ -2,12 +2,14 @@ package io.passauth.app.data
 
 import android.os.Build
 import io.passauth.core.Account
+import io.passauth.core.ApprovedLogin
 import io.passauth.core.CoreException
 import io.passauth.core.EncryptedItem
+import io.passauth.core.LoginRequestKey
 import io.passauth.core.MasterKeys
 import io.passauth.core.VaultKey
 import io.passauth.core.accountFromSessionBytes
-import io.passauth.core.createAccount
+import io.passauth.core.createAccountWithKdf
 import io.passauth.core.deriveMasterKeys
 import io.passauth.core.newId
 import io.passauth.core.opaqueLoginFinish
@@ -24,17 +26,20 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 enum class Status { Setup, LoggedOut, Locked, Unlocked }
@@ -64,6 +69,17 @@ data class AppState(
     val lastSync: Long = 0,
     val onboarding: Onboarding = Onboarding(),
     val showPermissionsIntro: Boolean = false,
+    /**
+     * The active account's server requires two-step login and the account has none yet (403
+     * `two_step_required`): the app shows only the setup screen ([TwoStepGate]). Memory only.
+     */
+    val twoStepRequired: Boolean = false,
+    /** The active account's server's policies (defaults when unknown or from servers without them). */
+    val policies: Policies = Policies(),
+    /** The longest vault timeout the signed-in accounts' servers allow (minutes; 0 = no limit). */
+    val timeoutLimit: Int = 0,
+    /** Website icons are shown: the user's setting and the active account's server's icon service ([SiteIcons]). */
+    val showSiteIcons: Boolean = true,
 )
 
 /** A decrypted item of the active account. */
@@ -82,7 +98,18 @@ enum class Role { Owner, Admin, Write, Read }
  * wrapped with this account's own key (only this account can have made it) and
  * `sealed` for a key someone shared with it.
  */
-data class VaultInfo(val id: String, val name: String, val role: Role, val keyKind: String = KEY_KIND_ACCOUNT) {
+data class VaultInfo(
+    val id: String,
+    val name: String,
+    val role: Role,
+    val keyKind: String = KEY_KIND_ACCOUNT,
+    /**
+     * The epoch of the vault key this device holds, from `/sync` (API v2: goes up by one with
+     * every key replacement); null from older servers. Writes encrypted under that key carry it
+     * (`key_epoch`), so the server refuses them once the key was replaced ([ItemWrites]).
+     */
+    val keyEpoch: Long? = null,
+) {
     val personal: Boolean get() = keyKind == KEY_KIND_ACCOUNT
 
     companion object {
@@ -105,6 +132,8 @@ data class VaultData(
     val revision: Long = 0,
     /** Shown from the on-device copy because the server couldn't be reached. */
     val offline: Boolean = false,
+    /** Vaults shared with the account and waiting for it to accept or decline (servers with `vault_invitations`). */
+    val invitations: List<Invitation> = emptyList(),
 ) {
     val folders: List<String> get() = entries.mapNotNull { it.item.folder?.takeIf(String::isNotEmpty) }.distinct().sorted()
     fun get(id: String) = entries.firstOrNull { it.id == id }
@@ -117,6 +146,13 @@ data class VaultData(
      * this account and put a login for a site in it.
      */
     fun isOwn(e: Entry) = vaults.firstOrNull { it.id == e.vaultId }?.let { it.personal && it.role != Role.Read } == true
+
+    /**
+     * Is [e] in one of the account's own vaults (key wrapped with its own key), whatever the role?
+     * Only such logins' regular-expression websites are used for matching (`AutofillMatcher`);
+     * a login whose vault is unknown counts as somebody else's.
+     */
+    fun isPersonal(e: Entry) = vaults.firstOrNull { it.id == e.vaultId }?.personal == true
     val writable: List<VaultInfo> get() = vaults.filter { it.role != Role.Read }
     val defaultVault: VaultInfo? get() = VaultInfo.defaultSaveVault(vaults)
 }
@@ -124,9 +160,53 @@ data class VaultData(
 sealed interface LoginResult {
     data object Done : LoginResult
     data class TwoFactor(val token: String, val providers: List<String>) : LoginResult
+
+    /** A device sign-in was approved: the code the approving app shows comes next ([VaultRepository.deviceCode]). */
+    data object CodeNeeded : LoginResult
 }
 
 data class Registered(val secretKey: String?, val emailVerificationRequired: Boolean)
+
+/**
+ * A sign-in this device asked another device to approve ([VaultRepository.beginDeviceLogin]),
+ * for account record [record]. Its key never leaves memory (it can't be saved), so the request
+ * ends with the process; [close] drops it.
+ */
+class DeviceLoginRequest internal constructor(
+    val record: String,
+    val id: String,
+    val email: String,
+    /** The five words this device shows, from its own key. */
+    val phrase: String,
+    /** Unix seconds, this device's clock: never more than 15 minutes after the request was made ([DeviceLogin.deadline]). */
+    val expiresAt: Long,
+    internal val accessCode: String,
+    internal val key: LoginRequestKey,
+) : AutoCloseable {
+    override fun close() = key.destroy()
+
+    override fun toString() = "DeviceLoginRequest($id)"
+}
+
+/**
+ * An approved device sign-in waiting for the code the approving app shows
+ * ([VaultRepository.confirmDeviceCode]): the account key that came with it stays inside [approved]
+ * (Rust), and nothing is unlocked, signed in or stored before the code is confirmed. [email] is the
+ * one typed on this device; [session] the server's sign-in answer (tokens, bundle).
+ */
+class DeviceCodeRequest internal constructor(
+    val record: String,
+    val email: String,
+    internal val approved: ApprovedLogin,
+    internal val session: JsonObject,
+    internal val bundle: String,
+    /** "Remember this device" from two-step login (key and token): kept only once the code is confirmed. */
+    internal val rememberToken: Pair<String, String>?,
+) : AutoCloseable {
+    override fun close() = approved.destroy()
+
+    override fun toString() = "DeviceCodeRequest($record)"
+}
 
 /** Unlocked keys of one account, in memory only (Rust handles). */
 private class Session(val accountId: String, val account: Account) {
@@ -144,24 +224,73 @@ class VaultRepository(
     private val store: SecureStore,
     private val api: ApiClient,
     private val scope: CoroutineScope,
-) {
+) : HealthSource {
     private val mutex = Mutex()
     private val sessions = mutableMapOf<String, Session>()
     private val sessionIds = MutableStateFlow<Set<String>>(emptySet())
     private var vaultKeys = mapOf<String, VaultKey>()
+
+    /** The vault headers [vaultKeys] were opened from (a changed header opens the key again). */
+    private var vaultHeaders = mapOf<String, SyncVault>()
+
+    /**
+     * The active account's copy behind [vault] (account id, ciphertext with cursor and vault
+     * numbers): the base of the next delta sync and of local changes after this device's writes.
+     */
+    private var copy: Pair<String, SyncSnapshot>? = null
+
+    /** Public syncs: one in flight, one waiting ([SyncQueue]). */
+    private val syncQueue = SyncQueue(scope)
     private val _vault = MutableStateFlow<VaultData?>(null)
     private var pendingMaster: MasterKeys? = null
     private var pendingRemember = ""
 
-    /** The active account's decrypted vault; null while locked. */
-    val vault: StateFlow<VaultData?> = _vault.asStateFlow()
+    /** A device sign-in waiting for two-step login: [verifyTwoFactor] finishes it with this key. */
+    private var pendingDeviceLogin: DeviceLoginRequest? = null
 
-    val state: StateFlow<AppState> = combine(store.data, sessionIds) { s, open -> toState(s, open) }
+    private val _deviceLogin = MutableStateFlow<DeviceLoginRequest?>(null)
+
+    /** The sign-in request waiting for another device's approval (the sign-in screen shows its words). */
+    val deviceLogin: StateFlow<DeviceLoginRequest?> = _deviceLogin.asStateFlow()
+
+    private val _deviceCode = MutableStateFlow<DeviceCodeRequest?>(null)
+
+    /** An approved device sign-in waiting for the approving app's code (the sign-in screen asks for it). */
+    val deviceCode: StateFlow<DeviceCodeRequest?> = _deviceCode.asStateFlow()
+
+    /** The active account's decrypted vault; null while locked. */
+    override val vault: StateFlow<VaultData?> = _vault.asStateFlow()
+
+    /** Accounts whose server answered 403 `two_step_required` (no two-step method while one is required); memory only. */
+    private val gated = MutableStateFlow<Set<String>>(emptySet())
+
+    /** Each signed-in account's `policy_violations` (`GET /account`), asked after sign-in and unlock; memory only. */
+    private val _violations = MutableStateFlow<Map<String, List<Violation>>>(emptyMap())
+    val violations: StateFlow<Map<String, List<Violation>>> = _violations.asStateFlow()
+
+    /** Notices the user dismissed (by key: a new invitation or another violation shows its notice again); memory only. */
+    private val _dismissed = MutableStateFlow<Set<String>>(emptySet())
+    val dismissed: StateFlow<Set<String>> = _dismissed.asStateFlow()
+
+    fun dismissNotice(key: String) = _dismissed.update { it + key }
+
+    /** Vault names read from invitations, by [Invitations.cacheKey] (null: it couldn't be opened). */
+    private var invitationNames = mapOf<String, String?>()
+
+    /**
+     * Called whenever the decrypted vault is dropped (lock, log out, switching or adding an
+     * account): what the app derived from it for this session (password health) goes too.
+     */
+    override var onVaultClosed: (() -> Unit)? = null
+
+    val state: StateFlow<AppState> = combine(store.data, sessionIds, gated) { s, open, g -> toState(s, open, g) }
         .stateIn(scope, SharingStarted.Eagerly, AppState())
 
     init {
         // Runs later: the request that noticed it may hold the lock.
         api.onSessionLost = { id -> scope.launch { mutex.withLock { closeSession(id) } } }
+        // The server requires two-step login first: the app shows only the setup screen for that account.
+        api.onTwoStepRequired = { id -> gated.update { it + id } }
     }
 
     private fun statusOf(id: String, a: AccountData?, open: Set<String>) = when {
@@ -171,7 +300,7 @@ class VaultRepository(
         else -> Status.Locked
     }
 
-    private fun toState(s: Stored, open: Set<String>): AppState {
+    private fun toState(s: Stored, open: Set<String>, gate: Set<String>): AppState {
         val a = s.active
         return AppState(
             loaded = true,
@@ -189,6 +318,10 @@ class VaultRepository(
             lastSync = a?.lastSync ?: 0,
             onboarding = s.onboarding,
             showPermissionsIntro = s.showPermissionsIntro,
+            twoStepRequired = a?.tokens != null && s.activeId in gate,
+            policies = a?.policies ?: Policies(),
+            timeoutLimit = s.timeoutLimit,
+            showSiteIcons = SiteIcons.shown(s.settings.showIcons, a?.api, a?.features),
         )
     }
 
@@ -211,19 +344,62 @@ class VaultRepository(
         mutex.withLock {
             val s = store.get()
             closeSession(s.activeId)
+            // A device sign-in in progress was for the old server.
+            cancelDeviceLogin()
+            dropPendingDeviceLogin()
             store.update { st ->
                 val id = st.activeId.takeIf { st.accounts.containsKey(it) } ?: UUID.randomUUID().toString()
                 val a = st.accounts[id] ?: AccountData()
-                st.copy(activeId = id, accounts = st.accounts + (id to a.copy(server = origin, tokens = null, bundle = null)))
+                st.copy(activeId = id, accounts = st.accounts + (id to a.copy(server = origin, tokens = null, bundle = null, features = null, featuresAt = 0, api = null, policies = null)))
             }
         }
     }
 
-    /** Whether the server allows sign-ups (from `/api/config`); null if unknown. */
-    suspend fun signupsAllowed(): Boolean? = runCatching {
-        val server = store.get().active?.server ?: return null
-        api.get("$server/api/config").use { r -> AppJson.parseToJsonElement(r.body.string()).jsonObject.bool("signups_allowed") }
-    }.getOrNull()
+    /** The active record's server's `/api/config` (sign-ups, features, policies), asked now; null if it couldn't be read. */
+    suspend fun publicConfig(): ServerConfig? {
+        val server = store.get().active?.server?.takeIf { it.isNotEmpty() } ?: return null
+        return fetchConfig(server)
+    }
+
+    /** `GET <server>/api/config`, read off the main thread; null when it fails or isn't a PassAuth answer. */
+    private suspend fun fetchConfig(server: String): ServerConfig? = try {
+        api.get("$server/api/config").use { r ->
+            if (!r.isSuccessful) return@use null
+            val o = withContext(Dispatchers.IO) { AppJson.parseToJsonElement(r.body.string()) } as? JsonObject ?: return@use null
+            ServerConfig.parse(o)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Ask account [id]'s server for its features and policies now and keep them with the account;
+     * a longer vault timeout than its policy allows is then lowered ([enforceTimeoutPolicy], run
+     * afterwards: this may be called inside a sync, holding the lock that settings changes take).
+     */
+    private suspend fun refreshConfig(id: String): ServerConfig? {
+        val server = store.get().accounts[id]?.server?.takeIf { it.isNotEmpty() } ?: return null
+        val config = fetchConfig(server) ?: return null
+        store.updateAccount(id) {
+            it.copy(
+                features = config.features,
+                featuresAt = System.currentTimeMillis(),
+                api = config.api,
+                policies = config.policies.takeIf { PolicyRules.FEATURE in config.features },
+            )
+        }
+        scope.launch {
+            try {
+                enforceTimeoutPolicy()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+        return config
+    }
 
     // -------------------------------------------------------------- login
 
@@ -234,6 +410,8 @@ class VaultRepository(
     }
 
     suspend fun login(email: String, password: String, secretKey: String?): LoginResult = mutex.withLock {
+        // A password sign-in replaces any device sign-in in progress.
+        dropPendingDeviceLogin()
         val s = store.get()
         val id = s.activeId
         val key = email.trim().lowercase()
@@ -281,13 +459,15 @@ class VaultRepository(
             if (pendingMaster !== master) master.destroy()
             throw e
         }
-        syncLocked()
+        syncOrGate()
+        refreshPoliciesLater(id)
         LoginResult.Done
     }
 
     suspend fun verifyTwoFactor(token: String, provider: String, code: String, remember: Boolean) {
         mutex.withLock {
-            val id = activeId()
+            val device = pendingDeviceLogin
+            val id = device?.record ?: activeId()
             val result = api.call(
                 id, "/auth/2fa/verify", auth = false,
                 body = buildJsonObject {
@@ -297,6 +477,17 @@ class VaultRepository(
                     put("remember", remember)
                 },
             ).jsonObject
+            if (device != null) {
+                // An approved device sign-in: the answer carries the sealed account key with the session.
+                // The approving app's code comes next; "remember this device" is kept only once it is confirmed.
+                pendingDeviceLogin = null
+                try {
+                    openDeviceApproval(device, result, result.strOrNull("remember_token")?.let { pendingRemember to it })
+                } finally {
+                    device.close()
+                }
+                return@withLock
+            }
             val master = pendingMaster ?: throw UserException("Sign-in expired. Start again.")
             pendingMaster = null
             try {
@@ -307,8 +498,23 @@ class VaultRepository(
             } finally {
                 master.destroy()
             }
-            syncLocked()
+            syncOrGate()
+            refreshPoliciesLater(id)
         }
+    }
+
+    /** Two-step login was left ("Back"): the sign-in waiting for it (its keys) leaves memory. */
+    suspend fun cancelTwoFactor() = mutex.withLock {
+        pendingMaster?.destroy()
+        pendingMaster = null
+        dropPendingDeviceLogin()
+    }
+
+    /** A device sign-in waiting for two-step login or for the approving app's code leaves memory (its session is signed out). */
+    private fun dropPendingDeviceLogin() {
+        pendingDeviceLogin?.close()
+        pendingDeviceLogin = null
+        _deviceCode.value?.let { dropDeviceCode(it) }
     }
 
     suspend fun sendTwoFactorEmail(token: String) {
@@ -317,8 +523,12 @@ class VaultRepository(
 
     private suspend fun finishLogin(id: String, master: MasterKeys, result: JsonObject) {
         val bundle = result["bundle"].toString()
+        finishSession(id, result, bundle, core { master.unlock(bundle) })
+    }
+
+    /** A sign-in's session answer with its account unlocked: kept and opened the same way for every kind of sign-in. */
+    private suspend fun finishSession(id: String, result: JsonObject, bundle: String, account: Account) {
         val email = result.str("email")
-        val account = core { master.unlock(bundle) }
         val before = store.get()
         val server = before.accounts[id]?.server
         // Signing in again to an account that is already listed replaces the old record.
@@ -341,8 +551,12 @@ class VaultRepository(
     /** Create an account on the active record's server (the web vault's Register). */
     suspend fun register(email: String, name: String, password: String, withSecretKey: Boolean): Registered = mutex.withLock {
         val id = activeId()
+        // The server's minimums for new keys (its policy), asked again now.
+        val kdf = PolicyRules.kdfMinimums(publicConfig())
         val init = api.call(id, "/auth/register/init", body = buildJsonObject { put("email", email.trim()) }, auth = false).jsonObject
-        val created = core { createAccount(init.str("account_id"), password, withSecretKey) }
+        val created = core {
+            createAccountWithKdf(init.str("account_id"), password, withSecretKey, kdf?.memoryMib?.toUInt(), kdf?.iterations?.toUInt())
+        }
         try {
             val start = core { opaqueRegisterStart(created.master) }
             val resp = api.call(
@@ -374,6 +588,184 @@ class VaultRepository(
         }
     }
 
+    // ---------------------------------------- sign in with another device
+
+    /** The new device's requests to account record [record]'s server (no session; the access code in a header). */
+    private fun deviceLoginFlow(record: String) = DeviceLoginFlow(ApiDeviceLoginTransport(securityTransport(record)))
+
+    /** Whether the active record's server lets a device sign in with another device's approval (`/api/config` `features`). */
+    suspend fun deviceLoginAvailable(): Boolean = publicConfig()?.features?.contains(DeviceLogin.FEATURE) == true
+
+    /**
+     * Ask the active record's server to let this device sign in to [email] once another device of
+     * the account approves: a key made for this request only (its words are shown, never the
+     * server's), a random access code kept here, this device's name and its "remember this
+     * device" token. The request is [deviceLogin] until [awaitDeviceLogin] ends it or the user
+     * cancels ([cancelDeviceLogin]); a new one replaces an older one.
+     */
+    suspend fun beginDeviceLogin(email: String): DeviceLoginRequest {
+        val s = store.get()
+        val id = s.activeId
+        val mail = email.trim()
+        if (mail.isEmpty()) throw UserException("Enter your email address.")
+        val key = core { LoginRequestKey.generate() }
+        try {
+            val code = DeviceLogin.accessCode()
+            val remember = s.rememberTokens["${s.accounts[id]?.server}|${mail.lowercase()}"]
+            val started = deviceLoginFlow(id).start(mail, key.publicKey(), code, deviceInfo(), remember)
+            val request = DeviceLoginRequest(id, started.id, mail, key.phrase(), started.expiresAt, code, key)
+            _deviceLogin.getAndUpdate { request }?.close()
+            return request
+        } catch (e: Exception) {
+            key.destroy()
+            throw e
+        }
+    }
+
+    /**
+     * Wait for the other device's answer (polling). Approved: the code the approving app shows
+     * comes next ([LoginResult.CodeNeeded], [deviceCode], [confirmDeviceCode]), or two-step login
+     * first ([LoginResult.TwoFactor], finished by [verifyTwoFactor]). Denied, expired and the like
+     * end with a [UserException] that says so. Cancelling the coroutine keeps the request
+     * ([deviceLogin]) so a new screen (rotation) can wait again.
+     */
+    suspend fun awaitDeviceLogin(request: DeviceLoginRequest): LoginResult {
+        val outcome = try {
+            deviceLoginFlow(request.record).await(request.id, request.accessCode, request.expiresAt)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            endDeviceLogin(request)
+            throw e
+        }
+        return when (outcome) {
+            is DeviceLoginPoll.Approved -> try {
+                mutex.withLock { openDeviceApproval(request, outcome.session, null) }
+                LoginResult.CodeNeeded
+            } finally {
+                endDeviceLogin(request)
+            }
+            is DeviceLoginPoll.TwoFactor -> {
+                mutex.withLock {
+                    pendingMaster?.destroy()
+                    pendingMaster = null
+                    if (pendingDeviceLogin !== request) dropPendingDeviceLogin()
+                    pendingDeviceLogin = request
+                    pendingRemember = "${store.get().accounts[request.record]?.server}|${request.email.lowercase()}"
+                }
+                // Handed over to two-step login: no longer the request the sign-in screen waits for.
+                _deviceLogin.compareAndSet(request, null)
+                LoginResult.TwoFactor(outcome.token, outcome.providers)
+            }
+            is DeviceLoginPoll.Ended -> {
+                endDeviceLogin(request)
+                throw UserException(outcome.message)
+            }
+            DeviceLoginPoll.Pending -> error("a request ended while pending")
+        }
+    }
+
+    /** Stop waiting ("Cancel"): the key leaves memory and the request expires on the server unanswered. */
+    fun cancelDeviceLogin() {
+        _deviceLogin.getAndUpdate { null }?.close()
+    }
+
+    private fun endDeviceLogin(request: DeviceLoginRequest) {
+        _deviceLogin.compareAndSet(request, null)
+        request.close()
+    }
+
+    /**
+     * An approved request's session answer: the account key sealed to this request's key (bound to
+     * the account and the request) opens into an approval that unlocks nothing yet: the code the
+     * approving app shows comes first ([deviceCode], [confirmDeviceCode]). Anything that doesn't
+     * open (another key, account or request, or changed) signs nobody in, and the session the server
+     * opened for it is signed out again.
+     */
+    private suspend fun openDeviceApproval(request: DeviceLoginRequest, result: JsonObject, remember: Pair<String, String>?) {
+        val bundle = result["bundle"]?.takeIf { it is JsonObject }?.toString()
+        val sealed = result.strOrNull("sealed_key")
+        val user = result.strOrNull("user_id")
+        val approved = if (bundle == null || sealed == null || user == null) {
+            null
+        } else {
+            try {
+                core { request.key.open(sealed, user, request.id) }
+            } catch (_: CoreException) {
+                null
+            }
+        }
+        if (bundle == null || approved == null) {
+            signOutLater(request.record, result)
+            throw UserException(DeviceLogin.UNVERIFIED)
+        }
+        val pending = DeviceCodeRequest(request.record, request.email, approved, result, bundle, remember)
+        _deviceCode.getAndUpdate { pending }?.let { if (it !== pending) dropDeviceCode(it) }
+    }
+
+    /**
+     * Check the code the approving app shows ([DeviceLogin.check]). Right: the approval unlocks the
+     * account (no master password), a Secret Key that came with it is kept only for the email typed
+     * here ([DeviceLogin.keepSecretKey]), and the session is stored like any sign-in's. The third
+     * wrong code stops the sign-in: its session is signed out (best effort) and its keys dropped.
+     */
+    suspend fun confirmDeviceCode(pending: DeviceCodeRequest, code: String): CodeCheck = mutex.withLock {
+        if (_deviceCode.value !== pending) throw UserException(DeviceLogin.GONE)
+        val check = core { DeviceLogin.check(pending.approved, code) }
+        when (check) {
+            CodeCheck.Confirmed -> {
+                _deviceCode.compareAndSet(pending, null)
+                try {
+                    val account = try {
+                        core { pending.approved.unlock(pending.bundle) }
+                    } catch (_: CoreException) {
+                        signOutLater(pending.record, pending.session)
+                        throw UserException(DeviceLogin.UNVERIFIED)
+                    }
+                    val secretKey = try {
+                        core { pending.approved.secretKey() }
+                    } catch (_: CoreException) {
+                        account.destroy()
+                        signOutLater(pending.record, pending.session)
+                        throw UserException(DeviceLogin.UNVERIFIED)
+                    }
+                    store.update { it.copy(secretKeys = DeviceLogin.keepSecretKey(it.secretKeys, secretKey, pending.email, pending.session.str("email"))) }
+                    pending.rememberToken?.let { (key, token) -> store.update { it.copy(rememberTokens = it.rememberTokens + (key to token)) } }
+                    finishSession(pending.record, pending.session, pending.bundle, account)
+                } finally {
+                    pending.close()
+                }
+                syncOrGate()
+                refreshPoliciesLater(pending.record)
+            }
+            is CodeCheck.Stopped -> dropDeviceCode(pending)
+            is CodeCheck.Wrong, is CodeCheck.NotACode -> Unit
+        }
+        check
+    }
+
+    /** Leave the code step ("Cancel"): the approval's keys leave memory and its session is signed out. */
+    fun cancelDeviceCode() {
+        _deviceCode.value?.let { dropDeviceCode(it) }
+    }
+
+    /** Drop an approval waiting for its code, and sign out the session that came with it. */
+    private fun dropDeviceCode(pending: DeviceCodeRequest) {
+        _deviceCode.compareAndSet(pending, null)
+        pending.close()
+        signOutLater(pending.record, pending.session)
+    }
+
+    /** Best effort, in the background: end the session a server opened for a device sign-in that won't be used. */
+    private fun signOutLater(record: String, session: JsonObject) {
+        val access = session.strOrNull("access_token")?.takeIf { it.isNotEmpty() } ?: return
+        val refresh = session.str("refresh_token")
+        scope.launch {
+            val server = store.get().accounts[record]?.server.orEmpty()
+            api.logoutRemote(server, Tokens(access, refresh))
+        }
+    }
+
     // ------------------------------------------------------------- unlock
 
     suspend fun unlock(password: String, secretKey: String?) {
@@ -402,7 +794,8 @@ class VaultRepository(
                 store.update { it.copy(secretKeys = it.secretKeys + (a.email.lowercase() to sk)) }
             }
             openSession(id, Session(b.str("account_id"), account))
-            syncLocked(fallbackToCache = true, cacheFirst = true)
+            syncOrGate(fallbackToCache = true, cacheFirst = true)
+            refreshPoliciesLater(id)
         }
     }
 
@@ -441,12 +834,19 @@ class VaultRepository(
                 bytes.fill(0)
             }
             openSession(id, Session(bundleAccountId(bundle), account))
-            syncLocked(fallbackToCache = true, cacheFirst = true)
+            syncOrGate(fallbackToCache = true, cacheFirst = true)
+            refreshPoliciesLater(id)
         }
     }
 
     /** Vault timeout "never": restore keys kept on disk after the app restarts. */
-    suspend fun restorePersisted(): Boolean = mutex.withLock {
+    suspend fun restorePersisted(): Boolean {
+        // A server's longest vault timeout may rule "never" out: lower it first (that wipes the kept keys).
+        enforceTimeoutPolicy()
+        return restoreLocked()
+    }
+
+    private suspend fun restoreLocked(): Boolean = mutex.withLock {
         val s = store.get()
         if (s.settings.vaultTimeout != VaultTimeout.Never) return@withLock false
         var restored = false
@@ -462,7 +862,10 @@ class VaultRepository(
                 restored = true
             }
         }
-        if (restored && sessions.containsKey(s.activeId)) syncLocked(fallbackToCache = true, cacheFirst = true)
+        if (restored && sessions.containsKey(s.activeId)) {
+            syncOrGate(fallbackToCache = true, cacheFirst = true)
+            refreshPoliciesLater(s.activeId)
+        }
         restored
     }
 
@@ -492,7 +895,11 @@ class VaultRepository(
     private fun unloadVault() {
         vaultKeys.values.forEach { it.destroy() }
         vaultKeys = emptyMap()
+        vaultHeaders = emptyMap()
+        invitationNames = emptyMap()
+        copy = null
         _vault.value = null
+        onVaultClosed?.invoke()
     }
 
     // ------------------------------------------------------ lock / logout
@@ -516,26 +923,42 @@ class VaultRepository(
             store.updateAccount(id) { it.copy(tokens = null, biometric = null) }
             Keystore.deleteBiometricKey(id)
             store.deleteCache(id)
+            forgetSessionState(id)
         }
     }
 
     /** Log out of the active account and remove it from this device; the next one becomes active. */
     suspend fun logout() = mutex.withLock {
         val s = store.get()
-        val id = s.activeId
         s.active?.let { api.logoutRemote(it.server, it.tokens) }
+        signOutLocally(s.activeId)
+    }
+
+    /**
+     * Log out of account [id] on this device only (its session already ended on the server):
+     * keys, offline copy and biometric unlock go; the account is removed from the device, or the
+     * last one stays as a signed-out record so the sign-in screen remembers the server and email.
+     */
+    private suspend fun signOutLocally(id: String) {
+        val s = store.get()
         closeSession(id)
         pendingMaster?.destroy()
         pendingMaster = null
         Keystore.deleteBiometricKey(id)
         store.deleteCache(id)
+        forgetSessionState(id)
         val listed = s.accounts.filterValues { it.server.isNotEmpty() && it.email.isNotEmpty() }
         if (listed.size > 1 || !listed.containsKey(id)) {
             removeAccount(id)
         } else {
-            // The last account stays as a signed-out record, so the sign-in screen remembers the server and email.
             store.updateAccount(id) { it.copy(tokens = null, biometric = null, bundle = null, lastSync = 0) }
         }
+    }
+
+    /** What this app knew about account [id]'s session in memory: the two-step gate and its policy violations. */
+    private fun forgetSessionState(id: String) {
+        gated.update { it - id }
+        _violations.update { it - id }
     }
 
     private suspend fun removeAccount(id: String) {
@@ -607,14 +1030,32 @@ class VaultRepository(
 
     // --------------------------------------------------------------- sync
 
-    suspend fun sync() = mutex.withLock { syncLocked() }
+    /**
+     * Sync the active account (pull to refresh, live sync, the editor's conflict choice). One sync
+     * runs at a time and at most one waits: a request made while one is waiting joins it.
+     */
+    suspend fun sync() = syncQueue.run { mutex.withLock { syncLocked() } }
 
-    /** Re-sync if the server has newer data (cheap revision check). */
+    /** Where the open copy is (revision and vault numbers); null while locked. */
+    val syncPosition: SyncPosition?
+        get() {
+            val v = _vault.value ?: return null
+            return copy?.second?.position ?: SyncPosition(v.revision, null)
+        }
+
+    /**
+     * Re-sync if the server has something the copy lacks (cheap `/sync/revision` check: the
+     * revision and, with delta sync, every vault's number; [SyncDecision.isStale]), or to leave
+     * the offline copy.
+     */
     suspend fun refreshIfStale() {
         val current = _vault.value ?: return
+        val have = syncPosition ?: return
         val id = activeId()
-        val r = runCatching { api.call(id, "/sync/revision").jsonObject.long("revision") }.getOrNull() ?: return
-        if (r > current.revision || current.offline) mutex.withLock { syncLocked() }
+        val j = runCatching { api.call(id, "/sync/revision").jsonObject }.getOrNull() ?: return
+        gated.update { it - id }
+        val r = (j["revision"] as? JsonPrimitive)?.longOrNull ?: return
+        if (SyncDecision.isStale(r, DeltaSync.vaultNumbers(j["vaults"]), have) || current.offline) sync()
     }
 
     /** Ask the server whether this session still exists: an ended one signs the account out (refresh fails). */
@@ -634,7 +1075,7 @@ class VaultRepository(
         for ((id, a) in s.accounts) {
             if (a.tokens == null || a.server.isEmpty()) continue
             try {
-                if (id == s.activeId && sessions.containsKey(id)) mutex.withLock { syncLocked() } else refreshCacheLocked(id)
+                if (id == s.activeId && sessions.containsKey(id)) sync() else refreshCacheLocked(id)
                 outcome = outcome.copy(refreshed = outcome.refreshed + 1)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -648,25 +1089,37 @@ class VaultRepository(
     }
 
     /**
-     * Refresh one account's offline copy without unlocking it: GET `/sync` through the
-     * usual client (token refresh and 401 handling unchanged), check the body is a vault
-     * snapshot and not older than the cached one, then store it as is. Never downgrades
-     * the copy and never writes an unparseable body.
+     * Refresh one account's offline copy without unlocking it, through the usual client (token
+     * refresh and 401 handling unchanged). Nothing is decrypted: with delta sync `/sync/revision`
+     * decides and only the changes are fetched and merged into the copy; otherwise the whole
+     * `/sync` replaces it. Only a valid sync answer (with the account bundle) at least as new as
+     * the copy is written ([DeltaSync.refresh]): never downgrades, never an unparseable body.
      */
     private suspend fun refreshCacheLocked(id: String) {
-        val json = api.callText(id, "/sync")
-        val fetched = core { CacheRefresh.revisionOf(json) } ?: return
-        val cached = withContext(Dispatchers.IO) { store.readCache(id) }?.let { c -> core { CacheRefresh.revisionOf(c) } }
-        if (!CacheRefresh.shouldWrite(fetched, cached)) return
+        val cached = readSnapshot(id)
+        val delta = deltaSyncEnabled(id)
+        val result = DeltaSync.refresh(cached, delta, TRASH_SUMMARY) { path -> api.callText(id, path) }
         if (store.get().accounts[id]?.tokens == null) return // signed out meanwhile
-        withContext(Dispatchers.IO) { store.writeCache(id, json) }
-        val data = core { AppJson.parseToJsonElement(json).jsonObject }
-        store.updateAccount(id) {
-            it.copy(
-                lastSync = System.currentTimeMillis(),
-                name = (data["user"] as? JsonObject)?.str("name") ?: it.name,
-                bundle = data["bundle"]?.toString() ?: it.bundle,
-            )
+        gated.update { it - id }
+        when (result) {
+            DeltaSync.CacheRefresh.Keep -> return
+            DeltaSync.CacheRefresh.Current -> store.updateAccount(id) { it.copy(lastSync = System.currentTimeMillis()) }
+            is DeltaSync.CacheRefresh.Write -> {
+                val next = result.snapshot
+                val text = core { next.encode() }
+                mutex.withLock {
+                    // Unlocked and shown meanwhile: its own sync writes the copy.
+                    if (sessions.containsKey(id) && activeId() == id) return@withLock
+                    withContext(Dispatchers.IO) { store.writeCache(id, text) }
+                    store.updateAccount(id) {
+                        it.copy(
+                            lastSync = System.currentTimeMillis(),
+                            name = (next.user as? JsonObject)?.strOrNull("name") ?: it.name,
+                            bundle = next.bundle?.toString() ?: it.bundle,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -675,25 +1128,32 @@ class VaultRepository(
      * unreachable server shows the on-device copy (offline). With [cacheFirst]
      * the on-device copy is shown straight away and the server is asked in the
      * background, so unlocking doesn't wait for a slow or unreachable server.
+     *
+     * With delta sync the server sends only what changed since the copy's cursor; the merged
+     * copy is decrypted incrementally ([decryptVault]) and stored with its new cursor in one
+     * write, so a failed or interrupted sync leaves the previous copy and cursor.
      */
     private suspend fun syncLocked(fallbackToCache: Boolean = false, cacheFirst: Boolean = false) {
         val id = activeId()
         val session = sessions[id] ?: return
         if (cacheFirst) {
-            val cached = withContext(Dispatchers.IO) { store.readCache(id) }
-            if (cached != null && runCatching { publish(id, session, cached, fromServer = false, offline = false) }.isSuccess) {
+            val cached = readSnapshot(id)
+            if (cached != null && runCatching { show(id, session, cached, offline = false, mode = CopyStore.None) }.isSuccess) {
                 scope.launch { backgroundSync(id, session) }
                 return
             }
         }
-        val (json, offline) = try {
-            api.callText(id, "/sync") to false
+        val (next, offline) = try {
+            fetchSnapshot(id).also { gated.update { g -> g - id } } to false
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            val cached = if (fallbackToCache) withContext(Dispatchers.IO) { store.readCache(id) } else null
+            // An answer that isn't a vault is an error, not "offline".
+            if (e is UserException && e.message == DeltaSync.unreadable().message) throw e
+            val cached = if (fallbackToCache) readSnapshot(id) else null
             if (cached == null) {
                 if (fallbackToCache && e !is ApiException) {
+                    copy = null
                     _vault.value = VaultData(offline = true)
                     return
                 }
@@ -701,7 +1161,7 @@ class VaultRepository(
             }
             cached to true
         }
-        publish(id, session, json, fromServer = !offline, offline = offline)
+        show(id, session, next, offline, if (offline) CopyStore.None else CopyStore.Synced)
     }
 
     /** The server sync after a cache-first unlock; an unreachable server leaves the copy marked offline. */
@@ -716,31 +1176,78 @@ class VaultRepository(
         }
     }
 
-    /** Parse, decrypt and show a `/sync` response (off the main thread); a server response also refreshes the cache. */
-    private suspend fun publish(id: String, session: Session, json: String, fromServer: Boolean, offline: Boolean) {
+    /** The account's copy after asking the server: since the copy's cursor when the server does delta sync, else everything. */
+    private suspend fun fetchSnapshot(id: String): SyncSnapshot {
+        val base = copy?.takeIf { it.first == id }?.second ?: readSnapshot(id)
+        val delta = deltaSyncEnabled(id)
+        return DeltaSync.fetch(base, delta, TRASH_SUMMARY) { path -> api.callText(id, path) }
+    }
+
+    /** The account's copy on this device (null if missing or unreadable). */
+    private suspend fun readSnapshot(id: String): SyncSnapshot? {
+        val text = withContext(Dispatchers.IO) { store.readCache(id) } ?: return null
+        return core { SyncSnapshot.decode(text) }
+    }
+
+    /**
+     * The active account's server's `/api/config` `features`, asked now (password health follows
+     * the admin's breach-check switch as it is) and kept with the account; null when the settings
+     * couldn't be loaded.
+     */
+    override suspend fun serverFeatures(): List<String>? = refreshConfig(activeId())?.features
+
+    /**
+     * Whether the account's server does delta sync (`/api/config` `features` has `delta_sync`),
+     * asked at most every 6 hours and kept with the account. A list gone stale is harmless: a
+     * server without the feature ignores `since` and answers in full. Unknown → no.
+     */
+    private suspend fun deltaSyncEnabled(id: String): Boolean {
+        val a = store.get().accounts[id]?.takeIf { it.server.isNotEmpty() } ?: return false
+        val now = System.currentTimeMillis()
+        val known = a.features
+        if (known != null && now >= a.featuresAt && now - a.featuresAt < FEATURES_MAX_AGE_MS) return DeltaSync.FEATURE in known
+        val config = refreshConfig(id) ?: return DeltaSync.FEATURE in known.orEmpty()
+        return DeltaSync.FEATURE in config.features
+    }
+
+    /** What [show] keeps of a copy besides showing it. */
+    private enum class CopyStore { None, LocalChange, Synced }
+
+    /**
+     * Decrypt [snap] (only what changed since the copy shown now) and show it. [CopyStore.Synced]:
+     * fresh from the server, stored as the offline copy with the time of the sync, the profile
+     * name and the bundle; [CopyStore.LocalChange]: this device's write applied to the copy, stored too.
+     */
+    private suspend fun show(id: String, session: Session, snap: SyncSnapshot, offline: Boolean, mode: CopyStore) {
         if (sessions[id] !== session) return
-        val (data, decrypted) = core {
-            val data = AppJson.parseToJsonElement(json).jsonObject
-            data to decryptVault(session.account, data)
-        }
-        val (next, keys) = decrypted
+        val previous = if (copy?.first == id) _vault.value?.let { Opened(it, vaultKeys, vaultHeaders, emptyList()) } else null
+        val names = if (copy?.first == id) invitationNames else emptyMap()
+        val opened = core { decryptVault(session.account, snap, previous, names) }
         if (sessions[id] !== session) {
-            keys.values.forEach { it.destroy() }
+            opened.fresh.forEach { it.destroy() }
             return
         }
-        if (fromServer) {
-            withContext(Dispatchers.IO) { store.writeCache(id, json) }
-            store.updateAccount(id) {
-                it.copy(
-                    lastSync = System.currentTimeMillis(),
-                    name = (data["user"] as? JsonObject)?.str("name") ?: it.name,
-                    bundle = data["bundle"]?.toString() ?: it.bundle,
-                )
+        if (mode != CopyStore.None) {
+            val text = core { snap.encode() }
+            withContext(Dispatchers.IO) { store.writeCache(id, text) }
+            if (mode == CopyStore.Synced) {
+                store.updateAccount(id) {
+                    it.copy(
+                        lastSync = System.currentTimeMillis(),
+                        name = (snap.user as? JsonObject)?.strOrNull("name") ?: it.name,
+                        bundle = snap.bundle?.toString() ?: it.bundle,
+                    )
+                }
             }
         }
-        vaultKeys.values.forEach { it.destroy() }
-        vaultKeys = keys
-        _vault.value = next.copy(offline = offline)
+        // Keys of vaults gone or opened again are freed; kept ones live on in the new map.
+        val kept = opened.keys.values
+        vaultKeys.values.filter { old -> kept.none { it === old } }.forEach { it.destroy() }
+        vaultKeys = opened.keys
+        vaultHeaders = opened.headers
+        invitationNames = opened.invitationNames
+        copy = id to snap
+        _vault.value = opened.data.copy(offline = offline)
     }
 
     /**
@@ -757,43 +1264,133 @@ class VaultRepository(
         }
     }
 
-    private fun decryptVault(account: Account, data: JsonObject): Pair<VaultData, Map<String, VaultKey>> {
-        val keys = mutableMapOf<String, VaultKey>()
-        val vaults = mutableListOf<VaultInfo>()
-        for (v in (data["vaults"] as? JsonArray).orEmpty()) {
-            val o = v.jsonObject
-            val vid = o.str("id")
-            val key = try {
-                account.openVaultKey(vid, o.str("wrapped_key"), o.str("key_kind"))
-            } catch (_: CoreException) {
-                continue // vault key unavailable (rotated); skip
+    /**
+     * After this device's write into [vaultId] ([answer]: the server's reply, with `vault_seq` on
+     * servers with delta sync): when it is the vault's next number nothing else changed there, so
+     * [change] is applied to the copy without asking the server; when the copy already has it
+     * nothing is done; otherwise (other writes too, a move, an older server) the copy is synced,
+     * as before every write.
+     */
+    private suspend fun afterWrite(vaultId: String, answer: JsonElement?, change: LocalChange?) {
+        val id = activeId()
+        val c = copy?.takeIf { it.first == id }
+        val session = sessions[id]
+        if (change == null || c == null || session == null) return syncAfterWrite()
+        val known = c.second.vaults.firstOrNull { it.id == vaultId }?.seq
+        val seq = ((answer as? JsonObject)?.get("vault_seq") as? JsonPrimitive)?.longOrNull
+        when (SyncDecision.afterWrite(known, seq)) {
+            SyncDecision.AfterWrite.Nothing -> return
+            SyncDecision.AfterWrite.Sync -> return syncAfterWrite()
+            SyncDecision.AfterWrite.ApplyLocally -> {
+                val next = seq?.let { SyncMerge.applyLocal(change, vaultId, it, c.second) } ?: return syncAfterWrite()
+                try {
+                    show(id, session, next, offline = false, mode = CopyStore.LocalChange)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    syncAfterWrite()
+                }
             }
-            val name = runCatching { AppJson.parseToJsonElement(key.decryptMeta(vid, o.str("meta"))).jsonObject.str("name") }
+        }
+    }
+
+    /**
+     * What one decryption produced, kept so the next one decrypts only what changed. [fresh]: keys
+     * opened by it; [invitationNames]: the vault names read from invitations ([Invitations.cacheKey]).
+     */
+    private class Opened(
+        val data: VaultData,
+        val keys: Map<String, VaultKey>,
+        val headers: Map<String, SyncVault>,
+        val fresh: List<VaultKey>,
+        val invitationNames: Map<String, String?> = emptyMap(),
+    )
+
+    /**
+     * Decrypt a copy, reusing what [previous] already opened: a vault key whose header (wrapping,
+     * kind, epoch) is unchanged, the vault's name while its `meta` is too, and items whose
+     * ciphertext is the same in a vault whose key was kept. A vault key that can't be opened
+     * (rotated) is skipped with its items, and so is an undecryptable item; trashed items aren't
+     * shown (the app has no trash view; with `trash=summary` they have no data anyway).
+     */
+    private fun decryptVault(account: Account, snap: SyncSnapshot, previous: Opened?, previousNames: Map<String, String?>): Opened {
+        val keys = mutableMapOf<String, VaultKey>()
+        val headers = mutableMapOf<String, SyncVault>()
+        val kept = mutableSetOf<String>()
+        val fresh = mutableListOf<VaultKey>()
+        val vaults = mutableListOf<VaultInfo>()
+        val oldNames = previous?.data?.vaults.orEmpty().associate { it.id to it.name }
+        for (v in snap.vaults) {
+            val old = previous?.headers?.get(v.id)
+            val oldKey = previous?.keys?.get(v.id)
+            var name: String? = null
+            val key = if (old != null && oldKey != null && old.sameKey(v)) {
+                kept += v.id
+                if (old.meta == v.meta) name = oldNames[v.id]
+                oldKey
+            } else {
+                try {
+                    account.openVaultKey(v.id, v.wrappedKey, v.keyKind).also { fresh += it }
+                } catch (_: CoreException) {
+                    continue // vault key unavailable (rotated); skip
+                }
+            }
+            val shown = name ?: runCatching { AppJson.parseToJsonElement(key.decryptMeta(v.id, v.meta)).jsonObject.str("name") }
                 .getOrNull()?.takeIf { it.isNotEmpty() } ?: "Vault"
-            val role = when (o.str("role")) {
+            val role = when (v.role) {
                 "owner" -> Role.Owner
                 "admin" -> Role.Admin
                 "write" -> Role.Write
                 else -> Role.Read
             }
-            keys[vid] = key
-            vaults += VaultInfo(vid, name, role, o.str("key_kind").ifEmpty { VaultInfo.KEY_KIND_ACCOUNT })
+            keys[v.id] = key
+            headers[v.id] = v
+            vaults += VaultInfo(v.id, shown, role, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, v.keyEpoch)
         }
+        val before = previous?.data?.entries.orEmpty().associateBy { it.id }
         val entries = mutableListOf<Entry>()
-        for (row in (data["items"] as? JsonArray).orEmpty()) {
-            val o = row.jsonObject
-            val key = keys[o.str("vault_id")] ?: continue
-            if (o.strOrNull("deleted_at") != null) continue
-            val enc = EncryptedItem(o.str("id"), o.str("vault_id"), o.str("item_key"), o.str("data"))
-            val item = try {
-                ItemCodec.decode(key.decryptItem(enc))
-            } catch (_: Exception) {
-                continue // undecryptable item; skip
+        for (row in snap.items) {
+            if (row.deletedAt != null) continue
+            val key = keys[row.vaultId] ?: continue
+            val enc = EncryptedItem(row.id, row.vaultId, row.itemKey ?: continue, row.data ?: continue)
+            val old = before[row.id]
+            val item = if (row.vaultId in kept && old != null && old.vaultId == row.vaultId && old.enc.key == enc.key && old.enc.data == enc.data) {
+                old.item
+            } else {
+                try {
+                    ItemCodec.decode(key.decryptItem(enc))
+                } catch (_: Exception) {
+                    continue // undecryptable item; skip
+                }
             }
-            entries += Entry(enc.id, item, enc.vaultId, o.long("revision"), enc)
+            entries += Entry(enc.id, item, enc.vaultId, row.revision ?: 0, enc)
         }
         entries.sortWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.item.name })
-        return VaultData(entries, vaults, data.long("revision")) to keys
+        // Invitations: each sealed key is opened only to read the vault's name, then destroyed.
+        val names = mutableMapOf<String, String?>()
+        val invitations = Invitations.open(snap.invitations) { inv ->
+            val key = Invitations.cacheKey(inv)
+            val name = if (previousNames.containsKey(key)) previousNames[key] else invitationName(account, inv)
+            names[key] = name
+            name
+        }
+        return Opened(VaultData(entries, vaults, snap.revision, invitations = invitations), keys, headers, fresh, names)
+    }
+
+    /** The vault name of an invitation, read with its sealed key (never kept); null when the account can't open it. */
+    private fun invitationName(account: Account, inv: SyncInvitation): String? {
+        val key = try {
+            account.openVaultKey(inv.vaultId, inv.wrappedKey, "sealed")
+        } catch (_: Exception) {
+            return null
+        }
+        return try {
+            Invitations.nameOf(AppJson.parseToJsonElement(key.decryptMeta(inv.vaultId, inv.meta)))
+        } catch (_: Exception) {
+            null
+        } finally {
+            key.destroy()
+        }
     }
 
     // -------------------------------------------------------------- items
@@ -809,50 +1406,95 @@ class VaultRepository(
         if (v.offline) throw UserException("You're offline. Changes can be saved once PassAuth reaches your server.")
     }
 
-    suspend fun createItem(item: Item, vaultId: String?): String = mutex.withLock {
-        val v = requireVault()
-        requireOnline(v)
-        val target = vaultId?.let { id -> v.vaults.firstOrNull { it.id == id } } ?: writableVault(v)
-        val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
+    /**
+     * Create an item. [id] keeps the item's id across the caller's retries (an editor or a save
+     * sheet whose first attempt failed or timed out), so a create that did reach the server
+     * isn't saved twice. Key epoch, the retry after a key change and an id that already exists:
+     * see [ItemWrites].
+     */
+    suspend fun createItem(item: Item, vaultId: String?, id: String? = null): String = mutex.withLock { createLocked(item, vaultId, id) }
+
+    private suspend fun createLocked(item: Item, vaultId: String?, requested: String?): String {
+        requireOnline(requireVault())
         val t = now()
-        val id = core { newId() }
-        val enc = core { key.encryptItem(ItemCodec.encode(item.copy(createdAt = t, updatedAt = t)), id, target.id) }
-        api.call(activeId(), "/items", body = enc.toJson())
-        syncAfterWrite()
-        id
+        val id = requested ?: core { newId() }
+        val stamped = item.copy(createdAt = t, updatedAt = t)
+        val json = ItemCodec.encode(stamped)
+        var targetId = ""
+        var sent: EncryptedItem? = null
+        var answer: JsonElement? = null
+        val created = ItemWrites.create(
+            send = {
+                val v = requireVault()
+                val target = vaultId?.let { want -> v.vaults.firstOrNull { it.id == want } } ?: writableVault(v)
+                val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
+                targetId = target.id
+                val enc = core { key.encryptItem(json, id, target.id) }
+                answer = api.call(activeId(), "/items", body = ItemWrites.body(enc, target.keyEpoch))
+                sent = enc
+            },
+            resync = { syncLocked() },
+            updateEarlierAttempt = {
+                syncLocked()
+                val landed = _vault.value?.get(id)?.takeIf { it.vaultId == targetId }
+                if (landed != null) updateLocked(landed, stamped.copy(createdAt = landed.item.createdAt), landed.vaultId)
+                landed != null
+            },
+        )
+        if (created == ItemWrites.Created.New) {
+            val enc = sent
+            val change = if (enc == null) null else ItemWrites.revision(answer)?.let { rev -> LocalChange.Put(SyncItem(id, targetId, enc.key, enc.data, rev, null, t, t)) }
+            afterWrite(targetId, answer, change)
+        }
+        return id
     }
 
     /**
      * Save changes to an item; with another [targetVaultId] the item also moves to that vault
-     * (re-encrypted with its key under the same id), like the web vault's `updateItem`.
+     * (re-encrypted with its key under the same id), like the web vault's `updateItem`. Throws
+     * [ConflictException] when the item changed on the server since [entry] was read. Key epoch
+     * and the retry after a key change: see [ItemWrites].
      */
     suspend fun updateItem(entry: Entry, item: Item, targetVaultId: String = entry.vaultId) {
-        mutex.withLock {
-            val v = requireVault()
-            requireOnline(v)
-            val vault = v.vaults.firstOrNull { it.id == entry.vaultId } ?: throw UserException("Vault not found.")
-            if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
-            val target = v.vaults.firstOrNull { it.id == targetVaultId } ?: throw UserException("Vault not found.")
-            if (target.role == Role.Read) throw UserException("You can't add items to ${target.name}.")
-            val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
-            val t = now()
-            var next = item.copy(updatedAt = t)
-            val old = entry.item.login?.password
-            val newPassword = next.login?.password
-            if (next.login != null && !old.isNullOrEmpty() && old != newPassword && next.passwordHistory == entry.item.passwordHistory) {
-                next = next.copy(passwordHistory = (listOf(PasswordChange(old, t)) + next.passwordHistory).take(20))
-            }
-            val json = ItemCodec.encode(next)
-            val enc = core { if (target.id == entry.vaultId) key.updateItem(entry.enc, json) else key.encryptItem(json, entry.id, target.id) }
-            val body = enc.toJson().let { JsonObject(it + ("revision" to kotlinx.serialization.json.JsonPrimitive(entry.revision))) }
-            try {
-                api.call(activeId(), "/items/${entry.id}", body = body, method = "PUT")
-            } catch (e: ApiException) {
-                if (e.status == 409) throw ConflictException()
-                throw e
-            }
-            syncAfterWrite()
+        mutex.withLock { updateLocked(entry, item, targetVaultId) }
+    }
+
+    private suspend fun updateLocked(base: Entry, item: Item, targetVaultId: String) {
+        requireOnline(requireVault())
+        val t = now()
+        var next = item.copy(updatedAt = t)
+        val old = base.item.login?.password
+        val newPassword = next.login?.password
+        if (next.login != null && !old.isNullOrEmpty() && old != newPassword && next.passwordHistory == base.item.passwordHistory) {
+            next = next.copy(passwordHistory = (listOf(PasswordChange(old, t)) + next.passwordHistory).take(20))
         }
+        val json = ItemCodec.encode(next)
+        var sent: EncryptedItem? = null
+        var moved = false
+        var answer: JsonElement? = null
+        ItemWrites.update(
+            base,
+            send = { entry ->
+                val v = requireVault()
+                val vault = v.vaults.firstOrNull { it.id == entry.vaultId } ?: throw UserException("Vault not found.")
+                if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
+                val target = v.vaults.firstOrNull { it.id == targetVaultId } ?: throw UserException("Vault not found.")
+                if (target.role == Role.Read) throw UserException("You can't add items to ${target.name}.")
+                val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
+                val enc = core { if (target.id == entry.vaultId) key.updateItem(entry.enc, json) else key.encryptItem(json, entry.id, target.id) }
+                answer = api.call(activeId(), "/items/${entry.id}", body = ItemWrites.body(enc, target.keyEpoch, entry.revision), method = "PUT")
+                sent = enc
+                moved = target.id != entry.vaultId
+            },
+            resync = {
+                syncLocked()
+                _vault.value?.get(base.id)
+            },
+        )
+        // A move also changed the vault it left (its number isn't in the answer): sync.
+        val enc = sent
+        val change = if (moved || enc == null) null else ItemWrites.revision(answer)?.let { rev -> LocalChange.Put(SyncItem(base.id, targetVaultId, enc.key, enc.data, rev, updatedAt = t)) }
+        afterWrite(targetVaultId, answer, change)
     }
 
     /** Move an item to another vault the user can write to. */
@@ -868,8 +1510,9 @@ class VaultRepository(
             val v = requireVault()
             requireOnline(v)
             if (!v.canWrite(entry)) throw UserException("You can only view items in this vault.")
-            api.call(activeId(), "/items/${entry.id}", method = "DELETE")
-            syncAfterWrite()
+            val answer = api.call(activeId(), "/items/${entry.id}", method = "DELETE")
+            val change = ItemWrites.revision(answer)?.let { LocalChange.Trash(entry.id, now(), it, TRASH_SUMMARY) }
+            afterWrite(entry.vaultId, answer, change)
         }
     }
 
@@ -917,8 +1560,10 @@ class VaultRepository(
         requireOnlineFor("Changing your master password")
         val bundle = a.bundle ?: throw UserException("Sync your vault first.")
         val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        // The server's minimums for new keys, asked again now (a stale copy could make keys it refuses).
+        val kdf = PolicyRules.kdfMinimums(refreshConfig(id)) ?: a.policies?.let(PolicyRules::kdfMinimums)
         val change = withContext(Dispatchers.Default) {
-            security(id, session.account).changeKeys(a.email, bundle, current, new, choice, sk)
+            security(id, session.account).changeKeys(a.email, bundle, current, new, choice, sk, kdf)
         }
         // First thing after the server accepted it: the old bundle no longer matches the server.
         store.update { it.afterKeyChange(id, change) }
@@ -930,13 +1575,30 @@ class VaultRepository(
     /** Two-step login methods and recovery codes of the active account (GET /account). */
     suspend fun securityStatus(): SecurityStatus = security(activeId()).status()
 
+    /** Items and storage of the active account against the server's limits (GET /account). */
+    suspend fun accountUsage(): AccountUsage = security(activeId()).usage()
+
     suspend fun totpSetup(): TotpSetup = security(activeId()).totpSetup()
 
-    suspend fun totpEnable(code: String): List<String>? = security(activeId()).totpEnable(code)
+    /** Turn the authenticator app on with its code, after re-authentication (the master password, and the Secret Key when this device lacks it). */
+    suspend fun totpEnable(code: String, password: String, secretKey: String?): List<String>? = mutex.withLock {
+        val s = store.get()
+        val id = s.activeId
+        val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+        val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        withContext(Dispatchers.Default) { security(id).totpEnable(code, a.email, password, sk) }
+    }
 
     suspend fun emailTwoFactorSetup() = security(activeId()).emailSetup()
 
-    suspend fun emailTwoFactorEnable(code: String): List<String>? = security(activeId()).emailEnable(code)
+    /** Turn email codes on with the emailed code, after re-authentication (as [totpEnable]). */
+    suspend fun emailTwoFactorEnable(code: String, password: String, secretKey: String?): List<String>? = mutex.withLock {
+        val s = store.get()
+        val id = s.activeId
+        val a = s.active?.takeIf { it.tokens != null } ?: throw UserException("Sign in first.")
+        val sk = secretKey?.trim()?.takeIf { it.isNotEmpty() } ?: s.secretKeys[a.email.lowercase()]
+        withContext(Dispatchers.Default) { security(id).emailEnable(code, a.email, password, sk) }
+    }
 
     /** New recovery codes after re-authentication (the current ones stop working). */
     suspend fun regenerateRecoveryCodes(password: String, secretKey: String?): List<String> = mutex.withLock {
@@ -969,6 +1631,180 @@ class VaultRepository(
         }
     }
 
+    /** The active account's sessions (Settings → Account security → Signed-in devices). */
+    suspend fun accountSessions(): SessionList = security(activeId()).sessions()
+
+    /** Sign out one of the active account's other sessions. */
+    suspend fun revokeSession(sessionId: String) = security(activeId()).revokeSession(sessionId)
+
+    /** Sign out every other session of the active account (servers with `revoke_others`); returns how many. */
+    suspend fun revokeOtherSessions(): Int? = security(activeId()).revokeOtherSessions()
+
+    /**
+     * Forget a device of the active account (servers with `forget_device`): all its sessions end
+     * and its next sign-in counts as a new device. When this app's own session was one of them
+     * ([ForgetResult.current]), the account is signed out here too, without a remote sign-out
+     * (that session is gone), and the two-step "remember this device" token is dropped (the
+     * server forgot it).
+     */
+    suspend fun forgetDevice(deviceId: String): ForgetResult {
+        val id = activeId()
+        val r = security(id).forgetDevice(deviceId)
+        if (r.current) {
+            mutex.withLock {
+                store.update { it.withoutRememberToken(id) }
+                signOutLocally(id)
+            }
+        }
+        return r
+    }
+
+    // ------------------------------------- approving another device's sign-in
+
+    /**
+     * The active account's sign-in requests from new devices (`GET /account/auth-requests`,
+     * unanswered and unexpired, newest first), when the account is unlocked here and its server has
+     * the feature; null otherwise (nothing to show).
+     */
+    suspend fun listAuthRequests(): AuthRequestListing? {
+        val s = store.get()
+        val id = s.activeId
+        val a = s.accounts[id]?.takeIf { it.tokens != null } ?: return null
+        if (id !in sessionIds.value) return null
+        val features = a.features ?: refreshConfig(id)?.features ?: return null
+        if (DeviceLogin.FEATURE !in features) return null
+        return AuthRequestListing(id, AuthRequestApi(securityTransport(id)).list(now()))
+    }
+
+    /**
+     * Approve [request] of [account] (as frozen when its sheet opened) with the words the user
+     * picked ([DeviceApprovals.prepare]): when they are the request's words, the account key is
+     * sealed to the new device's key (with the Secret Key this device keeps for the account, so the
+     * new device can later unlock with the master password), the request's challenge is opened as
+     * proof that the answer comes from an app that holds the keys, and the code the new device needs
+     * is returned. Other words deny the request, and null is returned. Needs the vault unlocked here.
+     */
+    suspend fun approveAuthRequest(account: String, request: AuthRequest, chosenPhrase: String): String? {
+        val s = store.get()
+        if (account != s.activeId) throw UserException("This request is for another account. Switch back to it to answer.")
+        val prepared = mutex.withLock {
+            val session = sessions[account] ?: throw UserException("Unlock your vault first.")
+            val secretKey = s.accounts[account]?.email?.lowercase()?.let { s.secretKeys[it] }
+            core { DeviceApprovals.prepare(request, chosenPhrase, AccountApprovalCrypto(session.account), secretKey) }
+        }
+        val requests = AuthRequestApi(securityTransport(account))
+        return when (prepared) {
+            is PreparedApproval.Approve -> {
+                requests.answer(request, prepared.body)
+                prepared.code
+            }
+            PreparedApproval.Mismatch -> {
+                requests.answer(request, DeviceApprovals.DENY)
+                null
+            }
+        }
+    }
+
+    /** Deny [request] of [account] ("None of these"): needs nothing from the account's keys. */
+    suspend fun denyAuthRequest(account: String, request: AuthRequest) {
+        AuthRequestApi(securityTransport(account)).answer(request, DeviceApprovals.DENY)
+    }
+
+    // -------------------------------------------------------- invitations
+
+    /** Accept an invitation (the vault arrives with the sync that follows). */
+    suspend fun acceptInvitation(vaultId: String) = InvitationActions(securityTransport(activeId())) { syncAfterAnswer() }.accept(vaultId)
+
+    /** Decline an invitation; its vault's managers are asked to replace the key. */
+    suspend fun declineInvitation(vaultId: String) = InvitationActions(securityTransport(activeId())) { syncAfterAnswer() }.decline(vaultId)
+
+    private fun securityTransport(id: String) = SecurityTransport { path, body, method, auth, headers -> api.call(id, path, body, method, auth, headers) }
+
+    /** The sync after an answer the server took: a failure doesn't report the answer as failed (the copy shows as offline). */
+    private suspend fun syncAfterAnswer() {
+        try {
+            sync()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            _vault.value = _vault.value?.copy(offline = true)
+        }
+    }
+
+    // ------------------------------------------------- policies, two-step gate
+
+    /**
+     * The first sync after the keys are in memory (sign-in, unlock, restore). A server that
+     * requires two-step login first (403 `two_step_required`) doesn't fail it: the account is
+     * gated (by [ApiClient.onTwoStepRequired]) and the keys stay for [continueAfterTwoStep].
+     */
+    private suspend fun syncOrGate(fallbackToCache: Boolean = false, cacheFirst: Boolean = false) {
+        try {
+            syncLocked(fallbackToCache, cacheFirst)
+        } catch (e: ApiException) {
+            if (!TwoStepGate.blocks(e)) throw e
+        }
+    }
+
+    /**
+     * The server says account [id] must set up two-step login first (live sync's
+     * `two_step_required`): the same gate as a 403 `two_step_required` answer ([TwoStepGate]),
+     * which also stops live sync for the account.
+     */
+    fun markTwoStepRequired(id: String) = gated.update { it + id }
+
+    /**
+     * After the gate's "Continue" (a two-step method is on now): with the keys in memory the vault
+     * syncs, which lets it open (another 403 keeps the gate and is thrown); a locked account leaves
+     * the gate and asks to be unlocked.
+     */
+    suspend fun continueAfterTwoStep() {
+        val id = activeId()
+        when (TwoStepGate.afterSetup(sessions.containsKey(id))) {
+            TwoStepGate.Next.Sync -> sync()
+            TwoStepGate.Next.Unlock -> gated.update { it - id }
+        }
+        refreshPoliciesLater(id)
+    }
+
+    /** [refreshPolicies] in the background: never blocks or fails sign-in and unlock. */
+    private fun refreshPoliciesLater(id: String) {
+        scope.launch {
+            try {
+                refreshPolicies(id)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Ask account [id]'s server for its features and policies (kept with the account; the longest
+     * vault timeout follows), and read what the account still has to change (`GET /account`
+     * `policy_violations`, servers with `policies`).
+     */
+    private suspend fun refreshPolicies(id: String) {
+        val config = refreshConfig(id) ?: return
+        if (PolicyRules.FEATURE !in config.features) return _violations.update { it - id }
+        if (store.get().accounts[id]?.tokens == null) return
+        val account = api.call(id, "/account") as? JsonObject ?: return
+        val found = PolicyRules.readViolations(account["policy_violations"])
+        if (store.get().accounts[id]?.tokens != null) _violations.update { it + (id to found) }
+    }
+
+    /**
+     * The servers' longest vault timeout (the strictest among the signed-in accounts): a saved
+     * choice above it is lowered to the longest one within it (through [updateSettings], so keys
+     * kept for "never" are wiped) and Settings says so.
+     */
+    suspend fun enforceTimeoutPolicy() {
+        val s = store.get()
+        val limit = s.timeoutLimit
+        if (PolicyRules.timeoutWithin(s.settings.vaultTimeout, limit)) return
+        updateSettings { it.copy(vaultTimeout = PolicyRules.clampTimeout(it.vaultTimeout, limit), vaultTimeoutLowered = true) }
+    }
+
     /** The active account's Secret Key kept on this device (for its Emergency Kit), if any. */
     suspend fun storedSecretKey(): String? = store.get().let { s -> s.active?.let { s.secretKeys[it.email.lowercase()] } }
 
@@ -987,6 +1823,7 @@ class VaultRepository(
             api.call(id, "/account", method = "DELETE", headers = mapOf("x-reauth-token" to token))
             // The server has ended every session of this account: no remote logout.
             closeSession(id)
+            forgetSessionState(id)
             pendingMaster?.destroy()
             pendingMaster = null
             Keystore.deleteBiometricKey(id)
@@ -1038,10 +1875,14 @@ class VaultRepository(
 
     // ---------------------------------------------- queries (autofill, phase 2)
 
-    /** Logins of the unlocked active account that match a web page (default match from settings). */
+    /**
+     * Logins of the unlocked active account that match a web page (default match from settings;
+     * regular expressions only from the account's own vaults).
+     */
     fun loginsFor(pageUrl: String): List<Entry> {
         val fallback = state.value.settings.defaultMatch
-        return _vault.value?.entries.orEmpty().filter { e -> e.item.login?.let { UrlMatcher.matchesAny(pageUrl, it, fallback) } == true }
+        val v = _vault.value ?: return emptyList()
+        return v.entries.filter { e -> e.item.login?.let { UrlMatcher.matchesAny(pageUrl, it, fallback, allowRegex = v.isPersonal(e)) } == true }
     }
 
     /** Passkeys saved for a relying party. */
@@ -1052,6 +1893,12 @@ class VaultRepository(
 
     companion object {
         const val SECRET_KEY_REQUIRED = "secret_key_required"
+
+        /** The app never shows the trash: `/sync` sends trashed items without key and data. */
+        private const val TRASH_SUMMARY = true
+
+        /** How long the server's `/api/config` features are trusted before asking again. */
+        private const val FEATURES_MAX_AGE_MS = 6 * 60 * 60 * 1000L
 
         /** The server address as an origin (plus path), https only except local development hosts. */
         fun normalizeServer(url: String): String {
@@ -1068,16 +1915,7 @@ class VaultRepository(
 
         private fun bundleAccountId(bundle: String) = AppJson.parseToJsonElement(bundle).jsonObject.str("account_id")
 
-        private fun EncryptedItem.toJson() = buildJsonObject {
-            put("id", id)
-            put("vault_id", vaultId)
-            put("key", key)
-            put("data", data)
-        }
-
         /** Rust core calls are CPU-bound (Argon2id, decryption): keep them off the main thread. */
         private suspend fun <T> core(block: () -> T): T = withContext(Dispatchers.Default) { block() }
     }
 }
-
-private fun JsonArray?.orEmpty(): List<JsonElement> = this ?: emptyList()
