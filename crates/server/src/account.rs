@@ -782,15 +782,23 @@ async fn delete_account(
 /// shared a vault with them is told to re-sync, and so is everyone invited to a
 /// vault deleted with them. Vaults they were a member of, or invited to, are
 /// marked for a key replacement. Their Sends go with them, the attachment files of
-/// the vaults deleted with them, their emergency access both ways and their sign-in
-/// requests.
+/// the vaults deleted with them, their emergency access both ways (the personal
+/// vaults of people who named them, wrapped for them, are marked for a key
+/// replacement too) and their sign-in requests.
 pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiResult<()> {
-    let vaults: Vec<String> = sqlx::query_scalar(
+    let mut vaults: Vec<String> = sqlx::query_scalar(
         "SELECT vault_id FROM vault_members WHERE user_id = $1 ORDER BY vault_id",
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await?;
+    // Their grantors' vaults whose keys they may have: locked and their owners told too.
+    {
+        let mut conn = state.db.acquire().await?;
+        vaults.extend(crate::emergency::vaults_wrapped_for_contact(&mut conn, user_id).await?);
+    }
+    vaults.sort_unstable();
+    vaults.dedup();
     let mut tx = state.db.begin().await?;
     // A write first (SQLite then never has to upgrade a read transaction).
     sqlx::query("DELETE FROM sessions WHERE user_id = $1")
@@ -800,6 +808,14 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
     // Like every vault write: lock the vaults (in id order) before changing them.
     for v in &vaults {
         crate::vault::lock_vault(&mut tx, v).await?;
+    }
+    // A vault wrapped for them after the read above: locked now, late but before the
+    // accesses, and its owner told like the others.
+    for v in crate::emergency::vaults_wrapped_for_contact(&mut tx, user_id).await? {
+        if !vaults.contains(&v) {
+            crate::vault::lock_vault(&mut tx, &v).await?;
+            vaults.push(v);
+        }
     }
     let owned: Vec<String> = sqlx::query_scalar(
         "SELECT m.vault_id FROM vault_members m WHERE m.user_id = $1 AND m.role = 'owner'
@@ -822,6 +838,7 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
     let mut files = Vec::new();
     for v in &owned {
         files.extend(crate::vault::detach_vault(&mut tx, v).await?);
+        crate::emergency::forget_vault_keys(&mut tx, v).await?;
         for stmt in [
             "DELETE FROM items WHERE vault_id = $1",
             "DELETE FROM item_versions WHERE vault_id = $1",
@@ -832,6 +849,21 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
             sqlx::query(stmt).bind(v).execute(&mut *tx).await?;
         }
     }
+    // Emergency access both ways; vaults wrapped for them as a contact get new keys,
+    // and the owners of any not told above learn it too.
+    let flagged = crate::emergency::end_accesses_of(&mut tx, user_id).await?;
+    let unseen: Vec<String> = flagged
+        .into_iter()
+        .filter(|v| !vaults.contains(v))
+        .collect();
+    let mut notices = notices;
+    notices.extend(
+        crate::vault::bump_members(&mut tx, postgres, &unseen, &[])
+            .await?
+            .into_iter()
+            .filter(|(u, _)| u != user_id)
+            .map(|(u, revision)| (u, SyncNotice::new(revision, None))),
+    );
     for stmt in [
         // Shared vaults that stay: the deleted user knew their keys.
         "UPDATE vaults SET rotation_pending = 1 WHERE id IN (SELECT vault_id FROM vault_members WHERE user_id = $1)",
@@ -842,7 +874,6 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
         "DELETE FROM two_factor_failures WHERE user_id = $1",
         "DELETE FROM email_tokens WHERE user_id = $1",
         "DELETE FROM sends WHERE user_id = $1",
-        "DELETE FROM emergency_access WHERE grantor_id = $1 OR grantee_id = $1",
         "DELETE FROM auth_requests WHERE user_id = $1",
     ] {
         sqlx::query(stmt).bind(user_id).execute(&mut *tx).await?;

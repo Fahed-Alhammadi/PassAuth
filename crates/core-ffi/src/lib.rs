@@ -1,7 +1,7 @@
 //! Kotlin and Swift bindings (UniFFI) for the native PassAuth apps.
 //!
 //! Mirrors `passauth-core-wasm`: keys stay in Rust objects (`MasterKeys`,
-//! `Account`, `VaultKey`, `GrantorKey`) and the apps only hold handles (send and
+//! `Account`, `VaultKey`, `EmergencyKey`) and the apps only hold handles (send and
 //! attachment keys are base64url strings: they go into a link and into the
 //! encrypted item anyway). Items, bundles and
 //! KDF parameters cross the boundary as JSON in the same shape as the server
@@ -14,7 +14,7 @@ use passauth_core::file::{self, FileKey};
 use passauth_core::item::{EncryptedItem as CoreEncrypted, Item, b64, unb64};
 use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{
-    self, AccountBundle, GrantorKey as CoreGrantorKey, NewAccount as CoreNew, UnlockedAccount,
+    self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
 use passauth_core::send::{self, SendField, SendKey};
 use passauth_core::{Error, device_login, export, generator, import, opaque, passkey, site, totp};
@@ -198,11 +198,52 @@ impl Account {
         Ok(self.0.unwrap_send_key(&wrapped)?.to_b64())
     }
 
-    /// Emergency access: this account's key sealed to a trusted contact's public
-    /// key (check their fingerprint first) — the grant's `sealed_key`. Confirming means
-    /// trusting the contact with the whole account, for good.
-    pub fn seal_account_key_for(&self, recipient_public_key: String) -> R<String> {
-        Ok(self.0.seal_account_key_for(&recipient_public_key)?)
+    /// Emergency access, the grantor's side, when confirming contact `grant_id` (the
+    /// access's id): a new emergency key and it wrapped with this account's key
+    /// (`wrapped`, the access's `grantor_key`).
+    pub fn new_emergency_key(&self, grant_id: String) -> R<NewEmergencyKey> {
+        let new = self.0.new_emergency_key(&grant_id)?;
+        Ok(NewEmergencyKey {
+            key: Arc::new(EmergencyKey(new.key)),
+            wrapped: new.wrapped,
+        })
+    }
+
+    /// The emergency key of this account's access `grant_id` again, from its
+    /// `grantor_key`. `DecryptFailed` for another account's or access's key.
+    pub fn open_emergency_key(&self, grant_id: String, wrapped: String) -> R<Arc<EmergencyKey>> {
+        Ok(Arc::new(EmergencyKey(
+            self.0.open_emergency_key(&grant_id, &wrapped)?,
+        )))
+    }
+
+    /// Emergency access: seal this account's roster of emergency contacts (JSON of the
+    /// app's own) with its key: the server keeps it but can neither read nor change it.
+    pub fn seal_emergency_roster(&self, json: String) -> R<String> {
+        Ok(self.0.seal_emergency_roster(&json)?)
+    }
+
+    /// The roster's JSON from what `seal_emergency_roster` made. `DecryptFailed` for
+    /// another account's roster or a changed one.
+    pub fn open_emergency_roster(&self, sealed: String) -> R<String> {
+        Ok(self.0.open_emergency_roster(&sealed)?)
+    }
+
+    /// Emergency access, the contact's side: open the `sealed_key` that account
+    /// `grantor_id` (the access's `grantor.id`) sealed to this account for access
+    /// `grant_id`. `DecryptFailed` if it isn't for this account, that grantor or that
+    /// access.
+    pub fn open_sealed_emergency_key(
+        &self,
+        grantor_id: String,
+        grant_id: String,
+        sealed: String,
+    ) -> R<Arc<EmergencyKey>> {
+        Ok(Arc::new(EmergencyKey(self.0.open_sealed_emergency_key(
+            &grantor_id,
+            &grant_id,
+            &sealed,
+        )?)))
     }
 
     /// Approve a sign-in request from another device, after the user picked, among
@@ -341,31 +382,46 @@ impl ApprovedLogin {
     }
 }
 
-/// Emergency access: a grantor's account key, opened by their contact. It only
-/// opens the grantor's own vault keys; the key itself never leaves Rust. The sealed box
-/// is anonymous, so a server could hand out one of its own making: show what it opens
-/// read-only and never autofill it.
+/// Emergency access: the key of one access (one emergency contact). It opens only
+/// the personal vault keys the grantor wrapped with it; the key itself never leaves
+/// Rust. The sealed box the contact gets is anonymous, so a server could hand out one
+/// of its own making: show what it opens read-only and never autofill it.
 #[derive(uniffi::Object)]
-pub struct GrantorKey(CoreGrantorKey);
+pub struct EmergencyKey(CoreEmergencyKey);
 
 #[uniffi::export]
-impl GrantorKey {
-    pub fn account_id(&self) -> String {
-        self.0.account_id().to_owned()
+impl EmergencyKey {
+    pub fn grantor_id(&self) -> String {
+        self.0.grantor_id().to_owned()
     }
 
-    /// `kind` must be "account": a grantor's vault keys wrapped by their account key.
-    pub fn open_vault_key(
+    /// The access this key belongs to.
+    pub fn grant_id(&self) -> String {
+        self.0.grant_id().to_owned()
+    }
+
+    /// Seal this key to the contact's public key (check their fingerprint first): the
+    /// access's `sealed_key`. Only a key from `Account.new_emergency_key` can be sealed;
+    /// fails for a malformed or low-order key, and for a `grantor_id` or `grant_id`
+    /// other than the key's own.
+    pub fn seal_for(
         &self,
-        vault_id: String,
-        wrapped: String,
-        kind: String,
-    ) -> R<Arc<VaultKey>> {
-        if kind != "account" {
-            return Err(CoreError::Invalid(
-                "only the grantor's own vaults (key_kind \"account\") can be opened".into(),
-            ));
-        }
+        contact_public_key: String,
+        grantor_id: String,
+        grant_id: String,
+    ) -> R<String> {
+        Ok(self
+            .0
+            .seal_for(&contact_public_key, &grantor_id, &grant_id)?)
+    }
+
+    /// Wrap personal vault `vault_id`'s key for this key's access.
+    pub fn wrap_vault_key(&self, vault_key: Arc<VaultKey>, vault_id: String) -> R<String> {
+        Ok(self.0.wrap_vault_key(&vault_key.0, &vault_id)?)
+    }
+
+    /// Open a vault key wrapped for vault `vault_id` and this key's access.
+    pub fn open_vault_key(&self, vault_id: String, wrapped: String) -> R<Arc<VaultKey>> {
         Ok(Arc::new(VaultKey(
             self.0.open_vault_key(&vault_id, &wrapped)?,
         )))
@@ -508,6 +564,14 @@ pub struct NewVaultKey {
     pub wrapped: String,
 }
 
+/// `Account.new_emergency_key`'s answer: the key, and it wrapped with the account's
+/// key (the access's `grantor_key`).
+#[derive(uniffi::Record)]
+pub struct NewEmergencyKey {
+    pub key: Arc<EmergencyKey>,
+    pub wrapped: String,
+}
+
 #[derive(uniffi::Record)]
 pub struct NewAccount {
     pub bundle_json: String,
@@ -628,22 +692,6 @@ pub fn create_account_with_kdf(
         with_secret_key,
         kdf,
     )?)
-}
-
-/// Emergency access, the contact's side: open the `sealed_key` that the grantor
-/// (`grantor_account_id`, the grant's `grantor.id`) sealed to `account`.
-/// `DecryptFailed` if it isn't for this account or that grantor.
-#[uniffi::export]
-pub fn open_sealed_account_key(
-    account: Arc<Account>,
-    grantor_account_id: String,
-    sealed: String,
-) -> R<Arc<GrantorKey>> {
-    Ok(Arc::new(GrantorKey(
-        account
-            .0
-            .open_sealed_account_key(&grantor_account_id, &sealed)?,
-    )))
 }
 
 /// A new random send key: base64url of 32 bytes, for the link's fragment
@@ -1413,26 +1461,64 @@ mod tests {
             .key
             .encrypt_item(item.into(), "i1".into(), "v1".into())
             .unwrap();
-        let sealed = grantor.seal_account_key_for(contact.public_key()).unwrap();
-        let gk =
-            open_sealed_account_key(contact.clone(), "grantor-1".into(), sealed.clone()).unwrap();
-        assert_eq!(gk.account_id(), "grantor-1");
-        let opened = gk
-            .open_vault_key("v1".into(), vk.wrapped.clone(), "account".into())
+        let new = grantor.new_emergency_key("g1".into()).unwrap();
+        let sealed = new
+            .key
+            .seal_for(contact.public_key(), "grantor-1".into(), "g1".into())
             .unwrap();
+        let again = grantor
+            .open_emergency_key("g1".into(), new.wrapped.clone())
+            .unwrap();
+        let wrapped = again.wrap_vault_key(vk.key.clone(), "v1".into()).unwrap();
+        // Opened again, the key can't be sealed to anyone.
+        assert!(
+            again
+                .seal_for(contact.public_key(), "grantor-1".into(), "g1".into())
+                .is_err()
+        );
+        let theirs = contact
+            .open_sealed_emergency_key("grantor-1".into(), "g1".into(), sealed.clone())
+            .unwrap();
+        assert_eq!(
+            (theirs.grantor_id(), theirs.grant_id()),
+            ("grantor-1".to_owned(), "g1".to_owned())
+        );
+        let opened = theirs.open_vault_key("v1".into(), wrapped.clone()).unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&opened.decrypt_item(enc).unwrap()).unwrap();
         assert_eq!(json["notes"], "PIN 1234");
-        assert!(
-            gk.open_vault_key("v1".into(), vk.wrapped.clone(), "sealed".into())
-                .is_err()
-        );
+        // Only that vault, that access, that grantor and that contact.
         assert!(matches!(
-            open_sealed_account_key(contact, "grantor-2".into(), sealed.clone()),
+            theirs.open_vault_key("v2".into(), wrapped.clone()),
             Err(CoreError::DecryptFailed)
         ));
         assert!(matches!(
-            open_sealed_account_key(quick_account("x"), "grantor-1".into(), sealed),
+            contact.open_sealed_emergency_key("grantor-2".into(), "g1".into(), sealed.clone()),
+            Err(CoreError::DecryptFailed)
+        ));
+        assert!(matches!(
+            quick_account("x").open_sealed_emergency_key("grantor-1".into(), "g1".into(), sealed),
+            Err(CoreError::DecryptFailed)
+        ));
+        assert!(matches!(
+            contact.open_emergency_key("g1".into(), new.wrapped.clone()),
+            Err(CoreError::DecryptFailed)
+        ));
+        assert!(
+            new.key
+                .seal_for(b64(&[0; 32]), "grantor-1".into(), "g1".into())
+                .is_err()
+        );
+        // The roster opens for its own account only.
+        let roster = grantor
+            .seal_emergency_roster(r#"{"version":1,"accesses":[]}"#.into())
+            .unwrap();
+        assert_eq!(
+            grantor.open_emergency_roster(roster.clone()).unwrap(),
+            r#"{"version":1,"accesses":[]}"#
+        );
+        assert!(matches!(
+            contact.open_emergency_roster(roster),
             Err(CoreError::DecryptFailed)
         ));
     }

@@ -1,7 +1,7 @@
 //! WebAssembly bindings for the web vault and browser extension.
 //!
 //! Keys stay inside WASM memory: JavaScript only holds opaque handles
-//! (`MasterKeys`, `Account`, `VaultKey`, `GrantorKey`). The one exception is
+//! (`MasterKeys`, `Account`, `VaultKey`, `EmergencyKey`). The one exception is
 //! `toSessionBytes`, which hands the unlocked account key to the extension so
 //! it can keep the vault unlocked across service-worker restarts. Send keys and
 //! attachment keys are base64url strings: they travel in a link's fragment and in
@@ -19,7 +19,7 @@ use passauth_core::file::{self, FileKey};
 use passauth_core::item::{EncryptedItem, Item, unb64};
 use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{
-    self, AccountBundle, GrantorKey as CoreGrantorKey, NewAccount as CoreNew, UnlockedAccount,
+    self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
 use passauth_core::send::{self, SendField, SendKey};
 use passauth_core::{Error, device_login, export, generator, import, opaque, totp};
@@ -212,16 +212,78 @@ impl Account {
             .map_err(js_err)
     }
 
-    /// Emergency access: this account's key sealed to a trusted contact's public
-    /// key (check their fingerprint first) — the grant's `sealed_key`. Confirming means
-    /// trusting the contact with the whole account, for good.
-    #[wasm_bindgen(js_name = sealAccountKeyFor)]
-    pub fn seal_account_key_for(
+    /// Emergency access, the grantor's side, when confirming contact `grantId` (the
+    /// access's id): a new emergency key (`takeKey`) and it wrapped with this account's
+    /// key (`wrapped`, the access's `grantor_key`).
+    #[wasm_bindgen(js_name = newEmergencyKey)]
+    pub fn new_emergency_key(
         &self,
-        #[wasm_bindgen(unchecked_param_type = "string")] recipient_public_key: JsValue,
+        #[wasm_bindgen(js_name = "grantId", unchecked_param_type = "string")] grant_id: JsValue,
+    ) -> R<NewEmergencyKey> {
+        let new = self
+            .0
+            .new_emergency_key(&string(grant_id)?)
+            .map_err(js_err)?;
+        Ok(NewEmergencyKey {
+            key: Some(EmergencyKey(new.key)),
+            wrapped: new.wrapped,
+        })
+    }
+
+    /// The emergency key of this account's access `grantId` again, from its
+    /// `grantor_key` (it wraps vault keys; it can't be sealed to anyone again). Throws
+    /// `decrypt_failed` for another account's or access's key.
+    #[wasm_bindgen(js_name = openEmergencyKey)]
+    pub fn open_emergency_key(
+        &self,
+        #[wasm_bindgen(js_name = "grantId", unchecked_param_type = "string")] grant_id: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] wrapped: JsValue,
+    ) -> R<EmergencyKey> {
+        let (grant_id, wrapped) = (string(grant_id)?, string(wrapped)?);
+        self.0
+            .open_emergency_key(&grant_id, &wrapped)
+            .map(EmergencyKey)
+            .map_err(js_err)
+    }
+
+    /// Emergency access: seal this account's roster of emergency contacts (JSON of the
+    /// app's own) with its key: the server keeps it but can neither read nor change it.
+    #[wasm_bindgen(js_name = sealEmergencyRoster)]
+    pub fn seal_emergency_roster(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] json: JsValue,
+    ) -> R<String> {
+        self.0.seal_emergency_roster(&string(json)?).map_err(js_err)
+    }
+
+    /// The roster's JSON from what `sealEmergencyRoster` made. Throws `decrypt_failed`
+    /// for another account's roster or a changed one.
+    #[wasm_bindgen(js_name = openEmergencyRoster)]
+    pub fn open_emergency_roster(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
     ) -> R<String> {
         self.0
-            .seal_account_key_for(&string(recipient_public_key)?)
+            .open_emergency_roster(&string(sealed)?)
+            .map_err(js_err)
+    }
+
+    /// Emergency access, the contact's side: open the `sealed_key` that account
+    /// `grantorId` (the access's `grantor.id`) sealed to this account for access
+    /// `grantId`. Throws `decrypt_failed` if it isn't for this account, that grantor
+    /// or that access.
+    #[wasm_bindgen(js_name = openSealedEmergencyKey)]
+    pub fn open_sealed_emergency_key(
+        &self,
+        #[wasm_bindgen(js_name = "grantorId", unchecked_param_type = "string")] grantor_id: JsValue,
+        #[wasm_bindgen(js_name = "grantId", unchecked_param_type = "string")] grant_id: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
+    ) -> R<EmergencyKey> {
+        let (grantor_id, grant_id, sealed) =
+            (string(grantor_id)?, string(grant_id)?, string(sealed)?);
+        self.0
+            .open_sealed_emergency_key(&grantor_id, &grant_id, &sealed)
+            .map(EmergencyKey)
             .map_err(js_err)
     }
 
@@ -377,38 +439,97 @@ impl ApprovedLogin {
     }
 }
 
-/// Emergency access: a grantor's account key, opened by their contact. It only
-/// opens the grantor's own vault keys; the key itself never leaves WASM. The sealed box
-/// is anonymous, so a server could hand out one of its own making: show what it opens
-/// read-only and never autofill it.
+/// Emergency access: the key of one access (one emergency contact), bound to its
+/// grantor and access. It opens only the personal vault keys the grantor wrapped with
+/// it for that access; the key itself never leaves WASM. The sealed box the contact
+/// gets is anonymous, so a server could hand out one of its own making: show what it
+/// opens read-only and never autofill it.
 #[wasm_bindgen]
-pub struct GrantorKey(CoreGrantorKey);
+pub struct EmergencyKey(CoreEmergencyKey);
 
 #[wasm_bindgen]
-impl GrantorKey {
-    #[wasm_bindgen(getter, js_name = accountId)]
-    pub fn account_id(&self) -> String {
-        self.0.account_id().to_owned()
+impl EmergencyKey {
+    /// The grantor's account id.
+    #[wasm_bindgen(getter, js_name = grantorId)]
+    pub fn grantor_id(&self) -> String {
+        self.0.grantor_id().to_owned()
     }
 
-    /// `kind` must be "account": a grantor's vault keys wrapped by their account key.
+    /// The access this key belongs to.
+    #[wasm_bindgen(getter, js_name = grantId)]
+    pub fn grant_id(&self) -> String {
+        self.0.grant_id().to_owned()
+    }
+
+    /// Seal this key to the contact's public key (check their fingerprint first): the
+    /// access's `sealed_key`. Only a key from `Account.newEmergencyKey` can be sealed.
+    /// Throws for a malformed or low-order key, and for a `grantorId` or `grantId` other
+    /// than the key's own.
+    #[wasm_bindgen(js_name = sealFor)]
+    pub fn seal_for(
+        &self,
+        #[wasm_bindgen(js_name = "contactPublicKey", unchecked_param_type = "string")]
+        contact_public_key: JsValue,
+        #[wasm_bindgen(js_name = "grantorId", unchecked_param_type = "string")] grantor_id: JsValue,
+        #[wasm_bindgen(js_name = "grantId", unchecked_param_type = "string")] grant_id: JsValue,
+    ) -> R<String> {
+        let contact_public_key = string(contact_public_key)?;
+        let (grantor_id, grant_id) = (string(grantor_id)?, string(grant_id)?);
+        self.0
+            .seal_for(&contact_public_key, &grantor_id, &grant_id)
+            .map_err(js_err)
+    }
+
+    /// Wrap personal vault `vaultId`'s key for this key's access: its `wrapped_key` in
+    /// the access's `vault_keys`.
+    #[wasm_bindgen(js_name = wrapVaultKey)]
+    pub fn wrap_vault_key(
+        &self,
+        #[wasm_bindgen(js_name = "vaultKey")] vault_key: &VaultKey,
+        #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+    ) -> R<String> {
+        self.0
+            .wrap_vault_key(&vault_key.0, &string(vault_id)?)
+            .map_err(js_err)
+    }
+
+    /// Open a vault key wrapped for vault `vaultId` and this key's access. Throws
+    /// `decrypt_failed` for any other vault, access or key.
     #[wasm_bindgen(js_name = openVaultKey)]
     pub fn open_vault_key(
         &self,
-        #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
+        #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
         #[wasm_bindgen(unchecked_param_type = "string")] wrapped: JsValue,
-        #[wasm_bindgen(unchecked_param_type = "string")] kind: JsValue,
     ) -> R<VaultKey> {
-        let (vault_id, wrapped, kind) = (string(vault_id)?, string(wrapped)?, string(kind)?);
-        if kind != "account" {
-            return Err(JsError::new(
-                "only the grantor's own vaults (key_kind \"account\") can be opened",
-            ));
-        }
+        let (vault_id, wrapped) = (string(vault_id)?, string(wrapped)?);
         self.0
             .open_vault_key(&vault_id, &wrapped)
             .map(VaultKey)
             .map_err(js_err)
+    }
+}
+
+/// `Account.newEmergencyKey`'s answer.
+#[wasm_bindgen]
+pub struct NewEmergencyKey {
+    key: Option<EmergencyKey>,
+    wrapped: String,
+}
+
+#[wasm_bindgen]
+impl NewEmergencyKey {
+    /// The key wrapped with the account's key: the access's `grantor_key`.
+    #[wasm_bindgen(getter)]
+    pub fn wrapped(&self) -> String {
+        self.wrapped.clone()
+    }
+
+    /// Take the key handle (can be called once).
+    #[wasm_bindgen(js_name = takeKey)]
+    pub fn take_key(&mut self) -> R<EmergencyKey> {
+        self.key
+            .take()
+            .ok_or_else(|| JsError::new("key already taken"))
     }
 }
 
@@ -732,23 +853,6 @@ pub fn create_account_with_kdf(
     let kdf = KdfParams::with_minimums(min_memory_mib, min_iterations).map_err(js_err)?;
     AccountBundle::create_with_kdf(&account_id, &password, with_secret_key, kdf)
         .map(NewAccount::from)
-        .map_err(js_err)
-}
-
-/// Emergency access, the contact's side: open the `sealed_key` that the grantor
-/// (`grantor_account_id`, the grant's `grantor.id`) sealed to `account`.
-/// Throws `decrypt_failed` if it isn't for this account or that grantor.
-#[wasm_bindgen(js_name = openSealedAccountKey)]
-pub fn open_sealed_account_key(
-    account: &Account,
-    #[wasm_bindgen(unchecked_param_type = "string")] grantor_account_id: JsValue,
-    #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
-) -> R<GrantorKey> {
-    let (grantor_account_id, sealed) = (string(grantor_account_id)?, string(sealed)?);
-    account
-        .0
-        .open_sealed_account_key(&grantor_account_id, &sealed)
-        .map(GrantorKey)
         .map_err(js_err)
 }
 

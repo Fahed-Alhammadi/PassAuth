@@ -564,7 +564,9 @@ async fn json_errors(req: Request, next: Next) -> Response {
 /// from version numbers.
 const API_VERSION: u32 = 2;
 
-/// What this server supports beyond API 1 (see docs/ARCHITECTURE.md), plus
+/// What this server supports beyond API 1 (see docs/ARCHITECTURE.md;
+/// `emergency_vault_keys`: emergency contacts get a key of their own over the
+/// personal vaults, not the account key), plus
 /// `breach_check` while the admin allows it, `item_history` while the admin
 /// keeps item versions (`item_versions_kept` above 0), `sends` while Send is on,
 /// `attachments` while attachments are on and have a folder, `emergency_access`
@@ -581,6 +583,7 @@ const FEATURES: &[&str] = &[
     "activity_log",
     "policies",
     "forget_device",
+    "emergency_vault_keys",
 ];
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {

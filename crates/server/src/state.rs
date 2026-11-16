@@ -341,7 +341,7 @@ impl App {
                 None
             }
         };
-        Ok(Arc::new(Self {
+        let state = Arc::new(Self {
             webauthn,
             passkey_registrations: Expiring::default(),
             signups: std::sync::RwLock::new(signups),
@@ -371,7 +371,10 @@ impl App {
             numbers,
             admin_verify: tokio::sync::Semaphore::new(2),
             admin_verified: std::sync::Mutex::new(None),
-        }))
+        });
+        // Never fails the start: a cleanup that can't run now waits for the next one.
+        db::scrub_if_pending(&state).await;
+        Ok(state)
     }
 
     pub fn signups_verify(&self) -> bool {

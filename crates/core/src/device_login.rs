@@ -894,7 +894,10 @@ mod tests {
         // An emergency-access box sealed to the same key is not a login key.
         let emergency = alice
             .unlocked
-            .seal_account_key_for(&request.public_key())
+            .new_emergency_key("req-1")
+            .unwrap()
+            .key
+            .seal_for(&request.public_key(), "user-1", "req-1")
             .unwrap();
         assert!(request.open(&emergency, "user-1", "req-1").is_err());
         // The code depends on the account, the request and the request key.
@@ -1019,9 +1022,13 @@ mod tests {
         let shared = share_vault_key("v1", &vk, &b64(&alice.keypair.public_bytes())).unwrap();
         assert!(alice.open_login_challenge(&shared, "v1").is_err());
         let emergency = bob
-            .seal_account_key_for(&b64(&alice.keypair.public_bytes()))
+            .new_emergency_key("req-1")
+            .unwrap()
+            .key
+            .seal_for(&b64(&alice.keypair.public_bytes()), "user-2", "req-1")
             .unwrap();
         assert!(alice.open_login_challenge(&emergency, "user-2").is_err());
+        assert!(alice.open_login_challenge(&emergency, "req-1").is_err());
         assert!(alice.open_login_challenge("", "req-1").is_err());
     }
 }

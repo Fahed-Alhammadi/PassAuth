@@ -73,6 +73,16 @@ pub mod code {
     pub const UPLOAD_IN_PROGRESS: &str = "upload_in_progress";
     /// 403: the admin turned emergency access off.
     pub const EMERGENCY_ACCESS_DISABLED: &str = "emergency_access_disabled";
+    /// 400: the request comes from an app too old for what this server requires
+    /// (confirming an emergency contact without emergency keys).
+    pub const UPDATE_REQUIRED: &str = "update_required";
+    /// 409: the roster of emergency contacts changed since the app read it
+    /// (`PUT /emergency-access/roster` with a stale `seq`).
+    pub const ROSTER_CHANGED: &str = "roster_changed";
+    /// 409: the emergency vault keys sent don't fit the grantor's personal vaults
+    /// (one missing, extra, or no longer personal); `expected` names the vaults to
+    /// wrap. Nothing was stored.
+    pub const EMERGENCY_VAULTS_CHANGED: &str = "emergency_vaults_changed";
     /// 403: the admin turned signing in with another device's approval off.
     pub const LOGIN_WITH_DEVICE_DISABLED: &str = "login_with_device_disabled";
     /// 507: the server's disk is down to the admin's free-space reserve
@@ -105,6 +115,14 @@ pub enum ApiError {
         code: &'static str,
         message: String,
     },
+    /// [`Self::Coded`] with more fields in the body (e.g. `expected`).
+    #[error("{message}")]
+    CodedWith {
+        status: StatusCode,
+        code: &'static str,
+        message: String,
+        fields: serde_json::Map<String, serde_json::Value>,
+    },
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
 }
@@ -119,6 +137,22 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+        }
+    }
+
+    /// A coded error whose body also carries `fields` (never `error`, `message` or
+    /// `request_id`, which they can't replace).
+    pub fn with_fields(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Self::CodedWith {
+            status,
+            code,
+            message: message.into(),
+            fields,
         }
     }
 
@@ -195,7 +229,7 @@ impl ApiError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
-            Self::Coded { status, .. } => *status,
+            Self::Coded { status, .. } | Self::CodedWith { status, .. } => *status,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -209,7 +243,7 @@ impl ApiError {
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
             Self::TooManyRequests(_) => "rate_limited",
-            Self::Coded { code, .. } => code,
+            Self::Coded { code, .. } | Self::CodedWith { code, .. } => code,
             Self::Internal(_) => "internal",
         }
     }
@@ -241,7 +275,15 @@ impl IntoResponse for ApiError {
         if let Self::Internal(e) = &self {
             tracing::error!(error = ?e, request_id = request_id().unwrap_or_default(), "internal error");
         }
-        let mut resp = (self.status(), Json(body(self.code(), &self.to_string()))).into_response();
+        let mut json = body(self.code(), &self.to_string());
+        if let Self::CodedWith { fields, .. } = &self
+            && let Some(obj) = json.as_object_mut()
+        {
+            for (k, v) in fields {
+                obj.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        let mut resp = (self.status(), Json(json)).into_response();
         if let Self::TooManyRequests(secs) = self {
             resp.headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));

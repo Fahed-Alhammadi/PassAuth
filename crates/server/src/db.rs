@@ -153,6 +153,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (10, SCHEMA_V10),
     (11, SCHEMA_V11),
     (12, SCHEMA_V12),
+    (13, SCHEMA_V13),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -371,6 +372,34 @@ const SCHEMA_V12: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS attachments_creator ON attachments (created_by, state)",
 ];
 
+/// Emergency access v2 (`emergency.rs`): a contact gets a key of their own (an
+/// emergency key per access) that opens only the grantor's personal vaults, instead
+/// of the grantor's account key. `sealed_key` is now that key sealed to the contact,
+/// `grantor_key` the same key wrapped by the grantor's account key (for their apps
+/// to wrap more vault keys later), `key_version` the scheme (2), and
+/// `emergency_vault_keys` each personal vault key wrapped by an access's key. The
+/// grantor's apps keep the list of contacts they trust in `users.emergency_roster`,
+/// sealed with the account key (opaque here), changed only by compare-and-swap on
+/// `emergency_roster_seq`. Every access that held a sealed account key goes back to
+/// `accepted` with `reconfirm` and `v1_exposed` set, without it (the data step in
+/// [`migrate`], which on SQLite also overwrites the freed space): the grantor
+/// confirms the contact again with the new scheme.
+const SCHEMA_V13: &[&str] = &[
+    "ALTER TABLE emergency_access ADD COLUMN key_version BIGINT NOT NULL DEFAULT 2",
+    "ALTER TABLE emergency_access ADD COLUMN grantor_key TEXT",
+    "ALTER TABLE emergency_access ADD COLUMN reconfirm BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE emergency_access ADD COLUMN v1_exposed BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN emergency_roster TEXT",
+    "ALTER TABLE users ADD COLUMN emergency_roster_seq BIGINT NOT NULL DEFAULT 0",
+    "CREATE TABLE IF NOT EXISTS emergency_vault_keys (
+        access_id TEXT NOT NULL,
+        vault_id TEXT NOT NULL,
+        wrapped_key TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (access_id, vault_id))",
+    "CREATE INDEX IF NOT EXISTS emergency_vault_keys_vault ON emergency_vault_keys (vault_id)",
+];
+
 /// Migration 12: the ids of vaults deleted before it, as far as the database still
 /// names them (their activity log above all), go into `vault_ids` too.
 pub(crate) const RETIRE_KNOWN_VAULT_IDS: &str = "INSERT INTO vault_ids (id, created_at)
@@ -413,12 +442,158 @@ async fn migrate(db: &Db) -> Result<()> {
                 .await
                 .with_context(|| format!("migration {version}: {stmt}"))?;
         }
+        let sqlite = tx.backend_name() == "SQLite";
+        data_step(*version, &mut tx, sqlite)
+            .await
+            .with_context(|| format!("migration {version}: data"))?;
         sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
             .bind(*version)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         tracing::info!(version, "database schema migrated");
+    }
+    Ok(())
+}
+
+/// `server_settings` key, set by migration 13 on SQLite: the database files may still
+/// hold the secrets it cleared (account keys sealed to emergency contacts), so
+/// [`scrub_if_pending`] rebuilds them, at each start until that succeeds.
+pub const SCRUB_PENDING: &str = "scrub_pending";
+
+/// The database file of a SQLite `url` on disk.
+fn sqlite_file(url: &str) -> Option<std::path::PathBuf> {
+    let path = url.strip_prefix("sqlite:")?;
+    let path = path.strip_prefix("//").unwrap_or(path);
+    let path = path.split('?').next().unwrap_or_default();
+    (!path.is_empty() && !path.contains(":memory:")).then(|| path.into())
+}
+
+/// The pending scrub ([`SCRUB_PENDING`]), at start-up. It never fails the start: when
+/// the disk lacks room for twice the database (its size, write-ahead log included:
+/// `VACUUM` builds a temporary copy and writes the new file through the log) plus
+/// the admin's reserve (`min_free_disk_mb`), or the scrub fails, it warns and stays
+/// pending for the next start.
+pub async fn scrub_if_pending(state: &crate::state::App) {
+    match setting(&state.db, SCRUB_PENDING).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "couldn't read whether the database still needs its one-time cleanup");
+            return;
+        }
+    }
+    let size = sqlite_file(&state.config.database_url).map_or(0, |file| {
+        let len = |p: &std::path::Path| std::fs::metadata(p).map_or(0, |m| m.len());
+        let mut wal = file.clone().into_os_string();
+        wal.push("-wal");
+        (len(&file) + len(std::path::Path::new(&wal))).saturating_mul(2)
+    });
+    let reserve = state.num(crate::settings::Num::MinFreeDiskMb).max(0) as u64 * 1024 * 1024;
+    if let Some(free) = state.disk.free().await
+        && free < size.saturating_add(reserve)
+    {
+        tracing::warn!(
+            free_mb = free / (1024 * 1024),
+            needed_mb = size.saturating_add(reserve) / (1024 * 1024),
+            "the one-time cleanup of the database (erasing old emergency access keys) needs more free disk space; it runs at the next start"
+        );
+        return;
+    }
+    match scrub_sqlite(&state.db).await {
+        Ok(()) => match delete_setting(&state.db, SCRUB_PENDING).await {
+            Ok(_) => tracing::info!(
+                "database cleaned up: old emergency access keys erased from its files"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "database cleaned up, but couldn't note it; it runs again at the next start")
+            }
+        },
+        Err(e) => tracing::warn!(
+            error = %e,
+            "the one-time cleanup of the database (erasing old emergency access keys) failed; it runs again at the next start"
+        ),
+    }
+}
+
+/// Leave no copy of cleared secrets in the SQLite files: `VACUUM` rebuilds the
+/// database without free pages (also those an earlier deletion left, before
+/// `secure_delete`), on its own connection and outside any transaction; then the
+/// write-ahead log is checkpointed and emptied (`TRUNCATE`), tried again for a moment
+/// while a reader holds it, else left with a warning (it empties itself at a later
+/// checkpoint).
+async fn scrub_sqlite(db: &Db) -> Result<()> {
+    #[cfg(test)]
+    if setting(db, "test_fail_vacuum").await?.is_some() {
+        anyhow::bail!("VACUUM failed (a test's fault)");
+    }
+    let mut conn = db.acquire().await?;
+    sqlx::query("VACUUM")
+        .execute(&mut *conn)
+        .await
+        .context("rebuilding the database file (VACUUM)")?;
+    for attempt in 1..=CHECKPOINT_TRIES {
+        let (busy, _log, _done): (i64, i64, i64) =
+            sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                .fetch_one(&mut *conn)
+                .await
+                .context("checkpointing the write-ahead log")?;
+        if busy == 0 {
+            return Ok(());
+        }
+        if attempt < CHECKPOINT_TRIES {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    tracing::warn!(
+        "the write-ahead log is busy and couldn't be emptied now; old values in it go at a later checkpoint"
+    );
+    Ok(())
+}
+
+/// Tries of the migration's write-ahead log checkpoint while a reader holds it.
+const CHECKPOINT_TRIES: u32 = 10;
+
+/// Data a migration changes after its statements, in the same transaction (what
+/// needs the clock, new ids or the activity log).
+async fn data_step(version: i64, conn: &mut sqlx::AnyConnection, sqlite: bool) -> Result<()> {
+    if version != 13 {
+        return Ok(());
+    }
+    // Migration 13 clears the account keys sealed to emergency contacts (v1): SQLite
+    // overwrites what it frees on this connection meanwhile, so they don't stay in
+    // free pages of the file. PostgreSQL's old row versions go with its vacuum.
+    let secure_delete: Option<i64> = if sqlite {
+        let was = sqlx::query_scalar("PRAGMA secure_delete")
+            .fetch_one(&mut *conn)
+            .await?;
+        sqlx::query("PRAGMA secure_delete = ON")
+            .execute(&mut *conn)
+            .await?;
+        Some(was)
+    } else {
+        None
+    };
+    let reset = crate::emergency::reconfirm_v1_accesses(conn).await;
+    if let Some(was) = secure_delete {
+        sqlx::query(if was == 0 {
+            "PRAGMA secure_delete = OFF"
+        } else {
+            "PRAGMA secure_delete = ON"
+        })
+        .execute(&mut *conn)
+        .await?;
+    }
+    let reset = reset?;
+    if reset > 0 {
+        tracing::info!(
+            accesses = reset,
+            "emergency contacts must be confirmed again (new emergency access keys)"
+        );
+    }
+    // Always, once: a v1 key may also linger in space freed by an access removed before.
+    if sqlite {
+        set_setting(&mut *conn, SCRUB_PENDING, "1").await?;
     }
     Ok(())
 }

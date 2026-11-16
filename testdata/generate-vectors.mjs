@@ -599,10 +599,11 @@ function checkStringArguments(core, memory, dts) {
   const grantor = core.accountFromSessionBytes("grantor", bytes(9));
   const request = core.LoginRequestKey.generate();
   const approval = grantor.approveLoginRequest(request.publicKey(), "req", request.phrase());
+  const emergency = grantor.newEmergencyKey("grant");
   const instances = {
     Account: contact,
     VaultKey: contact.newVaultKey("vault").takeKey(),
-    GrantorKey: core.openSealedAccountKey(contact, "grantor", grantor.sealAccountKeyFor(contact.publicKey())),
+    EmergencyKey: emergency.takeKey(),
     LoginRequestKey: request,
     ApprovedLogin: request.open(approval.sealed, "grantor", "req"),
     FileEncryptor: new core.FileEncryptor(core.fileNewKey(), "item", "file"),
@@ -663,6 +664,7 @@ function checkStringArguments(core, memory, dts) {
     throw new Error("the WASM instance broke during the string-argument check");
   }
   for (const handle of Object.values(instances)) handle.free();
+  emergency.free();
   grantor.free();
 }
 

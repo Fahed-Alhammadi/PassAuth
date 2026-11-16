@@ -2411,6 +2411,7 @@ async fn config_lists_the_api_version_and_features() {
             "activity_log",
             "policies",
             "forget_device",
+            "emergency_vault_keys",
             "breach_check",
             "item_history",
             "sends",

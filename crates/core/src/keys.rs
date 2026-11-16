@@ -3,7 +3,9 @@
 //! ```text
 //! password (+ Secret Key) ─Argon2id─► MasterKeys { auk, login }
 //! AUK ─wraps─► Account Key ─wraps─► X25519 private key
-//!                         └─wraps─► personal Vault Keys ─wraps─► Item Keys
+//!                         ├─wraps─► personal Vault Keys ─wraps─► Item Keys
+//!                         └─wraps─► Emergency Keys (one per emergency contact)
+//!                                     └─wraps─► personal Vault Keys
 //! ```
 //! Everything in [`AccountBundle`] is safe to store on the server.
 
@@ -22,8 +24,26 @@ fn aad(kind: &str, id: &str) -> Vec<u8> {
 /// Associated data of a send key wrapped by the Account Key. Sends get their id
 /// from the server after the app encrypted, so there is no id to bind.
 const SEND_KEY_AAD: &[u8] = b"passauth/send-key/v1";
-/// Kind of an Account Key sealed to an emergency contact (bound to the grantor's id).
-const EMERGENCY_KEY: &str = "emergency-account-key";
+
+/// Emergency access (v2) kinds: an emergency key wrapped by the grantor's Account
+/// Key (bound to grantor and access), sealed to the contact (the same), a personal
+/// vault key wrapped by an emergency key (grantor, access and vault), and the
+/// grantor's roster of emergency contacts sealed by their Account Key (account).
+const EMERGENCY_KEY: &str = "emergency-key";
+const SEALED_EMERGENCY_KEY: &str = "emergency-key-sealed";
+const EMERGENCY_VAULT_KEY: &str = "emergency-vault-key";
+const EMERGENCY_ROSTER: &str = "emergency-roster";
+
+/// `passauth/<kind>/v2/<id>/<id>…`: every id non-empty and without '/', so two
+/// lists of ids never give the same bytes.
+fn emergency_aad(kind: &str, ids: &[&str]) -> Result<Vec<u8>> {
+    if ids.iter().any(|id| id.is_empty() || id.contains('/')) {
+        return Err(Error::Malformed(
+            "emergency access ids must be non-empty, without '/'",
+        ));
+    }
+    Ok(format!("passauth/{kind}/v2/{}", ids.join("/")).into_bytes())
+}
 
 fn public_key(b64_key: &str) -> Result<[u8; 32]> {
     unb64(b64_key)?
@@ -262,55 +282,161 @@ impl UnlockedAccount {
             .map(SendKey::from_key)
     }
 
-    /// Emergency access: seal this account's Account Key to a trusted contact's
-    /// public key (base64url), after checking its fingerprint with them. The
-    /// sealed box (base64url) names this account, so it can't pass for another
-    /// grantor's key, nor for a shared vault key.
-    pub fn seal_account_key_for(&self, recipient_public: &str) -> Result<String> {
+    /// Emergency access, the grantor's side, when confirming contact `grant_id` (the
+    /// access's id): a new random emergency key for that access, and it wrapped with this
+    /// account's Account Key (base64url, the access's `grantor_key`), so any of the
+    /// account's apps can open it again to wrap more vault keys
+    /// ([`open_emergency_key`](Self::open_emergency_key)). Only this key can be sealed to
+    /// the contact ([`EmergencyKey::seal_for`]).
+    pub fn new_emergency_key(&self, grant_id: &str) -> Result<NewEmergencyKey> {
+        let aad = emergency_aad(EMERGENCY_KEY, &[&self.account_id, grant_id])?;
+        let key = SymmetricKey::generate()?;
+        let wrapped = b64(&self.account_key.wrap(&key, &aad)?);
+        Ok(NewEmergencyKey {
+            key: EmergencyKey {
+                key,
+                grantor_id: self.account_id.clone(),
+                grant_id: grant_id.to_owned(),
+                sealable: true,
+            },
+            wrapped,
+        })
+    }
+
+    /// The emergency key of this account's access `grant_id`, from its `grantor_key`.
+    /// It wraps and opens vault keys; it can't be sealed to anyone again.
+    pub fn open_emergency_key(&self, grant_id: &str, wrapped: &str) -> Result<EmergencyKey> {
+        let aad = emergency_aad(EMERGENCY_KEY, &[&self.account_id, grant_id])?;
+        Ok(EmergencyKey {
+            key: self.account_key.unwrap_key(&unb64(wrapped)?, &aad)?,
+            grantor_id: self.account_id.clone(),
+            grant_id: grant_id.to_owned(),
+            sealable: false,
+        })
+    }
+
+    /// Emergency access, the contact's side: open the `sealed_key` that account
+    /// `grantor_id` sealed to this account for access `grant_id`. What opens only
+    /// opens the vault keys that grantor wrapped for that access, and can't be sealed
+    /// to anyone again.
+    pub fn open_sealed_emergency_key(
+        &self,
+        grantor_id: &str,
+        grant_id: &str,
+        sealed: &str,
+    ) -> Result<EmergencyKey> {
+        let aad = emergency_aad(SEALED_EMERGENCY_KEY, &[grantor_id, grant_id])?;
+        let raw = zeroize::Zeroizing::new(self.keypair.open(&unb64(sealed)?, &aad)?);
+        Ok(EmergencyKey {
+            key: SymmetricKey::from_slice(&raw)?,
+            grantor_id: grantor_id.to_owned(),
+            grant_id: grant_id.to_owned(),
+            sealable: false,
+        })
+    }
+
+    /// Emergency access: seal this account's roster of emergency contacts (the apps'
+    /// own JSON: which accesses may get vault keys, and the version of the list) with
+    /// the Account Key (base64url), so the server stores it but can neither read nor
+    /// change it, nor pass another account's off as this one's.
+    pub fn seal_emergency_roster(&self, json: &str) -> Result<String> {
+        let aad = emergency_aad(EMERGENCY_ROSTER, &[&self.account_id])?;
+        Ok(b64(&self.account_key.encrypt(json.as_bytes(), &aad)?))
+    }
+
+    /// Open a roster sealed by [`seal_emergency_roster`](Self::seal_emergency_roster):
+    /// this account's, unchanged, or an error.
+    pub fn open_emergency_roster(&self, sealed: &str) -> Result<String> {
+        let aad = emergency_aad(EMERGENCY_ROSTER, &[&self.account_id])?;
+        let json = self.account_key.decrypt(&unb64(sealed)?, &aad)?;
+        String::from_utf8(json).map_err(|_| Error::Malformed("roster is not UTF-8"))
+    }
+}
+
+/// Emergency access (v2): a random key of one access (one emergency contact), made by
+/// the grantor's app when it confirms the contact. It is bound to its grantor and its
+/// access, and opens only the vault keys the grantor wrapped with it for that access
+/// (their personal vaults): never the Account Key, the private key, shared vaults or
+/// Sends, and the raw key can't be read out. The grantor keeps it wrapped by their
+/// Account Key (`grantor_key`); the contact gets it sealed to their public key
+/// (`sealed_key`), once, when it is made. Wiped from memory on drop.
+pub struct EmergencyKey {
+    key: SymmetricKey,
+    /// The grantor's account id: bound into every vault key this key wraps.
+    grantor_id: String,
+    /// The access: bound into every vault key this key wraps.
+    grant_id: String,
+    /// Made by [`UnlockedAccount::new_emergency_key`]: only such a key may be sealed
+    /// to a contact, so code that opened an existing one can't hand it to a key pair
+    /// of its own.
+    sealable: bool,
+}
+
+/// [`UnlockedAccount::new_emergency_key`]'s answer.
+pub struct NewEmergencyKey {
+    pub key: EmergencyKey,
+    /// The key wrapped by the grantor's Account Key (base64url): the access's `grantor_key`.
+    pub wrapped: String,
+}
+
+impl EmergencyKey {
+    /// The grantor's account id.
+    pub fn grantor_id(&self) -> &str {
+        &self.grantor_id
+    }
+
+    /// The access this key belongs to.
+    pub fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+
+    /// Seal this key to the contact's public key (base64url), after checking its
+    /// fingerprint with them: the access's `sealed_key`. Only a key from
+    /// [`UnlockedAccount::new_emergency_key`] can be sealed; refuses a malformed or
+    /// low-order public key, and a grantor or access other than the key's own.
+    pub fn seal_for(
+        &self,
+        contact_public_key: &str,
+        grantor_id: &str,
+        grant_id: &str,
+    ) -> Result<String> {
+        if !self.sealable {
+            return Err(Error::Malformed(
+                "only a new emergency key can be sealed to a contact",
+            ));
+        }
+        if grantor_id != self.grantor_id || grant_id != self.grant_id {
+            return Err(Error::Malformed(
+                "the emergency key belongs to another account or access",
+            ));
+        }
+        let aad = emergency_aad(SEALED_EMERGENCY_KEY, &[grantor_id, grant_id])?;
         Ok(b64(&seal_to(
-            &public_key(recipient_public)?,
-            self.account_key.as_bytes(),
-            &aad(EMERGENCY_KEY, &self.account_id),
+            &public_key(contact_public_key)?,
+            self.key.as_bytes(),
+            &aad,
         )?))
     }
 
-    /// Emergency access, the contact's side: open the Account Key that account
-    /// `grantor_account_id` sealed to this account. It can only open that
-    /// account's own vault keys.
-    pub fn open_sealed_account_key(
-        &self,
-        grantor_account_id: &str,
-        sealed: &str,
-    ) -> Result<GrantorKey> {
-        let raw = zeroize::Zeroizing::new(
-            self.keypair
-                .open(&unb64(sealed)?, &aad(EMERGENCY_KEY, grantor_account_id))?,
-        );
-        Ok(GrantorKey {
-            account_id: grantor_account_id.to_owned(),
-            account_key: SymmetricKey::from_slice(&raw)?,
-        })
-    }
-}
-
-/// Another account's Account Key, opened by its emergency contact. It opens that
-/// account's own vault keys (`key_kind = account`) for viewing, and nothing else:
-/// no private key, no Sends, no new keys, and the raw key can't be read out.
-pub struct GrantorKey {
-    account_id: String,
-    account_key: SymmetricKey,
-}
-
-impl GrantorKey {
-    /// The grantor's account id.
-    pub fn account_id(&self) -> &str {
-        &self.account_id
+    /// Wrap personal vault `vault_id`'s key for this key's access (base64url).
+    pub fn wrap_vault_key(&self, vault_key: &SymmetricKey, vault_id: &str) -> Result<String> {
+        Ok(b64(&self
+            .key
+            .wrap(vault_key, &self.vault_aad(vault_id)?)?))
     }
 
-    /// A vault key the grantor wrapped with their Account Key.
+    /// Open a vault key [`wrap_vault_key`](Self::wrap_vault_key) wrapped for this
+    /// vault and this key's access.
     pub fn open_vault_key(&self, vault_id: &str, wrapped: &str) -> Result<SymmetricKey> {
-        self.account_key
-            .unwrap_key(&unb64(wrapped)?, &aad("vault-key", vault_id))
+        self.key
+            .unwrap_key(&unb64(wrapped)?, &self.vault_aad(vault_id)?)
+    }
+
+    fn vault_aad(&self, vault_id: &str) -> Result<Vec<u8>> {
+        emergency_aad(
+            EMERGENCY_VAULT_KEY,
+            &[&self.grantor_id, &self.grant_id, vault_id],
+        )
     }
 }
 
@@ -489,41 +615,262 @@ mod tests {
         assert!(alice.unwrap_send_key(&b64(&bad)).is_err());
     }
 
-    #[test]
-    fn emergency_access_opens_only_the_grantors_vault_keys() {
-        let grantor = new(false).unlocked;
+    /// The grantor confirms contact `grant` (an access's id): (the contact, the
+    /// grantor's new emergency key, its `grantor_key`, its `sealed_key`).
+    fn confirmed(grantor: &UnlockedAccount, grant: &str) -> (UnlockedAccount, String, String) {
         let contact = new(false).unlocked;
-        let stranger = new(false).unlocked;
-        let (vk, wrapped) = grantor.new_vault_key("v1").unwrap();
-        let sealed = grantor
-            .seal_account_key_for(&b64(&contact.keypair.public_bytes()))
+        let NewEmergencyKey { key, wrapped } = grantor.new_emergency_key(grant).unwrap();
+        let sealed = key
+            .seal_for(
+                &b64(&contact.keypair.public_bytes()),
+                &grantor.account_id,
+                grant,
+            )
             .unwrap();
-        let key = contact.open_sealed_account_key("user-1", &sealed).unwrap();
-        assert_eq!(key.account_id(), "user-1");
+        (contact, wrapped, sealed)
+    }
+
+    #[test]
+    fn emergency_keys_open_only_the_vault_keys_wrapped_for_their_access() {
+        let grantor = new(false).unlocked;
+        let (contact, grantor_key, sealed) = confirmed(&grantor, "grant-1");
+        let (vk, _) = grantor.new_vault_key("v1").unwrap();
+        let (other_vk, _) = grantor.new_vault_key("v2").unwrap();
+        // The grantor's apps reopen the key from `grantor_key` and wrap vault keys with it.
+        let mine = grantor.open_emergency_key("grant-1", &grantor_key).unwrap();
+        assert_eq!((mine.grantor_id(), mine.grant_id()), ("user-1", "grant-1"));
+        let wrapped = mine.wrap_vault_key(&vk, "v1").unwrap();
+        let wrapped2 = mine.wrap_vault_key(&other_vk, "v2").unwrap();
+        // The contact opens the sealed key, then exactly those vault keys.
+        let theirs = contact
+            .open_sealed_emergency_key("user-1", "grant-1", &sealed)
+            .unwrap();
         assert_eq!(
-            key.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
+            (theirs.grantor_id(), theirs.grant_id()),
+            ("user-1", "grant-1")
+        );
+        assert_eq!(
+            theirs.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
             vk.as_bytes()
         );
-        assert!(key.open_vault_key("v2", &wrapped).is_err());
-        // Only the contact opens it, and only as this grantor's key.
-        assert!(stranger.open_sealed_account_key("user-1", &sealed).is_err());
-        assert!(contact.open_sealed_account_key("user-2", &sealed).is_err());
-        // Not interchangeable with a vault key sealed for sharing.
-        assert!(contact.open_shared_vault_key("user-1", &sealed).is_err());
-        let shared = share_vault_key("user-1", &vk, &b64(&contact.keypair.public_bytes())).unwrap();
-        assert!(contact.open_sealed_account_key("user-1", &shared).is_err());
-        // Bad public keys.
-        assert!(grantor.seal_account_key_for("short").is_err());
-        assert!(grantor.seal_account_key_for(&b64(&[0; 32])).is_err());
-        assert!(grantor.seal_account_key_for(&b64(&[1; 31])).is_err());
+        assert_eq!(
+            theirs.open_vault_key("v2", &wrapped2).unwrap().as_bytes(),
+            other_vk.as_bytes()
+        );
+        // A wrap for one vault isn't one for another.
+        assert!(theirs.open_vault_key("v2", &wrapped).is_err());
+        // The same box opened as another grantor's or another access's opens nothing.
+        let renamed = contact.open_sealed_emergency_key("user-2", "grant-1", &sealed);
+        assert!(matches!(renamed, Err(Error::Decrypt)));
+        assert!(
+            contact
+                .open_sealed_emergency_key("user-1", "grant-2", &sealed)
+                .is_err()
+        );
+        // Wrong contact, a changed box.
+        let stranger = new(false).unlocked;
+        assert!(
+            stranger
+                .open_sealed_emergency_key("user-1", "grant-1", &sealed)
+                .is_err()
+        );
+        let mut bad = unb64(&sealed).unwrap();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(
+            contact
+                .open_sealed_emergency_key("user-1", "grant-1", &b64(&bad))
+                .is_err()
+        );
+        // `grantor_key` opens only for its own account and access.
+        assert!(grantor.open_emergency_key("grant-2", &grantor_key).is_err());
+        let other_account = AccountBundle::create_with_kdf("user-1", "pw", false, test_params())
+            .unwrap()
+            .unlocked;
+        assert!(
+            other_account
+                .open_emergency_key("grant-1", &grantor_key)
+                .is_err()
+        );
+        let mut renamed = new(false).unlocked;
+        renamed.account_id = "user-2".into();
+        renamed.account_key = grantor.account_key.clone();
+        assert!(renamed.open_emergency_key("grant-1", &grantor_key).is_err());
+    }
+
+    #[test]
+    fn emergency_keys_of_two_accesses_stay_apart() {
+        let grantor = new(false).unlocked;
+        let (contact_a, key_a, sealed_a) = confirmed(&grantor, "grant-a");
+        let (contact_b, _, sealed_b) = confirmed(&grantor, "grant-b");
+        let (vk, _) = grantor.new_vault_key("v1").unwrap();
+        let a = grantor.open_emergency_key("grant-a", &key_a).unwrap();
+        let for_a = a.wrap_vault_key(&vk, "v1").unwrap();
+        // Contact B's key can't open what was wrapped for A.
+        let b = contact_b
+            .open_sealed_emergency_key("user-1", "grant-b", &sealed_b)
+            .unwrap();
+        assert!(matches!(
+            b.open_vault_key("v1", &for_a),
+            Err(Error::Decrypt)
+        ));
+        // Nor can A's contact open B's box, or A's box as B's access.
+        assert!(
+            contact_a
+                .open_sealed_emergency_key("user-1", "grant-b", &sealed_b)
+                .is_err()
+        );
+        assert!(
+            contact_a
+                .open_sealed_emergency_key("user-1", "grant-b", &sealed_a)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn only_a_new_emergency_key_is_sealed_to_a_contact() {
+        let grantor = new(false).unlocked;
+        let (contact, grantor_key, sealed) = confirmed(&grantor, "grant-1");
+        let other = b64(&new(false).unlocked.keypair.public_bytes());
+        // Neither a key opened again by the grantor's apps nor one opened by the contact
+        // can be handed to another key pair.
+        let mine = grantor.open_emergency_key("grant-1", &grantor_key).unwrap();
+        assert!(matches!(
+            mine.seal_for(&other, "user-1", "grant-1"),
+            Err(Error::Malformed(_))
+        ));
+        let theirs = contact
+            .open_sealed_emergency_key("user-1", "grant-1", &sealed)
+            .unwrap();
+        assert!(matches!(
+            theirs.seal_for(&other, "user-1", "grant-1"),
+            Err(Error::Malformed(_))
+        ));
+        // A new key is sealed for its own grantor and access only.
+        let NewEmergencyKey { key, .. } = grantor.new_emergency_key("grant-2").unwrap();
+        assert!(key.seal_for(&other, "user-1", "grant-2").is_ok());
+        for (grantor_id, grant_id) in [("user-2", "grant-2"), ("user-1", "grant-1")] {
+            assert!(matches!(
+                key.seal_for(&other, grantor_id, grant_id),
+                Err(Error::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn emergency_boxes_are_not_other_keys() {
+        let grantor = new(false).unlocked;
+        let (contact, grantor_key, sealed) = confirmed(&grantor, "grant-1");
+        let (vk, account_wrapped) = grantor.new_vault_key("v1").unwrap();
+        let key = grantor.open_emergency_key("grant-1", &grantor_key).unwrap();
+        let wrapped = key.wrap_vault_key(&vk, "v1").unwrap();
+        // A sealed emergency key is no shared vault key, and the other way round.
+        assert!(contact.open_shared_vault_key("grant-1", &sealed).is_err());
+        let shared =
+            share_vault_key("grant-1", &vk, &b64(&contact.keypair.public_bytes())).unwrap();
+        assert!(
+            contact
+                .open_sealed_emergency_key("user-1", "grant-1", &shared)
+                .is_err()
+        );
+        // The Account Key's own wraps (vault keys, `grantor_key`) aren't emergency wraps.
+        let theirs = contact
+            .open_sealed_emergency_key("user-1", "grant-1", &sealed)
+            .unwrap();
+        assert!(theirs.open_vault_key("v1", &account_wrapped).is_err());
+        assert!(theirs.open_vault_key("v1", &grantor_key).is_err());
+        assert!(grantor.open_vault_key("v1", &wrapped).is_err());
+        assert!(grantor.open_vault_key("grant-1", &grantor_key).is_err());
+        assert!(grantor.open_emergency_key("grant-1", &wrapped).is_err());
+        assert!(grantor.unwrap_send_key(&grantor_key).is_err());
+    }
+
+    #[test]
+    fn emergency_keys_refuse_bad_public_keys_and_ids() {
+        let grantor = new(false).unlocked;
+        let NewEmergencyKey { key, .. } = grantor.new_emergency_key("grant-1").unwrap();
+        // Malformed, wrong length, and low-order public keys.
+        for bad in [
+            "short".to_owned(),
+            b64(&[0; 32]),
+            b64(&[1; 31]),
+            b64(&[1; 33]),
+        ] {
+            assert!(key.seal_for(&bad, "user-1", "grant-1").is_err(), "{bad}");
+        }
+        let order8 =
+            hex::decode("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800")
+                .unwrap();
+        assert!(key.seal_for(&b64(&order8), "user-1", "grant-1").is_err());
+        // Ids that could run into each other are refused everywhere.
+        let (vk, _) = grantor.new_vault_key("v1").unwrap();
+        for id in ["", "a/b"] {
+            assert!(grantor.new_emergency_key(id).is_err());
+            assert!(grantor.open_emergency_key(id, "AQ").is_err());
+            assert!(key.wrap_vault_key(&vk, id).is_err());
+            assert!(key.open_vault_key(id, "AQ").is_err());
+            assert!(
+                grantor
+                    .open_sealed_emergency_key(id, "grant-1", "AQ")
+                    .is_err()
+            );
+            assert!(
+                grantor
+                    .open_sealed_emergency_key("user-1", id, "AQ")
+                    .is_err()
+            );
+        }
+        assert!(key.open_vault_key("v1", "not base64!").is_err());
+    }
+
+    #[test]
+    fn rosters_open_only_for_their_account_unchanged() {
+        let alice = new(false).unlocked;
+        let json =
+            r#"{"version":3,"accesses":[{"id":"g1","contact_key":"pk","grantor_key_hash":"h"}]}"#;
+        let sealed = alice.seal_emergency_roster(json).unwrap();
+        assert_eq!(alice.open_emergency_roster(&sealed).unwrap(), json);
+        assert_ne!(alice.seal_emergency_roster(json).unwrap(), sealed);
+        // Another account (also one with the same id, or the same key under another id).
+        let bob = new(false).unlocked;
+        assert!(matches!(
+            bob.open_emergency_roster(&sealed),
+            Err(Error::Decrypt)
+        ));
+        let mut renamed = new(false).unlocked;
+        renamed.account_id = "user-2".into();
+        renamed.account_key = alice.account_key.clone();
+        assert!(renamed.open_emergency_roster(&sealed).is_err());
+        // Changed on the way.
+        let mut bad = unb64(&sealed).unwrap();
+        bad[30] ^= 1;
+        assert!(alice.open_emergency_roster(&b64(&bad)).is_err());
+        assert!(alice.open_emergency_roster("not base64!").is_err());
+        // Nothing else the Account Key encrypts passes for a roster, nor the other way round.
+        let (_, vault) = alice.new_vault_key("v1").unwrap();
+        let send = alice.wrap_send_key(&SendKey::generate().unwrap()).unwrap();
+        let NewEmergencyKey { wrapped, .. } = alice.new_emergency_key("g1").unwrap();
+        for other in [&vault, &send, &wrapped] {
+            assert!(alice.open_emergency_roster(other).is_err());
+        }
+        let key_sized = alice.seal_emergency_roster(&"k".repeat(32)).unwrap();
+        assert!(alice.open_vault_key("v1", &key_sized).is_err());
+        assert!(alice.unwrap_send_key(&key_sized).is_err());
+        assert!(alice.open_emergency_key("g1", &key_sized).is_err());
     }
 
     /// Known answers, computed independently (Node.js: X25519, HKDF-SHA256,
     /// HChaCha20 + OpenSSL ChaCha20-Poly1305) from the documented formats.
-    /// Contact's X25519 secret 0x51 × 32, ephemeral secret 0x22 × 32, nonce 0x33 ×
-    /// 24, sealed Account Key 0x44 × 32 for grantor "grantor-1"; and that Account
-    /// Key wrapping the send key 0x55 × 32 (nonce 0x66 × 24).
-    const KAT_SEALED_ACCOUNT_KEY: &str = "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyABMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzG_lIxoR6wrblvXpHaJBJ-ZOE0Ut74OHPvVvQJktbjLyaUjkaL1uEagznYxGXQmFc";
+    /// Contact's X25519 secret 0x51 × 32, ephemeral secret 0x22 × 32, nonce 0x33 × 24:
+    /// the emergency key 0x44 × 32 of access "grant-1" sealed by grantor "grantor-1".
+    /// That grantor's Account Key 0x88 × 32 wrapping it (nonce 0x55 × 24); it
+    /// wrapping vault "v1"'s key 0x77 × 32 (nonce 0x66 × 24); that Account Key
+    /// sealing the roster `{"version":1,"accesses":[]}` (nonce 0x77 × 24). And an
+    /// Account Key 0x44 × 32 wrapping the send key 0x55 × 32 (nonce 0x66 × 24).
+    const KAT_SEALED_EMERGENCY_KEY: &str = "D6poTtKIZ7l_Smot7l34zpdOdrcBjj8iocTPJnhXDyABMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzG_lIxoR6wrblvXpHaJBJ-ZOE0Ut74OHPvVvQJktbjLz6dNvakU-kSsrSIuymX7ax";
+    const KAT_GRANTOR_KEY: &str = "AVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTpzySSLYm4_7qND8yQV4dI0j5KhSngWLAh2igD886iz_pfZm9aExcBW9sVrBflikg";
+    const KAT_EMERGENCY_VAULT_KEY: &str = "AWZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZtnqzdNMf5ljSMxWGXPHdJhCb3TsuIRGDDQunap9k-5oNf6FY6v3z6LXar1l6_QAVw";
+    const KAT_ROSTER: &str = "AXd3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d09jkwI3z1moKSpvWb_Rh-TpIXoNYVzpcvI18T8yAR-zPCt5rFZU7BGFeJQ";
     const KAT_WRAPPED_SEND_KEY: &str = "AWZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZvvI7_FuXbtBau50O1HlVrpgTVbOmqZkLhYMv4hfscxKbFUx2Fkhgidr7JyZEU5K2A";
 
     #[test]
@@ -533,25 +880,38 @@ mod tests {
             account_key: SymmetricKey::from_bytes([9; 32]),
             keypair: KeyPair::from_secret_bytes([0x51; 32]),
         };
-        let key = contact
-            .open_sealed_account_key("grantor-1", KAT_SEALED_ACCOUNT_KEY)
+        let theirs = contact
+            .open_sealed_emergency_key("grantor-1", "grant-1", KAT_SEALED_EMERGENCY_KEY)
             .unwrap();
-        // Prove it holds 0x44 × 32: it opens a vault key wrapped with that key.
-        let account_key = SymmetricKey::from_bytes([0x44; 32]);
-        let vk = SymmetricKey::from_bytes([0x77; 32]);
-        let wrapped = b64(&account_key.wrap(&vk, b"passauth/vault-key/v1/v1").unwrap());
         assert_eq!(
-            key.open_vault_key("v1", &wrapped).unwrap().as_bytes(),
+            theirs
+                .open_vault_key("v1", KAT_EMERGENCY_VAULT_KEY)
+                .unwrap()
+                .as_bytes(),
             &[0x77; 32]
         );
-
         let grantor = UnlockedAccount {
             account_id: "grantor-1".into(),
-            account_key,
+            account_key: SymmetricKey::from_bytes([0x88; 32]),
+            keypair: KeyPair::from_secret_bytes([0x61; 32]),
+        };
+        let mine = grantor
+            .open_emergency_key("grant-1", KAT_GRANTOR_KEY)
+            .unwrap();
+        assert_eq!(mine.key.as_bytes(), &[0x44; 32]);
+        assert_eq!(theirs.key.as_bytes(), &[0x44; 32]);
+        assert_eq!(
+            grantor.open_emergency_roster(KAT_ROSTER).unwrap(),
+            r#"{"version":1,"accesses":[]}"#
+        );
+
+        let sender = UnlockedAccount {
+            account_id: "grantor-1".into(),
+            account_key: SymmetricKey::from_bytes([0x44; 32]),
             keypair: KeyPair::from_secret_bytes([0x61; 32]),
         };
         assert_eq!(
-            grantor
+            sender
                 .unwrap_send_key(KAT_WRAPPED_SEND_KEY)
                 .unwrap()
                 .to_b64(),

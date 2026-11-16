@@ -141,6 +141,7 @@ pub(super) async fn delete_vault(
     w.tell_invitees(&id);
     w.bump().await?;
     let files = super::attachments::detach_vault(w.conn(), &id).await?;
+    crate::emergency::forget_vault_keys(w.conn(), &id).await?;
     for stmt in [
         "DELETE FROM items WHERE vault_id = $1",
         "DELETE FROM item_versions WHERE vault_id = $1",
@@ -233,7 +234,9 @@ const INVITATIONS_PER_HOUR: u32 = 100;
 /// Share a vault: someone who isn't a member yet gets an invitation (`invited`,
 /// shown to them in `/sync` until they accept or decline it, and emailed when
 /// email is set up); for an existing member or invitation this changes the role
-/// and the sealed key and keeps the status. Answers `{"revision", "status"}`.
+/// and the sealed key and keeps the status. Answers `{"revision", "status"}`, with
+/// `"rotation_pending": true` when the vault had emergency-access wraps: an
+/// emergency contact may hold its key, so the sharing app replaces it at once.
 pub(super) async fn add_member(
     State(state): State<AppState>,
     user: AuthUser,
@@ -327,6 +330,17 @@ pub(super) async fn add_member(
             invited
         }
     };
+    // Shared now (or still): no emergency contact gets this vault's key from here on.
+    // A contact may already hold it (an approved access, or a compromised server
+    // handing the key out early), and the other members never chose to trust them:
+    // the vault is marked for a new key, which the owner's apps make.
+    let rekey = crate::emergency::forget_vault_keys(w.conn(), &id).await? > 0;
+    if rekey {
+        sqlx::query("UPDATE vaults SET rotation_pending = 1 WHERE id = $1")
+            .bind(&id)
+            .execute(w.conn())
+            .await?;
+    }
     if invited {
         // Their invitation (new, or its role or key) is in their `/sync`.
         w.tell(&b.user_id);
@@ -338,7 +352,12 @@ pub(super) async fn add_member(
         tracing::warn!(error = %e, "emailing a vault invitation failed");
     }
     let status = if invited { "invited" } else { "active" };
-    Ok(Json(json!({ "revision": revision, "status": status })))
+    let mut answer = json!({ "revision": revision, "status": status });
+    if rekey {
+        // The sharing app replaces the key now, sealing the new one to everyone.
+        answer["rotation_pending"] = true.into();
+    }
+    Ok(Json(answer))
 }
 
 fn role_name(role: Role) -> &'static str {
@@ -648,8 +667,11 @@ fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
 /// they need the new key sealed to them), every item re-encrypted once (stamped
 /// with the write's sequence number `seq`), the pending-rotation mark cleared and
 /// the key epoch raised. Earlier item versions are deleted: they are encrypted
-/// with the old key, which the new one is meant to replace. Returns the new epoch.
-/// The caller tells the invitees (their invitation's key and name change).
+/// with the old key, which the new one is meant to replace; so are the vault's
+/// emergency-access wraps (the owner's apps wrap the new key). Attachments stay as
+/// they are: each file has its own key, kept inside its (re-encrypted) item.
+/// Returns the new epoch. The caller tells the invitees (their invitation's key
+/// and name change).
 async fn apply_rotation(w: &mut VaultWrite, id: &str, b: &Rotate, seq: i64) -> ApiResult<i64> {
     let key_epoch = rotate_rows(w.conn(), id, b, seq).await?;
     w.log(
@@ -739,6 +761,8 @@ async fn rotate_rows(conn: &mut AnyConnection, id: &str, b: &Rotate, seq: i64) -
         .bind(id)
         .execute(&mut *conn)
         .await?;
+    // Emergency contacts' wraps hold the old key; the owner's apps wrap the new one.
+    crate::emergency::forget_vault_keys(conn, id).await?;
     Ok(sqlx::query_scalar(
         "UPDATE vaults SET rotation_pending = 0, key_epoch = key_epoch + 1 WHERE id = $1 RETURNING key_epoch",
     )
