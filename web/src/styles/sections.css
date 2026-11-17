@@ -1,0 +1,116 @@
+/*
+ * Sectioned pages (Settings, server administration): a grouped list of sections beside the open one.
+ * Wide: the list stays on the left and the section reads in a column next to it.
+ * Narrow: the list is its own screen (`.is-index`, the bare /settings or /admin address) and each section has a back link.
+ * Tokens come from app.css.
+ */
+
+.sections-host { container-type: inline-size; }
+
+.sections {
+  --rail-w: 232px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: var(--space-6);
+}
+
+/* ------------------------------------------------------------------ list */
+.sections-rail { display: flex; flex-direction: column; gap: var(--space-5); align-self: start; }
+.sections-rail-title { font-size: var(--text-page); padding: 0 var(--space-3); }
+.rail-group { display: flex; flex-direction: column; gap: var(--space-1); }
+.rail-group-title { font-size: var(--text-caption); font-weight: 600; color: var(--ink-3); padding: 0 var(--space-3); letter-spacing: 0; }
+.rail-group ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.rail-group a {
+  position: relative;
+  display: flex; align-items: center; gap: var(--space-2);
+  min-height: 40px; padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-s);
+  color: var(--ink-2); text-decoration: none; font-weight: 500;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.rail-group a:hover { background: var(--surface-2); color: var(--ink); }
+.rail-group a:focus-visible { outline-offset: -2px; }
+/* The open section: white surface and a bar at the leading edge, so it reads as "you are here" without shouting. */
+.rail-group a.is-current { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: inset 0 0 0 1px var(--line); }
+.rail-group a.is-current::before {
+  content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.rail-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-chevron { display: none; color: var(--ink-3); }
+
+/* A section's state, next to its name: what needs attention, or a count. */
+.rail-status {
+  flex: none; font-size: var(--text-caption); font-weight: 500; line-height: 1.5;
+  padding: 0 var(--space-2); border-radius: 999px; font-variant-numeric: tabular-nums;
+  background: var(--surface-2); color: var(--ink-2);
+}
+.rail-status.is-ok { background: var(--ok-soft); color: var(--ok); }
+.rail-status.is-warn { background: var(--warn-soft); color: var(--warn); }
+.rail-status.is-count { background: var(--accent-soft); color: var(--accent-ink); }
+.rail-signout { align-self: flex-start; margin-left: calc(var(--space-3) - 12px); color: var(--ink-2); }
+
+/* ---------------------------------------------------------------- section */
+.sections-content { min-width: 0; display: flex; flex-direction: column; gap: var(--space-5); }
+.section-head { display: flex; flex-direction: column; gap: var(--space-1); }
+.section-name { font-size: var(--text-page); line-height: 1.25; }
+.section-intro { color: var(--ink-2); max-width: 62ch; }
+.section-back {
+  display: none; align-self: flex-start; align-items: center; gap: var(--space-1);
+  min-height: 44px; margin-left: calc(-1 * var(--space-2)); padding: 0 var(--space-2);
+  color: var(--accent-ink); text-decoration: none; font-weight: 500;
+}
+/* Cards inside a section: a little tighter than on their own page, the section heading already says where you are. */
+.sections-content > .settings-section,
+.sections-content > .admin-section { display: flex; flex-direction: column; gap: var(--space-4); }
+
+/* Wide enough for both columns: the list on the left, always visible. */
+@container (min-width: 760px) {
+  .sections { grid-template-columns: var(--rail-w) minmax(0, 1fr); column-gap: var(--space-6); }
+  .sections-rail { position: sticky; top: var(--space-6); }
+  .sections-content { max-width: 720px; }
+}
+
+/* Narrow: list and section are separate screens. */
+@container (max-width: 759.98px) {
+  .sections { padding: var(--space-4); }
+  .sections.is-index .sections-content { display: none; }
+  .sections:not(.is-index) .sections-rail { display: none; }
+  .section-back { display: inline-flex; }
+  /* As a screen of its own, the list reads like a grouped table: full-width rows with dividers and chevrons. */
+  .sections-rail-title { padding: 0; }
+  .rail-group-title { padding: 0 var(--space-1); }
+  .rail-group ul { gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); overflow: hidden; }
+  .rail-group li + li a { border-top: 1px solid var(--line); }
+  .rail-group a { min-height: 52px; border-radius: 0; padding: var(--space-3) var(--space-4); color: var(--ink); }
+  .rail-group a.is-current { box-shadow: none; background: transparent; font-weight: 500; }
+  .rail-group a.is-current::before { display: none; }
+  .rail-chevron { display: inline-flex; }
+  .rail-signout { margin-left: 0; min-height: 44px; }
+}
+
+/* ------------------------------------------------------------ admin page */
+.admin-body { flex: 1; width: 100%; }
+.admin-body .section-name { font-size: var(--text-page); }
+
+/* Limits: each group is a card of its own; one save bar for the section, kept in view while anything is unsaved. */
+.limits-form { display: flex; flex-direction: column; gap: var(--space-4); }
+fieldset.card.limit-group {
+  border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); padding: var(--space-5); gap: var(--space-4);
+}
+@container (max-width: 759.98px) { fieldset.card.limit-group { padding: var(--space-4); } }
+/* A legend can't be a flex item's first row reliably: float it so it sits like a card heading. */
+.limit-group > legend.limit-title { float: left; width: 100%; padding: 0; margin: 0; font-size: var(--text-title); font-weight: 600; color: var(--ink); }
+.limit-group > legend.limit-title + * { clear: both; }
+.save-bar {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; flex-direction: column; gap: var(--space-2);
+  margin: 0 calc(-1 * var(--space-2)); padding: var(--space-3) var(--space-2);
+  background: var(--paper);
+}
+.save-bar.is-dirty { box-shadow: 0 -1px 0 var(--line); }
+.save-bar.is-dirty .muted { color: var(--warn); }
+/* Settings: the app's sidebar already has Sign out; the list repeats it only as a screen of its own. */
+@container (min-width: 760px) { .rail-signout { display: none; } }

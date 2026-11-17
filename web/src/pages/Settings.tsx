@@ -81,6 +81,7 @@ import {
 import { ActivityTab, VaultActivity } from "./Activity";
 import { EmergencyTab } from "./Emergency";
 import "../styles/settings.css";
+import "../styles/sections.css";
 
 // ------------------------------------------------------------------ types
 
@@ -127,17 +128,23 @@ interface Session {
   client?: string | null;
 }
 
+/**
+ * Settings sections, grouped by what people come for. Keys are the URL (`/settings/<key>`); emails and apps link to
+ * `account`, `security`, `two-step`, `vaults`, `emergency` and `sessions`, so those keys never change.
+ */
 const TABS = [
-  { key: "account", label: "Account" },
-  { key: "security", label: "Security" },
-  { key: "two-step", label: "Two-step login" },
-  { key: "vaults", label: "Vaults & sharing" },
-  // Listed only when the server has emergency access (`emergency_access`); its emails link here either way.
-  { key: "emergency", label: "Emergency access" },
-  { key: "sessions", label: "Sessions" },
+  { key: "account", group: "You", label: "Account", intro: "Your name, email address, storage and fingerprint." },
+  { key: "preferences", group: "You", label: "Preferences", intro: "How PassAuth looks and behaves here." },
+  { key: "security", group: "Security", label: "Password and keys", intro: "Your master password, Secret Key and Emergency Kit." },
+  { key: "two-step", group: "Security", label: "Two-step login", intro: "A second step when you sign in on a new device." },
+  { key: "sessions", group: "Security", label: "Devices", intro: "Where you're signed in, and requests to sign in." },
   // Listed only when the server keeps an activity log (`activity_log`).
-  { key: "activity", label: "Activity" },
+  { key: "activity", group: "Security", label: "Activity", intro: "Sign-ins and changes to your account, newest first." },
+  { key: "vaults", group: "Sharing", label: "Vaults", intro: "Your vaults, the people you share them with, and invitations." },
+  // Listed only when the server has emergency access (`emergency_access`); its emails link here either way.
+  { key: "emergency", group: "Sharing", label: "Emergency access", intro: "People who can ask for access to your vaults if something happens to you." },
 ] as const;
+const GROUPS = ["You", "Security", "Sharing"] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
 const ROLE_LABEL: Record<Role, string> = { owner: "Owner", admin: "Admin", write: "Can edit", read: "Can view" };
@@ -179,7 +186,7 @@ function safeFingerprint(publicKey: unknown): string {
 // ------------------------------------------------------------------- page
 
 export function SettingsPage() {
-  const { tab = "account" } = useParams();
+  const { tab } = useParams();
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const config = usePublicConfig();
@@ -202,8 +209,10 @@ export function SettingsPage() {
     reload();
   }, [reload]);
 
-  if (!TABS.some((t) => t.key === tab)) return <Navigate to="/settings/account" replace />;
-  const current = tab as TabKey;
+  // `/settings` alone: the section list on phones, Account beside it on wider screens (CSS `.is-index`).
+  if (tab !== undefined && !TABS.some((t) => t.key === tab)) return <Navigate to="/settings/account" replace />;
+  const current = (tab ?? "account") as TabKey;
+  const section = TABS.find((t) => t.key === current)!;
 
   let body: ReactNode = <p className="muted">Loading…</p>;
   if (current === "vaults") body = <VaultsTab />;
@@ -217,36 +226,78 @@ export function SettingsPage() {
   else if (current === "activity") body = <ActivityTab />;
   else if (current === "emergency") body = <EmergencyTab />;
   else if (current === "security") body = <SecurityTab />;
+  else if (current === "preferences") body = <PreferencesTab />;
   else if (account) body = current === "account" ? <AccountTab account={account} reload={reload} /> : <TwoStepTab account={account} reload={reload} />;
   else if (loadError) body = <ErrorText error={loadError} />;
 
+  const shown = TABS.filter((t) => (t.key !== "activity" || activityLog || current === t.key) && (t.key !== "emergency" || emergency || current === t.key));
+  /** What the rail says next to a section, at a glance. */
+  const status = (key: TabKey): ReactNode => {
+    if (key === "two-step" && account) {
+      return account.two_factor.length > 0 || account.passkeys.length > 0 ? (
+        <span className="rail-status is-ok">On</span>
+      ) : (
+        <span className="rail-status is-warn">Off</span>
+      );
+    }
+    if (key === "vaults" && waiting > 0) {
+      return (
+        <>
+          <span className="rail-status is-count" aria-hidden="true">
+            {waiting}
+          </span>
+          <span className="sr-only">, {waiting === 1 ? "1 invitation" : `${waiting} invitations`}</span>
+        </>
+      );
+    }
+    if (key === "account" && account && !account.email_verified) return <span className="rail-status is-warn">Verify email</span>;
+    return null;
+  };
+
   return (
-    <div className="page">
-      <div className="page-inner">
-        <div className="settings-head">
-          <div className="row-between">
-            <h1>Settings</h1>
-            <button type="button" className="btn btn-ghost" onClick={logout}>
-              <Icon name="logout" /> Sign out
-            </button>
-          </div>
-          <nav className="settings-tabs" aria-label="Settings sections">
-            {TABS.filter((t) => (t.key !== "activity" || activityLog || current === t.key) && (t.key !== "emergency" || emergency || current === t.key)).map((t) => (
-              <Link key={t.key} to={`/settings/${t.key}`} aria-current={t.key === current ? "page" : undefined}>
-                {t.label}
-                {t.key === "vaults" && waiting > 0 && (
-                  <>
-                    <span className="badge tab-badge" aria-hidden="true">
-                      {waiting}
-                    </span>
-                    <span className="sr-only">, {waiting === 1 ? "1 invitation" : `${waiting} invitations`}</span>
-                  </>
-                )}
-              </Link>
-            ))}
-          </nav>
-        </div>
-        <div className="settings-section">{body}</div>
+    <div className="page sections-host">
+      <div className={`sections${tab === undefined ? " is-index" : ""}`}>
+        <nav className="sections-rail" aria-label="Settings sections">
+          <h1 className="sections-rail-title">Settings</h1>
+          {GROUPS.map((g) => {
+            const items = shown.filter((t) => t.group === g);
+            return (
+              <div key={g} className="rail-group" role="group" aria-labelledby={`rail-${g}`}>
+                <h2 id={`rail-${g}`} className="rail-group-title">
+                  {g}
+                </h2>
+                <ul>
+                  {items.map((t) => (
+                    <li key={t.key}>
+                      <Link to={`/settings/${t.key}`} aria-current={t.key === current && tab !== undefined ? "page" : undefined} className={t.key === current ? "is-current" : undefined}>
+                        <span className="rail-label">{t.label}</span>
+                        {status(t.key)}
+                        <span className="rail-chevron" aria-hidden="true">
+                          <Icon name="chevron" size={16} />
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+          <button type="button" className="btn btn-ghost rail-signout" onClick={logout}>
+            <Icon name="logout" /> Sign out
+          </button>
+        </nav>
+        <section className="sections-content" aria-labelledby="section-title">
+          <header className="section-head">
+            <Link to="/settings" className="section-back">
+              <Icon name="back" /> Settings
+            </Link>
+            <h2 id="section-title" className="section-name">
+              {section.label}
+            </h2>
+            <p className="section-intro">{section.intro}</p>
+          </header>
+          <div className="settings-section">{body}</div>
+        </section>
       </div>
     </div>
   );
@@ -281,9 +332,6 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   useVault();
   const identityFp = identityFingerprint();
   const fp = identityFp ?? getAccount()?.fingerprint() ?? (typeof account.fingerprint === "string" ? account.fingerprint : null);
-  const showIcons = useShowIcons();
-  const theme = useTheme();
-  const desktop = getDesktop();
 
   async function saveName(e: FormEvent) {
     e.preventDefault();
@@ -336,27 +384,6 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
 
       <UsageCard account={account} />
 
-      <section className="card" aria-labelledby="appearance-title">
-        <h2 id="appearance-title">Appearance</h2>
-        <Setting
-          as="label"
-          title="Theme"
-          control={
-            <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
-              <option value="system">Same as system</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          }
-        />
-        <Setting as="label" title="Show website icons" control={<input type="checkbox" role="switch" className="switch" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />}>
-          Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to {clientName()}.
-        </Setting>
-      </section>
-
-      {desktop?.vaultTimeout && <VaultTimeoutCard hook={desktop.vaultTimeout} />}
-      {desktop?.app && <DesktopAppCard hook={desktop.app} />}
-
       <section className="card" aria-labelledby="fp-title">
         <h2 id="fp-title">{identityFp ? "Your identity fingerprint" : "Your public key fingerprint"}</h2>
         <p className="card-text">
@@ -373,8 +400,6 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           <p className="muted">Your fingerprint isn't available. Reload the page to try again.</p>
         )}
       </section>
-
-      {desktop && <AboutDesktop desktop={desktop} />}
 
       <section className="card" aria-labelledby="danger-title">
         <div className="card-head">
@@ -403,6 +428,41 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           <p className="card-text">This permanently deletes the account, every vault you own and every item in them. You can't undo this.</p>
         </ConfirmPassword>
       )}
+    </>
+  );
+}
+
+// ------------------------------------------------------------ preferences
+
+/** How PassAuth looks and behaves in this browser or app: theme, icons, and the desktop app's own settings. */
+function PreferencesTab() {
+  const showIcons = useShowIcons();
+  const theme = useTheme();
+  const desktop = getDesktop();
+  return (
+    <>
+      <section className="card" aria-labelledby="appearance-title">
+        <h2 id="appearance-title">Appearance</h2>
+        <Setting
+          as="label"
+          title="Theme"
+          control={
+            <select className="select" value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+              <option value="system">Same as system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          }
+        />
+        <Setting as="label" title="Show website icons" control={<input type="checkbox" role="switch" className="switch" checked={showIcons} onChange={(e) => setShowIcons(e.target.checked)} />}>
+          Icons are fetched by your PassAuth server, which learns the website addresses but never your vault contents. Applies to {clientName()}.
+        </Setting>
+      </section>
+
+      {desktop?.vaultTimeout && <VaultTimeoutCard hook={desktop.vaultTimeout} />}
+      {desktop?.app && <DesktopAppCard hook={desktop.app} />}
+
+      {desktop && <AboutDesktop desktop={desktop} />}
     </>
   );
 }

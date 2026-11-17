@@ -1,4 +1,5 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Link, Navigate, useNavigate, useParams } from "react-router";
 import QRCode from "qrcode";
 import { Wordmark } from "../components/Logo";
 import { CodeField, RecoveryCodesModal } from "../components/TwoStep";
@@ -9,6 +10,7 @@ import { clientId } from "../lib/platform";
 import { formatBytes } from "../lib/sizes";
 import { EventList } from "./Activity";
 import "../styles/tools.css";
+import "../styles/sections.css";
 
 const TOKEN_KEY = "pa.admin";
 
@@ -411,6 +413,8 @@ function SignInForm({ initialError, onSignedIn }: { initialError: string | null;
 // -------------------------------------------------------------- dashboard
 
 function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message: string | null) => void }) {
+  const { section } = useParams();
+  const navigate = useNavigate();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [users, setUsers] = useState<User[] | null>(null);
   const [invites, setInvites] = useState<Invite[] | null>(null);
@@ -480,45 +484,168 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
     );
   }
 
+  const withoutTwoStep = users.filter((u) => !u.disabled && !u.two_factor).length;
+  const ranges = !!settings.ranges;
+  const shown = ADMIN_SECTIONS.filter((x) => (x.key !== "activity" || activityLog) && (!("limits" in x) || ranges));
+  if (section !== undefined && !shown.some((x) => x.key === section)) return <Navigate to="/admin" replace />;
+  const current = (section ?? "overview") as AdminSectionKey;
+  const meta = ADMIN_SECTIONS.find((x) => x.key === current)!;
+  const limits = (groups: string[]) => <LimitsCard key={`limits-${current}`} only={groups} settings={settings} call={call} reload={load} withoutTwoStep={withoutTwoStep} />;
+
+  /** What the list says next to a section, at a glance. */
+  const status = (key: AdminSectionKey): ReactNode => {
+    const c = overview.config;
+    switch (key) {
+      case "users":
+        return <span className="rail-status">{users.length.toLocaleString()}</span>;
+      case "invitations":
+        return invites.length > 0 ? <span className="rail-status is-count">{invites.length}</span> : null;
+      case "signups":
+        return <span className="rail-status">{c.signups_allowed ? "Open" : "Invite only"}</span>;
+      case "email":
+        return c.smtp_enabled ? <span className="rail-status is-ok">On</span> : <span className="rail-status is-warn">Off</span>;
+      case "security":
+        return twoStep.enabled ? <span className="rail-status is-ok">Two-step on</span> : <span className="rail-status is-warn">Two-step off</span>;
+      default:
+        return null;
+    }
+  };
+
+  let body: ReactNode;
+  switch (current) {
+    case "users":
+      body = (
+        <UsersCard
+          users={users}
+          call={call}
+          reload={load}
+          onShowActivity={
+            activityLog
+              ? (id) => {
+                  setActivityUser(id);
+                  navigate("/admin/activity");
+                }
+              : undefined
+          }
+        />
+      );
+      break;
+    case "invitations":
+      body = <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />;
+      break;
+    case "signups":
+      body = (
+        <>
+          <SignupsCard config={overview.config} call={call} reload={load} />
+          <SettingsCard key="verify" only={["verify"]} settings={settings} call={call} reload={load} />
+        </>
+      );
+      break;
+    case "activity":
+      body = <ActivityCard users={users} call={call} user={activityUser} onUser={setActivityUser} />;
+      break;
+    case "sign-in":
+      body = limits(["Sign-in", "Account policies"]);
+      break;
+    case "storage":
+      body = limits(["Storage", "Attachments", "Sync and trash", "History and activity"]);
+      break;
+    case "features":
+      body = (
+        <>
+          <SettingsCard key="features" only={["icons", "breach"]} settings={settings} call={call} reload={load} />
+          {limits(["Send", "Emergency access"])}
+        </>
+      );
+      break;
+    case "email":
+      body = <EmailCard smtp={settings.smtp} call={call} reload={load} />;
+      break;
+    case "security":
+      body = <AdminSecurityCard twoStep={twoStep} networks={overview.config.admin_networks} call={call} reload={load} />;
+      break;
+    default:
+      body = (
+        <>
+          <OverviewCard o={overview} />
+          <SettingsCard key="log" only={["log", "trash"]} settings={settings} call={call} reload={load} />
+        </>
+      );
+  }
+
   return (
-    <main className="admin-main">
-      <OverviewCard o={overview} />
-      <SignupsCard config={overview.config} call={call} reload={load} />
-      <UsersCard
-        users={users}
-        call={call}
-        reload={load}
-        onShowActivity={
-          activityLog
-            ? (id) => {
-                setActivityUser(id);
-                document.getElementById("admin-activity")?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }
-            : undefined
-        }
-      />
-      {activityLog && <ActivityCard users={users} call={call} user={activityUser} onUser={setActivityUser} />}
-      <InvitesCard invites={invites} smtp={overview.config.smtp_enabled} domain={overview.config.domain} call={call} reload={load} />
-      <SettingsCard settings={settings} call={call} reload={load} />
-      {settings.ranges && (
-        <LimitsCard settings={settings} call={call} reload={load} withoutTwoStep={users.filter((u) => !u.disabled && !u.two_factor).length} />
-      )}
-      <EmailCard smtp={settings.smtp} call={call} reload={load} />
-      <AdminSecurityCard twoStep={twoStep} networks={overview.config.admin_networks} call={call} reload={load} />
+    <main className="sections-host admin-body">
+      <div className={`sections${section === undefined ? " is-index" : ""}`}>
+        <nav className="sections-rail" aria-label="Administration sections">
+          {ADMIN_GROUPS.map((g) => {
+            const items = shown.filter((x) => x.group === g);
+            if (!items.length) return null;
+            return (
+              <div key={g} className="rail-group" role="group" aria-labelledby={`rail-${g}`}>
+                <h2 id={`rail-${g}`} className="rail-group-title">
+                  {g}
+                </h2>
+                <ul>
+                  {items.map((x) => (
+                    <li key={x.key}>
+                      <Link
+                        to={x.key === "overview" ? "/admin/overview" : `/admin/${x.key}`}
+                        aria-current={x.key === current && section !== undefined ? "page" : undefined}
+                        className={x.key === current ? "is-current" : undefined}
+                      >
+                        <span className="rail-label">{x.label}</span>
+                        {status(x.key)}
+                        <span className="rail-chevron" aria-hidden="true">
+                          <Icon name="chevron" size={16} />
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </nav>
+        <section className="sections-content" aria-labelledby="section-title">
+          <header className="section-head">
+            <Link to="/admin" className="section-back">
+              <Icon name="back" /> Administration
+            </Link>
+            <h1 id="section-title" className="section-name">
+              {meta.label}
+            </h1>
+            <p className="section-intro">{meta.intro}</p>
+          </header>
+          <div className="admin-section">{body}</div>
+        </section>
+      </div>
     </main>
   );
 }
+
+/** Admin sections, grouped by task; keys are the URL (`/admin/<key>`). `limits`: only on servers that report `ranges`. */
+const ADMIN_SECTIONS = [
+  { key: "overview", group: "Server", label: "Overview", intro: "What this server holds, how it's set up, and how much it logs." },
+  { key: "email", group: "Server", label: "Email delivery", intro: "The mail server PassAuth sends codes, invitations and alerts through." },
+  { key: "security", group: "Server", label: "Admin security", intro: "How this admin page is protected." },
+  { key: "users", group: "People", label: "Users", intro: "Every account on this server. Block, reset two-step login or delete accounts here." },
+  { key: "invitations", group: "People", label: "Invitations", intro: "Invite people by email, even while sign-ups are closed." },
+  { key: "signups", group: "People", label: "Sign-ups", intro: "Who can create an account on this server." },
+  { key: "activity", group: "People", label: "Activity", intro: "Sign-ins, account and sharing changes on this server, newest first." },
+  { key: "sign-in", group: "Rules", label: "Sign-in and passwords", intro: "Sessions, sign-in limits and the rules every account must follow.", limits: true },
+  { key: "storage", group: "Rules", label: "Storage and data", intro: "How much people can store, and how long deleted items and history are kept.", limits: true },
+  { key: "features", group: "Rules", label: "Features", intro: "Optional features you can turn on or off for everyone.", limits: true },
+] as const;
+type AdminSectionKey = (typeof ADMIN_SECTIONS)[number]["key"];
+const ADMIN_GROUPS = ["Server", "People", "Rules"] as const;
 
 type Call = <T>(path: string, opts?: { method?: string; body?: unknown }) => Promise<T>;
 
 function OverviewCard({ o }: { o: Overview }) {
   const c = o.config;
   return (
-    <section className="stack" aria-labelledby="ov-title">
-      <div className="row-between">
-        <h1 id="ov-title">Overview</h1>
-        <span className="small muted">PassAuth server version {o.version}</span>
-      </div>
+    <div className="stack">
+      <p className="small muted">PassAuth server version {o.version}</p>
       {c.admin_login === "token" && (
         <div className="alert alert-info" role="note">
           You sign in with ADMIN_TOKEN. To sign in with a user name and password instead, set PASSAUTH_ADMIN_USERNAME and PASSAUTH_ADMIN_PASSWORD in the
@@ -577,7 +704,7 @@ function OverviewCard({ o }: { o: Overview }) {
           )}
         </dl>
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -612,14 +739,14 @@ function SignupsCard({ config, call, reload }: { config: Overview["config"]; cal
 
   return (
     <section className="card" aria-labelledby="signups-title">
-      <h2 id="signups-title">Sign-ups</h2>
+      <h2 id="signups-title">Who can sign up</h2>
       <form className="stack" onSubmit={save}>
-        <label className="check">
-          <input type="checkbox" checked={allowed} onChange={(e) => setAllowed(e.target.checked)} />
-          <span>
-            Allow new accounts to sign up
-            <span className="field-hint block">When off, only people you invite below can create an account. Existing accounts are not affected.</span>
+        <label className="setting">
+          <span className="setting-text">
+            <span className="setting-title">Allow new accounts to sign up</span>
+            <span className="setting-desc">When off, only people you invite (People → Invitations) can create an account. Existing accounts are not affected.</span>
           </span>
+          <input type="checkbox" role="switch" className="switch" checked={allowed} onChange={(e) => setAllowed(e.target.checked)} />
         </label>
         {allowed && (
           <label className="field">
@@ -684,7 +811,7 @@ function UsersCard({
   return (
     <section className="card" aria-labelledby="users-title">
       <div className="card-head">
-        <h2 id="users-title">Users</h2>
+        <h2 id="users-title">Accounts</h2>
         <span className="small muted">{users.length === 1 ? "1 account" : `${users.length.toLocaleString()} accounts`}</span>
       </div>
       <ErrorText error={error} />
@@ -935,7 +1062,7 @@ function InvitesCard({ invites, smtp, domain, call, reload }: { invites: Invite[
 
   return (
     <section className="card" aria-labelledby="inv-title">
-      <h2 id="inv-title">Invitations</h2>
+      <h2 id="inv-title">Invite someone</h2>
       <p className="card-text">
         Invited people can create an account even when sign-ups are closed.{" "}
         {smtp ? "They receive an email with a sign-up link." : "Email is off, so share the sign-up link with them yourself."}
@@ -1047,7 +1174,7 @@ function ActivityCard({ users, call, user, onUser }: { users: User[]; call: Call
   return (
     <section className="card" id="admin-activity" aria-labelledby="activity-title">
       <div className="stack-s">
-        <h2 id="activity-title">Activity</h2>
+        <h2 id="activity-title">Events</h2>
         <p className="card-text">
           Sign-ins, account and sharing changes and item changes on this server, newest first. Vault contents are never recorded, so vaults and items are
           known here by what happened to them.
@@ -1132,23 +1259,27 @@ function ActivityCard({ users, call, user, onUser }: { users: User[]; call: Call
 /** "Empty trash after" choices in days; 0 keeps the trash until someone empties it. */
 const TRASH_DAYS = [0, 30, 60, 90];
 
-function SettingsCard({ settings, call, reload }: { settings: Settings; call: Call; reload: () => Promise<void> }) {
+type ServerSetting = "verify" | "icons" | "breach" | "log" | "trash";
+
+/** Some of the server's own settings (`PUT /admin/settings` takes any subset), so each section saves only what it shows. */
+function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[]; settings: Settings; call: Call; reload: () => Promise<void> }) {
+  const has = (k: ServerSetting) => only.includes(k);
   const [level, setLevel] = useState(settings.log_level);
   const [icons, setIcons] = useState(settings.icons);
   const [verify, setVerify] = useState(settings.signups_verify);
-  const hasBreach = typeof settings.breach_check === "boolean";
+  const hasBreach = has("breach") && typeof settings.breach_check === "boolean";
   const [breach, setBreach] = useState(settings.breach_check ?? true);
   // Only servers that can empty the trash by themselves report trash_days; with `ranges` it is set under Limits.
   const trashDaysNow = typeof settings.trash_days === "number" ? settings.trash_days : undefined;
-  const hasTrash = trashDaysNow !== undefined && !settings.ranges;
+  const hasTrash = has("trash") && trashDaysNow !== undefined && !settings.ranges;
   const [trashDays, setTrashDays] = useState(trashDaysNow ?? 0);
   const trashChoices = TRASH_DAYS.includes(trashDaysNow ?? 0) ? TRASH_DAYS : [...TRASH_DAYS, trashDaysNow!].sort((a, b) => a - b);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const changed =
-    level !== settings.log_level ||
-    icons !== settings.icons ||
-    verify !== settings.signups_verify ||
+    (has("log") && level !== settings.log_level) ||
+    (has("icons") && icons !== settings.icons) ||
+    (has("verify") && verify !== settings.signups_verify) ||
     (hasBreach && breach !== settings.breach_check) ||
     (hasTrash && trashDays !== trashDaysNow);
 
@@ -1159,10 +1290,16 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
     try {
       await call("/settings", {
         method: "PUT",
-        body: { log_level: level, icons, signups_verify: verify, ...(hasBreach ? { breach_check: breach } : {}), ...(hasTrash ? { trash_days: trashDays } : {}) },
+        body: {
+          ...(has("log") ? { log_level: level } : {}),
+          ...(has("icons") ? { icons } : {}),
+          ...(has("verify") ? { signups_verify: verify } : {}),
+          ...(hasBreach ? { breach_check: breach } : {}),
+          ...(hasTrash ? { trash_days: trashDays } : {}),
+        },
       });
       await reload();
-      toast("Server settings saved");
+      toast("Changes saved");
     } catch (err) {
       if (!(err instanceof AdminError && err.status === 401)) setError((err as Error).message);
     } finally {
@@ -1171,50 +1308,50 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
   }
 
   return (
-    <section className="card" aria-labelledby="settings-title">
-      <h2 id="settings-title">Server settings</h2>
+    <section className="card" aria-labelledby={`settings-title-${only[0]}`}>
+      <h2 id={`settings-title-${only[0]}`}>{has("verify") ? "Confirm email addresses" : has("log") ? "Server log" : "Optional services"}</h2>
       <form className="stack" onSubmit={save}>
-        <label className="check">
-          <input type="checkbox" checked={verify} onChange={(e) => setVerify(e.target.checked)} />
-          <span>
-            New accounts must confirm their email address
-            <span className="field-hint block">Needs email delivery (below). Without email, new accounts are confirmed automatically.</span>
-          </span>
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={icons} onChange={(e) => setIcons(e.target.checked)} />
-          <span>
-            Show website icons
-            <span className="field-hint block">
-              The server fetches each website's icon for the apps. It learns which websites' icons are asked for, never anything in a vault. When off, apps
-              show the first letter instead.
+        {has("verify") && (
+          <label className="setting">
+            <span className="setting-text">
+              <span className="setting-title">New accounts must confirm their email address</span>
+              <span className="setting-desc">Needs email delivery (Server → Email delivery). Without email, new accounts are confirmed automatically.</span>
             </span>
-          </span>
-        </label>
-        {hasBreach && (
-          <label className="check">
-            <input type="checkbox" checked={breach} onChange={(e) => setBreach(e.target.checked)} />
-            <span>
-              Check passwords against Have I Been Pwned
-              <span className="field-hint block">
-                Lets people find out in Password health whether their passwords appear in known data breaches, sending only the first 5 characters of
-                each password's SHA-1 hash from their device (never a password, and never through this server).
-              </span>
-            </span>
+            <input type="checkbox" role="switch" className="switch" checked={verify} onChange={(e) => setVerify(e.target.checked)} />
           </label>
         )}
-        <label className="field">
-          <span>Server log</span>
-          <select className="select" value={level} onChange={(e) => setLevel(e.target.value)}>
-            {level === "custom" && <option value="custom">Custom (LOG_LEVEL in .env)</option>}
-            {settings.log_levels.map((l) => (
-              <option key={l} value={l}>
-                {LEVEL_LABELS[l] ?? l}
-              </option>
-            ))}
-          </select>
-          <span className="field-hint">How much the server writes to its log (docker compose logs). Vault contents and passwords are never logged.</span>
-        </label>
+        {has("icons") && (
+          <label className="setting">
+            <span className="setting-text">
+              <span className="setting-title">Show website icons</span>
+              <span className="setting-desc">The server fetches each website's icon for the apps. It learns which websites' icons are asked for, never anything in a vault. When off, apps show the first letter instead.</span>
+            </span>
+            <input type="checkbox" role="switch" className="switch" checked={icons} onChange={(e) => setIcons(e.target.checked)} />
+          </label>
+        )}
+        {hasBreach && (
+          <label className="setting">
+            <span className="setting-text">
+              <span className="setting-title">Check passwords against Have I Been Pwned</span>
+              <span className="setting-desc">Lets people find out in Password health whether their passwords appear in known data breaches, sending only the first 5 characters of each password's SHA-1 hash from their device (never a password, and never through this server).</span>
+            </span>
+            <input type="checkbox" role="switch" className="switch" checked={breach} onChange={(e) => setBreach(e.target.checked)} />
+          </label>
+        )}
+        {has("log") && (
+          <label className="field">
+            <span>How much to log</span>
+            <select className="select" value={level} onChange={(e) => setLevel(e.target.value)}>
+              {level === "custom" && <option value="custom">Custom (LOG_LEVEL in .env)</option>}
+              {settings.log_levels.map((l) => (
+                <option key={l} value={l}>
+                  {LEVEL_LABELS[l] ?? l}
+                </option>
+              ))}
+            </select>
+            <span className="field-hint">How much the server writes to its log (docker compose logs). Vault contents and passwords are never logged.</span>
+          </label>
+        )}
         {hasTrash && (
           <label className="field">
             <span>Empty trash after</span>
@@ -1234,9 +1371,11 @@ function SettingsCard({ settings, call, reload }: { settings: Settings; call: Ca
         <ErrorText error={error} />
         <div className="card-actions">
           <button type="submit" className="btn btn-primary" disabled={busy || !changed}>
-            {busy ? "Saving…" : "Save server settings"}
+            {busy ? "Saving…" : "Save changes"}
           </button>
-          <span className="small muted">Takes effect immediately and replaces SIGNUPS_VERIFY, ICON_SERVICE and LOG_LEVEL from the server's .env file.</span>
+          <span className="small muted">
+            Takes effect immediately and replaces {[has("verify") && "SIGNUPS_VERIFY", has("icons") && "ICON_SERVICE", has("log") && "LOG_LEVEL"].filter(Boolean).join(" and ") || "the setting"} from the server's .env file.
+          </span>
         </div>
       </form>
     </section>
@@ -1465,11 +1604,24 @@ const LIMIT_GROUPS: { title: string; note?: string; fields: LimitField[]; switch
  * Lifetimes, attempt limits, quotas, sync settings, account policies and Send (`GET /admin/settings` values,
  * `ranges` and `switches`); saves only what changed, after asking for the switches that need it.
  */
-function LimitsCard({ settings, call, reload, withoutTwoStep }: { settings: Settings; call: Call; reload: () => Promise<void>; withoutTwoStep: number }) {
+function LimitsCard({
+  only,
+  settings,
+  call,
+  reload,
+  withoutTwoStep,
+}: {
+  /** The LIMIT_GROUPS titles this section shows. */
+  only: string[];
+  settings: Settings;
+  call: Call;
+  reload: () => Promise<void>;
+  withoutTwoStep: number;
+}) {
   const ranges = settings.ranges ?? {};
   const savedValue = (name: string) => settings[name] as number;
   const savedSwitch = (name: string) => settings[name] as boolean;
-  const groups = LIMIT_GROUPS.map((g) => ({
+  const groups = LIMIT_GROUPS.filter((g) => only.includes(g.title)).map((g) => ({
     ...g,
     fields: g.fields.filter((f) => ranges[f.name] && typeof settings[f.name] === "number"),
     switches: (g.switches ?? []).filter((sw) => typeof settings[sw.name] === "boolean"),
@@ -1550,15 +1702,11 @@ function LimitsCard({ settings, call, reload, withoutTwoStep }: { settings: Sett
   );
 
   return (
-    <section className="card" aria-labelledby="limits-title">
-      <div className="stack-s">
-        <h2 id="limits-title">Limits and policies</h2>
-        <p className="card-text">These apply to every account on this server and take effect immediately.</p>
-      </div>
-      <form className="stack" onSubmit={save} noValidate>
+    <>
+      <form className="limits-form" onSubmit={save} noValidate>
         {groups.map((g) => (
-          <fieldset key={g.title} className="limit-group">
-            <legend className="section-title">{g.title}</legend>
+          <fieldset key={g.title} className="card limit-group">
+            <legend className="limit-title">{g.title}</legend>
             {g.switchesFirst && g.switches.map(switchRow)}
             {g.fields.length > 0 && (
               <div className="limit-grid">
@@ -1607,16 +1755,16 @@ function LimitsCard({ settings, call, reload, withoutTwoStep }: { settings: Sett
             {g.note && g.fields.length > 0 && <p className="small muted">{g.note}</p>}
           </fieldset>
         ))}
-        <ErrorText error={error} />
-        <div className="card-actions">
-          <button type="submit" className="btn btn-primary" disabled={busy || unsaved === 0}>
-            {busy ? "Saving…" : "Save changes"}
-          </button>
-          {unsaved > 0 && !busy && (
+        <div className={`save-bar${unsaved > 0 ? " is-dirty" : ""}`}>
+          <ErrorText error={error} />
+          <div className="card-actions">
+            <button type="submit" className="btn btn-primary" disabled={busy || unsaved === 0}>
+              {busy ? "Saving…" : "Save changes"}
+            </button>
             <span className="small muted" role="status">
-              {unsaved === 1 ? "1 change not saved yet" : `${unsaved} changes not saved yet`}
+              {busy ? "" : unsaved === 0 ? "Applies to every account as soon as you save." : unsaved === 1 ? "1 change not saved yet" : `${unsaved} changes not saved yet`}
             </span>
-          )}
+          </div>
         </div>
       </form>
       {asking && (
@@ -1638,7 +1786,7 @@ function LimitsCard({ settings, call, reload, withoutTwoStep }: { settings: Sett
           <p className="card-text">{asking.text({ withoutTwoStep })}</p>
         </ConfirmDialog>
       )}
-    </section>
+    </>
   );
 }
 
@@ -1714,7 +1862,7 @@ function EmailCard({ smtp, call, reload }: { smtp: Smtp | null; call: Call; relo
 
   return (
     <section className="card" aria-labelledby="smtp-title">
-      <h2 id="smtp-title">Email delivery</h2>
+      <h2 id="smtp-title">Mail server</h2>
       <p className="card-text">
         {smtp
           ? "The server sends verification codes, invitations and security alerts through this mail server."
@@ -1868,8 +2016,8 @@ function AdminSecurityCard({ twoStep, networks, call, reload }: { twoStep: TwoSt
     <section className="card" aria-labelledby="admin-security-title">
       <div className="card-head">
         <div className="card-title">
-          <h2 id="admin-security-title">Admin security</h2>
-          {twoStep.enabled ? <span className="badge badge-ok">Two-step login on</span> : <span className="badge">Two-step login off</span>}
+          <h2 id="admin-security-title">Two-step login</h2>
+          {twoStep.enabled ? <span className="badge badge-ok">On</span> : <span className="badge">Off</span>}
         </div>
         {twoStep.enabled ? (
           <div className="card-actions">

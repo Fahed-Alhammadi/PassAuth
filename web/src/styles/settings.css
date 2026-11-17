@@ -1,6 +1,6 @@
 /* Settings page: section tabs, cards and rows. Tokens come from app.css. */
 
-.settings-head { display: flex; flex-direction: column; gap: var(--space-4); }
+
 
 .settings-tabs {
   display: flex; gap: var(--space-1); overflow-x: auto; border-bottom: 1px solid var(--line);

@@ -116,6 +116,7 @@ const router = createBrowserRouter([
   { path: "/register", element: <RegisterPage /> },
   { path: "/verify-email", element: <VerifyEmailPage /> },
   { path: "/admin", element: <AdminPage /> },
+  { path: "/admin/:section", element: <AdminPage /> },
   // Public: anyone with a Send's link opens it here, with or without an account (never signed in for it).
   { path: "/send/:id", element: <SendViewPage /> },
   {
