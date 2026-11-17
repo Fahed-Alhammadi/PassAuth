@@ -1,6 +1,2 @@
-• Send: share a note through an encrypted link that expires.
-• Attachments: add files to items, then open or save them.
-• Emergency access: someone you trust can ask for view-only access after a wait you choose.
-• Signed sharing: shared vaults are checked against the sharer's signature; a vault added without an invitation waits for your OK.
-• Editing no longer drops attached files.
-Needs PassAuth server 0.12.0.
+• Use one login on several sites and apps: when nothing is saved for a site or app, pick "Add this site to a login…" (or "Add this app…") in the autofill list. PassAuth adds it to the login you choose and fills it.
+• When you save a password that matches a login for another site, the save sheet also offers "Add this site".
