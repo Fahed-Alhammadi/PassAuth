@@ -399,6 +399,9 @@ test("passkey bridge requests: answered only in a tab's frame (a PassAuth page g
 });
 
 test("C7: malformed messages from content scripts and frames are refused before their handler runs", async () => {
+  // Work an earlier test started (timeout writes after a refused request) may land late on a slow machine: let it, then start empty.
+  await new Promise((r) => setTimeout(r, 100));
+  fake.session.data.clear();
   const bad: [Record<string, unknown>, ReturnType<typeof page> | ReturnType<typeof framed>][] = [
     [{ type: "page:submitted", username: 1, password: "pw" }, page(0)],
     [{ type: "page:submitted", username: "alex" }, page(0)],
@@ -422,7 +425,7 @@ test("C7: malformed messages from content scripts and frames are refused before 
     [{ type: "save:touch" }, framed("save-prompt.html", 7)],
   ];
   for (const [msg, sender] of bad) expect(await fake.deliver(msg, sender), JSON.stringify(msg).slice(0, 80)).toStrictEqual(NOT_ALLOWED);
-  expect(fake.session.data.size, "nothing was stored").toBe(0);
+  expect([...fake.session.data.keys()], "nothing was stored").toStrictEqual([]);
 });
 
 test('C10: a popup request while locked fails with the code "locked"', async () => {
