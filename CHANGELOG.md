@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.12.1 (2026-11-17)
+
+- Web vault: reorganize Settings and the admin page into sections (8c73bd9)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.12.0...server-0.12.1)
+
 ## 0.12.0 (2026-11-16)
 
 - Apps: adopt core round 5 — authenticated session restore, last-known pin merges, safe declines, unsent pins kept (fa84a4b)
