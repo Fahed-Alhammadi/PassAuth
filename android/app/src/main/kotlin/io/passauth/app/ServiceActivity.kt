@@ -44,6 +44,7 @@ import io.passauth.app.ui.components.QuietActions
 import io.passauth.app.ui.components.QuietButton
 import io.passauth.app.ui.components.RowDivider
 import io.passauth.app.ui.components.Tile
+import io.passauth.app.ui.components.TextInput
 import io.passauth.app.ui.components.TileRowInset
 import io.passauth.app.ui.components.WarningNote
 import io.passauth.app.ui.components.largeText
@@ -83,6 +84,17 @@ abstract class ServiceActivity : SecureActivity() {
             val warning: (String?) -> String? = { null },
         ) : Screen
         data class Message(val title: String, val body: String, val openApp: Boolean) : Screen
+
+        /** Pick one of many (with a search field), then [onPick] with its id. */
+        data class Pick(
+            val title: String,
+            val place: String,
+            val body: String?,
+            val choices: List<Choice>,
+            val action: String,
+            val onPick: suspend (String) -> Unit,
+            val account: String,
+        ) : Screen
     }
 
     private var screen by mutableStateOf<Screen>(Screen.None)
@@ -153,6 +165,7 @@ abstract class ServiceActivity : SecureActivity() {
             // A consent sheet belongs to the unlocked session it was opened in: locking, logging out
             // or switching account closes it (and with it whatever was waiting to be saved).
             is Screen.Confirm -> if (state.status == Status.Unlocked && state.activeId == s.account) ConfirmPrompt(s) else LaunchedEffect(Unit) { cancel() }
+            is Screen.Pick -> if (state.status == Status.Unlocked && state.activeId == s.account) PickPrompt(s) else LaunchedEffect(Unit) { cancel() }
             is Screen.Message -> MessagePrompt(s)
         }
     }
@@ -187,32 +200,69 @@ abstract class ServiceActivity : SecureActivity() {
         null -> null
     }
 
-    @Composable
-    private fun ConfirmPrompt(s: Screen.Confirm) {
-        fun run(block: suspend () -> Unit) {
-            if (busy) return
-            busy = true
-            error = null
-            lifecycleScope.launch {
-                try {
-                    block()
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    error = io.passauth.app.ui.errorMessage(e)
-                } finally {
-                    busy = false
-                }
+    private fun runAction(block: suspend () -> Unit) {
+        if (busy) return
+        busy = true
+        error = null
+        lifecycleScope.launch {
+            try {
+                block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = io.passauth.app.ui.errorMessage(e)
+            } finally {
+                busy = false
             }
         }
+    }
+
+    @Composable
+    private fun PickPrompt(s: Screen.Pick) {
+        var query by remember(s) { mutableStateOf("") }
+        val q = query.trim().lowercase()
+        val found = if (q.isEmpty()) s.choices else s.choices.filter { it.title.lowercase().contains(q) || it.detail.lowercase().contains(q) }
+        val shown = found.take(PICK_LIMIT)
         PromptSheet(
             onClose = ::cancel,
             canClose = !busy,
             error = error,
             actions = {
-                PrimaryButton(s.action(chosen), { run(s.onConfirm) }, busy = busy)
+                val pick = chosen?.takeIf { id -> s.choices.any { it.id == id } }
+                PrimaryButton(s.action, { pick?.let { id -> runAction { s.onPick(id) } } }, enabled = pick != null, busy = busy)
+                QuietActions { QuietButton("Cancel", ::cancel, enabled = !busy) }
+            },
+        ) {
+            PromptHeader(s.title, s.place) { Tile(s.place) }
+            s.body?.let { PromptText(it) }
+            Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+                TextInput(query, { query = it }, "Search logins", imeAction = androidx.compose.ui.text.input.ImeAction.Search)
+                if (shown.isEmpty()) {
+                    PromptText("No login matches “${query.trim()}”.", Modifier)
+                } else {
+                    GroupCard(Modifier.selectableGroup()) {
+                        val inset = if (largeText()) Space.l else TileRowInset
+                        shown.forEachIndexed { n, c ->
+                            if (n > 0) RowDivider(inset)
+                            ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol))
+                        }
+                    }
+                }
+                if (found.size > shown.size) PromptText("Showing ${shown.size} of ${found.size}. Search to find the others.", Modifier)
+            }
+        }
+    }
+
+    @Composable
+    private fun ConfirmPrompt(s: Screen.Confirm) {
+        PromptSheet(
+            onClose = ::cancel,
+            canClose = !busy,
+            error = error,
+            actions = {
+                PrimaryButton(s.action(chosen), { runAction(s.onConfirm) }, busy = busy)
                 QuietActions {
-                    s.quiet.forEach { q -> QuietButton(q.label, { run(q.onClick) }, enabled = !busy) }
+                    s.quiet.forEach { q -> QuietButton(q.label, { runAction(q.onClick) }, enabled = !busy) }
                     QuietButton(if (s.quiet.isEmpty()) "Cancel" else "Not now", ::cancel, enabled = !busy)
                 }
             },
@@ -233,6 +283,7 @@ abstract class ServiceActivity : SecureActivity() {
                     s.footnote?.let { PromptText(it, Modifier) }
                 }
             } else {
+                s.warning(chosen)?.let { WarningNote(it) }
                 s.footnote?.let { PromptText(it) }
             }
         }
@@ -297,6 +348,24 @@ abstract class ServiceActivity : SecureActivity() {
         screen = Screen.Confirm(title, place, body, action, onConfirm, choicesLabel, choices, footnote, quiet, graph.repo.state.value.activeId, warning)
     }
 
+    /**
+     * Let the user pick one of [choices] (searchable: long lists like a whole vault), then
+     * [onPick] with its id; its errors are shown on the sheet. Nothing is preselected.
+     */
+    protected fun pick(
+        title: String,
+        place: String,
+        body: String?,
+        choices: List<Choice>,
+        action: String,
+        error: String? = null,
+        onPick: suspend (String) -> Unit,
+    ) {
+        this.error = error
+        chosen = null
+        screen = Screen.Pick(title, place, body, choices, action, onPick, graph.repo.state.value.activeId)
+    }
+
     /** Show a message with a Close button (the request fails when closed). */
     protected fun message(title: String, body: String) {
         screen = Screen.Message(title, body, openApp = false)
@@ -316,5 +385,10 @@ abstract class ServiceActivity : SecureActivity() {
     protected open fun cancel() {
         setResult(RESULT_CANCELED)
         finish()
+    }
+
+    private companion object {
+        /** Rows a picker shows at once (the rest are found by searching). */
+        const val PICK_LIMIT = 50
     }
 }

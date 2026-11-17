@@ -1831,6 +1831,16 @@ class VaultRepository(
         mutex.withLock { updateLocked(entry, item, targetVaultId) }
     }
 
+    /**
+     * "Add this site to a login": [url] (a page origin or `androidapp://<package>`) becomes one
+     * more website of the login [entry], with match "default"; nothing else changes. Saved like any
+     * edit ([updateItem]: refused for a view-only vault, [ConflictException] on a newer version).
+     */
+    suspend fun addWebsite(entry: Entry, url: String) {
+        val login = entry.item.login ?: throw UserException("Login not found.")
+        updateItem(entry, entry.item.copy(login = login.copy(urls = login.urls + LoginUrl(url, UrlMatch.Default))))
+    }
+
     private suspend fun updateLocked(base: Entry, item: Item, targetVaultId: String) {
         requireOnline(requireVault())
         val t = now()

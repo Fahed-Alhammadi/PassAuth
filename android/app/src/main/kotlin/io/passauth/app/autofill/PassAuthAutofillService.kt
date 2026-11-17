@@ -76,7 +76,7 @@ class PassAuthAutofillService : AutofillService() {
             // Locked: the user unlocks in PassAuth, which then returns the matching logins.
             b.setAuthentication(ids.toTypedArray(), AutofillAuthActivity.sender(this, AutofillAuthActivity.MODE_UNLOCK), ui.lockedPresentations(state.email))
         } else {
-            val datasets = AutofillAuthActivity.buildDatasets(this, ui, engine, vault, target, form, state.settings)
+            val datasets = AutofillAuthActivity.buildDatasets(this, ui, engine, vault, target, form, state.settings, AddSite.allowed(target, parsed.webDomain))
             // Only "Open PassAuth" and nothing to save: stay out of the way.
             if (datasets.size <= 1 && save == null && form.password == null) return null
             b.addAll(datasets)
@@ -111,6 +111,9 @@ class PassAuthAutofillService : AutofillService() {
                 // never overwritten on the strength of Android's dialog alone. PassAuth shows which
                 // login would change ("Update login?") and lets the user choose.
                 if (SaveRule.needsSheet(plan)) return@launch askInSheet()
+                // A new login, but the same account is saved for another site or app: the sheet
+                // offers to add this place to that login instead (never chosen without the user).
+                if (engine.sameAccountElsewhere(vault, target, creds.first, creds.second).isNotEmpty()) return@launch askInSheet()
                 callback.onSuccess()
                 engine.applySave(vault, target, creds.first, creds.second, label, plan)?.let { toast(it) }
             } catch (e: CancellationException) {

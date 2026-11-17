@@ -96,6 +96,10 @@ struct MacAutofillRoot: View {
             MacInfo(model: model, symbol: "exclamationmark.triangle", title: title, text: text)
         case .configured:
             MacSettings(model: model, onBack: nil)
+        case .addSite:
+            MacAddSitePicker(model: model)
+        case .confirmAddSite:
+            MacAddSiteConfirm(model: model)
         case .confirmSave, .generate:
             // iOS only (macOS has no save / generate requests).
             MacInfo(model: model, symbol: "exclamationmark.triangle", title: "Not available", text: "This request isn't supported on macOS.")
@@ -488,10 +492,20 @@ struct MacList: View {
                 if !searching && !model.pages.isEmpty {
                     Section("For this site") {
                         if suggestions.isEmpty {
-                            Text(model.onlyCodes ? "No login with a verification code for this site. Search your other logins." : "No login saved for this site. Search your other logins.")
+                            Text(model.onlyCodes ? "No login with a verification code for this site. Search your other logins."
+                                 : model.addSitePage != nil ? "No login saved for this site. If you use one of your logins here, add this site to it."
+                                 : "No login saved for this site. Search your other logins.")
                                 .foregroundStyle(.secondary)
                         }
                         ForEach(suggestions) { e in entryRow(e) }
+                        if model.addSitePage != nil {
+                            // One account used on several sites: add this one to it instead of saving a copy.
+                            Button { model.openAddSite() } label: {
+                                MacRow(title: "Add this site to a login…", subtitle: suggestions.isEmpty ? "Use a login you saved for another site" : "", symbol: "plus")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("addSite")
+                        }
                     }
                 }
                 let shown = Set(suggestions.map(\.id))
@@ -592,6 +606,110 @@ private struct MacRow: View {
         .padding(.vertical, 3)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: Add this site to a login
+
+/// Choose the login this site is added to: editable logins none of whose websites match it yet.
+struct MacAddSitePicker: View {
+    @Bindable var model: AutofillModel
+    @State private var query = ""
+    @FocusState private var searchFocused: Bool
+    /// `AddSite.targets` matches every login against the page: computed once per vault change.
+    @State private var targets: [Entry] = []
+
+    var body: some View {
+        let host = model.addSiteHost
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let shown = q.isEmpty ? targets : AutofillMatcher.search(q, targets)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: PA.Space.m) {
+                PromptHeader(site: host, title: "Add this site to a login", subtitle: host)
+                Text("Pick the login you use on \(host). PassAuth adds this site to it, so it is suggested here from now on.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search logins", text: $query)
+                        .textFieldStyle(.plain)
+                        .focused($searchFocused)
+                        .accessibilityIdentifier("addSiteSearch")
+                    if !query.isEmpty {
+                        Button { query = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                            .buttonStyle(.borderless).accessibilityLabel("Clear search")
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+            }
+            .padding(.horizontal, PA.Space.l).padding(.top, PA.Space.l).padding(.bottom, PA.Space.s)
+
+            List {
+                Section(q.isEmpty ? "Your logins" : "Results") {
+                    if shown.isEmpty {
+                        Text(q.isEmpty ? "No logins to add this site to. Logins already saved for this site are in the list." : "No login matches “\(q)”.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(shown) { e in
+                        Button { model.chooseAddSite(e) } label: {
+                            MacRow(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("addSite-\(e.item.name)")
+                    }
+                }
+            }
+            .listStyle(.inset)
+            Divider()
+            HStack {
+                Button { model.addSiteBack() } label: { Label("Back", systemImage: "chevron.backward") }
+                    .buttonStyle(.link)
+                    .accessibilityIdentifier("addSiteBack")
+                Spacer()
+            }
+            .padding(.horizontal, PA.Space.l).padding(.vertical, 8)
+        }
+        .onAppear {
+            targets = model.addSiteTargets
+            searchFocused = true
+        }
+        .onChange(of: model.repo.vault?.revision) { targets = model.addSiteTargets }
+    }
+
+    /// "alex@example.com · gmail.com", and the vault's name for a login somebody shared.
+    private func detail(_ e: Entry) -> String {
+        var parts = [e.item.login?.username ?? "", AddSite.site(e)].filter { !$0.isEmpty }
+        if let shared = model.sharedVaultName(e) { parts.append("shared vault \(shared)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Confirm adding this site to the chosen login; then it is filled.
+struct MacAddSiteConfirm: View {
+    @Bindable var model: AutofillModel
+
+    var body: some View {
+        let host = model.addSiteHost
+        let e = model.addSiteChoice
+        let user = e?.item.login?.username ?? ""
+        MacPrompt(site: host, title: "Add \(host) to \(e.map(AddSite.name) ?? "this login")?", subtitle: user.isEmpty ? nil : user, error: model.error) {
+            if let e {
+                Text(AddSite.confirmText(e, host: host))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("addSiteText")
+                if let warning = model.addSiteWarning(e) {
+                    WarningNote(text: warning, identifier: "addSiteWarning")
+                }
+            }
+        } actions: {
+            MacPrimaryButton(title: model.busy ? "Adding…" : "Add site and fill", busy: model.busy, enabled: e != nil, action: model.confirmAddSite)
+                .accessibilityIdentifier("addSiteConfirm")
+            MacQuietActions {
+                Button("Back") { model.addSiteBack() }.disabled(model.busy)
+                    .accessibilityIdentifier("addSiteBack")
+            }
+        }
     }
 }
 

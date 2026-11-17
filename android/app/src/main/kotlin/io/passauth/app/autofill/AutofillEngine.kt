@@ -82,14 +82,48 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
      * counts as neither.
      */
     fun saveCandidates(vault: VaultData, target: FillTarget): List<SaveRule.Candidate<String>> =
-        AutofillMatcher.saveCandidates(
-            target,
-            vault.entries.mapNotNull { e -> e.item.login?.let { Triple(e.id, e.item.name, it) } },
-            settings().defaultMatch,
-        ) { id ->
-            val info = vault.get(id)?.let { e -> vault.vaults.firstOrNull { it.id == e.vaultId } }
-            AutofillMatcher.Place(writable = info != null && info.role != Role.Read, personal = info?.personal == true, vault = info?.name.orEmpty())
-        }
+        AutofillMatcher.saveCandidates(target, logins(vault), settings().defaultMatch, placeOf(vault))
+
+    /** The vault's logins as (id, name, login) and where each lives, for [SaveRule] and [AddSite]. */
+    private fun logins(vault: VaultData): List<Triple<String, String, Login>> =
+        vault.entries.mapNotNull { e -> e.item.login?.let { Triple(e.id, e.item.name, it) } }
+
+    private fun placeOf(vault: VaultData): (String) -> AutofillMatcher.Place = { id ->
+        val info = vault.get(id)?.let { e -> vault.vaults.firstOrNull { it.id == e.vaultId } }
+        AutofillMatcher.Place(writable = info != null && info.role != Role.Read, personal = info?.personal == true, vault = info?.name.orEmpty())
+    }
+
+    /** The logins [target] can be added to ("Add this site to a login", see [AddSite.targets]). */
+    fun addSiteTargets(vault: VaultData, target: FillTarget): List<AddSite.Target<String>> =
+        AddSite.targets(target, logins(vault), settings().defaultMatch, placeOf(vault))
+
+    /**
+     * The save sheet's "Add this site" rows for what was typed ([AddSite.sameAccountElsewhere]):
+     * only when the save rule has nothing for this place to offer and would save a new login.
+     */
+    fun sameAccountElsewhere(vault: VaultData, target: FillTarget, username: String, password: String): List<AddSite.Target<String>> {
+        if (!offerSave(target)) return emptyList()
+        val candidates = saveCandidates(vault, target)
+        if (SaveRule.plan(candidates, username, password) != SaveRule.Plan.New) return emptyList()
+        return AddSite.sameAccountElsewhere(
+            target, logins(vault), settings().defaultMatch, placeOf(vault), username, password,
+            SaveRule.targets(candidates, username, password),
+        )
+    }
+
+    /**
+     * Add [target]'s address to the login [id] (on the vault as it is now). Returns the login's
+     * entry, which matches [target] from now on. Nothing is written when it already matched.
+     * Throws when the login is gone or can only be viewed.
+     */
+    suspend fun addSite(vault: VaultData, id: String, target: FillTarget): Entry {
+        val e = vault.get(id)
+        val login = e?.item?.login ?: throw io.passauth.app.data.UserException("That login is no longer in your vault.")
+        if (!vault.canWrite(e)) throw io.passauth.app.data.UserException("You can only view this login, so nothing can be added to it.")
+        if (AddSite.alreadyMatches(target, login, settings().defaultMatch, vault.isPersonal(e))) return e
+        graph.repo.addWebsite(e, AddSite.address(target))
+        return e.copy(item = e.item.copy(login = AddSite.withSite(login, target)))
+    }
 
     /** What Android's save dialog can say about [target] before anything is typed (see [SaveRule.hint]). */
     fun saveHint(vault: VaultData, target: FillTarget): SaveRule.Hint? = SaveRule.hint(saveCandidates(vault, target))

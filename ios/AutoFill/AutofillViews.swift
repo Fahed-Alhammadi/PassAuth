@@ -42,6 +42,10 @@ struct AutofillRoot: View {
             SaveScreen(model: model)
         case .generate:
             GenerateScreen(model: model)
+        case .addSite:
+            AddSitePicker(model: model)
+        case .confirmAddSite:
+            AddSiteConfirm(model: model)
         case .configured:
             InfoView(symbol: "checkmark.circle", title: "AutoFill is ready",
                      text: "PassAuth now suggests your logins above the keyboard and offers to save and use passkeys. Your vault stays encrypted: iOS only learns the website and username of each login.")
@@ -184,13 +188,24 @@ private struct ListScreen: View {
                 .paRow()
             }
             if !searching && !model.pages.isEmpty {
-                Section("For this site") {
+                Section {
                     if suggestions.isEmpty {
-                        Text(model.onlyCodes ? "No login with a verification code for this site. Search your other logins below." : "No login saved for this site. Search your other logins below.")
+                        Text(model.onlyCodes ? "No login with a verification code for this site. Search your other logins below."
+                             : model.addSitePage != nil ? "No login saved for this site. If you use one of your logins here, add this site to it."
+                             : "No login saved for this site. Search your other logins below.")
                             .font(.subheadline).foregroundStyle(Color.paMuted)
                             .accessibilityIdentifier("autofillNoMatch")
                     }
                     ForEach(suggestions) { e in entryRow(e) }
+                    if model.addSitePage != nil {
+                        // One account used on several sites: add this one to it instead of saving a copy.
+                        Button { model.openAddSite() } label: {
+                            Row(title: "Add this site to a login…", subtitle: suggestions.isEmpty ? "Use a login you saved for another site" : "", symbol: "plus")
+                        }
+                        .accessibilityIdentifier("addSite")
+                    }
+                } header: {
+                    Text("For this site")
                 }
                 .paRow()
             }
@@ -361,6 +376,92 @@ private extension PasskeyScreen {
     }
 }
 
+// MARK: Add this site to a login
+
+/// Choose the login this site is added to: editable logins none of whose websites match it yet.
+private struct AddSitePicker: View {
+    @Bindable var model: AutofillModel
+    @State private var query = ""
+
+    var body: some View {
+        let host = model.addSiteHost
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let shown = model.addSiteSearch(query)
+        PromptScaffold(error: model.error) {
+            if q.isEmpty {
+                Section {
+                    PromptHeader(site: host, title: "Add this site to a login", subtitle: host).promptPlainRow()
+                } footer: {
+                    Text("Pick the login you use on \(host). PassAuth adds this site to it, so it is suggested here from now on.")
+                }
+            }
+            Section {
+                if shown.isEmpty {
+                    Text(q.isEmpty ? "No logins to add this site to. Logins already saved for this site are in the list." : "No login matches “\(q)”.")
+                        .foregroundStyle(Color.paMuted)
+                        .accessibilityIdentifier("addSiteEmpty")
+                }
+                ForEach(shown) { e in
+                    Button { model.chooseAddSite(e) } label: {
+                        Row(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e))
+                    }
+                    .accessibilityIdentifier("addSite-\(e.item.name)")
+                }
+            } header: {
+                Text(q.isEmpty ? "Your logins" : "Results")
+            }
+            .paRow()
+        } actions: {
+            QuietActions {
+                QuietButton(title: "Back", symbol: "chevron.backward") { model.addSiteBack() }
+                    .accessibilityIdentifier("addSiteBack")
+            }
+        }
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search logins")
+    }
+
+    /// "alex@example.com · gmail.com", and the vault's name for a login somebody shared.
+    private func detail(_ e: Entry) -> String {
+        var parts = [e.item.login?.username ?? "", AddSite.site(e)].filter { !$0.isEmpty }
+        if let shared = model.sharedVaultName(e) { parts.append("shared vault \(shared)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// Confirm adding this site to the chosen login; then it is filled.
+private struct AddSiteConfirm: View {
+    @Bindable var model: AutofillModel
+
+    var body: some View {
+        let host = model.addSiteHost
+        let e = model.addSiteChoice
+        PromptScaffold(error: model.error) {
+            Section {
+                PromptHeader(site: host, title: "Add \(host) to \(e.map(AddSite.name) ?? "this login")?",
+                             subtitle: e?.item.login?.username.isEmpty == false ? e?.item.login?.username : nil)
+                    .promptPlainRow()
+            }
+            if let e {
+                Section {
+                    Text(AddSite.confirmText(e, host: host))
+                        .accessibilityIdentifier("addSiteText")
+                    if let warning = model.addSiteWarning(e) {
+                        WarningNote(text: warning, identifier: "addSiteWarning")
+                    }
+                }
+                .paRow()
+            }
+        } actions: {
+            PrimaryButton(title: model.busy ? "Adding…" : "Add site and fill", busy: model.busy, enabled: e != nil, action: model.confirmAddSite)
+                .accessibilityIdentifier("addSiteConfirm")
+            QuietActions {
+                QuietButton(title: "Back") { model.addSiteBack() }.disabled(model.busy)
+                    .accessibilityIdentifier("addSiteBack")
+            }
+        }
+    }
+}
+
 // MARK: Saving a login
 
 private struct SaveScreen: View {
@@ -372,9 +473,11 @@ private struct SaveScreen: View {
         let user = (info?.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let password = info?.password ?? ""
         let update = model.saveUpdates
+        let addTo = model.saveAddsTo
+        let choices = !model.saveTargets.isEmpty || !model.addToTargets.isEmpty
         PromptScaffold(error: model.error) {
             Section {
-                PromptHeader(site: model.saveHost, title: update == nil ? "Save login?" : "Update login?", subtitle: model.saveHost)
+                PromptHeader(site: model.saveHost, title: addTo != nil ? "Add site to login?" : update == nil ? "Save login?" : "Update login?", subtitle: model.saveHost)
                     .promptPlainRow()
             }
             Section {
@@ -389,10 +492,10 @@ private struct SaveScreen: View {
                     .accessibilityLabel(reveal ? "Hide password" : "Show password")
                 }
             } footer: {
-                if model.saveTargets.isEmpty { summary(update, user: user, password: password) }
+                if !choices { summary(update, user: user, password: password) }
             }
             .paRow()
-            if !model.saveTargets.isEmpty {
+            if choices {
                 Section {
                     ForEach(model.saveTargets, id: \.id) { e in
                         // A login in a vault somebody shared says so (its vault's name).
@@ -401,6 +504,13 @@ private struct SaveScreen: View {
                                   detail: model.sharedVaultName(e).map { "\(user) · shared vault \($0)" } ?? user,
                                   selected: model.saveTarget == e.id) { model.chooseSaveTarget(e.id) }
                             .accessibilityIdentifier("saveIn-\(e.id)")
+                    }
+                    // The same account saved for another site (only when nothing here can be updated).
+                    ForEach(model.addToTargets, id: \.id) { e in
+                        let site = AddSite.site(e)
+                        ChoiceRow(title: AddSite.name(e), detail: site.isEmpty ? "Add this site" : "Add this site · \(site)", symbol: "plus.circle",
+                                  selected: model.saveTarget == e.id) { model.chooseSaveTarget(e.id) }
+                            .accessibilityIdentifier("addTo-\(e.id)")
                     }
                     ChoiceRow(title: "New login", detail: model.saveHost, symbol: "plus", selected: model.saveTarget == SaveLogic.newLogin) {
                         model.chooseSaveTarget(SaveLogic.newLogin)
@@ -411,15 +521,20 @@ private struct SaveScreen: View {
                 } footer: {
                     VStack(alignment: .leading, spacing: PA.Space.s) {
                         // A login in a shared vault is never preselected: only a deliberate pick, with this warning.
-                        if let warning = model.saveWarning { WarningNote(text: warning, identifier: "saveWarning") }
-                        summary(update, user: user, password: password)
+                        if let addTo {
+                            WarningNote(text: AddSite.warning(addTo, host: model.saveHost), identifier: "addSiteWarning")
+                            Text(AddSite.describe(addTo, host: model.saveHost)).accessibilityIdentifier("saveSummary")
+                        } else {
+                            if let warning = model.saveWarning { WarningNote(text: warning, identifier: "saveWarning") }
+                            summary(update, user: user, password: password)
+                        }
                     }
                 }
                 .paRow()
                 .disabled(model.busy)
             }
         } actions: {
-            PrimaryButton(title: model.busy ? "Saving…" : update == nil ? "Save" : "Update", busy: model.busy, action: model.confirmSave)
+            PrimaryButton(title: model.busy ? "Saving…" : addTo != nil ? "Add site" : update == nil ? "Save" : "Update", busy: model.busy, action: model.confirmSave)
                 .accessibilityIdentifier("saveLogin")
             QuietActions {
                 QuietButton(title: "Not now") { model.cancel() }

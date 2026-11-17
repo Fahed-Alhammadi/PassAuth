@@ -107,6 +107,9 @@ final class AutofillModel {
         case configured
         case confirmSave
         case generate
+        /// "Add this site to a login": choose the login, then confirm it.
+        case addSite
+        case confirmAddSite
     }
 
     let repo: VaultRepository
@@ -123,6 +126,11 @@ final class AutofillModel {
     /// `SaveLogic.newLogin`), preselected from the default plan.
     private(set) var saveTargets: [Entry] = []
     private(set) var saveTarget = SaveLogic.newLogin
+    /// Saving a login that nothing for the site can take: the user's own logins for other sites
+    /// with the same user name and password, offered as "Add this site" rows (`AddSite`), never preselected.
+    private(set) var addToTargets: [Entry] = []
+    /// "Add this site to a login" from the list: the login chosen in the picker.
+    private(set) var addSiteChoice: Entry?
     /// The user picked the target themselves (kept when the vault catches up with the server).
     @ObservationIgnored private var saveTargetPicked = false
     /// A new login's id, the same for every Save of this sheet (an attempt whose answer was lost
@@ -468,6 +476,86 @@ final class AutofillModel {
         }
     }
 
+    // MARK: Add this site to a login
+
+    /// The page "Add this site to a login" adds to a login: the most specific page of a password
+    /// list request, when it is a website (never for apps, verification codes or other requests).
+    var addSitePage: String? {
+        guard case .list = request, let page = pages.first, AddSite.origin(page) != nil else { return nil }
+        return page
+    }
+
+    /// The site's host as the add-site screens name it ("play.google.com").
+    var addSiteHost: String {
+        guard let page = addSitePage, let p = UrlMatcher.parse(page) else { return "" }
+        return p.host.hasPrefix("www.") ? String(p.host.dropFirst(4)) : p.host
+    }
+
+    /// The logins the site can be added to (`AddSite.targets`): editable, not matching it yet.
+    var addSiteTargets: [Entry] {
+        guard let page = addSitePage, let v = repo.vault else { return [] }
+        return AddSite.targets(page: page, vault: v, defaultMatch: state.settings.defaultMatch)
+    }
+
+    func addSiteSearch(_ query: String) -> [Entry] {
+        AutofillMatcher.search(query, addSiteTargets)
+    }
+
+    /// The warning for a login in a shared vault: everyone in it sees the new website.
+    func addSiteWarning(_ e: Entry) -> String? {
+        repo.vault.flatMap { AddSite.sharedWarning(e, in: $0) }
+    }
+
+    func openAddSite() {
+        guard addSitePage != nil, !busy else { return }
+        error = nil
+        addSiteChoice = nil
+        screen = .addSite
+    }
+
+    func chooseAddSite(_ e: Entry) {
+        guard !busy else { return }
+        error = nil
+        addSiteChoice = e
+        screen = .confirmAddSite
+    }
+
+    /// Back one step: from the confirmation to the picker, from the picker to the list.
+    func addSiteBack() {
+        guard !busy else { return }
+        error = nil
+        if screen == .confirmAddSite {
+            addSiteChoice = nil
+            screen = .addSite
+        } else {
+            screen = .list
+        }
+    }
+
+    /// Add the site to the chosen login, then fill it (what the user wanted on this page). If
+    /// adding fails, the error is shown and nothing is filled.
+    func confirmAddSite() {
+        guard let e = addSiteChoice, let page = addSitePage, !busy else { return }
+        busy = true
+        error = nil
+        Task {
+            do {
+                _ = try await repo.addSite(e.id, page: page)
+                // The identity store learns the new website (suggested above the keyboard next time).
+                await repo.identities.flush()
+                busy = false
+                guard let fresh = entry(e.id) else {
+                    self.error = "This login isn't in your vault any more."
+                    return
+                }
+                fill(fresh)
+            } catch {
+                self.error = errorMessage(error)
+                busy = false
+            }
+        }
+    }
+
     // MARK: Passkeys
 
     /// Verify the user before a passkey is used or created: unlocking in this flow counts,
@@ -557,6 +645,11 @@ final class AutofillModel {
         saveTargets.first { $0.id == saveTarget }
     }
 
+    /// The login the sheet's choice adds this site to ("Add this site" row); nil otherwise.
+    var saveAddsTo: Entry? {
+        addToTargets.first { $0.id == saveTarget }
+    }
+
     func chooseSaveTarget(_ id: String) {
         guard !busy else { return }
         saveTarget = id
@@ -589,7 +682,9 @@ final class AutofillModel {
     private func resetSaveChoice() {
         guard let info = saveInfo, let page = info.page, let v = repo.vault else { return }
         saveTargets = SaveLogic.targets(page: page, username: info.username, password: info.password, vault: v, defaultMatch: state.settings.defaultMatch)
-        if saveTargetPicked && (saveTarget == SaveLogic.newLogin || saveTargets.contains { $0.id == saveTarget }) { return }
+        addToTargets = AddSite.sameAccountElsewhere(page: page, username: info.username, password: info.password, saveTargets: saveTargets, vault: v,
+                                                    defaultMatch: state.settings.defaultMatch)
+        if saveTargetPicked && (saveTarget == SaveLogic.newLogin || (saveTargets + addToTargets).contains { $0.id == saveTarget }) { return }
         saveTargetPicked = false
         saveTarget = savePlan.map(SaveLogic.defaultTarget) ?? SaveLogic.newLogin
     }
@@ -620,6 +715,13 @@ final class AutofillModel {
         case .update(_, .only): model.cancel(.userInteractionRequired)
         case .create, .update:
             guard info.event == .userInitiated, let page = info.page else { return model.cancel(.userInteractionRequired) }
+            // The same account is saved for another site: the sheet offers adding this site to it
+            // instead of a second copy.
+            if case .create = plan, let v = model.repo.vault,
+               !AddSite.sameAccountElsewhere(page: page, username: info.username, password: info.password, saveTargets: [], vault: v,
+                                             defaultMatch: model.state.settings.defaultMatch).isEmpty {
+                return model.cancel(.userInteractionRequired)
+            }
             do {
                 // No target: the default plan of the synced vault; `saveLogin` refuses a rule-3
                 // update there too (the sheet is shown instead).
@@ -636,9 +738,17 @@ final class AutofillModel {
         guard let info = saveInfo, let page = info.page, !busy else { return }
         busy = true
         error = nil
+        let add = saveAddsTo
         Task {
             defer { busy = false }
             do {
+                if let add {
+                    // The same account for another site: this site is added to it (re-checked
+                    // after the sync: still the user's own login with this user name and password).
+                    _ = try await repo.addSite(add.id, page: page, sameAccount: (info.username, info.password))
+                    await repo.identities.flush()
+                    return completeSave()
+                }
                 // Exactly what the sheet shows is applied. If the synced vault no longer allows
                 // it (or would have made another default), nothing is written.
                 _ = try await repo.saveLogin(page: page, username: info.username, password: info.password, target: saveTarget, isDefault: !saveTargetPicked,
@@ -653,7 +763,9 @@ final class AutofillModel {
                 switch savePlan {
                 case .unchanged?: completeSave()
                 default:
-                    self.error = "Your vault changed while this was open. Check “Save in”, then confirm again."
+                    self.error = add == nil
+                        ? "Your vault changed while this was open. Check “Save in”, then confirm again."
+                        : "That login changed. Check where to save, then try again."
                 }
             } catch {
                 self.error = errorMessage(error)

@@ -2111,6 +2111,29 @@ public final class VaultRepository {
         }
     }
 
+    /// Add the page's origin as one more website (match "Default") of login `id` (`AddSite`).
+    /// Syncs first, so it works on the server's current item and revision; nothing but the
+    /// websites changes (no password history entry). `.alreadyMatched`: one of its websites
+    /// matches the page by now, nothing was written.
+    ///
+    /// `sameAccount`: the save sheet's choice, made for the typed user name and password. The
+    /// login must still be in the user's own vault with exactly those, else `SaveChoiceChanged`
+    /// is thrown and nothing is written (the sheet asks again).
+    public func addSite(_ id: String, page: String, sameAccount: (username: String, password: String)? = nil) async throws -> AddSite.Outcome {
+        guard AddSite.origin(page) != nil else { throw UserError("Only a website's address can be added to a login.") }
+        try await sync()
+        guard let v = vault else { throw UserError("Your vault is locked.") }
+        guard let e = v.entries.first(where: { $0.id == id }), e.item.login != nil else {
+            if sameAccount != nil { throw SaveChoiceChanged() }
+            throw UserError("This login isn't in your vault any more.")
+        }
+        if let s = sameAccount, !AddSite.isSameAccount(e, username: s.username, password: s.password, vault: v) { throw SaveChoiceChanged() }
+        guard v.canWrite(e) else { throw UserError("You can only view this login, so no website can be added to it.") }
+        guard let item = AddSite.updated(e, page: page, vault: v, defaultMatch: store.get().settings.defaultMatch) else { return .alreadyMatched }
+        try await updateItem(e, item)
+        return .added
+    }
+
     // MARK: Helpers
 
     /// An item write's body: the encrypted item, the `key_epoch` of the vault key it was

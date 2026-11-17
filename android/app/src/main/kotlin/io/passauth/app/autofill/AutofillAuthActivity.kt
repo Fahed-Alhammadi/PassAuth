@@ -29,6 +29,8 @@ import kotlinx.coroutines.launch
  *   or "Save login?") and lets the user change where it is saved.
  * - [MODE_NEVER]: "Never" on the save prompt; add the site or app to the never-save list.
  * - [MODE_OPEN]: "Open PassAuth".
+ * - [MODE_ADD_SITE]: "Add this site to a login…" (nothing matched); pick a login, confirm,
+ *   add the site or app to it ([AddSite]) and hand that login back (a Dataset) to fill.
  */
 class AutofillAuthActivity : ServiceActivity() {
     private val engine by lazy { AutofillEngine(this, graph) }
@@ -51,6 +53,7 @@ class AutofillAuthActivity : ServiceActivity() {
             }
             MODE_UNLOCK -> withVault("Unlock to fill", "Your vault is locked. Unlock it to fill your login.") { vault, _ -> fillResponse(vault) }
             MODE_DATASET -> withVault("Unlock to fill", "Your vault is locked. Unlock it to fill your login.") { vault, _ -> dataset(vault) }
+            MODE_ADD_SITE -> withVault("Unlock to fill", "Your vault is locked. Unlock it to choose the login to fill here.") { vault, _ -> addSite(vault) }
             MODE_SAVE -> {
                 // From here on this sheet decides; the save is no longer applied by itself at the next unlock.
                 intent.getStringExtra(EXTRA_KEY)?.let(AutofillEngine::claimPendingSave)
@@ -83,7 +86,7 @@ class AutofillAuthActivity : ServiceActivity() {
         val form = parsed.form
         val ui = AutofillResponses(this, inlineRequest())
         val settings = graph.repo.state.value.settings
-        val datasets = buildDatasets(this, ui, engine, vault, target, form, settings)
+        val datasets = buildDatasets(this, ui, engine, vault, target, form, settings, AddSite.allowed(target, parsed.webDomain))
         if (datasets.isEmpty()) {
             toast("No logins in PassAuth match this ${if (target is FillTarget.App) "app" else "site"}.")
             return cancel()
@@ -103,6 +106,11 @@ class AutofillAuthActivity : ServiceActivity() {
         val id = intent.getStringExtra(EXTRA_ENTRY) ?: return cancel()
         // Checked again here: the login must still match this site or app.
         val entry = engine.matches(vault, target).firstOrNull { it.id == id } ?: return cancel()
+        finishWith(fillWith(entry, parsed, target))
+    }
+
+    /** [entry] as a Dataset for the form, with a fresh verification code (copied too when the setting is on). */
+    private fun fillWith(entry: io.passauth.app.data.Entry, parsed: ParsedStructure, target: FillTarget): android.service.autofill.Dataset? {
         val secret = entry.item.login?.totp?.takeIf { it.isNotBlank() }
         val code = secret?.let { runCatching { currentTotp(it).code }.getOrNull() }
         val ds = AutofillResponses(this, inlineRequest()).dataset(entry, parsed.form, auth = null, otpCode = code)
@@ -110,7 +118,67 @@ class AutofillAuthActivity : ServiceActivity() {
             graph.clipboard.copy(code, "Verification code")
             toast("Verification code copied. Paste it when the ${if (target is FillTarget.App) "app" else "site"} asks.")
         }
-        finishWith(ds)
+        return ds
+    }
+
+    /** "Add this site to a login…": nothing matched here; the user picks the login of the same account. */
+    private suspend fun addSite(vault: VaultData) {
+        val parsed = structure()?.let(StructureParser::parse) ?: return cancel()
+        val target = engine.target(parsed) ?: return cancel()
+        // Never for an app's WebView its domain doesn't vouch for (the entry isn't offered there either).
+        if (!AddSite.allowed(target, parsed.webDomain)) return cancel()
+        val place = engine.placeName(target, (target as? FillTarget.App)?.let { engine.appLabel(it.packageName) ?: parsed.windowTitle })
+        pickLogin(parsed, target, place, vault, null)
+    }
+
+    private fun pickLogin(parsed: ParsedStructure, target: FillTarget, place: String, vault: VaultData, notice: String?) {
+        val here = if (target is FillTarget.App) "app" else "site"
+        val targets = engine.addSiteTargets(vault, target)
+        if (targets.isEmpty()) {
+            return message("No login to add this $here to", "PassAuth has no login you can edit that isn't already suggested on $place. Sign in, and PassAuth offers to save the login.")
+        }
+        pick(
+            title = "Add this $here to a login",
+            place = place,
+            body = "Choose the login you use on $place. It is suggested and filled here from now on.",
+            choices = targets.map { t ->
+                val detail = listOf(t.username.ifEmpty { "No user name" }, t.site, if (t.personal) "" else t.vault.ifEmpty { "Shared vault" })
+                ServiceActivity.Choice(t.id, t.name.ifEmpty { t.site.ifEmpty { "Untitled" } }, detail.filter { it.isNotEmpty() }.joinToString(" · "))
+            },
+            action = "Continue",
+            error = notice,
+        ) { id ->
+            val t = targets.firstOrNull { it.id == id } ?: return@pick
+            confirmAddSite(parsed, target, place, t)
+        }
+    }
+
+    private fun confirmAddSite(parsed: ParsedStructure, target: FillTarget, place: String, t: AddSite.Target<String>) {
+        val here = if (target is FillTarget.App) "app" else "site"
+        val name = t.name.ifEmpty { t.site.ifEmpty { "this login" } }
+        confirm(
+            title = { "Add $place to $name?" },
+            place = place,
+            body = { AddSite.confirmText(t, place, here) },
+            action = { if (target is FillTarget.App) "Add app" else "Add site" },
+            warning = { AddSite.sharedWarning(t, here) },
+            quiet = listOf(
+                ServiceActivity.Quiet("Choose another") {
+                    val now = graph.repo.vault.value ?: throw io.passauth.app.data.UserException("PassAuth is locked.")
+                    pickLogin(parsed, target, place, now, null)
+                },
+            ),
+        ) {
+            val current = graph.repo.vault.value ?: throw io.passauth.app.data.UserException("PassAuth is locked. Choose the login again.")
+            // The login as it is now: gone, view-only or changed since the list was shown → choose again.
+            if (engine.addSiteTargets(current, target).none { it.id == t.id } && engine.matches(current, target).none { it.id == t.id }) {
+                return@confirm pickLogin(parsed, target, place, current, "That login can no longer be added here. Choose another.")
+            }
+            // Saved first (errors stay on this sheet); only a saved login is filled.
+            val entry = engine.addSite(current, t.id, target)
+            toast("$place added to $name.")
+            finishWith(fillWith(entry, parsed, target))
+        }
     }
 
     private suspend fun save(vault: VaultData) {
@@ -128,15 +196,16 @@ class AutofillAuthActivity : ServiceActivity() {
         if (!engine.offerSave(p.target)) return saved(null)
         val candidates = engine.saveCandidates(vault, p.target)
         val plan = SaveRule.plan(candidates, p.username, p.password)
+        val addTo = engine.sameAccountElsewhere(vault, p.target, p.username, p.password)
         // No login the user could choose instead: nothing to decide (a new login, or already saved).
-        if (SaveRule.targets(candidates, p.username, p.password).isEmpty() || plan == SaveRule.Plan.Nothing) {
+        if (addTo.isEmpty() && (SaveRule.targets(candidates, p.username, p.password).isEmpty() || plan == SaveRule.Plan.Nothing)) {
             return try {
                 saved(engine.applySave(vault, p.target, p.username, p.password, p.appLabel, plan) ?: "This login is already saved in PassAuth.")
             } catch (e: Exception) {
                 saved("Couldn't save to PassAuth: ${io.passauth.app.ui.errorMessage(e)}")
             }
         }
-        askSave(p, candidates, plan, null)
+        askSave(p, candidates, plan, addTo, null)
     }
 
     /**
@@ -144,28 +213,39 @@ class AutofillAuthActivity : ServiceActivity() {
      * sheet shows is what gets saved: if the chosen login is gone by the time the user confirms
      * (a sync), the choices are shown again instead of saving somewhere else.
      */
-    private fun askSave(p: AutofillEngine.Companion.PendingSave, candidates: List<SaveRule.Candidate<String>>, plan: SaveRule.Plan<String>, notice: String?) {
+    private fun askSave(
+        p: AutofillEngine.Companion.PendingSave,
+        candidates: List<SaveRule.Candidate<String>>,
+        plan: SaveRule.Plan<String>,
+        addTo: List<AddSite.Target<String>>,
+        notice: String?,
+    ) {
         val targets = SaveRule.targets(candidates, p.username, p.password)
         // A new login's id, the same for every tap on Save in this sheet (an attempt whose answer was lost isn't saved twice).
         val newItemId = saveItemId
         val place = engine.placeName(p.target, p.appLabel)
         val here = if (p.target is FillTarget.App) "app" else "site"
         fun target(choice: String?) = targets.firstOrNull { it.id == choice }
+        // Same account on another site or app: "Add this site" rows (ids prefixed: never a login's own id).
+        fun adding(choice: String?) = choice?.takeIf { it.startsWith(ADD_TO) }?.let { c -> addTo.firstOrNull { ADD_TO + it.id == c } }
+        val addWord = if (p.target is FillTarget.App) "app" else "site"
         confirm(
-            title = { if (target(it) != null) "Update login?" else "Save login?" },
+            title = { if (adding(it) != null) "Add $addWord to login?" else if (target(it) != null) "Update login?" else "Save login?" },
             place = place,
-            body = { SaveRule.describe(target(it), p.username, place) },
-            action = { if (target(it) != null) "Update login" else "Save login" },
+            body = { c -> adding(c)?.let { AddSite.describe(it, place) } ?: SaveRule.describe(target(c), p.username, place) },
+            action = { if (adding(it) != null) "Add $addWord" else if (target(it) != null) "Update login" else "Save login" },
             choicesLabel = "Save in",
             choices = targets.map { c ->
                 // A login in a vault somebody shared says so: its other members will see what is saved.
                 val user = c.username.ifEmpty { "No user name" }
                 ServiceActivity.Choice(c.id, c.name.ifEmpty { place }, if (c.personal) user else "$user · ${c.vault.ifEmpty { "Shared vault" }}")
+            } + addTo.map { t ->
+                ServiceActivity.Choice(ADD_TO + t.id, t.name.ifEmpty { t.site.ifEmpty { "Login" } }, "Add this $addWord · ${t.site.ifEmpty { t.username.ifEmpty { "same account" } }}")
             } + ServiceActivity.Choice(SAVE_NEW, "New login", place, ServiceActivity.Symbol.New),
             initialChoice = (plan as? SaveRule.Plan.Update)?.id ?: SAVE_NEW,
             error = notice,
             // A login in a shared vault is only ever chosen here, by the user, with this warning.
-            warning = { SaveRule.sharedWarning(target(it)) },
+            warning = { c -> adding(c)?.let { AddSite.warning(it, place, addWord) } ?: SaveRule.sharedWarning(target(c)) },
             quiet = listOf(
                 ServiceActivity.Quiet("Never for this $here") {
                     engine.addNeverSave(AutofillMatcher.neverSaveKey(p.target))
@@ -175,11 +255,25 @@ class AutofillAuthActivity : ServiceActivity() {
         ) {
             if (p.accountId != graph.repo.state.value.activeId) throw io.passauth.app.data.UserException("Another account is active now. Sign in again to save this login.")
             val current = graph.repo.vault.value ?: throw io.passauth.app.data.UserException("PassAuth is locked. Sign in to $place again to save this login.")
+            adding(chosen)?.let { t ->
+                // Still the same account (editable, own vault, the typed user name and password); otherwise ask again.
+                val still = engine.sameAccountElsewhere(current, p.target, p.username, p.password).any { it.id == t.id }
+                if (!still) {
+                    val now = engine.saveCandidates(current, p.target)
+                    return@confirm askSave(
+                        p, now, SaveRule.plan(now, p.username, p.password),
+                        engine.sameAccountElsewhere(current, p.target, p.username, p.password),
+                        "That login changed. Check where to save, then try again.",
+                    )
+                }
+                engine.addSite(current, t.id, p.target)
+                return@confirm saved("$place added to ${t.name.ifEmpty { "your login" }}.")
+            }
             val now = engine.saveCandidates(current, p.target)
             val chosenPlan = SaveRule.planFor(now, chosen.takeIf { it != SAVE_NEW }, p.username, p.password)
             if (chosenPlan == null) {
                 // The login the sheet showed is no longer one this save may go to: ask again.
-                askSave(p, now, SaveRule.plan(now, p.username, p.password), "That login is no longer in your vault. Choose where to save.")
+                askSave(p, now, SaveRule.plan(now, p.username, p.password), engine.sameAccountElsewhere(current, p.target, p.username, p.password), "That login is no longer in your vault. Choose where to save.")
             } else {
                 saved(engine.applySave(current, p.target, p.username, p.password, p.appLabel, chosenPlan, newItemId) ?: "This login is already saved in PassAuth.")
             }
@@ -207,9 +301,13 @@ class AutofillAuthActivity : ServiceActivity() {
         const val MODE_SAVE = "save"
         const val MODE_NEVER = "never"
         const val MODE_OPEN = "open"
+        const val MODE_ADD_SITE = "add-site"
 
         /** "Save in" choice meaning a new login (never an item id: those are UUIDs). */
         private const val SAVE_NEW = "new"
+
+        /** Prefix of a "Save in" choice that adds the site or app to a login for another place. */
+        private const val ADD_TO = "add:"
 
         private val requestCodes = AtomicInteger(1)
 
@@ -221,7 +319,7 @@ class AutofillAuthActivity : ServiceActivity() {
             val intent = Intent(context, AutofillAuthActivity::class.java)
                 .putExtra(EXTRA_MODE, mode)
                 .apply { entry?.let { putExtra(EXTRA_ENTRY, it) }; key?.let { putExtra(EXTRA_KEY, it) } }
-            val mutable = mode == MODE_UNLOCK || mode == MODE_DATASET
+            val mutable = mode == MODE_UNLOCK || mode == MODE_DATASET || mode == MODE_ADD_SITE
             val flags = PendingIntent.FLAG_CANCEL_CURRENT or if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE
             return PendingIntent.getActivity(context, requestCodes.getAndIncrement(), intent, flags).intentSender
         }
@@ -229,7 +327,8 @@ class AutofillAuthActivity : ServiceActivity() {
         /**
          * One dataset per matching login (filled directly, or through [MODE_DATASET] when it
          * has a verification code to copy or fill), plus "Open PassAuth". On a form with
-         * only a one-time-code field, the logins that have a verification code.
+         * only a one-time-code field, the logins that have a verification code. When no login
+         * matches a sign-in form and [addSite] ([AddSite.allowed]): "Add this site to a login…".
          */
         fun buildDatasets(
             context: Context,
@@ -239,6 +338,7 @@ class AutofillAuthActivity : ServiceActivity() {
             target: FillTarget,
             form: LoginForm<android.view.autofill.AutofillId>,
             settings: io.passauth.app.data.Settings,
+            addSite: Boolean,
         ): List<android.service.autofill.Dataset> {
             val otpOnly = form.fillIds.isEmpty() && form.otp != null
             val entries = engine.matches(vault, target).filter { !otpOnly || !it.item.login?.totp.isNullOrBlank() }
@@ -246,6 +346,11 @@ class AutofillAuthActivity : ServiceActivity() {
                 val auth = if (AutofillResponses.wantsTotpAuth(e, form, settings)) sender(context, MODE_DATASET, entry = e.id) else null
                 ui.dataset(e, form, auth)
             }.toMutableList()
+            // Nothing saved for this place: offer to add it to a login of the same account ([AddSite]).
+            if (addSite && entries.isEmpty() && !otpOnly && form.password != null && engine.addSiteTargets(vault, target).isNotEmpty()) {
+                val place = engine.placeName(target, (target as? FillTarget.App)?.let { engine.appLabel(it.packageName) })
+                ui.addSiteDataset(form.fillIds, target is FillTarget.App, place, sender(context, MODE_ADD_SITE))?.let { out += it }
+            }
             ui.openDataset(form.fillIds + listOfNotNull(form.otp?.id), sender(context, MODE_OPEN))?.let { out += it }
             return out
         }

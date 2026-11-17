@@ -381,6 +381,103 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(PasskeyLogic.b64urlDecode(s + "="), d)
         XCTAssertNil(PasskeyLogic.b64urlDecode("A"))
     }
+
+    // MARK: Add this site to a login
+
+    private func addSiteVault(_ entries: [Entry]) -> VaultData {
+        var v = VaultData()
+        v.entries = entries
+        v.vaults = [
+            VaultInfo(id: "v1", name: "Personal", role: .owner),
+            VaultInfo(id: "ro", name: "Shared", role: .read, keyKind: "sealed"),
+            VaultInfo(id: "team", name: "Team", role: .write, keyKind: "sealed"),
+        ]
+        return v
+    }
+
+    func testAddSiteTargetsExcludeMatchingAndReadOnlyLogins() {
+        let page = "https://play.google.com/console/signup"
+        let gmail = entry("g", name: "Gmail", user: "alex@example.com", urls: [("https://mail.google.com", .host)])
+        let google = entry("a", name: "Google", user: "alex@example.com", urls: [("https://accounts.google.com", .default)]) // base domain matches
+        let viewOnly = entry("r", name: "Read only", user: "alex", urls: [("https://example.org", .default)], vault: "ro")
+        let team = entry("t", name: "Team", user: "alex", urls: [("https://team.example.net", .default)], vault: "team")
+        let card = Entry(id: "c", item: Item(name: "Card"), vaultId: "v1", revision: 1, enc: EncryptedItem(id: "c", vaultId: "v1", key: "", data: ""), deletedAt: nil)
+        let v = addSiteVault([team, viewOnly, gmail, google, card])
+
+        // Own vaults first; matching (base domain), read-only and non-logins are left out.
+        XCTAssertEqual(AddSite.targets(page: page, vault: v, defaultMatch: .domain).map(\.id), ["g", "t"])
+        // With "host" as the default, the base-domain login no longer matches: it can take the site.
+        XCTAssertEqual(AddSite.targets(page: page, vault: v, defaultMatch: .host).map(\.id), ["g", "a", "t"])
+        // Apps and non-web pages: nothing.
+        XCTAssertTrue(AddSite.targets(page: "androidapp://com.example", vault: v, defaultMatch: .domain).isEmpty)
+        XCTAssertNil(AddSite.origin("androidapp://com.example"))
+        XCTAssertNil(AddSite.origin("ftp://example.com/"))
+    }
+
+    func testAddSiteAppendsOriginWithDefaultMatchAndIsNoOpWhenMatching() {
+        let gmail = entry("g", name: "Gmail", user: "alex@example.com", password: "pw1", urls: [("https://mail.google.com", .host)])
+        let v = addSiteVault([gmail])
+        let page = "https://play.google.com:8443/console/signup?x=1"
+        XCTAssertEqual(AddSite.origin(page), "https://play.google.com:8443")
+        guard let item = AddSite.updated(gmail, page: page, vault: v, defaultMatch: .domain) else { return XCTFail("adds the site") }
+        XCTAssertEqual(item.login?.urls, [LoginUrl(url: "https://mail.google.com", match: .host), LoginUrl(url: "https://play.google.com:8443", match: .default)])
+        // Nothing else changes: user name, password, history.
+        XCTAssertEqual(item.login?.username, "alex@example.com")
+        XCTAssertEqual(item.login?.password, "pw1")
+        XCTAssertEqual(item.passwordHistory, gmail.item.passwordHistory)
+        XCTAssertEqual(item.name, "Gmail")
+        // Now it matches the page: adding again is a no-op.
+        let added = Entry(id: "g", item: item, vaultId: "v1", revision: 2, enc: gmail.enc, deletedAt: nil)
+        XCTAssertTrue(AutofillMatcher.matches(page, item.login!, defaultMatch: .domain, allowRegex: true))
+        XCTAssertNil(AddSite.updated(added, page: page, vault: addSiteVault([added]), defaultMatch: .domain))
+        XCTAssertNil(AddSite.updated(gmail, page: "https://mail.google.com/inbox", vault: v, defaultMatch: .domain), "already matched")
+        // An http page gets its http origin.
+        XCTAssertEqual(AddSite.withSite(gmail.item, origin: AddSite.origin("http://intranet.local/login")!).login?.urls.last,
+                       LoginUrl(url: "http://intranet.local", match: .default))
+    }
+
+    func testSameAccountElsewhere() {
+        let page = "https://play.google.com/signin"
+        let gmail = entry("g", name: "Gmail", user: "Alex@Example.com", password: "pw1", urls: [("https://mail.google.com", .host)])
+        let otherPw = entry("o", name: "Other password", user: "alex@example.com", password: "pw2", urls: [("https://a.example", .default)])
+        let otherUser = entry("u", name: "Other user", user: "sam@example.com", password: "pw1", urls: [("https://b.example", .default)])
+        let shared = entry("t", name: "Team copy", user: "alex@example.com", password: "pw1", urls: [("https://c.example", .default)], vault: "team")
+        let extra = (1...4).map { entry("e\($0)", name: "Extra \($0)", user: "alex@example.com", password: "pw1", urls: [("https://e\($0).example", .default)]) }
+        let v = addSiteVault([shared, otherPw, otherUser, gmail] + extra)
+        func same(_ user: String, _ pw: String, targets: [Entry] = [], page: String = page) -> [String] {
+            AddSite.sameAccountElsewhere(page: page, username: user, password: pw, saveTargets: targets, vault: v, defaultMatch: .domain).map(\.id)
+        }
+        // User name trimmed + case-insensitive, password exact, own vault only, at most 3.
+        XCTAssertEqual(same("  alex@example.COM ", "pw1"), ["g", "e1", "e2"])
+        XCTAssertEqual(same("alex@example.com", "PW1"), [])
+        // Both must be typed.
+        XCTAssertEqual(same("", "pw1"), [])
+        XCTAssertEqual(same("alex@example.com", ""), [])
+        // Only when nothing for the site can be updated.
+        XCTAssertEqual(same("alex@example.com", "pw1", targets: [otherPw]), [])
+        // Not for apps.
+        XCTAssertEqual(same("alex@example.com", "pw1", page: "androidapp://com.example"), [])
+        // A login that already matches the page isn't offered.
+        XCTAssertEqual(same("alex@example.com", "pw1", page: "https://e1.example/login"), ["g", "e2", "e3"])
+        XCTAssertTrue(AddSite.isSameAccount(gmail, username: "alex@example.com", password: "pw1", vault: v))
+        XCTAssertFalse(AddSite.isSameAccount(gmail, username: "alex@example.com", password: "changed", vault: v))
+        XCTAssertFalse(AddSite.isSameAccount(shared, username: "alex@example.com", password: "pw1", vault: v))
+    }
+
+    func testAddSiteWords() {
+        let gmail = entry("g", name: "Gmail", user: "alex", urls: [("https://www.gmail.com", .default)])
+        let team = entry("t", name: "", user: "alex", urls: [("androidapp://com.x", .default), ("https://team.example.net", .default)], vault: "team")
+        let v = addSiteVault([gmail, team])
+        XCTAssertEqual(AddSite.site(gmail), "gmail.com")
+        XCTAssertEqual(AddSite.name(team), "team.example.net")
+        XCTAssertEqual(AddSite.describe(gmail, host: "play.google.com"),
+                       "Adds play.google.com to Gmail. Its user name and password stay the same, and it is suggested here from now on.")
+        XCTAssertEqual(AddSite.warning(gmail, host: "play.google.com"), "Only add it if play.google.com uses the same account as gmail.com.")
+        XCTAssertEqual(AddSite.confirmText(gmail, host: "play.google.com"),
+                       "Gmail will be suggested and filled on play.google.com. Its user name and password stay the same. Add a site only when it uses the same account as gmail.com.")
+        XCTAssertNil(AddSite.sharedWarning(gmail, in: v))
+        XCTAssertEqual(AddSite.sharedWarning(team, in: v), "This login is in Team: everyone in that vault sees the new website.")
+    }
 }
 
 /// What unlocking with the master password costs in memory (the AutoFill extension has a hard

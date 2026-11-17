@@ -104,6 +104,18 @@ class AutofillResponses(private val context: Context, private val inline: Inline
         return b.setAuthentication(auth).build()
     }
 
+    /**
+     * "Add this site to a login…" / "Add this app to a login…": opens PassAuth's picker, which
+     * adds the place to the chosen login and hands that login back to fill.
+     */
+    @Suppress("DEPRECATION")
+    fun addSiteDataset(ids: List<AutofillId>, app: Boolean, place: String, auth: IntentSender): Dataset? {
+        if (ids.isEmpty()) return null
+        val b = Dataset.Builder(presentations(if (app) "Add this app to a login…" else "Add this site to a login…", place.ifEmpty { null })).setId("add-site")
+        ids.forEach { b.setValue(it, null) }
+        return b.setAuthentication(auth).build()
+    }
+
     fun lockedPresentations(email: String): Presentations = presentations("PassAuth is locked", "Unlock to fill · $email".trimEnd(' ', '·'))
 
     private fun text(v: String) = Field.Builder().setValue(AutofillValue.forText(v)).build()
