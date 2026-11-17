@@ -8,6 +8,7 @@ import { logged, loggedAs } from "../../shared/log";
 import type { PasskeyWindowApi, PopupApi } from "../../shared/protocol";
 import type { Settings } from "../../shared/types";
 import { touch } from "../activity";
+import { addSite, addSiteTargets } from "../add-site";
 import { fileAccess, keptFiles, missingFiles, withoutFiles } from "../attachments";
 import { copy } from "../clipboard";
 import { afterUnlock, openPopup, orderedMatches } from "../commands";
@@ -134,6 +135,8 @@ export const popupHandlers = {
       return vault.updateItem(e, keptFiles(item, e.item));
     },
   },
+  "addSite:targets": { from: POPUP, unlock: true, run: ({ url }) => addSiteTargets(url) },
+  addSite: { from: POPUP, unlock: true, activity: "restart", run: ({ id, url }) => addSite(id, url) },
   trashItem: { from: POPUP, unlock: true, activity: "restart", run: ({ id }) => vault.trashItem(entry(id)) },
   editorInfo: { from: POPUP, unlock: true, run: () => vault.editorInfo() },
   // The editor asks while the user types (debounced): at most 50 patterns, each checked by the core.

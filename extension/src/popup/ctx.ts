@@ -14,6 +14,8 @@ export type Route =
   | { tab: "vault"; page: "history"; id: string }
   | { tab: "vault"; page: "edit"; id: string }
   | { tab: "vault"; page: "new"; kind: ItemKind; prefill?: Prefill }
+  /** Add the page at `url` to one of the user's logins. */
+  | { tab: "vault"; page: "addSite"; url: string }
   | { tab: "generator" }
   | { tab: "settings"; section?: string };
 

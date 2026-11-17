@@ -94,6 +94,11 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .group-title { display: flex; justify-content: space-between; align-items: baseline; font-size: var(--text-caption); font-weight: 600; color: var(--ink-2); margin: 0 var(--space-1); }
 .group-title .count { font-weight: 500; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .group-title .btn-icon { width: 28px; height: 28px; margin: -6px -4px -6px 0; }
+.group-title > span:first-child { margin-right: auto; }
+.group-title .group-action { margin-left: var(--space-2); font-weight: 600; }
+.group-title .group-action .btn { height: 28px; margin: -6px -8px -6px 0; padding: 0 var(--space-2); gap: 4px; }
+.group-title .menu { font-size: var(--text-body); font-weight: 400; color: var(--ink); }
+.add-site-intro { margin: 0 var(--space-1) var(--space-3); }
 .sections { display: flex; flex-direction: column; gap: var(--space-4); }
 .disclosure { all: unset; display: inline-flex; align-items: center; gap: var(--space-1); cursor: pointer; border-radius: 4px; }
 .disclosure svg { transition: transform var(--dur-fast) var(--ease-out); }

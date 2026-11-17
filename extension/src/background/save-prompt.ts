@@ -10,13 +10,16 @@
  * menu) is kept as a pending save from the moment it is filled (`rememberGenerated`, 10 minutes), so its prompt
  * follows the sign-up even when PassAuth doesn't see the submit.
  */
+
+import { siteHost } from "@web/lib/types";
 import { AppError, codeOf, EXPIRED, INSUFFICIENT_STORAGE, messageOf, notAllowed, QUOTA_EXCEEDED } from "../shared/errors";
 import { credentialsFit, MAX_USERNAME } from "../shared/limits";
 import { log, logged, loggedAs } from "../shared/log";
 import { hostText, pageText } from "../shared/page-text";
 import { clampPromptHeight, promptHeight } from "../shared/save-layout";
-import type { SaveAnswer, SaveOffer, SavePrompt } from "../shared/types";
+import type { AddSiteTarget, SaveAnswer, SaveOffer, SavePrompt } from "../shared/types";
 import { touch } from "./activity";
+import { siteOrigin, withSite } from "./add-site";
 import { QUOTA_TEXT, STORAGE_TEXT } from "./api";
 import { initCore } from "./core";
 import { matching } from "./matching";
@@ -42,6 +45,8 @@ interface PendingSave extends Expiring {
   target: string;
   /** The logins the user may pick instead (their own ones for this site, and shared ones under the typed user name; the save rule). */
   targets: SaveTarget[];
+  /** Nothing saved for this site: own logins for other sites with the same user name and password ("add this site to"). */
+  addTo?: AddSiteTarget[];
   /** Ties the prompt the user sees to this pending save. */
   nonce: string;
   /** The prompt frame that used the nonce first: the only one that may answer. */
@@ -87,7 +92,7 @@ export async function rememberUser(sender: Sender, username: string) {
 const MAX_SAVE_TARGETS = 12;
 
 /** The default target and the "Save in" choices for what was typed (the save rule, site.ts), or null when there is nothing to offer. */
-async function planFor(url: string, username: string, password: string): Promise<Pick<PendingSave, "target" | "targets"> | null> {
+async function planFor(url: string, username: string, password: string): Promise<Pick<PendingSave, "target" | "targets" | "addTo"> | null> {
   const host = parse(url)?.hostname ?? "";
   const candidates = (await matching(url)).flatMap((e) => {
     const login = e.item.login;
@@ -110,7 +115,27 @@ async function planFor(url: string, username: string, password: string): Promise
   const targets = [...plan.targets.filter((t) => t.id === plan.target), ...plan.targets.filter((t) => t.id !== plan.target)]
     .slice(0, MAX_SAVE_TARGETS)
     .map((t) => ({ ...t, username: t.username.slice(0, 256) }));
-  return { target: plan.target, targets };
+  const addTo = targets.length ? [] : sameAccountElsewhere(username, password);
+  return { target: plan.target, targets, ...(addTo.length ? { addTo } : {}) };
+}
+
+const MAX_ADD_TO = 3;
+
+/**
+ * The user's own logins (for other sites: nothing matched this one) saved with exactly this user name and password:
+ * the same account, used on one more site. Both must be typed; a password alone says nothing about the account.
+ */
+function sameAccountElsewhere(username: string, password: string): AddSiteTarget[] {
+  const user = username.trim().toLowerCase();
+  if (!user || !password) return [];
+  return vault
+    .allEntries()
+    .filter((e) => e.item.login && vault.isPersonal(e) && vault.canWrite(e) && e.item.login.password === password && e.item.login.username.trim().toLowerCase() === user)
+    .slice(0, MAX_ADD_TO)
+    .map((e) => {
+      const site = siteHost(e.item).replace(/^www\./, "");
+      return { id: e.id, name: (e.item.name || site || "Login").slice(0, 120), username: e.item.login!.username.slice(0, 256), site: site.slice(0, 120) };
+    });
 }
 
 /**
@@ -184,12 +209,20 @@ export async function rememberGenerated(tabId: number, url: string, username: st
 }
 
 /** What the page side gets: the nonce for the prompt frame, a first height for it and whether it takes the focus. Nothing from the vault. */
-const promptOf = (p: PendingSave): SavePrompt => ({ nonce: p.nonce, height: promptHeight(p.targets.length), ...(p.keyboard ? { focus: true } : {}) });
+const promptOf = (p: PendingSave): SavePrompt => ({ nonce: p.nonce, height: promptHeight(p.targets.length + (p.addTo?.length ?? 0)), ...(p.keyboard ? { focus: true } : {}) });
 
 /** What the prompt frame shows. */
 async function offerOf(p: PendingSave): Promise<SaveOffer> {
   const { theme } = await getSettings();
-  return { host: parse(p.url)?.hostname ?? "", username: p.username, targets: p.targets, selected: p.target, theme, ...(p.generated ? { generated: true } : {}) };
+  return {
+    host: parse(p.url)?.hostname ?? "",
+    username: p.username,
+    targets: p.targets,
+    ...(p.addTo?.length ? { addTo: p.addTo } : {}),
+    selected: p.target,
+    theme,
+    ...(p.generated ? { generated: true } : {}),
+  };
 }
 
 /**
@@ -309,7 +342,8 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
     return finish();
   }
   if (accept !== "save") return finish();
-  const choice = chosenTarget(p, target);
+  const addTo = typeof target === "string" ? p.addTo?.find((t) => t.id === target) : undefined;
+  const choice = addTo ? addTo.id : chosenTarget(p, target);
   if (choice === null) {
     await finish();
     throw notAllowed();
@@ -323,6 +357,26 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
     }
     // Saving is the user at work in PassAuth: it restarts the vault timeout.
     await touch();
+    if (addTo) {
+      const existing = vault.getEntry(addTo.id);
+      const origin = siteOrigin(p.url);
+      // Still the same account (nothing changed it since the prompt was shown); otherwise ask again.
+      if (!origin || !existing?.item.login || !vault.canWrite(existing) || existing.item.login.password !== p.password) {
+        const next = await planFor(p.url, p.username, p.password);
+        if (!next) return finish();
+        const again: PendingSave = { ...p, ...next };
+        if (!next.addTo) delete again.addTo;
+        await saves.put(tabId, again);
+        return { again: await offerOf(again), notice: "That login changed. Check where to save, then try again." };
+      }
+      await vault.updateItem(existing, withSite(existing.item, origin));
+      await saves.remove(tabId);
+      forgetNonce(p.nonce);
+      await closePrompt(tabId);
+      // The page learns only that its own site was added, never which login it went to.
+      await notifyTab(tabId, pageText`${hostText(host)} added to your login.`);
+      return { done: true };
+    }
     if (choice !== NEW_LOGIN) {
       const existing = vault.getEntry(choice);
       if (!existing?.item.login || !vault.canWrite(existing)) {

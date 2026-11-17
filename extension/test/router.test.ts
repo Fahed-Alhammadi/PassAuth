@@ -260,6 +260,8 @@ const REQUESTS: Record<string, Record<string, Record<string, unknown>>> = {
     generate: { mode: "password" },
     createItem: { item: entry("x", "https://example.com").item },
     updateItem: { id: "e1", item: entry("x", "https://example.com").item },
+    "addSite:targets": { url: "https://example.com/" },
+    addSite: { id: "e1", url: "https://example.com/" },
     trashItem: { id: "e1" },
     editorInfo: {},
     settings: { patch: { theme: "dark" } },
@@ -607,4 +609,68 @@ test("the popup's item list says why the last fill on its tab's page didn't work
   expect(other.data.fillProblem).toBeUndefined();
   // A content script can't ask for it.
   expect(await fake.deliver({ type: "items", url: TAB.url, tabId: 1 }, page(0))).toStrictEqual(NOT_ALLOWED);
+});
+
+/** Records `updateItem` calls for one test (the mock's own is a no-op). */
+async function capturingUpdates(run: (updates: Item[]) => Promise<void>) {
+  const before = v.updateItem;
+  const updates: Item[] = [];
+  v.updateItem = (async (_e: unknown, item: Item) => {
+    updates.push(item);
+  }) as typeof v.updateItem;
+  try {
+    await run(updates);
+  } finally {
+    v.updateItem = before;
+  }
+}
+
+test("Add to an existing login (popup): lists logins not saved for the page; adds the page's origin with the default match", async () => {
+  v.data.entries = [entry("gmail", "https://gmail.com"), entry("here", "https://example.com")];
+  const targets = await fake.deliver({ type: "addSite:targets", url: "https://example.com/login" }, popup);
+  expect(targets.data.map((t: { id: string }) => t.id)).toStrictEqual(["gmail"]);
+  await capturingUpdates(async (updates) => {
+    expect((await fake.deliver({ type: "addSite", id: "gmail", url: "https://example.com/login?x=1" }, popup)).data).toBe(true);
+    expect(updates[0]?.login?.urls).toStrictEqual([
+      { url: "https://gmail.com", match: "domain" },
+      { url: "https://example.com", match: "default" },
+    ]);
+    // Already saved for the page: nothing changes.
+    expect((await fake.deliver({ type: "addSite", id: "here", url: "https://example.com/login" }, popup)).data).toBe(false);
+    expect(updates).toHaveLength(1);
+  });
+  // Only http(s) pages, and never from a page.
+  expect(await fake.deliver({ type: "addSite", id: "gmail", url: "chrome://settings" }, popup)).toStrictEqual(NOT_ALLOWED);
+  expect(await fake.deliver({ type: "addSite", id: "gmail", url: "https://example.com/" }, page(0))).toStrictEqual(NOT_ALLOWED);
+});
+
+test("save prompt: the typed user name and password of a login for another site offer 'add this site'; the page never learns which login", async () => {
+  v.data.entries = [entry("gmail", "https://gmail.com"), entry("team", "https://team.test", "v-team")];
+  expect((await fake.deliver({ type: "page:submitted", username: "Alex", password: "secret-pw" }, page(0))).data).toBe(true);
+  const nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+  const offer = (await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7))).data;
+  // Own vault only (never a shared one), and never preselected.
+  expect(offer).toMatchObject({ targets: [], selected: "new", addTo: [{ id: "gmail", name: "gmail", username: "alex" }] });
+  fake.sentToTabs.length = 0;
+  await capturingUpdates(async (updates) => {
+    expect((await fake.deliver({ type: "save:answer", nonce, accept: "save", target: "gmail" }, framed("save-prompt.html", 7))).data).toStrictEqual({ done: true });
+    expect(updates[0]?.login?.urls.map((u) => u.url)).toStrictEqual(["https://gmail.com", "https://example.com"]);
+    expect(updates[0]?.login?.password).toBe("secret-pw");
+  });
+  const toasts = fake.sentToTabs.filter((s) => s.message.type === "toast").map((s) => s.message.text as string);
+  expect(toasts).toStrictEqual(["example.com added to your login."]);
+});
+
+test("save prompt: another password, or no user name, offers no 'add this site'", async () => {
+  v.data.entries = [entry("gmail", "https://gmail.com")];
+  for (const [username, password] of [
+    ["alex", "other-pw"],
+    ["", "secret-pw"],
+  ]) {
+    expect((await fake.deliver({ type: "page:submitted", username, password }, page(0))).data).toBe(true);
+    const nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+    const offer = (await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7))).data;
+    expect(offer.addTo, `${username}/${password}`).toBeUndefined();
+    await fake.deliver({ type: "save:answer", nonce, accept: "dismiss", target: "new" }, framed("save-prompt.html", 7));
+  }
 });

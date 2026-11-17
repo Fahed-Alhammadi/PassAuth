@@ -61,6 +61,7 @@ export function VaultList({
   const [data, setData] = useState<ItemList | null>(null);
   const [tabId, setTabId] = useState<number | undefined>();
   const [host, setHost] = useState("");
+  const [pageUrl, setPageUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showFilter, setShowFilter] = useState(!!(filter.kind || filter.folder !== null || filter.favorite || filter.vault !== null));
   const [favOpen, setFavOpen] = useState<boolean | null>(null);
@@ -80,6 +81,7 @@ export function VaultList({
         const url = tab?.url?.startsWith("http") ? tab.url : undefined;
         if (alive && url) {
           setHost(hostOf(url));
+          setPageUrl(url);
           setTabId(tab?.id);
         }
         return callPopup("items", { url, ...(url && tab?.id !== undefined ? { tabId: tab.id } : {}) });
@@ -138,7 +140,9 @@ export function VaultList({
   const results = data && searching ? searchItems(data.all.filter(keep), filter.query, suggestedIds) : [];
 
   // The sections on screen, in order: the keyboard walks the rows in this order.
-  const sections: { title: ReactNode; count: number; rows: Row[]; empty?: ReactNode; collapsed?: boolean }[] = [];
+  const sections: { title: ReactNode; count: number; rows: Row[]; empty?: ReactNode; collapsed?: boolean; add?: ReactNode }[] = [];
+  const newLogin = () => ctx.go({ tab: "vault", page: "new", kind: "login" });
+  const addToExisting = () => pageUrl && ctx.go({ tab: "vault", page: "addSite", url: pageUrl });
   const rowsOf = (name: string, items: ItemSummary[]): Row[] =>
     items.map((item) => ({ key: `${name}:${item.id}`, item, canFill: suggestedIds.has(item.id) && item.kind === "login" && (item.hasPassword || !!item.username) }));
   if (data && searching) {
@@ -162,10 +166,14 @@ export function VaultList({
         title: "Autofill suggestions",
         count: data.suggested.length,
         rows: rowsOf("s", data.suggested),
+        add: <AddMenu host={host} onNew={newLogin} onExisting={addToExisting} />,
         empty: (
           <div className="empty">
             <p className="empty-title">No logins for {host}</p>
-            <p>Sign in on the page and PassAuth offers to save the login.</p>
+            <p>Use the same account here as on another site? Add {host} to that login. Or sign in on the page and PassAuth offers to save it.</p>
+            <div className="empty-actions">
+              <AddMenu host={host} onNew={newLogin} onExisting={addToExisting} primary />
+            </div>
           </div>
         ),
       });
@@ -355,6 +363,7 @@ export function VaultList({
             <h2 className="group-title">
               <span>{s.title}</span>
               <span className="count">{s.count}</span>
+              {s.add && s.rows.length > 0 && <span className="group-action">{s.add}</span>}
             </h2>
             {s.rows.length ? (
               <div className="list">
@@ -369,6 +378,31 @@ export function VaultList({
         ))}
       </div>
     </Page>
+  );
+}
+
+/**
+ * "Add" for the page the user is on: a new login for it, or the site added to a login they already have (the same
+ * account on another site). In the suggestions' heading, and as the button of their empty state.
+ */
+function AddMenu({ host, onNew, onExisting, primary }: { host: string; onNew: () => void; onExisting: () => void; primary?: boolean }) {
+  return (
+    <Menu
+      label={`Add a login for ${host}`}
+      className={primary ? "btn btn-primary" : "btn btn-text btn-sm"}
+      trigger={
+        <>
+          <Icon name="plus" size={primary ? undefined : 14} /> Add
+        </>
+      }
+    >
+      <MenuItem icon="plus" onClick={onNew}>
+        New login
+      </MenuItem>
+      <MenuItem icon="globe" onClick={onExisting}>
+        Existing login…
+      </MenuItem>
+    </Menu>
   );
 }
 

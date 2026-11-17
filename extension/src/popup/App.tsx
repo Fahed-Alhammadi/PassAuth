@@ -5,6 +5,7 @@ import { codeOf, LOCKED, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } fr
 import { callPopup, setFailureHandler } from "../shared/protocol";
 import type { PopupState, TwoFactorChallenge } from "../shared/types";
 import { openCentered, POPUP_WINDOW } from "../shared/windows";
+import { AddSitePage } from "./add-site";
 import { type CopyRequest, type Ctx, hostOf, msg, type Route, seconds } from "./ctx";
 import { DeviceSignIn, deviceSignInEmail, deviceSignInUrl } from "./device-sign-in";
 import { EditPage } from "./editor";
@@ -630,6 +631,7 @@ function Screens({ state, onChange, start, startNote }: { state: PopupState; onC
       {/* The first page shown may bring back the draft its editor had when the popup closed. */}
       {route.tab === "vault" && route.page === "edit" && <EditPage key={visit} id={route.id} draft={visit === 0 ? start.draft : undefined} ctx={ctx} />}
       {route.tab === "vault" && route.page === "new" && <EditPage key={visit} kind={route.kind} prefill={route.prefill} draft={visit === 0 ? start.draft : undefined} ctx={ctx} />}
+      {route.tab === "vault" && route.page === "addSite" && <AddSitePage key={visit} url={route.url} ctx={ctx} />}
       {route.tab === "generator" && <GeneratorPage key={visit} ctx={ctx} />}
       {route.tab === "settings" && <SettingsPage key={visit} ctx={ctx} section={route.section} />}
       <div className="pop-note" role="status" aria-live="polite" aria-atomic="true">

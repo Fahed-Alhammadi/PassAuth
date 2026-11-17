@@ -88,6 +88,7 @@ function validRoute(r: unknown): Route | null {
   if (x.page === "list") return LIST;
   if ((x.page === "item" || x.page === "edit" || x.page === "history") && str(x.id)) return { tab: "vault", page: x.page, id: x.id };
   if (x.page === "new" && KINDS.has(x.kind as ItemKind)) return { tab: "vault", page: "new", kind: x.kind as ItemKind };
+  if (x.page === "addSite" && typeof x.url === "string" && /^https?:\/\//i.test(x.url) && x.url.length < 2048) return { tab: "vault", page: "addSite", url: x.url };
   return null;
 }
 

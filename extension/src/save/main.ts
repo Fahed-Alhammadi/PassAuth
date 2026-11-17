@@ -27,7 +27,7 @@ import { closeSvg, logoSvg, plusSvg } from "../content/brand";
 import { againHint, clickGate, inputKind } from "../content/guard";
 import { onFocusRequest, onMoved, receiveNonce, reportTouch } from "../shared/dom/frame-channel";
 import { callSave } from "../shared/protocol";
-import { describeSave, NEW_LOGIN, sharedWarning, type TextPart } from "../shared/save-text";
+import { addSiteWarning, describeAddSite, describeSave, NEW_LOGIN, sharedWarning, type TextPart } from "../shared/save-text";
 import type { SaveAnswer, SaveOffer } from "../shared/types";
 
 /** Set once the content script that placed this frame has handed it over (frame-channel.ts). */
@@ -135,8 +135,9 @@ let last: SaveOffer | null = null;
 function render(offer: SaveOffer, state: { notice?: string; error?: string; closed?: boolean } = {}) {
   last = offer;
   const { host, username, targets } = offer;
+  const addTo = offer.addTo ?? [];
   if (offer.theme !== "system") document.documentElement.dataset.theme = offer.theme;
-  selected = offer.selected === NEW_LOGIN || targets.some((t) => t.id === offer.selected) ? offer.selected : NEW_LOGIN;
+  selected = offer.selected === NEW_LOGIN || targets.some((t) => t.id === offer.selected) || addTo.some((t) => t.id === offer.selected) ? offer.selected : NEW_LOGIN;
   const site = host.replace(/^www\./, "");
 
   const brand = el("span", "sheet-brand");
@@ -168,6 +169,16 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
 
   // Title, button, the sentence that names what will be saved and the shared-vault warning all follow the selection.
   const update = () => {
+    const add = addTo.find((t) => t.id === selected);
+    if (add) {
+      // The same account on another site: this site is added to that login (nothing else changes).
+      title.textContent = "Add site to login?";
+      primary.textContent = "Add site";
+      note.replaceChildren(...parts(describeAddSite(add, site)));
+      warn.hidden = false;
+      warn.replaceChildren(...parts(addSiteWarning(add, site)));
+      return;
+    }
     const target = targets.find((t) => t.id === selected);
     title.textContent = target ? "Update login?" : "Save login?";
     primary.textContent = target ? "Update" : "Save";
@@ -179,7 +190,7 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
 
   const body = el("div", "modal-body");
   body.append(context);
-  if (targets.length && !state.closed) {
+  if ((targets.length || addTo.length) && !state.closed) {
     const group = el("fieldset", "choice-group");
     const list = el("div", "choices");
     const row = (id: string, name: string, sub: string, icon: HTMLElement) => {
@@ -199,8 +210,10 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
       // A login in a shared vault (only one saved under the typed user name, never preselected) says so.
       list.append(row(t.id, t.name, t.vault ? `In ${t.vault}: ${user}` : user, tile(t.name)));
     }
+    // Logins for other sites saved with what was typed: "add this site to" (never preselected).
+    for (const t of addTo) list.append(row(t.id, t.name, `Add this site · ${t.site || t.username || "same account"}`, tile(t.name)));
     list.append(row(NEW_LOGIN, "New login", username || site, tile(plusSvg, true)));
-    group.append(el("legend", "field-label", "Save in"), list);
+    group.append(el("legend", "field-label", targets.length ? "Save in" : "Save as"), list);
     group.addEventListener("change", (e) => {
       const input = e.target as HTMLInputElement;
       // Only the user changes the choice (clicks and arrow keys are trusted events).

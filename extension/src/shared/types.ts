@@ -349,6 +349,15 @@ export interface SavePrompt {
   focus?: boolean;
 }
 
+/** A login for another site that the save prompt offers to add this site to. */
+export interface AddSiteTarget {
+  id: string;
+  name: string;
+  username: string;
+  /** The login's own site ("gmail.com"). */
+  site: string;
+}
+
 /** What the save prompt shows. Only the prompt frame (an extension page) gets it, never the content script. */
 export interface SaveOffer {
   host: string;
@@ -359,6 +368,11 @@ export interface SaveOffer {
    * shared vault saved under the typed user name, which names its vault and is never preselected (the save rule).
    */
   targets: SaveTarget[];
+  /**
+   * Only when nothing is saved for this site: the user's own logins for other sites with exactly the typed user name
+   * and password (the same account used here). Picking one adds this site to it. Never preselected.
+   */
+  addTo?: AddSiteTarget[];
   /** Preselected: one of the user's own `targets` (update it) or "new" (save a new login). */
   selected: string;
   theme: Settings["theme"];

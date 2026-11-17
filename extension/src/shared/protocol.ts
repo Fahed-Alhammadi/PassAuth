@@ -23,6 +23,7 @@ import type {
   InlineKind,
   ItemData,
   ItemList,
+  ItemSummary,
   LoginResult,
   PasskeyRequestInfo,
   PinUnlockResult,
@@ -81,6 +82,10 @@ export interface PopupApi {
   /** `id`: the new item's id (a UUID the editor keeps), so trying again after a failure can't save it twice. */
   createItem: Rpc<{ item: Item; vaultId?: string; id?: string }, string>;
   updateItem: Rpc<{ id: string; item: Item }, void>;
+  /** Logins the page at `url` can be added to ("Add this site to a login"): editable, not matching the page yet. */
+  "addSite:targets": Rpc<{ url: string }, ItemSummary[]>;
+  /** Add the page's address to login `id`; false when it already matched the page. */
+  addSite: Rpc<{ id: string; url: string }, boolean>;
   trashItem: Rpc<{ id: string }, void>;
   editorInfo: Rpc<None, EditorInfo>;
   settings: Rpc<{ patch: Partial<Settings> }, Settings>;
