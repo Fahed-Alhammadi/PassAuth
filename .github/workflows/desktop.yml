@@ -15,8 +15,10 @@
 # (APP_STORE_CONNECT_API_KEY_ID / _API_ISSUER_ID / _API_KEY_P8). Without the certificate the app
 # is built unsigned and Gatekeeper warns on first open (Control-click → Open).
 # Windows: unsigned for now; SmartScreen warns until a code-signing certificate is added.
-# Updater signatures: TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD when the key
-# has one; empty otherwise). The matching public key is in desktop/src-tauri/tauri.conf.json.
+# Updater signatures: TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD are secrets of
+# the `desktop-release` environment, which needs the owner's approval for every run of the build
+# job (Actions → the run → Review deployments): no signed update can be built without it. The
+# matching public key is in desktop/src-tauri/tauri.conf.json.
 name: Desktop
 
 on:
@@ -151,6 +153,7 @@ jobs:
   build:
     name: ${{ matrix.os }}
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
+    environment: desktop-release
     strategy:
       fail-fast: false
       matrix:
