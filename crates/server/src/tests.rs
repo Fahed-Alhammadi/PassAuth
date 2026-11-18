@@ -5427,7 +5427,7 @@ async fn breach_check_opens_the_web_vaults_csp_and_is_a_feature() {
     let mut config = test_config().await;
     config.web_vault_dir = Some(dir.to_str().unwrap().to_owned());
     let app = crate::router(App::new(config).await.unwrap());
-    let closed = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+    let closed = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
     let open = closed.replace(
         "connect-src 'self';",
         "connect-src 'self' https://api.pwnedpasswords.com;",
