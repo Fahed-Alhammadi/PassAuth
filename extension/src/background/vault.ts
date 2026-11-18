@@ -39,6 +39,7 @@ import type {
 } from "../shared/types";
 import * as core from "../wasm/passauth_core";
 import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, refreshServerInfo, serverConfig, serverInfo } from "./api";
+import { AVATAR_FEATURE, avatarSeqOf, avatars, deleteAvatar, refreshAvatar, uploadAvatar } from "./avatar";
 import { initCore } from "./core";
 import { forgetLastUsed } from "./last-used";
 import { type IndexedLogin, type MatchIndex, matchIndex } from "./match-index";
@@ -235,15 +236,20 @@ export async function state(): Promise<PopupState> {
   const status = !l.server ? "setup" : !l.tokens ? "logged-out" : s || (account && currentId === l.activeId) ? "unlocked" : "locked";
   const never = l.settings.vaultTimeout === "never";
   const accounts: AccountSummary[] = [];
+  const pictures = await avatars.many(Object.keys(l.accounts));
   for (const [id, a] of Object.entries(l.accounts)) {
     if (!a.server || !a.email) continue;
-    accounts.push({ id, email: a.email, name: a.name, server: a.server, status: id === l.activeId ? status : await statusOf(a, id, never) });
+    const avatar = pictures[id];
+    accounts.push({ id, email: a.email, name: a.name, server: a.server, status: id === l.activeId ? status : await statusOf(a, id, never), ...(avatar ? { avatar } : {}) });
   }
+  const avatar = pictures[l.activeId];
   return {
     status,
     activeId: l.activeId,
     accounts,
     name: l.name,
+    ...(avatar ? { avatar } : {}),
+    ...(status === "unlocked" && (await serverInfo(l.server))?.features.has(AVATAR_FEATURE) ? { avatarEditable: true } : {}),
     server: l.server,
     email: l.email,
     secretKeyRequired: await secretKeyRequired(l, s),
@@ -526,6 +532,30 @@ export async function persistForNever() {
   if (never) await pinCopies.remove(Object.keys(accounts));
 }
 
+// ---------------------------------------------------------- profile picture
+
+/** After a sync of `id`: fetch and open its profile picture when the server's number changed (in the background; a failure only leaves the old one). */
+function syncAvatar(id: string, user: unknown) {
+  const acct = account;
+  const gen = generation;
+  if (!acct || currentId !== id) return;
+  const stale = () => gen !== generation || currentId !== id || account !== acct;
+  void refreshAvatar(id, avatarSeqOf(user), (sealed) => acct.openAvatar(sealed), stale).catch(logged("Fetching the profile picture"));
+}
+
+/** Set the active account's profile picture (a JPEG the popup made, ≤ 256 KiB): sealed with the Account Key here, then uploaded. */
+export async function setAvatar(jpeg: Uint8Array) {
+  if (!account || !currentId) throw lockedError();
+  const acct = account;
+  await uploadAvatar(currentId, jpeg, (image) => acct.sealAvatar(image));
+}
+
+/** Remove the active account's profile picture. */
+export async function removeAvatar() {
+  if (!account || !currentId) throw lockedError();
+  await deleteAvatar(currentId);
+}
+
 /** "Forget this browser" for the active account: its remember-device token and stored Secret Key. */
 export async function forgetBrowser() {
   const { server, email } = await local.get();
@@ -800,6 +830,7 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
       await checkSharing(snap, id, "open", copy?.trust);
       if (gen !== generation || currentId !== id || loaded) return;
       show(snap);
+      syncAvatar(id, snap.user);
       void refreshIfStale().catch(logged("Checking for changes"));
       return;
     }
@@ -857,6 +888,7 @@ export async function logout() {
   await clearUnlocked(id);
   await syncCache.clear(id);
   await forgetLastUsed(id);
+  await avatars.remove([id]);
   // Signing out forgets this browser for the account: its Secret Key and two-step "remember" token go too.
   if (server && email) await local.forgetDevice(server, email);
   if (Object.values(accounts).filter((a) => a.server).length > 1) await local.removeAccount(id);
@@ -963,6 +995,7 @@ export async function logoutAll() {
   for (const [id, a] of Object.entries(accounts)) {
     await syncCache.clear(id);
     await forgetLastUsed(id);
+    await avatars.remove([id]);
     if (!a.tokens) continue;
     await logoutRemote(a.server, a.tokens);
     await local.set({ tokens: null }, id);
@@ -1103,6 +1136,7 @@ async function accept(snap: Snapshot, id: string) {
   show(snap);
   await persist(id);
   await local.set({ lastSync: Date.now(), name: typeof snap.user?.name === "string" ? snap.user.name : "" }, id);
+  syncAvatar(id, snap.user);
   if (sharingResync) {
     sharingResync = false;
     void sync().catch(logged("Syncing again"));

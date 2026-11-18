@@ -534,7 +534,7 @@ struct MacList: View {
 
     private func entryRow(_ e: Entry) -> some View {
         Button { model.pick(e) } label: {
-            MacRow(title: e.item.name, subtitle: e.item.login?.username ?? "", letter: e.item.name, hasCode: Clipboard.totp(e.item.login?.totp) != nil)
+            MacRow(title: e.item.name, subtitle: e.item.login?.username ?? "", letter: e.item.name, globe: !model.repo.state.showSiteIcons, hasCode: Clipboard.totp(e.item.login?.totp) != nil)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("login-\(e.item.name)")
@@ -588,11 +588,13 @@ private struct MacRow: View {
     let subtitle: String
     var symbol: String? = nil
     var letter: String = ""
+    /// Website icons are off: the neutral globe instead of the letter.
+    var globe = false
     var hasCode = false
 
     var body: some View {
         HStack(spacing: 10) {
-            InitialTile(text: letter, symbol: symbol, size: 28)
+            InitialTile(text: letter, symbol: symbol, size: 28, globe: globe)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title.isEmpty ? "Untitled" : title).lineLimit(1)
                 if !subtitle.isEmpty { Text(subtitle).font(.callout).foregroundStyle(.secondary).lineLimit(1) }
@@ -653,7 +655,7 @@ struct MacAddSitePicker: View {
                     }
                     ForEach(shown) { e in
                         Button { model.chooseAddSite(e) } label: {
-                            MacRow(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e))
+                            MacRow(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e), globe: !model.repo.state.showSiteIcons)
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("addSite-\(e.item.name)")

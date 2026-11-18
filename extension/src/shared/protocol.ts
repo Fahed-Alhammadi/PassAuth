@@ -98,6 +98,10 @@ export interface PopupApi {
   "account:cancelAdd": Rpc<None, void>;
   /** Forget this browser for the active account: its remember-device token and its stored Secret Key. */
   "account:forgetBrowser": Rpc<None, void>;
+  /** Set the active account's profile picture: `jpeg` = base64 of the 256×256 JPEG the popup made (≤ 256 KiB). */
+  "avatar:set": Rpc<{ jpeg: string }, void>;
+  /** Remove the active account's profile picture. */
+  "avatar:remove": Rpc<None, void>;
   /** Two-step login security keys of the active account (`GET /account`). */
   securityKeys: Rpc<None, SecurityKeys>;
   /** Remove one, after the master password (fresh reauth token). */

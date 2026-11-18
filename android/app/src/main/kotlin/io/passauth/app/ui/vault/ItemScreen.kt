@@ -118,7 +118,7 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
             onDismiss = { confirmDelete = false },
             title = "Move to trash?",
             subtitle = i.name.ifEmpty { "Untitled" },
-            tile = { SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp) },
+            tile = { SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp, login = i.kind == io.passauth.app.data.ItemKind.Login) },
             actions = {
                 PrimaryButton("Move to trash", {
                     confirmDelete = false
@@ -179,7 +179,7 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
         ) {
             CardSection(null) {
                 Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 44.dp)
+                    SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 44.dp, login = i.kind == io.passauth.app.data.ItemKind.Login)
                     Text(i.name.ifEmpty { "Untitled" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).semantics { heading() })
                     if (i.favorite) Icon(Icons.Filled.Star, "Favorite", tint = MaterialTheme.colorScheme.primary)
                 }

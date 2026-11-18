@@ -227,8 +227,8 @@ export interface SyncInvitation {
 
 export interface SyncResponse {
   revision: number;
-  /** `identity` and `key_pins_seq`: signed sharing (servers with `signed_sharing`), read by `signed-sharing.ts`. */
-  user: { id: string; email: string; name: string; email_verified: boolean; identity?: unknown; key_pins_seq?: unknown };
+  /** `identity` and `key_pins_seq`: signed sharing (servers with `signed_sharing`), read by `signed-sharing.ts`. `avatar_seq`: profile picture (servers with `avatar`; 0 = none). */
+  user: { id: string; email: string; name: string; email_verified: boolean; identity?: unknown; key_pins_seq?: unknown; avatar_seq?: unknown };
   bundle: Bundle;
   vaults: SyncVaultRow[];
   items: SyncItemRow[];

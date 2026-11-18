@@ -18,6 +18,7 @@
  */
 import type { Bundle, SyncResponse } from "@web/lib/types";
 import { log, logged } from "../shared/log";
+import { AVATAR_PREFIX } from "../shared/storage-keys";
 import type { Settings } from "../shared/types";
 import { forgetLastUsed } from "./last-used";
 import type { StoredSync } from "./sync-rules";
@@ -233,6 +234,7 @@ export const local = {
         Object.assign(patch, { secretKeys, rememberTokens });
       }
       await chrome.storage.local.set(patch);
+      await chrome.storage.local.remove(`${AVATAR_PREFIX}${id}`);
       await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id)]);
       await forgetLastUsed(id);
       await syncCache.clear(id);

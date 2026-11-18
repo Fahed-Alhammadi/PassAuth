@@ -1,5 +1,6 @@
 import { isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { friendlyError } from "../lib/api";
+import { initialsOf, useAvatarUrl } from "../lib/avatar";
 import { WEAK_BITS } from "../lib/health";
 import { getDesktop } from "../lib/platform";
 import { server as serverConfig } from "../lib/server";
@@ -173,13 +174,32 @@ export async function copySecret(value: string, label = "Copied"): Promise<boole
   return false;
 }
 
-/** Website icon from the server's icon service, falling back to the item's initial. */
+/** The account's picture in a circle (aspect-fill), or its initials when there is none. Decorative: the name is the label. */
+export function AccountPicture({ name, email, size = "m" }: { name: string; email: string; size?: "s" | "m" }) {
+  const url = useAvatarUrl();
+  return (
+    <span className={`account-pic account-pic-${size}${url ? " has-photo" : ""}`} aria-hidden="true">
+      {url ? <img src={url} alt="" /> : initialsOf(name, email)}
+    </span>
+  );
+}
+
+/**
+ * Website icon from the server's icon service, falling back to the item's initial when the icon can't be had. With
+ * website icons turned off every login shows the same globe glyph instead (no letter, no request).
+ */
 export function SiteIcon({ host, name, server = serverConfig.base, enabled = true }: { host: string; name: string; server?: string; enabled?: boolean }) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => setLoaded(false), [host]);
+  if (!enabled)
+    return (
+      <span className="avatar glyph" aria-hidden="true">
+        <Icon name="globe" />
+      </span>
+    );
   return (
     <span className={loaded ? "avatar has-img" : "avatar"} aria-hidden="true">
-      {enabled && host ? (
+      {host ? (
         <img
           src={`${server}/api/icons/${encodeURIComponent(host)}`}
           alt=""

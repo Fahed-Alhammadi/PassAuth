@@ -86,7 +86,18 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
         if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
     }.getOrNull()
 
+    /** Deletes account [id]'s offline copy and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
         cacheFile(id).delete()
+        avatars.delete(id)
     }
+
+    // ------------------------------------------------------- profile pictures
+
+    /** Each account's profile picture, sealed with the store key ([AvatarCache]). */
+    val avatars = AvatarCache(
+        File(context.noBackupFilesDir, "avatars"),
+        seal = { Keystore.encrypt(Keystore.storeKey(), it) },
+        open = { Keystore.decrypt(Keystore.storeKey(), it) },
+    )
 }

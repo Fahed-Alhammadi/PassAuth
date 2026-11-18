@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.outlined.Casino
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -47,6 +48,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
@@ -85,20 +87,43 @@ fun initials(name: String, email: String): String {
     return s.ifEmpty { "?" }.uppercase()
 }
 
+/** The account's profile picture ([image], cropped to the circle), or its initials [text] when there is none. */
 @Composable
-fun Avatar(text: String, size: Dp = 36.dp, modifier: Modifier = Modifier) {
+fun Avatar(text: String, size: Dp = 36.dp, modifier: Modifier = Modifier, image: ImageBitmap? = null) {
     Box(
         modifier.size(size).clip(CircleShape).background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(Brand.Blue, Brand.Cyan))),
         contentAlignment = Alignment.Center,
     ) {
-        // Sized to the circle, not the font scale (the account menu button has its own description).
-        Text(text, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = fixedSp(size * 0.38f), maxLines = 1)
+        if (image != null) {
+            // Decorative: the name next to it (or the button's description) is the label.
+            Image(image, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(size))
+        } else {
+            // Sized to the circle, not the font scale (the account menu button has its own description).
+            Text(text, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = fixedSp(size * 0.38f), maxLines = 1)
+        }
     }
 }
 
-/** Site icon from the server, or the item's first letter. */
+/** What a site tile shows. */
+enum class SiteTileContent { Icon, Globe, Letter }
+
+/**
+ * Website icons on: the site's icon, or the first letter while it is missing or fails to load.
+ * Off (the user's setting or the server's): one neutral globe for every login; other kinds keep their letter.
+ */
+fun siteTileContent(enabled: Boolean, hasIcon: Boolean, login: Boolean): SiteTileContent = when {
+    enabled && hasIcon -> SiteTileContent.Icon
+    !enabled && login -> SiteTileContent.Globe
+    else -> SiteTileContent.Letter
+}
+
+/** The neutral globe of a login tile while website icons are off. */
 @Composable
-fun SiteIcon(host: String, name: String, server: String, enabled: Boolean, icons: IconLoader, size: Dp = 36.dp) {
+fun GlobeGlyph(size: Dp) = Icon(Icons.Filled.Public, null, tint = PassAuthTheme.colors.muted, modifier = Modifier.size(size * 0.55f))
+
+/** Site icon from the server, the item's first letter, or a globe for logins when icons are off ([siteTileContent]). */
+@Composable
+fun SiteIcon(host: String, name: String, server: String, enabled: Boolean, icons: IconLoader, size: Dp = 36.dp, login: Boolean = true) {
     val bitmap by produceState<ImageBitmap?>(icons.cached(server, host)?.getOrNull(), host, server, enabled) {
         if (enabled && host.isNotEmpty() && server.isNotEmpty()) value = icons.load(server, host)
     }
@@ -108,10 +133,10 @@ fun SiteIcon(host: String, name: String, server: String, enabled: Boolean, icons
         contentAlignment = Alignment.Center,
     ) {
         val b = bitmap
-        if (enabled && b != null) {
-            Image(b, contentDescription = null, modifier = Modifier.size(size * 0.6f))
-        } else {
-            Text(
+        when (siteTileContent(enabled, b != null, login)) {
+            SiteTileContent.Icon -> Image(b!!, contentDescription = null, modifier = Modifier.size(size * 0.6f))
+            SiteTileContent.Globe -> GlobeGlyph(size)
+            SiteTileContent.Letter -> Text(
                 (name.trim().firstOrNull() ?: '?').uppercase(),
                 color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.SemiBold,

@@ -153,22 +153,22 @@ export function MenuItem({ icon, children, onClick, danger }: { icon?: Parameter
   );
 }
 
+/** Whether this page is the pop-out window (not the toolbar popup). */
+export const isPopOut = () => new URLSearchParams(location.search).has("popout");
+
+/** Open PassAuth in its own window, where the popup was (its view is restored), and close this popup. */
+export async function openPopOut() {
+  // Over the browser window this popup belongs to, not in a corner of the screen.
+  const browser = await chrome.windows.getCurrent().catch(() => null);
+  await openCentered(chrome.runtime.getURL("popup.html?popout=1"), POPUP_WINDOW, { windowId: browser?.id });
+  window.close();
+}
+
 /** Open the popup in its own window so it stays open while you work in a page. */
 export function PopOut() {
-  if (new URLSearchParams(location.search).has("popout")) return null;
+  if (isPopOut()) return null;
   return (
-    <button
-      type="button"
-      className="btn btn-icon"
-      aria-label="Open in a window"
-      title="Open in a window"
-      onClick={async () => {
-        // Over the browser window this popup belongs to, not in a corner of the screen.
-        const browser = await chrome.windows.getCurrent().catch(() => null);
-        await openCentered(chrome.runtime.getURL("popup.html?popout=1"), POPUP_WINDOW, { windowId: browser?.id });
-        window.close();
-      }}
-    >
+    <button type="button" className="btn btn-icon" aria-label="Open in a window" title="Open in a window" onClick={openPopOut}>
       <Icon name="external" />
     </button>
   );
@@ -184,13 +184,26 @@ export function initials(name: string, email: string) {
   return ((p1 && p2 ? p1.charAt(0) + p2.charAt(0) : p1?.slice(0, 2)) || "?").toUpperCase();
 }
 
+/** An account's profile picture (decorative: the name next to it is the label), else its initials. */
+export function AccountPicture({ name, email, avatar }: { name: string; email: string; avatar?: string }) {
+  return avatar ? <img className="account-pic" src={avatar} alt="" /> : initials(name, email);
+}
+
 const STATUS_LABEL: Record<Status, string> = { unlocked: "Unlocked", locked: "Locked", "logged-out": "Signed out", setup: "" };
 
 /** Account menu: who is signed in, other accounts to switch to, add account, lock, web vault, sign out (asks first: `onSignOut`). */
 export function Account({ state, onChange, onSignOut }: { state: PopupState; onChange: () => void; onSignOut: () => void }) {
   const others = state.accounts.filter((a) => a.id !== state.activeId);
   return (
-    <Menu label="Accounts" className="avatar-btn" trigger={<span aria-hidden="true">{initials(state.name, state.email)}</span>}>
+    <Menu
+      label="Accounts"
+      className="avatar-btn"
+      trigger={
+        <span aria-hidden="true" className="avatar-face">
+          <AccountPicture name={state.name} email={state.email} avatar={state.avatar} />
+        </span>
+      }
+    >
       <div className="menu-head">
         <span className="title">{state.name || state.email}</span>
         {state.name && <span className="sub">{state.email}</span>}
@@ -199,7 +212,7 @@ export function Account({ state, onChange, onSignOut }: { state: PopupState; onC
       {others.map((a) => (
         <button type="button" key={a.id} role="menuitem" className="account-item" onClick={() => callPopup("account:switch", { id: a.id }).then(onChange)}>
           <span className="avatar-sm" aria-hidden="true">
-            {initials(a.name, a.email)}
+            <AccountPicture name={a.name} email={a.email} avatar={a.avatar} />
           </span>
           <span className="grow">
             <span className="title">{a.name || a.email}</span>
@@ -248,7 +261,7 @@ export function OtherAccounts({ state, onChange }: { state: PopupState; onChange
             onClick={() => (adding ? callPopup("account:cancelAdd") : callPopup("account:switch", { id: a.id })).then(() => (adding ? callPopup("account:switch", { id: a.id }) : null)).then(onChange)}
           >
             <span className="tile avatar-round" aria-hidden="true">
-              {initials(a.name, a.email)}
+              <AccountPicture name={a.name} email={a.email} avatar={a.avatar} />
             </span>
             <span className="choice-text">
               <span className="choice-title">{a.name || a.email}</span>

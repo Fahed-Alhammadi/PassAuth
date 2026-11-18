@@ -424,7 +424,7 @@ struct AccountMenu: View {
             Button { model.openWebVault() } label: { Label("Open web vault", systemImage: "safari") }
             Button(role: .destructive) { confirmLogout = true } label: { Label("Log out…", systemImage: "rectangle.portrait.and.arrow.right") }
         } label: {
-            Avatar(text: initials(s.name, s.email), size: 30)
+            AccountAvatar(id: s.activeId, name: s.name, email: s.email, size: 30)
         }
         .accessibilityLabel("Account menu: \(s.name.isEmpty ? s.email : s.name)")
         .accessibilityIdentifier("accountMenu")

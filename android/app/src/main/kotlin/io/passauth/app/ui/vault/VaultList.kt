@@ -346,7 +346,7 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
             .padding(start = Space.l, end = Space.xs, top = Space.s, bottom = Space.s),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp)
+        SiteIcon(s.host, s.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 40.dp, login = s.item.kind == io.passauth.app.data.ItemKind.Login)
         Column(Modifier.weight(1f).padding(start = Space.m, end = Space.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(s.name, style = MaterialTheme.typography.bodyLarge, maxLines = if (roomy) 1 else 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))

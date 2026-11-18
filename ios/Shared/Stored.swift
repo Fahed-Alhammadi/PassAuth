@@ -158,6 +158,9 @@ public struct AccountData: Codable, Equatable, Sendable {
     /// The server's account policies (`/api/config` `policies`, kept with `features`); nil until
     /// asked or from servers without the `policies` feature.
     public var policies: Policies?
+    /// The version (`/sync` `user.avatar_seq`) of the profile picture cached on this device
+    /// (`AvatarCache`, the app only); nil when none was ever fetched, 0 = the account has none.
+    public var avatarSeq: Int64?
 
     public init(server: String = "", email: String = "") {
         self.server = server

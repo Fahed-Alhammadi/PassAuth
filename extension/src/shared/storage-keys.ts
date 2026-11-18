@@ -30,3 +30,9 @@ export const SIGN_IN_REQUESTS_PREFIX = "signInRequests:";
 
 /** chrome.storage.session: sign-in requests the user put off ("Not now"): the popup doesn't open their sheet again. */
 export const SIGN_IN_PUT_OFF_KEY = "signInPutOff";
+
+/**
+ * chrome.storage.local: an account's opened profile picture (`avatar:<account>`, background/avatar.ts `CachedAvatar`),
+ * kept so the popup can show it while locked. Removed when the account signs out or is removed.
+ */
+export const AVATAR_PREFIX = "avatar:";

@@ -3,11 +3,12 @@
 import { LogoMark } from "@web/components/Logo";
 import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "@web/components/ui";
 import { minutesLabel, timeoutOptions } from "@web/lib/policies";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { callPopup } from "../shared/protocol";
 import type { PopupState, SecurityKey, SecurityKeys, Settings, SharingIdentity, VaultTimeout } from "../shared/types";
+import { avatarJpeg, bytesToBase64 } from "./avatar-image";
 import { type Ctx, msg, seconds } from "./ctx";
-import { Account, Page, PopOut } from "./shell";
+import { Account, AccountPicture, isPopOut, openPopOut, Page, PopOut } from "./shell";
 import { applyTheme } from "./theme";
 
 /** The keyboard commands in the order Settings and the welcome page list them, with PassAuth's wording. */
@@ -478,6 +479,70 @@ function SecurityKeysSettings({ notify }: { notify: (t: string) => void }) {
 }
 
 /**
+ * The account's profile picture (servers with the `avatar` feature, while unlocked): Change picture picks an image
+ * file, which is cropped, resized and re-encoded here (never uploaded as it was) and sealed by the background; Remove
+ * only when there is one. Without a picture the initials show.
+ */
+function ProfilePicture({ state, notify, reload }: { state: PopupState; notify: (t: string) => void; reload: () => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  async function run(work: () => Promise<void>, done: string) {
+    setBusy(true);
+    try {
+      await work();
+      notify(done);
+      reload();
+    } catch (e) {
+      notify(msg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function picked(file: File | undefined) {
+    if (input.current) input.current.value = "";
+    if (!file) return;
+    await run(async () => {
+      const jpeg = await avatarJpeg(file);
+      await callPopup("avatar:set", { jpeg: bytesToBase64(jpeg) });
+    }, "Profile picture changed.");
+  }
+  return (
+    <>
+      <section className="stack-s" aria-labelledby="profile-title">
+        <h3 className="section-title" id="profile-title">
+          Profile picture
+        </h3>
+        <div className="profile">
+          <span className="profile-pic" aria-hidden="true">
+            <AccountPicture name={state.name} email={state.email} avatar={state.avatar} />
+          </span>
+          <span className="profile-text">
+            <span className="title">{state.name || state.email}</span>
+            {state.name && <span className="sub">{state.email}</span>}
+          </span>
+        </div>
+        <div className="profile-actions">
+          <button type="button" className="btn" disabled={busy} onClick={() => (isPopOut() ? input.current?.click() : void openPopOut())}>
+            {state.avatar ? "Change picture" : "Choose picture"}
+          </button>
+          {state.avatar && (
+            <button type="button" className="btn" disabled={busy} onClick={() => run(() => callPopup("avatar:remove"), "Profile picture removed.")}>
+              Remove
+            </button>
+          )}
+        </div>
+        <input ref={input} type="file" accept="image/*" hidden onChange={(e) => void picked(e.target.files?.[0])} />
+        <p className="small muted">
+          {isPopOut() ? "" : "PassAuth opens in its own window first, so the file chooser can stay open. "}Your picture is encrypted before it leaves this browser. Your other devices show it after
+          their next sync.
+        </p>
+      </section>
+      <hr />
+    </>
+  );
+}
+
+/**
  * "Forget this browser": the account's Secret Key and two-step "remember this
  * device" token stored here go, so the next unlock or sign-in asks for them again.
  */
@@ -569,6 +634,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "lock",
       body: (
         <>
+          {state.avatarEditable && <ProfilePicture state={state} notify={notify} reload={ctx.reload} />}
           <label className="field">
             <span>Vault timeout</span>
             <select

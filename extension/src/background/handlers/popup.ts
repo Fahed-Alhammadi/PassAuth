@@ -10,6 +10,7 @@ import type { Settings } from "../../shared/types";
 import { touch } from "../activity";
 import { addSite, addSiteTargets } from "../add-site";
 import { fileAccess, keptFiles, missingFiles, withoutFiles } from "../attachments";
+import { fromBase64 } from "../avatar";
 import { copy } from "../clipboard";
 import { afterUnlock, openPopup, orderedMatches } from "../commands";
 import { createDeviceRequest, discardDeviceSession, pollDeviceRequest, startDeviceSignIn, verifyDeviceTwoStep } from "../device-sign-in";
@@ -182,6 +183,8 @@ export const popupHandlers = {
   "account:switch": { from: POPUP, activity: "restart", run: ({ id }) => vault.switchAccount(id) },
   "account:cancelAdd": { from: POPUP, activity: "restart", run: () => vault.cancelAddAccount() },
   "account:forgetBrowser": { from: POPUP, activity: "restart", run: () => vault.forgetBrowser() },
+  "avatar:set": { from: POPUP, unlock: true, activity: "restart", run: ({ jpeg }) => vault.setAvatar(fromBase64(jpeg)) },
+  "avatar:remove": { from: POPUP, unlock: true, activity: "restart", run: () => vault.removeAvatar() },
   securityKeys: { from: POPUP, unlock: true, run: () => vault.securityKeys() },
   "securityKeys:remove": { from: POPUP, unlock: true, activity: "restart", run: ({ id, password }) => vault.removeSecurityKey(id, password) },
   "hiddenSites:remove": {

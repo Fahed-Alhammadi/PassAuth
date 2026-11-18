@@ -365,6 +365,17 @@ public final class VaultRepository {
     /// limit). The extensions ignore both.
     @ObservationIgnored public var isApp = false
 
+    /// Profile pictures cached on this device (the app sets it; the AutoFill extensions show
+    /// none). Setting it loads every cached picture into `avatars`.
+    @ObservationIgnored public var avatarCache: AvatarCache? {
+        didSet { avatars = avatarCache?.all() ?? [:] }
+    }
+    /// The accounts' profile pictures (JPEG), by account id; no entry: initials.
+    public private(set) var avatars: [String: Data] = [:]
+    /// The last picture download started after a sync (tests wait for it).
+    @ObservationIgnored public private(set) var avatarFetch: Task<Void, Never>?
+    @ObservationIgnored private var avatarFetching: Set<String> = []
+
     /// Ask for trashed items without their key and data (`trash=summary`): the macOS AutoFill
     /// extension never shows the trash and keeps its own copy. On iOS the app shows the trash and
     /// shares its copy with the AutoFill extension, so both fetch it whole.
@@ -616,6 +627,7 @@ public final class VaultRepository {
         for d in dupes {
             closeSession(d)
             store.deleteCache(d)
+            forgetAvatar(d)
             Keychain.deleteBiometric(d)
         }
         store.update { s in
@@ -865,6 +877,7 @@ public final class VaultRepository {
             }
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            forgetAvatar(id)
             twoStepGated.remove(id)
             violations[id] = nil
         }
@@ -894,6 +907,7 @@ public final class VaultRepository {
             pendingMaster = nil
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            forgetAvatar(id)
             let listed = s.file.accounts.filter { $0.value.isListed }
             if listed.count > 1 || listed[id] == nil {
                 await removeAccount(id)
@@ -912,6 +926,7 @@ public final class VaultRepository {
 
     private func removeAccount(_ id: String) async {
         sharingMemory.clear(id)
+        forgetAvatar(id)
         store.update { s in
             s.file.accounts[id] = nil
             s.secrets.tokens[id] = nil
@@ -987,6 +1002,92 @@ public final class VaultRepository {
                 store.update { $0.secrets.persistedKeys = [:] }
             }
         }
+    }
+
+    // MARK: Profile picture
+
+    /// The active account's server has profile pictures (`/api/config` feature `avatar`, as last asked).
+    public var avatarsSupported: Bool { cachedFeatures.contains(AvatarImage.feature) }
+
+    /// The active account's picture (JPEG), nil: initials.
+    public var activeAvatar: Data? { avatars[activeId] }
+
+    /// Set the active account's picture: `jpeg` is what `AvatarImage.prepare` made. Sealed with
+    /// the Account Key, then `PUT /account/avatar`.
+    public func setAvatar(_ jpeg: Data) async throws {
+        let id = activeId
+        guard let session = sessions[id] else { throw UserError("Unlock PassAuth first.") }
+        guard jpeg.count <= AvatarImage.maxBytes else { throw UserError("This picture is too large. Choose another one.") }
+        let account = session.account
+        let sealed = try await core { try account.sealAvatar(image: jpeg) }
+        let j: JSON
+        do {
+            j = try await api.call(id, "/account/avatar", body: ["avatar": .string(sealed)], method: "PUT")
+        } catch let e as ApiError where e.status == 413 {
+            throw UserError("This picture is too large. Choose another one.")
+        }
+        keepAvatar(id, seq: j["avatar_seq"]?.number, jpeg: jpeg)
+    }
+
+    /// Remove the active account's picture (`DELETE /account/avatar`): initials again.
+    public func removeAvatar() async throws {
+        let id = activeId
+        guard sessions[id] != nil else { throw UserError("Unlock PassAuth first.") }
+        let j = try await api.call(id, "/account/avatar", method: "DELETE")
+        keepAvatar(id, seq: j["avatar_seq"]?.number, jpeg: nil)
+    }
+
+    /// After a sync from the server (the app only): fetch the picture when `user.avatar_seq`
+    /// differs from the cached version, drop it when the account has none any more. Runs in the
+    /// background; a failure keeps what is cached.
+    func refreshAvatar(_ id: String, _ session: Session, serverSeq: Int64?) {
+        guard isApp, avatarCache != nil else { return }
+        let cached = store.get().file.accounts[id]?.avatarSeq
+        switch AvatarSyncAction.decide(serverSeq: serverSeq, cachedSeq: cached, hasFile: avatars[id] != nil) {
+        case .none: return
+        case .clear: keepAvatar(id, seq: 0, jpeg: nil)
+        case .fetch:
+            guard !avatarFetching.contains(id) else { return }
+            avatarFetching.insert(id)
+            avatarFetch = Task { @MainActor [weak self] in
+                await self?.fetchAvatar(id, session)
+                self?.avatarFetching.remove(id)
+            }
+        }
+    }
+
+    private func fetchAvatar(_ id: String, _ session: Session) async {
+        guard let j = try? await api.call(id, "/account/avatar"), sessions[id] === session else { return }
+        let seq = j["avatar_seq"]?.number ?? 0
+        guard let sealed = j["avatar"]?.string, !sealed.isEmpty else {
+            keepAvatar(id, seq: seq, jpeg: nil)
+            return
+        }
+        let account = session.account
+        // A picture that doesn't open (another account's, changed) shows the initials; its
+        // version is kept, so it isn't fetched again until it changes.
+        let jpeg = try? await core { try account.openAvatar(sealed: sealed) }
+        guard sessions[id] === session else { return }
+        keepAvatar(id, seq: seq, jpeg: jpeg)
+    }
+
+    /// Cache (or drop, `jpeg` nil) the account's picture at version `seq`.
+    private func keepAvatar(_ id: String, seq: Int64?, jpeg: Data?) {
+        if let jpeg, !jpeg.isEmpty {
+            avatarCache?.write(id, jpeg)
+            avatars[id] = jpeg
+        } else {
+            avatarCache?.delete(id)
+            avatars[id] = nil
+        }
+        if let seq { store.updateAccount(id) { $0.avatarSeq = seq } }
+    }
+
+    /// Log out / removal: the account's picture leaves the device.
+    private func forgetAvatar(_ id: String) {
+        avatarCache?.delete(id)
+        avatars[id] = nil
+        store.updateAccount(id) { $0.avatarSeq = nil }
     }
 
     // MARK: Sync
@@ -1140,6 +1241,7 @@ public final class VaultRepository {
                     if storeBundle, let bundle { a.bundle = bundle }
                     if a.accountId == nil, storeBundle { a.accountId = session.meId }
                 }
+                refreshAvatar(id, session, serverSeq: snapshot.user?["avatar_seq"]?.number)
             }
         }
         guard sessions[id] === session, activeId == id else { return }
@@ -1951,6 +2053,7 @@ public final class VaultRepository {
             pendingMaster = nil
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            forgetAvatar(id)
             let email = a.email.lowercased()
             let sameEmailElsewhere = s.file.accounts.contains { $0.key != id && $0.value.email.lowercased() == email }
             store.update { st in

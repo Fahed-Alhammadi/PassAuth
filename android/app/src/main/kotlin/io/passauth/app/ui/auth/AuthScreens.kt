@@ -826,7 +826,7 @@ fun AccountRow(a: AccountSummary, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Avatar(initials(a.name, a.email), 32.dp)
+        Avatar(initials(a.name, a.email), 32.dp, image = a.avatar)
         Column(Modifier.weight(1f)) {
             Text(a.name.ifEmpty { a.email }, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
             Text(host(a.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted, maxLines = 1)

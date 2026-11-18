@@ -20,6 +20,9 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Language
@@ -93,6 +96,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -325,7 +329,7 @@ private fun AccountCard(ctx: UiCtx) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Avatar(initials(s.name, s.email), 52.dp)
+        Avatar(initials(s.name, s.email), 52.dp, image = s.avatar)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(s.name.ifEmpty { s.email }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (s.name.isNotEmpty()) Text(s.email, style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -350,7 +354,7 @@ private fun ColumnScope.Account(ctx: UiCtx) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Space.s),
     ) {
-        Avatar(initials(s.name, s.email), 72.dp)
+        AccountPhoto(ctx)
         Text(s.name.ifEmpty { s.email }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
         if (s.name.isNotEmpty()) Text(s.email, style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted)
     }
@@ -371,7 +375,7 @@ private fun ColumnScope.Account(ctx: UiCtx) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(Space.m),
                 ) {
-                    Avatar(initials(a.name, a.email), 34.dp)
+                    Avatar(initials(a.name, a.email), 34.dp, image = a.avatar)
                     Column(Modifier.weight(1f)) {
                         Text(a.name.ifEmpty { a.email }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(hostOf(a.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -405,6 +409,87 @@ private fun ColumnScope.Account(ctx: UiCtx) {
         Muted("Permanently deletes ${s.email} from ${hostOf(s.server)}, with every vault you own and every item in them.")
     }
     if (deleting) DeleteAccountDialog(ctx) { deleting = false }
+}
+
+/**
+ * The Account page's big avatar. With a server that keeps profile pictures and the vault unlocked,
+ * tapping it offers Choose photo… (system Photo Picker, images only) and Remove photo (when one is set).
+ */
+@Composable
+private fun AccountPhoto(ctx: UiCtx) {
+    val s = ctx.state
+    val editable = s.avatarAvailable && s.status == io.passauth.app.data.Status.Unlocked
+    if (!editable) {
+        Avatar(initials(s.name, s.email), 72.dp, image = s.avatar)
+        return
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var menu by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val pick = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        ctx.launch {
+            try {
+                val jpeg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { io.passauth.app.data.AvatarImage.prepare(context, uri) }
+                ctx.repo.setAvatar(jpeg)
+                ctx.notify("Profile photo updated")
+            } finally {
+                busy = false
+            }
+        }
+    }
+    Box {
+        Box(
+            Modifier.size(80.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                .clickable(enabled = !busy, role = Role.Button, onClickLabel = "Change profile photo") { menu = true }
+                .clearAndSetSemantics { contentDescription = "Profile photo" },
+            contentAlignment = Alignment.Center,
+        ) {
+            Avatar(initials(s.name, s.email), 72.dp, image = s.avatar)
+        }
+        // Camera badge: the avatar is the control.
+        Box(
+            Modifier.align(Alignment.BottomEnd).size(26.dp).clip(androidx.compose.foundation.shape.CircleShape)
+                .background(MaterialTheme.colorScheme.background).padding(2.dp)
+                .clip(androidx.compose.foundation.shape.CircleShape).background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (busy) {
+                androidx.compose.material3.CircularProgressIndicator(Modifier.size(14.dp), color = MaterialTheme.colorScheme.onPrimary, strokeWidth = 2.dp)
+            } else {
+                Icon(Icons.Filled.PhotoCamera, null, tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(14.dp))
+            }
+        }
+        androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            androidx.compose.material3.DropdownMenuItem(
+                text = { Text("Choose photo…") },
+                leadingIcon = { Icon(Icons.Outlined.PhotoLibrary, null) },
+                onClick = {
+                    menu = false
+                    pick.launch(androidx.activity.result.PickVisualMediaRequest(androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+            )
+            if (s.avatar != null) {
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Remove photo", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        menu = false
+                        busy = true
+                        ctx.launch {
+                            try {
+                                ctx.repo.removeAvatar()
+                                ctx.notify("Profile photo removed")
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                )
+            }
+        }
+    }
 }
 
 private fun statusLabel(s: io.passauth.app.data.Status) = when (s) {

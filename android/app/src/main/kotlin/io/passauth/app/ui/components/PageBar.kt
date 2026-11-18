@@ -88,7 +88,7 @@ fun AccountMenu(ctx: UiCtx) {
     var open by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }, modifier = Modifier.semantics { contentDescription = "Account menu: ${state.name.ifEmpty { state.email }}" }) {
-        Avatar(initials(state.name, state.email), 32.dp, Modifier.clearAndSetSemantics { })
+        Avatar(initials(state.name, state.email), 32.dp, Modifier.clearAndSetSemantics { }, image = state.avatar)
     }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
@@ -99,7 +99,7 @@ fun AccountMenu(ctx: UiCtx) {
         HorizontalDivider()
         state.accounts.filter { it.id != state.activeId }.forEach { a ->
             DropdownMenuItem(
-                leadingIcon = { Avatar(initials(a.name, a.email), 28.dp) },
+                leadingIcon = { Avatar(initials(a.name, a.email), 28.dp, image = a.avatar) },
                 text = {
                     Column {
                         Text(a.name.ifEmpty { a.email }, maxLines = 1)

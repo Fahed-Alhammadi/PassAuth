@@ -50,6 +50,7 @@ import {
   setTokens,
 } from "./api";
 import { stripAttachments } from "./attachments";
+import { avatars } from "./avatar";
 import { afterTwoStepSetup, isTwoStepClose, isTwoStepNotice, readPolicies, readViolations, type Violation } from "./policies";
 import { checkCode, secretKeyToKeep, type CodeOutcome } from "./device-login";
 import { afterWrite, applyOwnWrite, knownSeq, mergeSync, noticeAction, sameCiphertext, vaultKeyChanged, type Merged, type OwnWrite, type Snapshot, type SyncNotice } from "./delta";
@@ -242,6 +243,12 @@ export const onVaultChange = subscribe;
 export function sessionKeys(): { accountId: string; keys: Uint8Array } | null {
   if (!account || !bundle) return null;
   return { accountId: bundle.account_id, keys: account.toSessionBytes() };
+}
+
+/** Seal a profile picture (a JPEG from `makeAvatarJpeg`) with the Account Key, for `PUT /account/avatar`. */
+export function sealAvatar(jpeg: Uint8Array): string {
+  if (!account) throw new Error("Unlock the vault first.");
+  return account.sealAvatar(jpeg);
 }
 
 /** Whether the account keys are in memory: the vault is open, or the two-step screen came up after it was unlocked. */
@@ -441,6 +448,7 @@ function dropKeys() {
   invitationNames = new Map();
   verdicts = null;
   checksOn = false;
+  avatars.clear();
   signed.endSigning();
   if (old.length || state.items.length || state.invitations.length || state.blockedVaults.length || state.consents.length)
     set({ vaults: [], items: [], invitations: [], blockedVaults: [], consents: [], keyChanges: [], signingNotice: null });
@@ -1152,6 +1160,8 @@ function materialize(snap: Snapshot) {
       ]),
     ],
   });
+  // Profile picture: fetched and opened only when its number changed (servers with `avatar`).
+  void avatars.note(snap.user.avatar_seq, (sealed) => acct.openAvatar(sealed));
   // Handles the new state no longer uses (a vault gone, or its key replaced).
   before.forEach((v) => {
     if (!kept.has(v.key)) v.key.free();

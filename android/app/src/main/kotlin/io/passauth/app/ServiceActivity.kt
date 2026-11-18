@@ -219,6 +219,8 @@ abstract class ServiceActivity : SecureActivity() {
 
     @Composable
     private fun PickPrompt(s: Screen.Pick) {
+        // Website icons off: logins show the neutral globe instead of their letter.
+        val globe = !graph.repo.state.collectAsStateWithLifecycle().value.showSiteIcons
         var query by remember(s) { mutableStateOf("") }
         val q = query.trim().lowercase()
         val found = if (q.isEmpty()) s.choices else s.choices.filter { it.title.lowercase().contains(q) || it.detail.lowercase().contains(q) }
@@ -244,7 +246,7 @@ abstract class ServiceActivity : SecureActivity() {
                         val inset = if (largeText()) Space.l else TileRowInset
                         shown.forEachIndexed { n, c ->
                             if (n > 0) RowDivider(inset)
-                            ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol))
+                            ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol), globe = globe)
                         }
                     }
                 }
@@ -255,6 +257,8 @@ abstract class ServiceActivity : SecureActivity() {
 
     @Composable
     private fun ConfirmPrompt(s: Screen.Confirm) {
+        // Website icons off: logins show the neutral globe instead of their letter.
+        val globe = !graph.repo.state.collectAsStateWithLifecycle().value.showSiteIcons
         PromptSheet(
             onClose = ::cancel,
             canClose = !busy,
@@ -276,7 +280,7 @@ abstract class ServiceActivity : SecureActivity() {
                         val inset = if (largeText()) Space.l else TileRowInset
                         s.choices.forEachIndexed { n, c ->
                             if (n > 0) RowDivider(inset)
-                            ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol))
+                            ChoiceRow(c.title, c.detail, selected = chosen == c.id, onClick = { chosen = c.id }, enabled = !busy, icon = symbol(c.symbol), globe = globe)
                         }
                     }
                     s.warning(chosen)?.let { WarningNote(it) }

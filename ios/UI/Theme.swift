@@ -206,19 +206,30 @@ func initials(_ name: String, _ email: String) -> String {
     return (s.isEmpty ? "?" : s).uppercased()
 }
 
+/// The account's profile picture (aspect-fill circle) or, without one, its initials.
 struct Avatar: View {
     let text: String
     var size: CGFloat = 32
+    /// The profile picture; nil: initials.
+    var image: Image? = nil
 
     var body: some View {
-        Circle()
-            .fill(LinearGradient(colors: [Color.Brand.blue, Color.Brand.cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
-            .frame(width: size, height: size)
-            .overlay(
-                // Sized to the circle, not the text size setting.
-                Text(text).font(.system(size: size * 0.38, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-            )
-            .accessibilityHidden(true)
+        Group {
+            if let image {
+                image.resizable().renderingMode(.original).scaledToFill()
+                    .frame(width: size, height: size)
+                    .clipShape(Circle())
+            } else {
+                Circle()
+                    .fill(LinearGradient(colors: [Color.Brand.blue, Color.Brand.cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: size, height: size)
+                    .overlay(
+                        // Sized to the circle, not the text size setting.
+                        Text(text).font(.system(size: size * 0.38, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    )
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -229,6 +240,8 @@ struct InitialTile: View {
     @ScaledMetric(relativeTo: .body) var size: CGFloat = 36
     /// On the page itself (not on a card): the card colour, so the tile stands out.
     var onPage = false
+    /// Website icons are turned off: every login shows the same neutral globe instead of its letter.
+    var globe = false
 
     var body: some View {
         RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous)
@@ -237,6 +250,8 @@ struct InitialTile: View {
             .overlay {
                 if let symbol {
                     Image(systemName: symbol).font(.body.weight(.medium)).foregroundStyle(Color.paAccent)
+                } else if globe {
+                    Image(systemName: "globe").font(.body.weight(.medium)).foregroundStyle(Color.paMuted)
                 } else {
                     Text(String(text.trimmingCharacters(in: .whitespaces).first ?? "?").uppercased())
                         .font(.body.weight(.semibold)).foregroundStyle(Color.paAccent)

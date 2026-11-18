@@ -26,6 +26,7 @@ import { againHint, clickGate, inputKind } from "../content/guard";
 import { onFocusRequest, onMoved, receiveNonce, reportTouch } from "../shared/dom/frame-channel";
 import { callInline, type InlineFrameApi } from "../shared/protocol";
 import type { InlineItems, InlineKind, ItemSummary } from "../shared/types";
+import { siteIcon } from "./site-icon";
 
 /** Set once the content script that placed this frame has handed it over (frame-channel.ts). */
 let nonce = "";
@@ -132,19 +133,6 @@ function showError(e: unknown) {
   foot.replaceChildren();
   // Only a frame that has the focus already keeps it.
   if (document.hasFocus()) close.focus();
-}
-
-function siteIcon(item: ItemSummary, d: InlineItems) {
-  const letter = (item.name.trim()[0] ?? "?").toUpperCase();
-  const box = el("span", { className: "avatar", ariaHidden: "true" }, letter);
-  if (d.showIcons && item.host) {
-    const img = el("img", { src: `${d.server}/api/icons/${encodeURIComponent(item.host)}`, alt: "", referrerPolicy: "no-referrer" });
-    img.addEventListener("load", () => {
-      box.classList.add("has-img");
-      box.replaceChildren(img);
-    });
-  }
-  return box;
 }
 
 const tile = (markup: string) => {

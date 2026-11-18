@@ -765,7 +765,7 @@ private fun EmergencyVaultScreen(ctx: UiCtx, g: Grant, back: () -> Unit) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(Space.m),
                         ) {
-                            Tile(e.item.name, onCard = true)
+                            Tile(e.item.name, onCard = true, globe = !ctx.state.showSiteIcons && e.item.kind == io.passauth.app.data.ItemKind.Login)
                             Column(Modifier.weight(1f)) {
                                 Text(e.item.name.ifEmpty { "Untitled" }, style = MaterialTheme.typography.bodyLarge)
                                 val sub = listOfNotNull(

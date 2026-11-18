@@ -26,6 +26,8 @@ export const moreSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="cu
 export const keySvg = stroke("M20 8.5a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0zM12.3 11.7 4 20m3-3 2 2m1-5 2 2", 18);
 /** A payment card. */
 export const cardSvg = stroke("M3 6.5h18v11H3zM3 10.5h18M7 14.5h3", 20);
+/** A globe: every login's picture while website icons are off. */
+export const globeSvg = stroke("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18", 20);
 /** A person (an identity). */
 export const personSvg = stroke("M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 8a7 7 0 0 1 14 0", 20);
 

@@ -1,6 +1,7 @@
 package io.passauth.app.data
 
 import android.os.Build
+import androidx.compose.ui.graphics.ImageBitmap
 import io.passauth.core.Account
 import io.passauth.core.ApprovedLogin
 import io.passauth.core.CoreException
@@ -25,6 +26,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -50,6 +53,8 @@ data class AccountSummary(
     val name: String,
     val server: String,
     val status: Status,
+    /** The account's profile picture kept on this device; null: initials. */
+    val avatar: ImageBitmap? = null,
 )
 
 /** What the UI needs to know about accounts and settings (no secrets). */
@@ -80,6 +85,10 @@ data class AppState(
     val timeoutLimit: Int = 0,
     /** Website icons are shown: the user's setting and the active account's server's icon service ([SiteIcons]). */
     val showSiteIcons: Boolean = true,
+    /** The active account's profile picture kept on this device; null: initials. */
+    val avatar: ImageBitmap? = null,
+    /** The active account's server keeps profile pictures (`/api/config` feature [AvatarRules.FEATURE]). */
+    val avatarAvailable: Boolean = false,
 )
 
 /** A decrypted item of the active account. */
@@ -347,7 +356,10 @@ class VaultRepository(
      */
     override var onVaultClosed: (() -> Unit)? = null
 
-    val state: StateFlow<AppState> = combine(store.data, sessionIds, gated) { s, open, g -> toState(s, open, g) }
+    /** Profile pictures kept on this device, decoded, by account record id. */
+    private val _avatars = MutableStateFlow<Map<String, ImageBitmap>>(emptyMap())
+
+    val state: StateFlow<AppState> = combine(store.data, sessionIds, gated, _avatars) { s, open, g, pics -> toState(s, open, g, pics) }
         .stateIn(scope, SharingStarted.Eagerly, AppState())
 
     init {
@@ -355,6 +367,17 @@ class VaultRepository(
         api.onSessionLost = { id -> scope.launch { mutex.withLock { closeSession(id) } } }
         // The server requires two-step login first: the app shows only the setup screen for that account.
         api.onTwoStepRequired = { id -> gated.update { it + id } }
+        // Pictures kept on this device: read for the listed records; files of records gone are deleted.
+        scope.launch(Dispatchers.IO) {
+            store.data.map { it.accounts.keys }.distinctUntilChanged().collect { ids ->
+                runCatching { store.avatars.prune(ids) }
+                val known = _avatars.value
+                val loaded = ids.filter { it !in known }.mapNotNull { id ->
+                    store.avatars.read(id)?.let { e -> AvatarImage.decode(e.jpeg) }?.let { id to it }
+                }.toMap()
+                _avatars.update { cur -> cur.filterKeys { it in ids } + loaded }
+            }
+        }
     }
 
     private fun statusOf(id: String, a: AccountData?, open: Set<String>) = when {
@@ -364,14 +387,14 @@ class VaultRepository(
         else -> Status.Locked
     }
 
-    private fun toState(s: Stored, open: Set<String>, gate: Set<String>): AppState {
+    private fun toState(s: Stored, open: Set<String>, gate: Set<String>, pics: Map<String, ImageBitmap>): AppState {
         val a = s.active
         return AppState(
             loaded = true,
             status = statusOf(s.activeId, a, open),
             activeId = s.activeId,
             accounts = s.accounts.filter { (_, v) -> v.server.isNotEmpty() && v.email.isNotEmpty() }
-                .map { (id, v) -> AccountSummary(id, v.email, v.name, v.server, statusOf(id, v, open)) },
+                .map { (id, v) -> AccountSummary(id, v.email, v.name, v.server, statusOf(id, v, open), pics[id]) },
             name = a?.name.orEmpty(),
             server = a?.server.orEmpty(),
             email = a?.email.orEmpty(),
@@ -386,6 +409,8 @@ class VaultRepository(
             policies = a?.policies ?: Policies(),
             timeoutLimit = s.timeoutLimit,
             showSiteIcons = SiteIcons.shown(s.settings.showIcons, a?.api, a?.features),
+            avatar = pics[s.activeId],
+            avatarAvailable = a?.features?.contains(AvatarRules.FEATURE) == true,
         )
     }
 
@@ -597,7 +622,7 @@ class VaultRepository(
         val server = before.accounts[id]?.server
         // Signing in again to an account that is already listed replaces the old record.
         val dupes = before.accounts.filter { (k, v) -> k != id && v.server == server && v.email.equals(email, true) }.keys
-        dupes.forEach { closeSession(it); store.deleteCache(it); Keystore.deleteBiometricKey(it) }
+        dupes.forEach { closeSession(it); deleteLocalCopy(it); Keystore.deleteBiometricKey(it) }
         store.update { s -> s.signedIn(id, email, Tokens(result.str("access_token"), result.str("refresh_token")), bundle, dupes) }
         Keystore.deleteBiometricKey(id)
         openSession(id, Session(bundleAccountId(bundle), account))
@@ -991,7 +1016,7 @@ class VaultRepository(
             api.logoutRemote(a.server, a.tokens)
             store.updateAccount(id) { it.copy(tokens = null, biometric = null) }
             Keystore.deleteBiometricKey(id)
-            store.deleteCache(id)
+            deleteLocalCopy(id)
             forgetSessionState(id)
         }
     }
@@ -1014,7 +1039,7 @@ class VaultRepository(
         pendingMaster?.destroy()
         pendingMaster = null
         Keystore.deleteBiometricKey(id)
-        store.deleteCache(id)
+        deleteLocalCopy(id)
         forgetSessionState(id)
         val listed = s.accounts.filterValues { it.server.isNotEmpty() && it.email.isNotEmpty() }
         if (listed.size > 1 || !listed.containsKey(id)) {
@@ -1314,6 +1339,8 @@ class VaultRepository(
                         bundle = AccountBundles.toStore(session.account, it.bundle, snap.bundle?.toString()),
                     )
                 }
+                val avatarSeq = ((snap.user as? JsonObject)?.get("avatar_seq") as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+                if (avatarSeq != null) scope.launch { refreshAvatar(id, session, avatarSeq) }
             }
         }
         // Keys of vaults gone or opened again are freed; kept ones live on in the new map.
@@ -1898,6 +1925,77 @@ class VaultRepository(
         }
     }
 
+    // --------------------------------------------------------- profile picture
+
+    /** Account [id]'s offline copy and profile picture deleted from this device (log out, account removed). */
+    private fun deleteLocalCopy(id: String) {
+        store.deleteCache(id)
+        _avatars.update { it - id }
+    }
+
+    /** Keep account [id]'s picture at [seq] ([jpeg] empty: none) on this device and show it. */
+    private suspend fun keepAvatar(id: String, seq: Long, jpeg: ByteArray) {
+        val image = withContext(Dispatchers.IO) {
+            store.avatars.write(id, seq, jpeg)
+            AvatarImage.decode(jpeg)
+        }
+        _avatars.update { if (image != null) it + (id to image) else it - id }
+    }
+
+    /**
+     * After a sync of account [id] the server's picture is at [serverSeq]: fetched and opened only when
+     * it differs from the one kept here. A network failure tries again at the next sync; a picture that
+     * doesn't open (or isn't there) is kept as "none at this seq", so the initials stay.
+     */
+    private suspend fun refreshAvatar(id: String, session: Session, serverSeq: Long) {
+        try {
+            val cached = withContext(Dispatchers.IO) { store.avatars.read(id) }?.seq ?: 0
+            if (!AvatarRules.needsFetch(cached, serverSeq)) return
+            val o = api.call(id, "/account/avatar") as? JsonObject ?: return
+            val seq = o.long("avatar_seq")
+            val sealed = o.strOrNull("avatar")
+            val jpeg = mutex.withLock {
+                // Locked or signed out meanwhile: the next sync after unlock tries again.
+                if (sessions[id] !== session || store.get().accounts[id]?.tokens == null) return
+                if (sealed.isNullOrEmpty()) ByteArray(0)
+                else runCatching { core { session.account.openAvatar(sealed) } }.getOrElse {
+                    android.util.Log.w("PassAuth", "Profile picture couldn't be opened")
+                    ByteArray(0)
+                }
+            }
+            keepAvatar(id, seq, jpeg)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("PassAuth", "Profile picture not fetched: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Set the active account's profile picture to [jpeg] (from [AvatarImage.prepare]): sealed with the Account Key, then uploaded. */
+    suspend fun setAvatar(jpeg: ByteArray) {
+        if (jpeg.isEmpty() || jpeg.size > AvatarRules.MAX_BYTES) throw UserException("That picture is too large. Choose another one.")
+        val (id, sealed) = mutex.withLock {
+            val id = activeId()
+            val session = sessions[id] ?: throw UserException("Unlock first.")
+            requireOnlineFor("Changing your profile picture")
+            id to core { session.account.sealAvatar(jpeg) }
+        }
+        val o = api.call(id, "/account/avatar", buildJsonObject { put("avatar", sealed) }, "PUT") as? JsonObject
+        keepAvatar(id, o?.long("avatar_seq") ?: 0, jpeg)
+    }
+
+    /** Remove the active account's profile picture (the initials come back). */
+    suspend fun removeAvatar() {
+        val id = mutex.withLock {
+            val id = activeId()
+            if (!sessions.containsKey(id)) throw UserException("Unlock first.")
+            requireOnlineFor("Removing your profile picture")
+            id
+        }
+        val o = api.call(id, "/account/avatar", method = "DELETE") as? JsonObject
+        keepAvatar(id, o?.long("avatar_seq") ?: 0, ByteArray(0))
+    }
+
     // ------------------------------------------- re-authentication, account
 
     /**
@@ -2250,7 +2348,7 @@ class VaultRepository(
             pendingMaster?.destroy()
             pendingMaster = null
             Keystore.deleteBiometricKey(id)
-            store.deleteCache(id)
+            deleteLocalCopy(id)
             val email = a.email.lowercase()
             val sameEmailElsewhere = s.accounts.any { (k, v) -> k != id && v.email.equals(email, ignoreCase = true) }
             val deletedUser = Stored.bundleUserId(a.bundle)

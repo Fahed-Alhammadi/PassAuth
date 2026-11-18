@@ -235,7 +235,7 @@ private struct ListScreen: View {
 
     private func entryRow(_ e: Entry) -> some View {
         Button { model.pick(e) } label: {
-            Row(title: e.item.name, subtitle: e.item.login?.username ?? "", letter: e.item.name, hasCode: Clipboard.totp(e.item.login?.totp) != nil)
+            Row(title: e.item.name, subtitle: e.item.login?.username ?? "", letter: e.item.name, globe: !model.repo.state.showSiteIcons, hasCode: Clipboard.totp(e.item.login?.totp) != nil)
         }
         .accessibilityIdentifier("login-\(e.item.name)")
     }
@@ -291,11 +291,13 @@ private struct Row: View {
     let subtitle: String
     var symbol: String? = nil
     var letter: String = ""
+    /// Website icons are off: the neutral globe instead of the letter.
+    var globe = false
     var hasCode = false
 
     var body: some View {
         HStack(spacing: PA.Space.m) {
-            if !typeSize.isAccessibilitySize { InitialTile(text: letter, symbol: symbol) }
+            if !typeSize.isAccessibilitySize { InitialTile(text: letter, symbol: symbol, globe: globe) }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title.isEmpty ? "Untitled" : title).foregroundStyle(Color.paInk)
                 if !subtitle.isEmpty { Text(subtitle).font(.subheadline).foregroundStyle(Color.paMuted) }
@@ -403,7 +405,7 @@ private struct AddSitePicker: View {
                 }
                 ForEach(shown) { e in
                     Button { model.chooseAddSite(e) } label: {
-                        Row(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e))
+                        Row(title: AddSite.name(e), subtitle: detail(e), letter: AddSite.name(e), globe: !model.repo.state.showSiteIcons)
                     }
                     .accessibilityIdentifier("addSite-\(e.item.name)")
                 }

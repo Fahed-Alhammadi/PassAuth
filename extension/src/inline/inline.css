@@ -19,6 +19,7 @@ main { position: relative; height: 100%; display: flex; flex-direction: column; 
 .row:hover, .row[aria-selected="true"] { background: var(--surface-2); }
 .row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .row .avatar, .row .tile { width: 36px; height: 36px; border-radius: var(--radius-s); }
+.row .avatar.glyph { color: var(--ink-2); }
 .txt { min-width: 0; flex: 1; display: grid; }
 .name, .user { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .name { font-weight: 500; }

@@ -75,6 +75,8 @@ final class AppModel {
         repo = VaultRepository(store: store, api: api)
         // Invitations and the server's policies are the app's (the AutoFill extension ignores them).
         repo.isApp = true
+        // Profile pictures: cached in the app's own container (the AutoFill extension shows none).
+        repo.avatarCache = AvatarCache()
         icons = IconLoader(session: api.session)
         authRequests = AuthRequestInbox(source: repo)
         lockManager = LockManager(repo: repo)

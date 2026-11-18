@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
 import QRCode from "qrcode";
@@ -6,7 +6,7 @@ import { SignInRequestsCard } from "../components/DeviceSignIn";
 import { KitActions } from "../components/KitActions";
 import { PersonTrust, PinBadge, ReviewDialog, SignerTrust, SigningNotices, TrustBadge, VerifyDialog, conflictText, personLabel, signerText } from "../components/SignedSharing";
 import { CodeField, MasterPasswordField, RecoveryCodesModal } from "../components/TwoStep";
-import { ConfirmDialog, ConfirmPassword, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast } from "../components/ui";
+import { AccountPicture, ConfirmDialog, ConfirmPassword, CopyButton, ErrorText, Icon, Modal, PasswordInput, SheetActions, StrengthMeter, toast } from "../components/ui";
 import { ATTACHMENT_QUOTA_EXCEEDED, ApiError, api, friendlyError, hasErrorCode, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { clientInfo, deviceKindInfo } from "../lib/clients";
 import { sharerListedAs, sharerName, sharerShortName, type Invitation } from "../lib/invitations";
@@ -41,6 +41,7 @@ import {
   type SignerView,
 } from "../lib/signed-sharing";
 import { formatBytes } from "../lib/sizes";
+import { makeAvatarJpeg, removeAvatar, uploadAvatar, useAvatarUrl } from "../lib/avatar";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
 import {
   acceptConsent,
@@ -70,6 +71,7 @@ import {
   removeMember,
   renameVault,
   rotateVaultKey,
+  sealAvatar,
   shareVault,
   sync,
   useVault,
@@ -322,6 +324,68 @@ const OnOff = ({ on }: { on: boolean }) => (on ? <span className="badge badge-ok
 
 // ---------------------------------------------------------------- account
 
+/** Settings → Account: the picture with Change / Remove (servers with `avatar` only; older ones show nothing here). */
+function ProfilePicture({ name, email }: { name: string; email: string }) {
+  const config = usePublicConfig();
+  const url = useAvatarUrl();
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState<"set" | "remove" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  if (!hasFeature(config, "avatar")) return null;
+
+  async function pick(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy("set");
+    setError(null);
+    try {
+      // Re-drawn here as a small square JPEG: the original file and its metadata (location, camera) never leave the device.
+      const jpeg = await makeAvatarJpeg(file);
+      await uploadAvatar(jpeg, sealAvatar);
+      toast("Picture saved");
+    } catch (err) {
+      setError(friendly(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove() {
+    setBusy("remove");
+    setError(null);
+    try {
+      await removeAvatar();
+      toast("Picture removed");
+    } catch (err) {
+      setError(friendly(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="stack-s">
+      <div className="profile-pic">
+        <AccountPicture name={name} email={email} />
+        <div className="row row-wrap">
+          <button type="button" className="btn btn-sm" disabled={busy !== null} onClick={() => input.current?.click()}>
+            <Icon name="person" size={16} /> {busy === "set" ? "Saving…" : url ? "Change picture" : "Add picture"}
+          </button>
+          {url && (
+            <button type="button" className="btn btn-sm btn-ghost" disabled={busy !== null} onClick={remove}>
+              {busy === "remove" ? "Removing…" : "Remove"}
+            </button>
+          )}
+          <input ref={input} type="file" accept="image/*" hidden onChange={pick} />
+        </div>
+      </div>
+      <span className="field-hint">Only your devices can see it: it is encrypted like your vault.</span>
+      <ErrorText error={error} />
+    </div>
+  );
+}
+
 function AccountTab({ account, reload }: { account: AccountInfo; reload: () => Promise<void> }) {
   const [name, setName] = useState(account.name);
   const [saving, setSaving] = useState(false);
@@ -360,6 +424,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
     <>
       <section className="card" aria-labelledby="profile-title">
         <h2 id="profile-title">Profile</h2>
+        <ProfilePicture name={account.name} email={account.email} />
         <form className="inline-form" onSubmit={saveName}>
           <label className="field">
             <span>Name</span>
@@ -2072,9 +2137,13 @@ function VaultManager({ vault, count }: { vault: Vault; count: number }) {
               const label = signing && !self ? personLabel(personState(m, m.email).pinnedEmail, m.email, m.name) : personLabel(null, m.email, m.name);
               return (
                 <div key={m.user_id} role="listitem">
-                  <span className="avatar" aria-hidden="true">
-                    {(label.title.trim()[0] ?? "?").toUpperCase()}
-                  </span>
+                  {self ? (
+                    <AccountPicture name={m.name} email={m.email} size="s" />
+                  ) : (
+                    <span className="avatar" aria-hidden="true">
+                      {(label.title.trim()[0] ?? "?").toUpperCase()}
+                    </span>
+                  )}
                   <span className="grow">
                     <span className="row-title">
                       {label.title}

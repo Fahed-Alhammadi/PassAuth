@@ -216,7 +216,7 @@ private struct AccountCard: View {
     var body: some View {
         let s = model.state
         HStack(spacing: 14) {
-            Avatar(text: initials(s.name, s.email), size: 52)
+            AccountAvatar(id: s.activeId, name: s.name, email: s.email, size: 52)
             VStack(alignment: .leading, spacing: 2) {
                 Text(s.name.isEmpty ? s.email : s.name).font(.title3.weight(.semibold)).foregroundStyle(Color.paInk).lineLimit(1)
                 if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted).lineLimit(1) }
@@ -279,14 +279,16 @@ private struct AccountPage: View {
         let s = model.state
         Section {
             VStack(spacing: PA.Space.s) {
-                Avatar(text: initials(s.name, s.email), size: 72)
-                Text(s.name.isEmpty ? s.email : s.name).font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
-                    .multilineTextAlignment(.center)
-                if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted) }
+                AccountPageAvatar(size: 72)
+                VStack(spacing: PA.Space.s) {
+                    Text(s.name.isEmpty ? s.email : s.name).font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
+                        .multilineTextAlignment(.center)
+                    if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted) }
+                }
+                .accessibilityElement(children: .combine)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, PA.Space.s)
-            .accessibilityElement(children: .combine)
             .listRowBackground(Color.clear)
         }
         Section {

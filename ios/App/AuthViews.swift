@@ -663,7 +663,7 @@ struct AccountRow: View {
     let account: AccountSummary
     var body: some View {
         HStack(spacing: 12) {
-            Avatar(text: initials(account.name, account.email), size: 34)
+            AccountAvatar(id: account.id, name: account.name, email: account.email, size: 34)
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.name.isEmpty ? account.email : account.name).foregroundStyle(Color.paInk).lineLimit(1)
                 Text(hostOf(account.server)).font(.footnote).foregroundStyle(Color.paMuted).lineLimit(1)

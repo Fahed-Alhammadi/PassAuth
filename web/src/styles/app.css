@@ -625,3 +625,13 @@ dialog.modal::backdrop { background: var(--scrim); animation: scrim-in var(--dur
   .sheet-bar { padding-left: var(--space-4); }
   .modal-body { padding: var(--space-1) var(--space-4) var(--space-4); }
 }
+
+/* The account's own picture (profile picture): a circle the photo fills (aspect-fill), else the account's initials. */
+.account-pic {
+  flex: none; width: 64px; height: 64px; border-radius: 50%; display: grid; place-items: center; overflow: hidden;
+  background: var(--accent-soft); color: var(--accent); font-weight: 600; font-size: var(--text-title); user-select: none;
+}
+.account-pic-s { width: 36px; height: 36px; font-size: var(--text-caption); }
+.account-pic.has-photo { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line); }
+.account-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-pic { display: flex; align-items: center; gap: var(--space-4); }

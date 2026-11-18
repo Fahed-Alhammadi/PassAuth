@@ -99,13 +99,15 @@ val LocalOnSheet = staticCompositionLocalOf { false }
 @Composable
 fun largeText(): Boolean = LocalDensity.current.fontScale >= 1.5f
 
-/** A rounded tile with a symbol, or the first letter of [text] (a site, an item). */
+/** A rounded tile with a symbol, or the first letter of [text] (a site, an item); [globe]: a login while website icons are off. */
 @Composable
-fun Tile(text: String = "", icon: ImageVector? = null, size: Dp = 40.dp, onCard: Boolean = false, danger: Boolean = false) {
+fun Tile(text: String = "", icon: ImageVector? = null, size: Dp = 40.dp, onCard: Boolean = false, danger: Boolean = false, globe: Boolean = false) {
     val color = if (onCard && !LocalOnSheet.current) MaterialTheme.colorScheme.surfaceVariant else PassAuthTheme.colors.tile
     Box(Modifier.size(size).background(color, RoundedCornerShape(Radius.control)), contentAlignment = Alignment.Center) {
         if (icon != null) {
             Icon(icon, null, Modifier.size(size * 0.5f), tint = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+        } else if (globe) {
+            GlobeGlyph(size)
         } else {
             // Sized to the tile, not the font scale: it is a picture of the site, the name is next to it.
             val sp = with(LocalDensity.current) { (size * 0.42f).toSp() }
@@ -175,6 +177,7 @@ fun ChoiceRow(
     onClick: () -> Unit,
     enabled: Boolean = true,
     icon: ImageVector? = null,
+    globe: Boolean = false,
 ) {
     val big = largeText()
     Row(
@@ -184,7 +187,7 @@ fun ChoiceRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Space.m),
     ) {
-        if (!big) Tile(title, icon, onCard = true)
+        if (!big) Tile(title, icon, onCard = true, globe = globe)
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = if (big) Int.MAX_VALUE else 1, overflow = TextOverflow.Ellipsis)
             if (detail.isNotEmpty()) {

@@ -34,6 +34,8 @@ export interface AccountSummary {
   name: string;
   server: string;
   status: Status;
+  /** The account's profile picture (a data URL), when it has one. */
+  avatar?: string;
 }
 
 export interface PopupState {
@@ -43,6 +45,10 @@ export interface PopupState {
   accounts: AccountSummary[];
   /** Profile name of the active account ("" if not set). */
   name: string;
+  /** The active account's profile picture (a data URL), when it has one; else its initials are shown. */
+  avatar?: string;
+  /** The account is unlocked and its server has profile pictures (feature `avatar`): Change picture / Remove are offered. */
+  avatarEditable?: boolean;
   server: string;
   email: string;
   secretKeyRequired: boolean;
