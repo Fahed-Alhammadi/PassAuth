@@ -44,6 +44,14 @@ data class Item(
      */
     @Transient val extra: JsonObject = EMPTY_EXTRA,
 ) {
+    /**
+     * The item's edit counter (core `rev`, inside the ciphertext, so the server can't change it; kept
+     * in [extra] and written back unchanged, the core counts it up at every encryption); 0 = never
+     * counted. Read-only here: never shown or edited.
+     */
+    val rev: Long
+        get() = (extra["rev"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()?.takeIf { it >= 0 } ?: 0
+
     val kind: ItemKind
         get() = when {
             login != null -> ItemKind.Login

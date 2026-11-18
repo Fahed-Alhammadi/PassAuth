@@ -172,9 +172,10 @@ extension VaultRepository {
                 let pinsNow = pins
                 let rows = ident.created ? snapshot.vaults.filter { candidates.contains($0.id) } : []
                 let ids: [(vaultId: String, keyId: String)] = rows.compactMap { v in
-                    let legacy = (try? pinsLegacyWrapAllowed(pinsJson: pinsNow, vaultId: v.id)) ?? true
+                    let epoch = UInt64(max(0, v.keyEpoch ?? 0))
+                    let legacy = (try? pinsLegacyWrapAllowed(pinsJson: pinsNow, vaultId: v.id, keyEpoch: epoch)) ?? true
                     guard let key = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
-                                                              keyEpoch: UInt64(max(0, v.keyEpoch ?? 0)), legacyAllowed: legacy),
+                                                              keyEpoch: epoch, legacyAllowed: legacy),
                           let keyId = try? key.keyId(vaultId: v.id) else { return nil }
                     return (v.id, keyId)
                 }
@@ -965,13 +966,15 @@ extension VaultRepository {
         guard review.version == UInt64(seq + 1) else { throw moved }
         guard activeId == id, sessions[id] === session else { return .skipped }
         let next = UInt64(epoch + 1)
+        // This account's own wrap epoch-bound (v2) when every app of the account reads it.
+        let bound = session.accountWrapsV2
         let account = session.account
         let name = info.name
         let digest = review.digest
         let made: (keys: [JSON], items: [JSON], meta: String, roster: String, epochPin: String)
         do {
             made = try await core {
-                let nv = try account.newVaultKey(vaultId: vid)
+                let nv = bound ? try account.newVaultKeyBound(vaultId: vid, keyEpoch: next) : try account.newVaultKey(vaultId: vid)
                 let epochPin = try nv.key.epochPinJson(vaultId: vid, keyEpoch: next)
                 var keys: [JSON] = []
                 for m in members {

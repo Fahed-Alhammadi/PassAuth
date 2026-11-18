@@ -11,6 +11,7 @@ import io.passauth.core.MasterKeys
 import io.passauth.core.VaultKey
 import io.passauth.core.createAccountWithKdf
 import io.passauth.core.deriveMasterKeys
+import io.passauth.core.itemRevCheck
 import io.passauth.core.newId
 import io.passauth.core.opaqueLoginFinish
 import io.passauth.core.opaqueLoginStart
@@ -191,7 +192,14 @@ data class VaultData(
     val offline: Boolean = false,
     /** Vaults shared with the account and waiting for it to accept or decline (servers with `vault_invitations`). */
     val invitations: List<Invitation> = emptyList(),
+    /** Items the server sent in an older version than this phone saw ([ItemRevs]): shown with a warning. */
+    val rolledBack: Set<String> = emptySet(),
+    /** For some of [rolledBack] this phone kept the newer copy it had (instead of the one served). */
+    val keptNewer: Boolean = false,
 ) {
+    /** The sync-level notice about [rolledBack], or null. */
+    val rollbackNotice: String? get() = ItemRevs.notice(rolledBack, keptNewer)
+
     val folders: List<String> get() = entries.mapNotNull { it.item.folder?.takeIf(String::isNotEmpty) }.distinct().sorted()
     fun get(id: String) = entries.firstOrNull { it.id == id }
     fun vaultName(id: String) = vaults.firstOrNull { it.id == id }?.name ?: "Vault"
@@ -311,6 +319,9 @@ class VaultRepository(
      * numbers): the base of the next delta sync and of local changes after this device's writes.
      */
     private var copy: Pair<String, SyncSnapshot>? = null
+
+    /** The remembered item edit counters of one account ([ItemRevs]; stored with its offline copy). */
+    private var itemRevs: Pair<String, Map<String, Long>>? = null
 
     /** Public syncs: one in flight, one waiting ([SyncQueue]). */
     private val syncQueue = SyncQueue(scope)
@@ -1195,7 +1206,8 @@ class VaultRepository(
             DeltaSync.CacheRefresh.Keep -> return
             DeltaSync.CacheRefresh.Current -> store.updateAccount(id) { it.copy(lastSync = System.currentTimeMillis()) }
             is DeltaSync.CacheRefresh.Write -> {
-                val next = result.snapshot
+                // Nothing is decrypted here: the versions replaced are held for the next unlocked sync's rollback check.
+                val next = ItemRevs.withHeld(result.snapshot, cached)
                 val text = core { next.encode() }
                 mutex.withLock {
                     // Unlocked and shown meanwhile: its own sync writes the copy.
@@ -1319,14 +1331,23 @@ class VaultRepository(
         if (sessions[id] !== session) return
         // An identity uploaded at this sync goes into the copy kept, so an offline unlock later opens it (instead of pausing).
         @Suppress("NAME_SHADOWING")
-        val snap = checks?.identityRecord?.let { withIdentity(snap, it) } ?: snap
+        val served = checks?.identityRecord?.let { withIdentity(snap, it) } ?: snap
         val previous = if (copy?.first == id) _vault.value?.let { Opened(it, vaultKeys, vaultHeaders, emptyList()) } else null
         val names = if (copy?.first == id) invitationNames else emptyMap()
-        val opened = core { decryptVault(session.account, snap, previous, names, checks) }
+        // Rollback check: what this phone remembers, and the copies it has to compare with (the copy
+        // shown, else the stored one, and the versions a locked refresh held).
+        val revs = itemRevsOf(id)
+        val priorCopy = copy?.takeIf { it.first == id }?.second ?: if (mode == CopyStore.Synced) readSnapshot(id) else null
+        val priors = (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held).groupBy { it.id }
+        val opened = core { decryptVault(session.account, served, previous, names, checks, revs, priors) }
         if (sessions[id] !== session) {
             opened.fresh.forEach { it.destroy() }
             return
         }
+        // The copy kept: newer copies in place of older versions served; held versions checked now.
+        @Suppress("NAME_SHADOWING")
+        val snap = ItemRevs.keepRows(served, opened.keptRows).copy(held = emptyList())
+        rememberRevs(id, revs, opened.revUpdates, present = if (mode == CopyStore.Synced) snap.items.map { it.id }.toSet() else null)
         if (mode != CopyStore.None) {
             val text = core { snap.encode() }
             withContext(Dispatchers.IO) { store.writeCache(id, text) }
@@ -1353,6 +1374,23 @@ class VaultRepository(
         _vault.value = opened.data.copy(offline = offline)
         rememberUsable(id, session, opened.data.vaults.map { it.id }.toSet(), checks)
         if (!offline) vaultKeysMaybeChanged(id, opened.data.vaults)
+    }
+
+    /** Account [id]'s remembered item edit counters (read from the phone once per account and kept). */
+    private suspend fun itemRevsOf(id: String): Map<String, Long> {
+        itemRevs?.takeIf { it.first == id }?.let { return it.second }
+        val m = ItemRevs.decode(withContext(Dispatchers.IO) { store.readRevs(id) })
+        itemRevs = id to m
+        return m
+    }
+
+    /** [updates] remembered (never lowered); with [present] (a sync's copy) ids gone from it are forgotten. Written only when changed. */
+    private suspend fun rememberRevs(id: String, memory: Map<String, Long>, updates: Map<String, Long>, present: Set<String>?) {
+        val next = ItemRevs.merged(memory, updates, present)
+        if (next == memory) return
+        itemRevs = id to next
+        val text = ItemRevs.encode(next)
+        withContext(Dispatchers.IO) { store.writeRevs(id, text) }
     }
 
     /**
@@ -1423,6 +1461,10 @@ class VaultRepository(
         val headers: Map<String, SyncVault>,
         val fresh: List<VaultKey>,
         val invitationNames: Map<String, String?> = emptyMap(),
+        /** Item edit counters seen newer than remembered ([ItemRevs]). */
+        val revUpdates: Map<String, Long> = emptyMap(),
+        /** Rows of newer copies kept instead of an older version served (by item id). */
+        val keptRows: Map<String, SyncItem> = emptyMap(),
     )
 
     /**
@@ -1432,7 +1474,15 @@ class VaultRepository(
      * (rotated) is skipped with its items, and so is an undecryptable item; trashed items aren't
      * shown (the app has no trash view; with `trash=summary` they have no data anyway).
      */
-    private fun decryptVault(account: Account, snap: SyncSnapshot, previous: Opened?, previousNames: Map<String, String?>, checks: SharingChecks? = null): Opened {
+    private fun decryptVault(
+        account: Account,
+        snap: SyncSnapshot,
+        previous: Opened?,
+        previousNames: Map<String, String?>,
+        checks: SharingChecks? = null,
+        revs: Map<String, Long> = emptyMap(),
+        priors: Map<String, List<SyncItem>> = emptyMap(),
+    ): Opened {
         val keys = mutableMapOf<String, VaultKey>()
         val headers = mutableMapOf<String, SyncVault>()
         val kept = mutableSetOf<String>()
@@ -1453,7 +1503,7 @@ class VaultRepository(
                 oldKey
             } else {
                 try {
-                    val legacy = checks?.legacyAllowed?.invoke(v.id) ?: true
+                    val legacy = checks?.legacyAllowed?.invoke(v.id, v.keyEpoch) ?: true
                     account.openVaultKey(v.id, v.wrappedKey, v.keyKind.ifEmpty { VaultInfo.KEY_KIND_ACCOUNT }, (v.keyEpoch ?: 0).toULong(), legacy).also { fresh += it }
                 } catch (_: CoreException) {
                     continue // vault key unavailable (rotated); skip
@@ -1474,6 +1524,20 @@ class VaultRepository(
         }
         val before = previous?.data?.entries.orEmpty().associateBy { it.id }
         val entries = mutableListOf<Entry>()
+        val revUpdates = mutableMapOf<String, Long>()
+        val keptRows = mutableMapOf<String, SyncItem>()
+        val rolledBack = mutableSetOf<String>()
+        var keptNewer = false
+        // A copy this phone has of an item (shown before, or held by a locked refresh), decrypted only when needed.
+        fun priorOf(row: SyncItem): Pair<SyncItem, Item>? = priors[row.id].orEmpty()
+            .filter { it.deletedAt == null && it.itemKey != null && it.data != null && it.data != row.data }
+            .mapNotNull { p ->
+                val k = keys[p.vaultId] ?: return@mapNotNull null
+                val o = before[p.id]?.takeIf { it.enc.data == p.data && it.enc.key == p.itemKey }?.item
+                    ?: runCatching { ItemCodec.decode(k.decryptItem(EncryptedItem(p.id, p.vaultId, p.itemKey!!, p.data!!))) }.getOrNull()
+                o?.let { p to it }
+            }
+            .maxByOrNull { it.second.rev }
         for (row in snap.items) {
             if (row.deletedAt != null) continue
             val key = keys[row.vaultId] ?: continue
@@ -1488,6 +1552,31 @@ class VaultRepository(
                     continue // undecryptable item; skip
                 }
             }
+            // Rollback check ([ItemRevs]): the copy this phone had is read only for an item never
+            // remembered (a copy from before) or one served older than remembered.
+            val remembered = revs[row.id]
+            val check = { r: Long?, served: Long -> itemRevCheck(r?.toULong(), served.toULong()) }
+            var prior: Pair<SyncItem, Item>? = null
+            var verdict = ItemRevs.judge(remembered, item.rev, null, check)
+            if (remembered == null || verdict is ItemRevs.Verdict.Rollback) {
+                prior = priorOf(row)
+                if (prior != null) verdict = ItemRevs.judge(remembered, item.rev, prior.second.rev, check)
+            }
+            when (val v = verdict) {
+                is ItemRevs.Verdict.Accept -> v.remember?.let { revUpdates[row.id] = it }
+                is ItemRevs.Verdict.Rollback -> {
+                    rolledBack += row.id
+                    val p = prior
+                    if (v.keepPrior && p != null) {
+                        // The newer copy stays (shown, filled, stored), under its own row.
+                        keptNewer = true
+                        keptRows[row.id] = p.first
+                        val pe = EncryptedItem(p.first.id, p.first.vaultId, p.first.itemKey!!, p.first.data!!)
+                        entries += Entry(pe.id, p.second, pe.vaultId, p.first.revision ?: 0, pe)
+                        continue
+                    }
+                }
+            }
             entries += Entry(enc.id, item, enc.vaultId, row.revision ?: 0, enc)
         }
         entries.sortWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.item.name })
@@ -1499,7 +1588,10 @@ class VaultRepository(
             names[key] = name
             name
         }.map { inv -> checks?.invitations?.get(inv.vaultId)?.let { inv.copy(trust = it) } ?: inv }
-        return Opened(VaultData(entries, vaults, snap.revision, invitations = invitations), keys, headers, fresh, names)
+        return Opened(
+            VaultData(entries, vaults, snap.revision, invitations = invitations, rolledBack = rolledBack, keptNewer = keptNewer),
+            keys, headers, fresh, names, revUpdates, keptRows,
+        )
     }
 
     // ------------------------------------------------------- signed sharing
@@ -1511,7 +1603,7 @@ class VaultRepository(
     private class SharingChecks(
         val vaults: Map<String, VaultCheck>,
         val invitations: Map<String, InvitationTrust>,
-        val legacyAllowed: (String) -> Boolean,
+        val legacyAllowed: (String, Long?) -> Boolean,
         /** The identity record this session uploaded, for a copy whose `user.identity` is still null. */
         val identityRecord: String? = null,
     )
@@ -1665,11 +1757,11 @@ class VaultRepository(
                 val check = sh.checkVault(
                     v,
                     open = { legacy -> session.account.openVaultKey(v.id, v.wrappedKey, kind, (v.keyEpoch ?: 0).toULong(), legacy) },
-                    nameOf = { rowName(session.account, v, sh.legacyAllowed(v.id)) },
+                    nameOf = { rowName(session.account, v, sh.legacyAllowed(v.id, v.keyEpoch)) },
                     online = online,
                 )
                 vaults[v.id] = check
-                if (check is VaultCheck.Refused || check is VaultCheck.Held) names[v.id] = rowName(session.account, v, sh.legacyAllowed(v.id))
+                if (check is VaultCheck.Refused || check is VaultCheck.Held) names[v.id] = rowName(session.account, v, sh.legacyAllowed(v.id, v.keyEpoch))
             }
             val invitations = mutableMapOf<String, InvitationTrust>()
             for (inv in snap.invitations) {
@@ -1685,7 +1777,7 @@ class VaultRepository(
             sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, fromServer)
             if (online) savePinsQuietly(sh)
             if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names, sh.missingWhy())
-            SharingChecks(vaults, invitations, { vid -> sh.legacyAllowed(vid) }, sh.uploadedRecord)
+            SharingChecks(vaults, invitations, { vid, epoch -> sh.legacyAllowed(vid, epoch) }, sh.uploadedRecord)
         }
     }
 
@@ -1930,6 +2022,7 @@ class VaultRepository(
     /** Account [id]'s offline copy and profile picture deleted from this device (log out, account removed). */
     private fun deleteLocalCopy(id: String) {
         store.deleteCache(id)
+        if (itemRevs?.first == id) itemRevs = null
         _avatars.update { it - id }
     }
 
@@ -2423,7 +2516,9 @@ class VaultRepository(
     /** Send, the owner's side, on the active account (its keys looked up at each call: a lock frees them). */
     fun sends(): SendActions {
         val id = state.value.activeId
-        return SendActions(securityTransport(id)) { CoreSendCrypto(sessions[id]?.account ?: throw UserException("Your vault is locked.")) }
+        return SendActions(securityTransport(id), sendV2 = { featuresOf(id)?.contains(Sends.FEATURE_V2) == true }) {
+            CoreSendCrypto(sessions[id]?.account ?: throw UserException("Your vault is locked."))
+        }
     }
 
     /** The link of a Send (made on this account's server). */
@@ -2683,6 +2778,7 @@ class VaultRepository(
             val text = api.callText(id, "/sync")
             val full = core { AppJson.decodeFromString(SyncResponse.serializer(), text) }
             val fresh = full.vaults?.firstOrNull { it.id == vaultId }
+            val wrapsV2 = SignedSharing.accountWrapsV2(full.user)
             // The members answer, the roster and the items must all belong to the state this sync verified.
             val membersEpoch = if (sh != null) SignedSharing.number(members, "key_epoch") else oldEpoch
             if (RotationRules.checkBase(header, membersEpoch, fresh, signed, trusted, rosterSeq, latestRoster) == RotationRules.Base.Retry) {
@@ -2727,7 +2823,13 @@ class VaultRepository(
                     }
                     val meta = metaPlain?.let { made.key.encryptMeta(vaultId, it) }
                     val keys = kotlinx.serialization.json.buildJsonArray {
-                        add(buildJsonObject { put("user_id", me); put("wrapped_key", made.key.wrapFor(session.account, vaultId)); put("key_kind", VaultInfo.KEY_KIND_ACCOUNT) })
+                        // v2 (bound to the epoch the vault has after this write) once every app of the account reads it.
+                        val ownWrap = if (wrapsV2 && oldEpoch != null) {
+                            made.key.wrapForBound(session.account, vaultId, newEpoch.toULong())
+                        } else {
+                            made.key.wrapFor(session.account, vaultId)
+                        }
+                        add(buildJsonObject { put("user_id", me); put("wrapped_key", ownWrap); put("key_kind", VaultInfo.KEY_KIND_ACCOUNT) })
                         if (plan != null) {
                             for ((n, row) in rows.withIndex()) {
                                 if (ids[n] == me) continue

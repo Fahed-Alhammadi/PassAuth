@@ -85,6 +85,8 @@ data class SyncResponse(
      * never makes the answer unreadable.
      */
     val invitations: JsonElement? = null,
+    /** Only in this phone's own stored copy ([SyncSnapshot.held]); never read from a server answer. */
+    val held: List<SyncItem>? = null,
 )
 
 /**
@@ -111,6 +113,11 @@ data class SyncSnapshot(
     val items: List<SyncItem> = emptyList(),
     /** The pending invitations of the answer (every answer replaces them); empty in copies from before. */
     val invitations: List<SyncInvitation> = emptyList(),
+    /**
+     * Item versions a locked refresh replaced, kept until an unlocked sync checked their edit
+     * counters ([ItemRevs.withHeld]); empty after every unlocked sync. Local only.
+     */
+    val held: List<SyncItem> = emptyList(),
 ) {
     val position: SyncPosition
         get() {
@@ -123,7 +130,9 @@ data class SyncSnapshot(
 
     companion object {
         /** The stored copy, or null when it can't be read as one (also a plain `/sync` answer stored before delta sync). */
-        fun decode(text: String): SyncSnapshot? = DeltaSync.parse(text)?.let { SyncMerge.apply(it, null) }
+        fun decode(text: String): SyncSnapshot? = DeltaSync.parse(text)?.let { r ->
+            SyncMerge.apply(r, null)?.copy(held = r.held.orEmpty().filter { it.itemKey != null && it.data != null })
+        }
     }
 }
 

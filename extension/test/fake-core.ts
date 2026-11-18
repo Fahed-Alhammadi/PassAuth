@@ -3,7 +3,8 @@
  * background uses. "Encryption" is JSON plus a tag naming the vault key that
  * wrapped the item key, so an item encrypted under a replaced vault key fails
  * to open, as with the real core. The site logic (host names, matching, the save
- * rule, passkey targets, RP IDs, sign-in phrases) is the real core's. Used through
+ * rule, passkey targets, RP IDs, sign-in phrases, the item edit counter check) is the real core's; item writes raise
+ * the item's edit counter `rev` like the core's. Used through
  *   vi.mock("../src/wasm/passauth_core", async () => (await import("./fake-core")).module())
  */
 import { readFileSync } from "node:fs";
@@ -26,6 +27,11 @@ export const control = {
 
 let seq = 0;
 
+const revOf = (item: unknown): number => {
+  const r = (item as { rev?: unknown } | null)?.rev;
+  return typeof r === "number" ? r : 0;
+};
+
 export class FakeVaultKey {
   constructor(public tag: string) {}
   free() {}
@@ -39,12 +45,15 @@ export class FakeVaultKey {
     this.check(enc);
     return JSON.parse(enc.data);
   }
+  /** Like the core: the item's edit counter `rev` one higher than the item given (1 for a new item). */
   encryptItem(item: unknown, id: string, vault_id: string) {
-    return { id, vault_id, key: `${this.tag}:${++seq}`, data: JSON.stringify(item) };
+    return { id, vault_id, key: `${this.tag}:${++seq}`, data: JSON.stringify({ ...(item as object), rev: revOf(item) + 1 }) };
   }
+  /** Like the core: `rev` one higher than the higher of the stored item's and the given one's. */
   updateItem(enc: { id: string; vault_id: string; key: string; data: string }, item: unknown) {
     this.check(enc);
-    return { ...enc, data: JSON.stringify(item) };
+    const rev = Math.max(revOf(JSON.parse(enc.data)), revOf(item)) + 1;
+    return { ...enc, data: JSON.stringify({ ...(item as object), rev }) };
   }
 }
 
@@ -132,6 +141,7 @@ async function realSiteLogic() {
     effectiveRpId,
     loginPhrase,
     loginPhraseChoices,
+    itemRevCheck,
   } = real;
   return {
     normalizeHost,
@@ -151,6 +161,7 @@ async function realSiteLogic() {
     effectiveRpId,
     loginPhrase,
     loginPhraseChoices,
+    itemRevCheck,
   };
 }
 

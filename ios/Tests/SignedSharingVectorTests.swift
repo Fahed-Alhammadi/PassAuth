@@ -107,7 +107,7 @@ final class SignedSharingVectorTests: XCTestCase {
                      "observations", "emails", "legacyWraps"] {
             XCTAssertFalse(list(name).isEmpty, "no \(name) vectors")
         }
-        for name in ["keyPins", "keyPinsWithEpoch", "keyPinsRaised", "keyPinsLeft", "keyPinsGrandfathered", "keyPinsWithheld", "keyPinsUnsigned", "keyPinsRosterMax", "keyPinsOwn", "mergedEpochs", "ownIdentity", "keyIds",
+        for name in ["keyPins", "keyPinsWithEpoch", "keyPinsRaised", "keyPinsLeft", "keyPinsGrandfathered", "keyPinsWithheld", "keyPinsUnsigned", "keyPinsRosterMax", "keyPinsOwn", "keyPinsBound", "mergedEpochs", "ownIdentity", "keyIds",
                      "forgedUpgrade"] {
             XCTAssertNotNil(v[name], name)
         }
@@ -356,8 +356,13 @@ final class SignedSharingVectorTests: XCTestCase {
         XCTAssertNotNil(KeyPinsReader.field(grandfathered, "grandfathered"))
         XCTAssertNil(KeyPinsReader.field(pins, "grandfathered"))
         XCTAssertTrue(KeyPinsReader.signedSince(withEpoch, vaultId))
+        // A v2 (epoch-bound) own wrap opened at epoch 1 is recorded as `bound_since` (security round 7).
+        let boundObserved = try XCTUnwrap(SignedSharing.observe(ownPins, vaultId: vaultId, kind: "account", epochPin: try key.epochPinJson(vaultId: vaultId, keyEpoch: 1),
+                                                                rosterVersion: nil, rosterHash: nil, signedShare: false, paused: false, boundWrap: true))
+        let boundPins = try XCTUnwrap(boundObserved.pins)
+        XCTAssertEqual(object(boundPins), v["keyPinsBound"] as? NSDictionary)
         let sets: [String: String?] = ["none": nil, "withEpoch": withEpoch, "raised": raised, "left": left, "grandfathered": grandfathered,
-                                       "withheld": withheld, "unsigned": unsigned, "rosterMax": rosterMax, "own": ownPins]
+                                       "withheld": withheld, "unsigned": unsigned, "rosterMax": rosterMax, "own": ownPins, "bound": boundPins]
         for c in list("admissions") {
             let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""], "\(c)")
             XCTAssertEqual(object(try pinsAdmit(pinsJson: p, observationJson: try text(c["observation"]))), c["expected"] as? NSDictionary, "admission \(c)")
@@ -413,7 +418,8 @@ final class SignedSharingVectorTests: XCTestCase {
         }
         for c in list("legacyWraps") {
             let p = try XCTUnwrap(sets[c["pins"] as? String ?? ""])
-            XCTAssertEqual(try pinsLegacyWrapAllowed(pinsJson: p, vaultId: vaultId), c["expected"] as? Bool)
+            let epoch = UInt64(try XCTUnwrap(c["keyEpoch"] as? Int))
+            XCTAssertEqual(try pinsLegacyWrapAllowed(pinsJson: p, vaultId: vaultId, keyEpoch: epoch), c["expected"] as? Bool, "\(c)")
         }
         let own = v["ownIdentity"] as? Object ?? [:]
         XCTAssertEqual(try XCTUnwrap(a["alice"]).signing.identityHash(), own["hash"] as? String)

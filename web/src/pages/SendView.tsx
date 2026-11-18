@@ -3,7 +3,7 @@ import * as core from "../wasm/passauth_core";
 import { LogoMark } from "../components/Logo";
 import { copyText, ErrorText, PasswordInput, SheetActions } from "../components/ui";
 import { ApiError, UnreachableError, api, errorMessage, friendlyError } from "../lib/api";
-import { sendVerifier } from "../lib/send-kdf";
+import { sendKeys } from "../lib/send-kdf";
 import { parseSendLocation, readOpenedSend, readPublicSend, visitorError, type PublicSend } from "../lib/sends";
 import "../styles/files.css";
 
@@ -89,7 +89,7 @@ export function SendViewPage() {
         const info = readPublicSend(await api(`/public/sends/${encodeURIComponent(id)}`, { auth: false }));
         if (!info) throw new Error("The server sent an unexpected response. Reload the page to try again.");
         // Without a password the name comes first; it also proves the key fits before anything is opened.
-        const name = info.name !== null ? core.sendDecrypt(key, "name", info.name) : null;
+        const name = info.name !== null ? core.sendOpen(key, null, "name", info.name) : null;
         if (live) setStage({ kind: "ready", info, name });
       } catch (e) {
         if (live) setStage({ kind: "problem", ...problem(e) });
@@ -109,11 +109,13 @@ export function SendViewPage() {
     setFormError(null);
     try {
       let verifier: string | undefined;
+      // A v2 Send's text opens only with this key (from the link key and the password); it never leaves this page.
+      let contentKey: string | null = null;
       if (info.needsPassword && info.accessSalt) {
         // In a worker when it can be (`send-kdf.ts`): the page stays responsive and shows that it is working.
         setChecking(true);
         try {
-          verifier = await sendVerifier(password, info.accessSalt);
+          ({ verifier, contentKey } = await sendKeys(password, info.accessSalt, key));
         } finally {
           setChecking(false);
         }
@@ -122,8 +124,9 @@ export function SendViewPage() {
         await api(`/public/sends/${encodeURIComponent(id)}/access`, { method: "POST", auth: false, body: verifier ? { verifier } : {} }),
       );
       if (!opened) throw new Error("The server sent an unexpected response. Reload the page to try again.");
-      const name = core.sendDecrypt(key, "name", opened.name);
-      const text = core.sendDecrypt(key, "data", opened.data);
+      // Either version: v1 with the link key alone, v2 with the content key too.
+      const name = core.sendOpen(key, contentKey, "name", opened.name);
+      const text = core.sendOpen(key, contentKey, "data", opened.data);
       setPassword("");
       setStage({ kind: "open", info, name, text });
     } catch (err) {

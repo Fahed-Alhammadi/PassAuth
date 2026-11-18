@@ -25,6 +25,10 @@ public struct Item: Codable, Equatable, Sendable {
     /// edit here; nil when the item has none (the field is then left out). Read through
     /// `AttachmentList.read`.
     public var attachments: [JSON]?
+    /// The item's edit counter (inside the ciphertext, so authenticated): the core writes
+    /// `rev + 1` on every encryption; 0 = never counted (left out when written). Read only for
+    /// the app: rollback detection (`ItemRevMemory`) compares it, editors never change it.
+    public var rev: UInt64 = 0
     /// Top-level fields this app doesn't know (a newer app's), written back unchanged.
     public var extra: [String: JSON] = [:]
 
@@ -43,7 +47,7 @@ public struct Item: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey, CaseIterable {
-        case format, name, notes, favorite, folder, tags, login, card, identity, fields, attachments
+        case format, name, notes, favorite, folder, tags, login, card, identity, fields, attachments, rev
         case sshKey = "ssh_key", passwordHistory = "password_history", createdAt = "created_at", updatedAt = "updated_at"
     }
 
@@ -66,6 +70,7 @@ public struct Item: Codable, Equatable, Sendable {
         createdAt = c.lenient(.createdAt, 0)
         updatedAt = c.lenient(.updatedAt, 0)
         attachments = c.lenient(.attachments, nil as [JSON]?)
+        rev = c.lenient(.rev, 0 as UInt64)
         extra = decoder.unknownFields(Self.knownKeys)
         // An `attachments` value that isn't a list (a newer app's shape) is kept as written.
         if attachments == nil, let raw = c.lenient(.attachments, nil as JSON?), raw != .null { extra[CodingKeys.attachments.rawValue] = raw }
@@ -88,6 +93,7 @@ public struct Item: Codable, Equatable, Sendable {
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encodeIfPresent(attachments, forKey: .attachments)
+        if rev > 0 { try c.encode(rev, forKey: .rev) }
         try encoder.encodeUnknown(extra, known: Self.knownKeys)
         if attachments == nil, let raw = extra[CodingKeys.attachments.rawValue] { try c.encode(raw, forKey: .attachments) }
     }

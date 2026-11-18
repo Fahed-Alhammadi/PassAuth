@@ -206,6 +206,32 @@ public final class SecureStore {
 
     public func deleteCache(_ id: String) {
         try? FileManager.default.removeItem(at: cacheURL(id))
+        try? FileManager.default.removeItem(at: revsURL(id))
+    }
+
+    // MARK: Item edit counters seen (rollback detection), next to the offline copy
+
+    private func revsURL(_ id: String) -> URL {
+        cacheDir.appendingPathComponent("\(id.filter { $0.isLetter || $0.isNumber || $0 == "-" }).revs")
+    }
+
+    /// The highest item edit counter (`rev`) this device saw per item id of the account; empty
+    /// when none was kept (a new device or copy: trust on first sight), nil when the file exists
+    /// but can't be read now.
+    public func readItemRevs(_ id: String) -> [String: UInt64]? {
+        guard let blob = try? Data(contentsOf: revsURL(id)) else { return [:] }
+        guard let plain = open(blob, aad: "revs:\(id)") else { return nil }
+        return (try? JSONDecoder().decode([String: UInt64].self, from: plain)) ?? [:]
+    }
+
+    /// Store `revs` (only these ids: the ones left out were pruned), never lowering a value the
+    /// other process (the app or an AutoFill extension) wrote meanwhile.
+    public func writeItemRevs(_ id: String, _ revs: [String: UInt64]) {
+        let disk = readItemRevs(id) ?? [:]
+        let merged = revs.reduce(into: [String: UInt64]()) { out, e in out[e.key] = max(e.value, disk[e.key] ?? 0) }
+        guard let plain = try? JSONEncoder().encode(merged), let blob = seal(plain, aad: "revs:\(id)") else { return }
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
+        write(blob, to: revsURL(id))
     }
 
     // MARK: Encryption

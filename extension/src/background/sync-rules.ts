@@ -12,6 +12,7 @@
 import type { Snapshot, SyncNotice } from "@web/lib/delta";
 import { readInvitations } from "@web/lib/invitations";
 import { isSyncResponse, isSyncVaultRow, type SyncInvitation, type SyncItemRow, type SyncResponse } from "@web/lib/types";
+import type { StoredRevMemory } from "./item-revs";
 import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
 
 /**
@@ -19,7 +20,11 @@ import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
  * after this browser's own writes that were shown without asking the server (`applyOwnWrite`). The cursor stays
  * behind those writes, so the next delta sends their rows again.
  */
-export interface StoredSync extends SyncResponse {
+/*
+ * `itemRevs` / `rolledBack` (item-revs.ts): the highest item edit counters seen and the items a server sent in an
+ * older version, kept with the rows so they share the copy's lifetime.
+ */
+export interface StoredSync extends SyncResponse, StoredRevMemory {
   own?: Record<string, number>;
   /**
    * Signed sharing: each vault's last verdict with the row it was made for (signed-sharing.ts `stampOf`), so an

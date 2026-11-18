@@ -936,3 +936,138 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(repo.state.settings.vaultTimeout, .min30, "a lowered choice isn't raised again")
     }
 }
+
+// MARK: Security round 7/8/9 (epoch-bound own wraps, Send v2, item rollback)
+
+extension ContractTests {
+    /// `body` (a `/sync` answer) with `fields` added to its `user`.
+    private func withUser(_ body: Data, _ fields: [String: Any]) throws -> Data {
+        var o = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        var user = o["user"] as? [String: Any] ?? [:]
+        user.merge(fields) { _, new in new }
+        o["user"] = user
+        return try JSONSerialization.data(withJSONObject: o)
+    }
+
+    private func ownWrapAfterRotation(hint: Any?) async throws -> (wrapped: String, f: Fixture) {
+        let f = try fixture()
+        let two = try twoVaults(f)
+        ScriptedServer.syncBodies = [hint.map { try? withUser(two.body, ["account_wraps_v2": $0]) } ?? two.body].compactMap { $0 }
+        let repo = try await repo(f)
+        ScriptedServer.answer("GET /api/vaults/\(f.vaultId)/members", 200, members([f.accountId]))
+        let done = try await repo.rotateVaultKeys([f.vaultId])
+        XCTAssertEqual(done.rotated, [f.vaultId])
+        let keys = try XCTUnwrap(rotations().first?.body["keys"] as? [[String: Any]])
+        return (try XCTUnwrap(keys.first?["wrapped_key"] as? String), f)
+    }
+
+    /// Every app of the account reads v2 (`user.account_wraps_v2`): the own wrap is bound to the
+    /// epoch the vault has after the replacement (1 → 2).
+    func testOwnKeyReplacementIsEpochBoundWhenEveryAppReadsIt() async throws {
+        let (wrapped, f) = try await ownWrapAfterRotation(hint: true)
+        XCTAssertTrue(accountWrapIsBound(wrapped: wrapped))
+        XCTAssertNoThrow(try f.created.account.openVaultKey(vaultId: f.vaultId, wrapped: wrapped, kind: "account", keyEpoch: 2, legacyAllowed: false))
+    }
+
+    /// Without the hint (an older server, or an app that can't read v2), or a hint that isn't
+    /// `true`: v1 as before.
+    func testOwnKeyReplacementStaysV1WithoutTheHint() async throws {
+        let (wrapped, _) = try await ownWrapAfterRotation(hint: nil)
+        XCTAssertFalse(accountWrapIsBound(wrapped: wrapped))
+    }
+
+    func testOwnKeyReplacementStaysV1WhenTheHintIsntTrue() async throws {
+        let (wrapped, _) = try await ownWrapAfterRotation(hint: "true")
+        XCTAssertFalse(accountWrapIsBound(wrapped: wrapped))
+    }
+
+    /// The server sends an older version of an item: the newer copy stays shown and in the
+    /// offline copy, the item is marked, and the counter remembered survives a new unlock.
+    func testAnOlderItemFromTheServerKeepsTheNewerCopy() async throws {
+        let f = try fixture()
+        let old = try f.key.encryptItem(itemJson: ItemCodec.encode(f.item), id: f.itemId, vaultId: f.vaultId)
+        var changed = try ItemCodec.decode(try f.key.decryptItem(encrypted: old))
+        changed.login?.password = "pw-2"
+        let newer = try f.key.updateItem(encrypted: old, itemJson: ItemCodec.encode(changed))
+        func body(_ e: EncryptedItem, _ revision: Int64) throws -> Data {
+            try answer(f, ["revision": revision, "vaults": [try vaultRow(f, seq: revision)],
+                           "items": [["id": f.itemId, "vault_id": f.vaultId, "item_key": e.key, "data": e.data, "revision": revision, "deleted_at": NSNull()]]])
+        }
+        ScriptedServer.syncBodies = [try body(newer, 5)]
+        let repo = try await repo(f)
+        XCTAssertEqual(repo.vault?.get(f.itemId)?.item.login?.password, "pw-2")
+        XCTAssertNil(repo.vault?.rollback)
+        ScriptedServer.syncBodies = [try body(old, 6)]
+        try await repo.sync()
+        let shown = try XCTUnwrap(repo.vault?.get(f.itemId))
+        XCTAssertTrue(shown.rolledBack)
+        XCTAssertEqual(shown.item.login?.password, "pw-2")
+        XCTAssertEqual(repo.vault?.rollback?.kept, [f.itemId])
+        // Kept in the offline copy too, and the remembered counter is on the device.
+        let store = SecureStore(directory: dir, role: .app)
+        store.load()
+        XCTAssertEqual(store.readItemRevs("acc"), [f.itemId: 2])
+        let cached = try XCTUnwrap(store.readCache("acc").flatMap(SyncSnapshot.decode))
+        XCTAssertEqual(cached.items.first?.data, newer.data)
+        // An edit of the kept copy counts on from it (rev 3) at the server's revision.
+        var edit = shown.item
+        edit.notes = "edited"
+        try await repo.updateItem(shown, edit)
+        let put = try XCTUnwrap(writes().last { $0.method == "PUT" })
+        XCTAssertEqual((put.body["revision"] as? NSNumber)?.int64Value, 6)
+        let sent = EncryptedItem(id: f.itemId, vaultId: f.vaultId, key: put.body["key"] as? String ?? "", data: put.body["data"] as? String ?? "")
+        XCTAssertEqual(try ItemCodec.decode(try f.key.decryptItem(encrypted: sent)).rev, 3)
+    }
+
+    /// Send v2 (server with `send_v2`): a Send with a password is encrypted with the
+    /// password-derived content key, which the owner keeps wrapped; without the feature, v1.
+    func testSendWithAPasswordIsEncryptedWithIt() async throws {
+        let f = try fixture()
+        ScriptedServer.syncBodies = [try syncBody(f, key: f.key, wrapped: f.wrapped, epoch: 1)]
+        let repo = try await repo(f)
+        let reply = #"{"id":"s1","name":"n","owner_key":"k","delete_at":9999999999}"#
+        ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","api":2,"features":["sends","send_v2"]}"#)
+        _ = await repo.sendConfig()
+        ScriptedServer.answer("POST /api/sends", 200, reply)
+        _ = try await repo.createSend(NewSend(name: "Door", text: "1234", password: "open sesame", maxViews: nil, expiresAt: nil,
+                                              deleteAt: 9_999_999_999, hideEmail: false))
+        let body = try XCTUnwrap(ScriptedServer.recorded().last { $0.path == "/api/sends" }?.body)
+        let account = f.created.account
+        let key = try account.unwrapSendKey(wrapped: try XCTUnwrap(body["owner_key"] as? String))
+        let ck = try account.unwrapSendContentKey(wrapped: try XCTUnwrap(body["owner_content_key"] as? String))
+        let name = try XCTUnwrap(body["name"] as? String)
+        XCTAssertEqual(try sendFieldVersion(ciphertext: name), 2)
+        XCTAssertEqual(try sendOpen(key: key, contentKey: ck, field: "name", ciphertext: name), "Door")
+        XCTAssertThrowsError(try sendOpen(key: key, contentKey: nil, field: "data", ciphertext: body["data"] as? String ?? ""))
+        let keys = try sendPasswordKeys(password: "open sesame", salt: try XCTUnwrap(body["access_salt"] as? String), key: key)
+        XCTAssertEqual(body["access_verifier"] as? String, keys.verifier)
+        XCTAssertEqual(keys.contentKey, ck)
+
+        // The owner opens it with the wrapped content key; removing the password goes back to v1.
+        let owned = try XCTUnwrap(OwnedSend(json: ["id": "s1", "name": .string(name), "owner_key": .string(body["owner_key"] as? String ?? ""),
+                                                   "owner_content_key": .string(body["owner_content_key"] as? String ?? ""),
+                                                   "data": .string(body["data"] as? String ?? ""), "delete_at": 9_999_999_999, "has_password": true]))
+        XCTAssertEqual(repo.sendName(owned), "Door")
+        XCTAssertEqual(try repo.sendText(owned), "1234")
+        ScriptedServer.answer("PUT /api/sends/s1", 200, reply)
+        var edit = SendEdit()
+        edit.password = .some(nil)
+        try await repo.updateSend(owned, edit)
+        let put = try XCTUnwrap(ScriptedServer.recorded().last { $0.method == "PUT" }?.body)
+        XCTAssertTrue(put["owner_content_key"] is NSNull)
+        XCTAssertTrue(put["access_verifier"] is NSNull)
+        XCTAssertEqual(try sendFieldVersion(ciphertext: put["data"] as? String ?? ""), 1)
+        XCTAssertEqual(try sendOpen(key: key, contentKey: nil, field: "data", ciphertext: put["data"] as? String ?? ""), "1234")
+
+        // A server without `send_v2`: v1 with a server-checked password, as before.
+        ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","api":2,"features":["sends"]}"#)
+        _ = await repo.sendConfig()
+        ScriptedServer.answer("POST /api/sends", 200, reply)
+        _ = try await repo.createSend(NewSend(name: "Door", text: "1234", password: "open sesame", maxViews: nil, expiresAt: nil,
+                                              deleteAt: 9_999_999_999, hideEmail: false))
+        let v1 = try XCTUnwrap(ScriptedServer.recorded().last { $0.path == "/api/sends" }?.body)
+        XCTAssertNil(v1["owner_content_key"])
+        XCTAssertEqual(try sendFieldVersion(ciphertext: v1["name"] as? String ?? ""), 1)
+        XCTAssertNotNil(v1["access_verifier"] as? String)
+    }
+}

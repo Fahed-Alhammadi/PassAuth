@@ -15,6 +15,7 @@ import io.passauth.core.pinsCheckOwnIdentity
 import io.passauth.core.pinsGrandfather
 import io.passauth.core.pinsLeave
 import io.passauth.core.pinsLegacyWrapAllowed
+import io.passauth.core.accountWrapIsBound
 import io.passauth.core.pinsDecline
 import io.passauth.core.pinsMergeLastKnown
 import io.passauth.core.pinsRecordRotation
@@ -556,6 +557,14 @@ object SignedSharing {
     internal fun number(o: JsonObject?, key: String): Long? = (o?.get(key) as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
 
     internal fun flag(o: JsonObject?, key: String): Boolean = (o?.get(key) as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull == true
+
+    /**
+     * `/sync` `user.account_wraps_v2` (servers from 0.14): every signed-in app of the account reads
+     * v2 (epoch-bound) account wraps, so new own wraps may be written v2. Only a JSON `true` counts;
+     * absent (older server) or anything else = v1. A hint for compatibility only: a server that lies
+     * can only make this app write v1, as before.
+     */
+    fun accountWrapsV2(user: JsonElement?): Boolean = flag(user as? JsonObject, "account_wraps_v2")
 
     internal fun obj(text: String): JsonObject? = runCatching { AppJson.parseToJsonElement(text) as? JsonObject }.getOrNull()
 
@@ -1381,8 +1390,12 @@ class SharingSession(
         if (absent != before) memory.write { it.copy(absent = absent) }
     }
 
-    /** Whether an `account` wrap of the vault may be a v1 wrap (the core's rule). */
-    fun legacyAllowed(vaultId: String): Boolean = runCatching { pinsLegacyWrapAllowed(pins, vaultId) }.getOrDefault(false)
+    /**
+     * Whether an `account` wrap of the vault at [keyEpoch] (the row's `key_epoch`) may be a v1 wrap
+     * (the core's rule: refused at or below the highest epoch this account opened from a v2 wrap).
+     */
+    fun legacyAllowed(vaultId: String, keyEpoch: Long?): Boolean =
+        runCatching { pinsLegacyWrapAllowed(pins, vaultId, (keyEpoch ?: 0).coerceAtLeast(0).toULong()) }.getOrDefault(false)
 
     /** The member roster this phone trusts for the vault (remembered only after a sync's checks passed). */
     suspend fun rememberedRoster(vaultId: String): String? = memory.read().rosters[vaultId]
@@ -1557,7 +1570,7 @@ class SharingSession(
         if (!pinsLoaded && sealed) return refused(SignedSharing.UNCHECKED)
         val epoch = v.keyEpoch ?: return refused(SignedSharing.refusedReason("missing_epoch"))
         val key = try {
-            open(legacyAllowed(v.id))
+            open(legacyAllowed(v.id, epoch))
         } catch (_: CoreException) {
             return refused(SignedSharing.REFUSED)
         }
@@ -1594,7 +1607,9 @@ class SharingSession(
                 }
             }
             val current = key.epochPinJson(v.id, epoch.toULong())
-            val observation = observation(v.id, if (sealed) "sealed" else "account", current, rosterVersion, roster, trusted.chain, signer != null).toString()
+            // An own vault opened from a v2 (epoch-bound) wrap: the pins remember it (`bound_since`), so a v1 wrap at that epoch is refused later.
+            val bound = !sealed && accountWrapIsBound(v.wrappedKey)
+            val observation = observation(v.id, if (sealed) "sealed" else "account", current, rosterVersion, roster, trusted.chain, signer != null, boundWrap = bound).toString()
             // The core's admission, with what it says to pin (`pin`: key, signed history, roster version and hash) applied.
             val observed = SignedSharing.obj(pinsObserve(pins, observation)) ?: return refused(SignedSharing.REFUSED)
             val admission = observed["admission"] as? JsonObject ?: return refused(SignedSharing.REFUSED)
@@ -1658,7 +1673,7 @@ class SharingSession(
      * round 4), `roster_hash` exactly with `roster_version`, `chain_hashes` whenever a chain was
      * fetched ([chain]), `invitation: true` for an invitation ([invitation]).
      */
-    private fun observation(vaultId: String, kind: String, current: String, rosterVersion: Long?, roster: String?, chain: Map<String, String>?, signedShare: Boolean, invitation: Boolean = false): JsonObject = buildJsonObject {
+    private fun observation(vaultId: String, kind: String, current: String, rosterVersion: Long?, roster: String?, chain: Map<String, String>?, signedShare: Boolean, invitation: Boolean = false, boundWrap: Boolean = false): JsonObject = buildJsonObject {
         put("vault_id", vaultId)
         put("key_kind", kind)
         put("key", AppJson.parseToJsonElement(current))
@@ -1669,6 +1684,8 @@ class SharingSession(
         put("paused", paused)
         // An invitation (round 5 Android M): never grandfathered or own, held when the account has the vault; the same in admit and accept.
         if (invitation) put("invitation", true)
+        // Only for `account` rows (the core refuses it on a sealed one).
+        if (boundWrap) put("bound_wrap", true)
     }
 
     /** The key pins with [observation] accepted (`pins_accept`); what the core refuses is said in words. */

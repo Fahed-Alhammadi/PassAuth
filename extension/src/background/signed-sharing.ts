@@ -479,9 +479,10 @@ export const pinsDigest = (pins: core.KeyPins | null) => sha256(JSON.stringify(p
 
 /**
  * The version of these checks. Part of every stamp (review L2): a verdict kept by an older version of the extension is
- * checked again rather than reused offline. Raise it whenever a check changes what it decides.
+ * checked again rather than reused offline. Raise it whenever a check changes what it decides (7: own vaults opened
+ * from a bound wrap are recorded in the pins).
  */
-export const CHECKS_VERSION = 6;
+export const CHECKS_VERSION = 7;
 
 /** The stamp of a verdict: the row and everything else it depends on (pins, roster memory, paused, own identity, the checks' version). */
 export const contextStamp = (row: SignedVaultRow, c: StampContext, version = CHECKS_VERSION) => sha256(JSON.stringify([version, rowStamp(row), c.pins, c.remembered, c.seenSigned, c.paused, c.me]));
@@ -743,6 +744,9 @@ export async function checkVault(input: VaultCheckInput): Promise<VaultCheck> {
       ...(chain ? { chain_hashes: chain } : {}),
       signed_share: signedShare,
       paused: input.paused,
+      // An own vault opened from an epoch-bound (v2) wrap: the pins remember it, so a v1 wrap for that epoch or an
+      // older one is refused from then on (ARCHITECTURE "Account wraps").
+      ...(row.key_kind === "account" && core.accountWrapIsBound(row.wrapped_key) ? { bound_wrap: true } : {}),
     };
     const observed = core.pinsObserve(input.pins, observation);
     const adm = observed.admission;

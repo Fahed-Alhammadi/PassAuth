@@ -148,6 +148,119 @@ class SendsTest {
             return "salt-$saltsMade"
         }
         override fun verifier(password: String, salt: String) = "v($password,$salt)"
+        // Send v2 with the real core (a real salt: one Argon2id run each).
+        override fun passwordKeys(password: String, salt: String, key: String) =
+            io.passauth.core.sendPasswordKeys(password, salt, key).let { SendKeys(it.verifier, it.contentKey) }
+        override fun encryptV2(contentKey: String, field: String, plain: String) = io.passauth.core.sendEncryptV2(contentKey, field, plain)
+        override fun open(key: String, contentKey: String?, field: String, cipher: String) = io.passauth.core.sendOpen(key, contentKey, field, cipher)
+        override fun fieldVersion(cipher: String) = io.passauth.core.sendFieldVersion(cipher).toInt()
+        override fun wrapContent(contentKey: String) = "content:$contentKey"
+        override fun unwrapContent(wrapped: String) = if (wrapped.startsWith("content:")) wrapped.removePrefix("content:") else throw io.passauth.core.CoreException.DecryptFailed("no")
+    }
+
+    /** [Crypto] with real salts, for Send v2 (the core checks the salt's KDF parameters). */
+    private class V2Crypto : SendCrypto by Crypto() {
+        override fun passwordSalt(): String = io.passauth.core.sendPasswordSalt()
+    }
+
+    /** A fake server keeping one Send as the owner's API answers it. */
+    private class Server {
+        val calls = mutableListOf<Triple<String, String, JsonElement?>>()
+        var stored: JsonObject? = null
+        val transport = SecurityTransport { path, body, method, _, _ ->
+            calls += Triple(method, path, body)
+            when (method) {
+                "POST" -> {
+                    val b = body as JsonObject
+                    stored = JsonObject(b + mapOf("id" to JsonPrimitive("AbCdEfGhIjKlMnOpQrSt_-"), "has_password" to JsonPrimitive(b["access_verifier"] != null)))
+                    stored!!
+                }
+                "PUT" -> {
+                    val b = body as JsonObject
+                    var next = stored!! + b
+                    if ("access_verifier" in b) next = next + ("has_password" to JsonPrimitive(b["access_verifier"] != JsonNull))
+                    stored = JsonObject(next.filterValues { it != JsonNull })
+                    stored!!
+                }
+                "GET" -> stored!!
+                else -> JsonNull
+            }
+        }
+        fun last(): JsonObject = calls.last().third as JsonObject
+    }
+
+    private fun text(o: JsonObject, k: String) = (o[k] as JsonPrimitive).content
+
+    @Test
+    fun sendV2EncryptsWithThePasswordAndTheOwnerReadsItWithItsContentKey() = runBlocking {
+        val server = Server()
+        val actions = SendActions(server.transport, sendV2 = { true }) { V2Crypto() }
+        val (send, sendKey) = actions.create(NewSend("Wi-Fi", "hunter2", "pw", null, null, 5000, false))
+        val body = server.last()
+        assertEquals(2, io.passauth.core.sendFieldVersion(text(body, "name")).toInt())
+        assertEquals(2, io.passauth.core.sendFieldVersion(text(body, "data")).toInt())
+        assertTrue(text(body, "owner_content_key").startsWith("content:"))
+        // The link alone doesn't open it; the password does (the visitor's way).
+        try {
+            io.passauth.core.sendOpen(sendKey, null, "data", text(body, "data"))
+            org.junit.Assert.fail("a v2 Send opened with the link alone")
+        } catch (_: io.passauth.core.CoreException.PasswordRequired) {
+        }
+        val visitor = io.passauth.core.sendPasswordKeys("pw", text(body, "access_salt"), sendKey)
+        assertEquals(text(body, "access_verifier"), visitor.verifier)
+        assertEquals("hunter2", io.passauth.core.sendOpen(sendKey, visitor.contentKey, "data", text(body, "data")))
+        // The owner reads it without the password.
+        assertEquals("Wi-Fi", actions.nameOf(send))
+        assertEquals("hunter2", actions.textOf(actions.get(send.id)))
+
+        // A text edit (password kept): v2 with the same content key, nothing else.
+        actions.update(actions.get(send.id), SendEdit(text = "new"))
+        assertEquals(setOf("data"), server.last().keys)
+        assertEquals("new", io.passauth.core.sendOpen(sendKey, visitor.contentKey, "data", text(server.last(), "data")))
+
+        // Turning the link off needs no content key at all.
+        val unreadable = actions.get(send.id).copy(ownerContentKey = "broken")
+        actions.update(unreadable, SendEdit(disabled = true))
+        assertEquals(setOf("disabled"), server.last().keys)
+        assertNull(actions.nameOf(unreadable))
+
+        // A new password: new salt and content key, both fields again (the list's Send has no text: fetched).
+        val listed = actions.get(send.id).copy(data = null)
+        actions.update(listed, SendEdit(password = "pw2"))
+        val change = server.last()
+        assertEquals(setOf("name", "data", "access_salt", "access_verifier", "owner_content_key"), change.keys)
+        val second = io.passauth.core.sendPasswordKeys("pw2", text(change, "access_salt"), sendKey)
+        assertEquals("new", io.passauth.core.sendOpen(sendKey, second.contentKey, "data", text(change, "data")))
+        assertEquals("Wi-Fi", io.passauth.core.sendOpen(sendKey, second.contentKey, "name", text(change, "name")))
+
+        // Removing the password: back to v1 (link key only), the content key cleared.
+        actions.update(actions.get(send.id), SendEdit(password = ""))
+        val removed = server.last()
+        assertEquals(setOf("name", "data", "access_verifier", "owner_content_key"), removed.keys)
+        assertEquals(JsonNull, removed["owner_content_key"])
+        assertEquals(JsonNull, removed["access_verifier"])
+        assertEquals("new", io.passauth.core.sendDecrypt(sendKey, "data", text(removed, "data")))
+        assertEquals("Wi-Fi", actions.nameOf(actions.get(send.id)))
+    }
+
+    @Test
+    fun withoutSendV2OrAPasswordSendsStayV1() = runBlocking {
+        val server = Server()
+        val actions = SendActions(server.transport, sendV2 = { false }) { V2Crypto() }
+        actions.create(NewSend("A", "text", "pw", null, null, 5000, false))
+        assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
+        assertFalse("owner_content_key" in server.last())
+        val v2 = SendActions(server.transport, sendV2 = { true }) { V2Crypto() }
+        v2.create(NewSend("B", "text", null, null, null, 5000, false))
+        assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
+        assertFalse("owner_content_key" in server.last())
+        // A v1 Send with a password gets v2 when its password changes on a server with v2.
+        val (s, key) = actions.create(NewSend("C", "old", "pw", null, null, 5000, false))
+        v2.update(v2.get(s.id), SendEdit(password = "pw3"))
+        val up = server.last()
+        assertEquals(2, io.passauth.core.sendFieldVersion(text(up, "data")).toInt())
+        val keys = io.passauth.core.sendPasswordKeys("pw3", text(up, "access_salt"), key)
+        assertEquals("old", io.passauth.core.sendOpen(key, keys.contentKey, "data", text(up, "data")))
     }
 
     @Test

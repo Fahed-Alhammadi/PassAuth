@@ -23,8 +23,13 @@ export function loadCore(): Promise<void> {
 
 /** The `signedSharing` section of the shared test vectors. */
 export async function signedVectors(): Promise<SignedVectors> {
+  return (await allVectors()).signedSharing as SignedVectors;
+}
+
+/** The whole of the shared test vectors (sections other tests read, e.g. `itemRev`, `sendV2`). */
+export async function allVectors(): Promise<Record<string, unknown>> {
   const text = new TextDecoder().decode(await readBytes("../../../testdata/vectors.json"));
-  return (JSON.parse(text) as { signedSharing: SignedVectors }).signedSharing;
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 export function unb64(s: string): Uint8Array {
@@ -65,6 +70,8 @@ export interface SignedVectors {
   keyPinsUnsigned: core.KeyPins;
   keyPinsRosterMax: core.KeyPins;
   keyPinsOwn: core.KeyPins;
+  /** Own vault at epoch 1 opened from a v2 (epoch-bound) wrap: `bound_since: 1`. */
+  keyPinsBound: core.KeyPins;
   admissions: { pins: string; observation: core.VaultObservation; expected: core.Admission }[];
   accepts: ({ pins: string; observation: core.VaultObservation } & Outcome)[];
   merges: ({ name: string; base: core.KeyPins; ours: core.KeyPins } & Outcome)[];
@@ -72,7 +79,7 @@ export interface SignedVectors {
   declines: { pins: string; vaultId: string; currentRow: boolean; expected: core.KeyPins }[];
   observations: { observation: core.VaultObservation; expected: core.Observed; accept?: true; accepted?: core.KeyPins }[];
   emails: { email: string; expected: string }[];
-  legacyWraps: { pins: string; expected: boolean }[];
+  legacyWraps: { pins: string; keyEpoch: number; expected: boolean }[];
   ownIdentity: { hash: string; pins: core.KeyPins; checks: { pins: string; listed: string | null; expected: string }[] };
 }
 

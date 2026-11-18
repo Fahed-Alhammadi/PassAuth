@@ -41,6 +41,7 @@ import * as core from "../wasm/passauth_core";
 import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, refreshServerInfo, serverConfig, serverInfo } from "./api";
 import { AVATAR_FEATURE, avatarSeqOf, avatars, deleteAvatar, refreshAvatar, uploadAvatar } from "./avatar";
 import { initCore } from "./core";
+import { emptyRevMemory, itemRevOf, noteServed, pruneRevMemory, readRevMemory, rollbackNotice, storedRevMemory } from "./item-revs";
 import { forgetLastUsed } from "./last-used";
 import { type IndexedLogin, type MatchIndex, matchIndex } from "./match-index";
 import { forgetPolicyState, noteTwoStepDone, policyState } from "./policies";
@@ -138,6 +139,12 @@ let synced: Snapshot | null = null;
 let openedFrom = new Map<string, SyncVaultRow>();
 /** Per item, the row it was decrypted from and the result (null: it can't be decrypted), reused while the ciphertext stays. */
 let decrypted = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
+/**
+ * Item rollback detection (item-revs.ts): the loaded account's highest item edit counters seen and the items marked,
+ * read from its offline copy once per generation (`revGen`) before anything is shown, kept with the copy.
+ */
+let revMem = emptyRevMemory();
+let revGen = -1;
 /**
  * Signed sharing for the loaded account (signed-sharing.ts): checks run (`sharingOn`) on servers with `signed_sharing`
  * and for accounts this browser has seen anything signed for. `verdicts`: each vault row's last check, which
@@ -829,6 +836,8 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
       // Shared vaults as the copy's verdicts say (rows without one are checked here, without the network where possible).
       await checkSharing(snap, id, "open", copy?.trust);
       if (gen !== generation || currentId !== id || loaded) return;
+      await loadRevMemory(id, { copy });
+      if (gen !== generation || currentId !== id || loaded) return;
       show(snap);
       syncAvatar(id, snap.user);
       void refreshIfStale().catch(logged("Checking for changes"));
@@ -907,6 +916,8 @@ function unload() {
   synced = null;
   openedFrom = new Map();
   decrypted = new Map();
+  revMem = emptyRevMemory();
+  revGen = -1;
   opening = null;
   sharingOn = false;
   verdicts = new Map();
@@ -1132,6 +1143,8 @@ async function accept(snap: Snapshot, id: string) {
     throw new AppError(FAILED, WRONG_ACCOUNT_TEXT);
   }
   await checkSharing(snap, id, "sync");
+  if (gen !== generation || currentId !== id || !account) return;
+  await loadRevMemory(id);
   if (gen !== generation || currentId !== id || !account) return;
   show(snap);
   await persist(id);
@@ -1765,7 +1778,7 @@ async function checkSharing(snap: Snapshot, id: string, mode: "sync" | "open", s
       } else {
         let key: core.VaultKey;
         try {
-          key = acct.openVaultKey(row.id, row.wrapped_key, row.key_kind, epoch, core.pinsLegacyWrapAllowed(pins, row.id));
+          key = acct.openVaultKey(row.id, row.wrapped_key, row.key_kind, epoch, core.pinsLegacyWrapAllowed(pins, row.id, epoch));
         } catch {
           continue; // a key this account can't open: the vault stays hidden anyway
         }
@@ -1931,7 +1944,7 @@ async function checkUnreadable(
     else if (pins) {
       let key: core.VaultKey;
       try {
-        key = acct.openVaultKey(row.id, row.wrapped_key, row.key_kind, epoch, core.pinsLegacyWrapAllowed(pins, row.id));
+        key = acct.openVaultKey(row.id, row.wrapped_key, row.key_kind, epoch, core.pinsLegacyWrapAllowed(pins, row.id, epoch));
       } catch {
         continue;
       }
@@ -2108,10 +2121,39 @@ function persist(id: string): Promise<void> {
   const gen = generation;
   const p = storing.then(async () => {
     if (gen !== generation || currentId !== id || !synced) return;
-    await syncCache.set(id, sharingOn ? { ...toStored(synced), trust: Object.fromEntries(verdicts) } : { ...toStored(synced), checks: "off" });
+    // The item edit counters only once read for this generation (else the stored ones would be replaced by none).
+    const revs = revGen === gen ? storedRevMemory(revMem) : await keptRevMemory(id);
+    await syncCache.set(id, sharingOn ? { ...toStored(synced), ...revs, trust: Object.fromEntries(verdicts) } : { ...toStored(synced), ...revs, checks: "off" });
   });
   storing = p.catch(() => {});
   return p;
+}
+
+/** The item edit counters in `id`'s offline copy, as stored (none when the copy isn't this account's). */
+async function keptRevMemory(id: string) {
+  const copy = await syncCache.get(id);
+  return account && copy && copy.user?.id === meOf(account) ? storedRevMemory(readRevMemory(copy)) : {};
+}
+
+/**
+ * Read the loaded account's item edit counters from its offline copy (`read`: the copy the caller already read), once
+ * per generation. A copy for another account gives none (trust on first sight, like a new browser).
+ */
+async function loadRevMemory(id: string, read?: { copy: StoredSync | undefined }): Promise<void> {
+  if (revGen === generation) return;
+  const gen = generation;
+  const copy = read ? read.copy : await syncCache.get(id);
+  if (gen !== generation || revGen === generation || currentId !== id) return;
+  revMem = account && copy && copy.user?.id === meOf(account) ? readRevMemory(copy) : emptyRevMemory();
+  revGen = gen;
+}
+
+/** Whether the server sent an older version of item `id` than this browser had seen (item-revs.ts). */
+export const rolledBack = (id: string): boolean => revMem.rolledBack.has(id);
+
+/** The vault-wide notice about items a server sent in an older version, or null. */
+export function rollbackSummary(): { text: string; key: string } | null {
+  return rollbackNotice(revMem, new Set(entries.map((e) => e.id)));
 }
 
 const byName = new Intl.Collator(undefined, { sensitivity: "base" });
@@ -2163,8 +2205,9 @@ function materialize(snap: Snapshot) {
     } else {
       try {
         // Account wraps open with the row's key epoch; a v1 wrap only where the account's pins allow it.
-        const legacyOk = sharingOn ? core.pinsLegacyWrapAllowed(keyPins, v.id) : true;
-        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, Number.isSafeInteger(v.key_epoch) && (v.key_epoch as number) >= 0 ? (v.key_epoch as number) : 0, legacyOk);
+        const rowEpoch = whole(v.key_epoch) ?? 0;
+        const legacyOk = sharingOn ? core.pinsLegacyWrapAllowed(keyPins, v.id, rowEpoch) : true;
+        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, rowEpoch, legacyOk);
       } catch {
         continue; // vault key unavailable (replaced): its items stay hidden
       }
@@ -2185,6 +2228,8 @@ function materialize(snap: Snapshot) {
   const byId = new Map(next.map((v) => [v.id, v]));
   const copies = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
   const list: Entry[] = [];
+  // Only once this account's remembered counters are read (always so through openVault and accept).
+  const checkRevs = revGen === generation;
   for (const row of snap.items.values()) {
     const vault = byId.get(row.vault_id);
     if (!vault || row.deleted_at) continue;
@@ -2194,10 +2239,36 @@ function materialize(snap: Snapshot) {
       entry = old.entry && old.entry.revision !== row.revision ? { ...old.entry, revision: row.revision } : old.entry;
     } else {
       entry = decryptRow(vault.key, row);
+      if (entry && checkRevs) {
+        // Item rollback detection: the core's verdict on the counter inside the ciphertext against the highest seen.
+        let verdict: string;
+        try {
+          verdict = core.itemRevCheck(revMem.revs.get(row.id) ?? null, itemRevOf(entry.item));
+        } catch {
+          verdict = "rollback";
+        }
+        const held: { mine: Entry | null } = { mine: null };
+        const how = noteServed(revMem, row.id, itemRevOf(entry.item), verdict, !!old, () => {
+          // The copy shown before, opened again with the vault key it has now (with the server's revision, so an edit
+          // made from it isn't refused as a conflict, and the row's trash state).
+          if (!old?.entry || old.row.vault_id !== row.vault_id || typeof old.row.item_key !== "string" || typeof old.row.data !== "string") return null;
+          held.mine = decryptRow(vault.key, { ...row, item_key: old.row.item_key, data: old.row.data });
+          return held.mine ? itemRevOf(held.mine.item) : null;
+        });
+        const mine = held.mine;
+        if (how === "keep" && mine) {
+          const keptRow: SyncItemRow = { ...row, item_key: mine.enc.key, data: mine.enc.data };
+          snap.items.set(row.id, keptRow);
+          copies.set(row.id, { row: keptRow, entry: mine });
+          list.push(mine);
+          continue;
+        }
+      }
     }
     copies.set(row.id, { row, entry });
     if (entry) list.push(entry);
   }
+  if (checkRevs) pruneRevMemory(revMem, snap.items);
   list.sort((a, b) => byName.compare(a.item.name, b.item.name));
   // Handles the new state no longer uses (a vault gone, or its key replaced).
   for (const v of vaults) if (!kept.has(v.key)) v.key.free();
@@ -2406,7 +2477,8 @@ function stableJson(v: unknown): string {
 
 /** Same item content, apart from what re-encrypting may change (the format stamp) and the times a create sets. */
 export function sameContent(a: Item, b: Item, ignoreTimes = false): boolean {
-  const strip = ({ format: _f, ...rest }: Item) => (ignoreTimes ? { ...rest, created_at: 0, updated_at: 0 } : rest);
+  // `rev`: the edit counter the core raises on every write, never content.
+  const strip = ({ format: _f, rev: _r, ...rest }: Item & { rev?: unknown }) => (ignoreTimes ? { ...rest, created_at: 0, updated_at: 0 } : rest);
   return stableJson(strip(a)) === stableJson(strip(b));
 }
 

@@ -86,6 +86,11 @@ export interface Attachment {
 export interface Item {
   /** Data format, set by the core on encrypt (older items are upgraded on decrypt). */
   format?: number;
+  /**
+   * Edit counter, inside the encryption (the core counts it up on every encrypt; missing = 0, an item never counted).
+   * Read-only for the apps: kept as it is in edits, compared by `item-revs.ts` to notice a server serving an older copy.
+   */
+  rev?: number;
   name: string;
   notes: string;
   favorite: boolean;
@@ -157,6 +162,8 @@ export interface VaultEntry {
   revision: number;
   deletedAt: number | null;
   enc: EncryptedItem;
+  /** The server sent an older version of this item than this device saw (`item-revs.ts`): shown with a warning. */
+  rollback?: boolean;
 }
 
 export type Role = "owner" | "admin" | "write" | "read";
@@ -227,8 +234,8 @@ export interface SyncInvitation {
 
 export interface SyncResponse {
   revision: number;
-  /** `identity` and `key_pins_seq`: signed sharing (servers with `signed_sharing`), read by `signed-sharing.ts`. `avatar_seq`: profile picture (servers with `avatar`; 0 = none). */
-  user: { id: string; email: string; name: string; email_verified: boolean; identity?: unknown; key_pins_seq?: unknown; avatar_seq?: unknown };
+  /** `identity` and `key_pins_seq`: signed sharing (servers with `signed_sharing`), read by `signed-sharing.ts`. `avatar_seq`: profile picture (servers with `avatar`; 0 = none). `account_wraps_v2`: every signed-in app of the account reads epoch-bound own-vault wraps (a hint; only `true` counts). */
+  user: { id: string; email: string; name: string; email_verified: boolean; identity?: unknown; key_pins_seq?: unknown; avatar_seq?: unknown; account_wraps_v2?: unknown };
   bundle: Bundle;
   vaults: SyncVaultRow[];
   items: SyncItemRow[];

@@ -56,6 +56,7 @@ import { checkCode, secretKeyToKeep, type CodeOutcome } from "./device-login";
 import { afterWrite, applyOwnWrite, knownSeq, mergeSync, noticeAction, sameCiphertext, vaultKeyChanged, type Merged, type OwnWrite, type Snapshot, type SyncNotice } from "./delta";
 import { readVersion, readVersions, restoredItem, type ItemVersion } from "./history";
 import { openInvitations, type Invitation } from "./invitations";
+import { ROLLBACK_KEPT, ROLLBACK_SHOWN, RevMemory, revOf } from "./item-revs";
 import * as signed from "./signed-sharing";
 import { RaceError, ReviewNeededError, type Confirmation, type Consent, type InvitationTrust, type KeyChange, type ReviewView, type VaultTrust, type Verdicts } from "./signed-sharing";
 import {
@@ -214,6 +215,14 @@ let invitationNames = new Map<string, string | null>();
 let verdicts: Verdicts | null = null;
 /** Signed sharing: whether the last sync ran the checks (the server signs, its features are unknown, or they're sticky). */
 let checksOn = false;
+/**
+ * Whether the last sync said every signed-in app of the account reads epoch-bound (v2) own-vault wraps (`/sync`
+ * `user.account_wraps_v2`; only `true` counts, unknown is false). A hint for writing only: a server that lies can only
+ * make this app write v1 wraps, as before.
+ */
+let accountWrapsV2 = false;
+/** Item edit counters this device saw for the unlocked account (`item-revs.ts`); loaded at the first sync. */
+let revMemory: RevMemory | null = null;
 const subs = new Set<() => void>();
 
 function set(patch: Partial<State>) {
@@ -448,6 +457,8 @@ function dropKeys() {
   invitationNames = new Map();
   verdicts = null;
   checksOn = false;
+  accountWrapsV2 = false;
+  revMemory = null;
   avatars.clear();
   signed.endSigning();
   if (old.length || state.items.length || state.invitations.length || state.blockedVaults.length || state.consents.length)
@@ -986,6 +997,7 @@ async function doSync() {
   }
   checksOn = on;
   verdicts = checked;
+  accountWrapsV2 = snap.user.account_wraps_v2 === true;
   if (delta) synced = snap;
   // Kept only when it is this unlocked account's own bundle (round 5: never another account id's).
   if (account.matchesBundle(snap.bundle)) bundle = snap.bundle;
@@ -1016,6 +1028,29 @@ async function fetchSync(cursor: string | null, gen: number): Promise<Merged | "
 }
 
 const byName = new Intl.Collator(undefined, { sensitivity: "base" });
+
+/** The unlocked account's item counters on this device (`item-revs.ts`), per server and account. */
+function revMemoryFor(acct: core.Account): RevMemory {
+  const scope = signed.scopeOf(acct);
+  if (revMemory?.scope !== scope) revMemory = new RevMemory(signed.deviceStore(), scope);
+  return revMemory;
+}
+
+/**
+ * Item rollback detection for a freshly decrypted item: its edit counter checked against what this device saw. A
+ * rollback keeps the newer copy this page still shows (with the row's revision, so an edit saves over the server's
+ * copy) or shows the served one; both are marked for the warning. Counted in `rollbacks` for the sync notice.
+ */
+function checkRollback(revs: RevMemory, entry: VaultEntry, shown: VaultEntry | null, rollbacks: { kept: number; shown: number }): VaultEntry {
+  const served = revOf(entry.item);
+  if (revs.check(entry.id, served) !== "rollback") return entry;
+  if (shown && shown.vaultId === entry.vaultId && revOf(shown.item) > served) {
+    rollbacks.kept++;
+    return { ...shown, revision: entry.revision, deletedAt: entry.deletedAt, rollback: true };
+  }
+  rollbacks.shown++;
+  return { ...entry, rollback: true };
+}
 
 function decryptRow(key: core.VaultKey, row: SyncItemRow): VaultEntry | null {
   const enc: EncryptedItem = { id: row.id, vault_id: row.vault_id, key: row.item_key, data: row.data };
@@ -1068,7 +1103,8 @@ function materialize(snap: Snapshot) {
       kept.add(key);
     } else {
       try {
-        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, typeof v.key_epoch === "number" ? v.key_epoch : 0, signed.legacyWrapAllowed(v.id));
+        const epoch = typeof v.key_epoch === "number" ? v.key_epoch : 0;
+        key = acct.openVaultKey(v.id, v.wrapped_key, v.key_kind, epoch, signed.legacyWrapAllowed(v.id, epoch));
       } catch {
         warnings.push(`One vault couldn't be opened: its key may have been replaced. Ask the person who manages it to share it with you again.`);
         continue;
@@ -1098,6 +1134,8 @@ function materialize(snap: Snapshot) {
   const copies = new Map<string, { row: SyncItemRow; entry: VaultEntry | null }>();
   const items: VaultEntry[] = [];
   const failed = new Map<string, number>();
+  const revs = revMemoryFor(acct);
+  const rollbacks = { kept: 0, shown: 0 };
   for (const row of snap.items.values()) {
     const vault = byId.get(row.vault_id);
     if (!vault) continue;
@@ -1106,8 +1144,14 @@ function materialize(snap: Snapshot) {
     if (old && kept.has(vault.key) && sameCiphertext(old.row, row)) {
       entry = old.entry;
       if (entry && (entry.revision !== row.revision || entry.deletedAt !== row.deleted_at)) entry = { ...entry, revision: row.revision, deletedAt: row.deleted_at };
+      // Still marked from an earlier sync: a kept newer copy holds the remembered counter, a served older one less.
+      if (entry?.rollback) {
+        if (revOf(entry.item) < (revs.get(entry.id) ?? 0)) rollbacks.shown++;
+        else rollbacks.kept++;
+      }
     } else {
       entry = decryptRow(vault.key, row);
+      if (entry) entry = checkRollback(revs, entry, old?.entry ?? null, rollbacks);
     }
     copies.set(row.id, { row, entry });
     if (entry) items.push(entry);
@@ -1117,6 +1161,11 @@ function materialize(snap: Snapshot) {
     const name = byId.get(id)?.name ?? "a vault";
     warnings.push(`${n === 1 ? "An item" : `${n} items`} in "${name}" couldn't be decrypted and ${n === 1 ? "is" : "are"} hidden.`);
   }
+  // Ids the server no longer serves at all (deleted for good, or in no vault this account has) are forgotten.
+  revs.prune(new Set(snap.items.keys()));
+  revs.flush();
+  if (rollbacks.shown) warnings.push(ROLLBACK_SHOWN);
+  else if (rollbacks.kept) warnings.push(ROLLBACK_KEPT);
   items.sort((a, b) => byName.compare(a.item.name, b.item.name));
   decrypted = copies;
   openedFrom = opened;
@@ -1535,13 +1584,15 @@ function canonical(item: Item, ignore: string[] = []): string {
 
 /** Only the item's encryption or revision changed (e.g. its vault key was replaced), not its content or place. */
 function sameItem(a: VaultEntry, b: VaultEntry) {
-  return a.vaultId === b.vaultId && a.deletedAt === b.deletedAt && canonical(a.item) === canonical(b.item);
+  // `rev` is the core's edit counter: re-encrypting (a new vault key) counts it up without changing the content.
+  return a.vaultId === b.vaultId && a.deletedAt === b.deletedAt && canonical(a.item, ["rev"]) === canonical(b.item, ["rev"]);
 }
 
 /** The server already holds `next` in `vaultId`: an earlier try of this save was stored, only its answer got lost. */
 function holds(entry: VaultEntry, next: Item, vaultId: string) {
-  // updated_at is set per try, and the core stamps `format` when it encrypts.
-  return entry.vaultId === vaultId && canonical(entry.item, ["updated_at", "format"]) === canonical(next, ["updated_at", "format"]);
+  // updated_at is set per try, and the core stamps `format` and counts `rev` when it encrypts.
+  const ignore = ["updated_at", "format", "rev"];
+  return entry.vaultId === vaultId && canonical(entry.item, ignore) === canonical(next, ignore);
 }
 
 /**
@@ -1554,7 +1605,9 @@ async function putItem(base: VaultEntry, next: Item, vaultId: string): Promise<{
   for (let attempt = 1; ; attempt++) {
     try {
       const v = vaultFor(vaultId);
-      const enc = (vaultId === base.vaultId ? v.key.updateItem(base.enc, next) : v.key.encryptItem(next, base.id, vaultId)) as EncryptedItem;
+      // A move encrypts afresh (the counter is `next.rev + 1`): never from below the counter the item has now.
+      const moved = vaultId === base.vaultId ? next : { ...next, rev: Math.max(revOf(next), revOf(base.item)) };
+      const enc = (vaultId === base.vaultId ? v.key.updateItem(base.enc, next) : v.key.encryptItem(moved, base.id, vaultId)) as EncryptedItem;
       const answer = await api<WriteAnswer>(`/items/${base.id}`, { method: "PUT", body: { ...enc, revision: base.revision, ...epochOf(v) } });
       return { enc, answer, from: base.vaultId };
     } catch (e) {
@@ -1735,7 +1788,8 @@ async function sendImportBatch(vaultId: string, batch: { id: string; item: Item 
 export async function createVault(name: string): Promise<string> {
   if (!account) throw new Error("Vault is locked.");
   const id = core.newId();
-  const nv = account.newVaultKey(id);
+  // Every vault starts at key epoch 0; bound to it (v2) when all the account's apps read that.
+  const nv = accountWrapsV2 ? account.newVaultKeyBound(id, 0) : account.newVaultKey(id);
   const key = nv.takeKey();
   const meta = key.encryptMeta(id, { name });
   key.free();
@@ -2169,7 +2223,8 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
       // No roster and nobody else: re-keyed for this account alone, nothing sealed or signed (the server accepts it
       // unsigned while the vault has no roster).
     }
-    const nv = account.newVaultKey(vaultId);
+    // The own wrap bound (v2) to the epoch the vault has after this write, when all the account's apps read that.
+    const nv = accountWrapsV2 && v?.epoch !== undefined ? account.newVaultKeyBound(vaultId, v.epoch + 1) : account.newVaultKey(vaultId);
     const fresh = nv.takeKey();
     try {
       let keys: { user_id: string; wrapped_key: string; key_kind: string; signature?: string }[];

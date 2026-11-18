@@ -129,6 +129,10 @@ describe("the owner's Sends", () => {
     const s = readSend(raw)!;
     expect(s).toMatchObject({ id: ID, name: "enc-name", ownerKey: "wrapped", hasPassword: true, maxViews: 5, views: 2, expiresAt: 2000, deleteAt: 3000, hideEmail: true, data: null });
     expect(readSend({ ...raw, data: "enc-text" })!.data).toBe("enc-text");
+    // Send v2: the content key wrapped for the owner; null (or missing, an older server) for v1 Sends.
+    expect(readSend(raw)!.ownerContentKey).toBeNull();
+    expect(readSend({ ...raw, owner_content_key: null })!.ownerContentKey).toBeNull();
+    expect(readSend({ ...raw, owner_content_key: "wrapped-ck" })!.ownerContentKey).toBe("wrapped-ck");
     expect(readSends({ sends: [raw, { id: "x" }, null] })).toHaveLength(1);
     expect(readSends({})).toEqual([]);
   });
@@ -156,6 +160,8 @@ describe("the owner's Sends", () => {
     expect(changesBody({ password: { salt: "s", verifier: "v" } })).toEqual({ access_salt: "s", access_verifier: "v" });
     expect(changesBody({ password: null, maxViews: null, expiresAt: null })).toEqual({ access_verifier: null, max_views: null, expires_at: null });
     expect(changesBody({ deleteAt: 5, hideEmail: false, data: "d" })).toEqual({ delete_at: 5, hide_email: false, data: "d" });
+    expect(changesBody({ ownerContentKey: "ck" })).toEqual({ owner_content_key: "ck" });
+    expect(changesBody({ password: null, ownerContentKey: null })).toEqual({ access_verifier: null, owner_content_key: null });
   });
 });
 

@@ -47,8 +47,8 @@ export function parseSendLocation(pathname: string, hash: string): { id: string 
 
 // ------------------------------------------------------------------ sizes
 
-/** Bytes the core adds when it encrypts a field: a version byte, the 24-byte nonce and the 16-byte tag. */
-const OVERHEAD = 1 + 24 + 16;
+/** Bytes the core adds when it encrypts a field: the v2 marker byte (password Sends), a version byte, the 24-byte nonce and the 16-byte tag. */
+const OVERHEAD = 1 + 1 + 24 + 16;
 
 /** UTF-8 bytes of `text`. */
 export const utf8Length = (text: string): number => new TextEncoder().encode(text).length;
@@ -113,6 +113,11 @@ export interface OwnedSend {
   name: string;
   /** The send key wrapped by the account key. */
   ownerKey: string;
+  /**
+   * Send v2 (a password Send whose text is encrypted with a key derived from the link key and the password): that
+   * content key wrapped by the account key, so the owner's apps open it without the password. Null for v1 Sends.
+   */
+  ownerContentKey: string | null;
   hasPassword: boolean;
   accessSalt: string | null;
   maxViews: number | null;
@@ -148,6 +153,7 @@ export function readSend(value: unknown): OwnedSend | null {
     id,
     name,
     ownerKey,
+    ownerContentKey: text(s.owner_content_key),
     hasPassword: s.has_password === true,
     accessSalt: text(s.access_salt),
     maxViews,
@@ -205,6 +211,8 @@ export interface SendChanges {
   name?: string;
   data?: string;
   password?: { salt: string; verifier: string } | null;
+  /** Send v2: the content key wrapped for the owner (null clears it: back to v1); undefined keeps it. */
+  ownerContentKey?: string | null;
   maxViews?: number | null;
   expiresAt?: number | null;
   deleteAt?: number;
@@ -222,6 +230,7 @@ export function changesBody(changes: SendChanges): Record<string, unknown> {
     body.access_salt = changes.password.salt;
     body.access_verifier = changes.password.verifier;
   }
+  if (changes.ownerContentKey !== undefined) body.owner_content_key = changes.ownerContentKey;
   if (changes.maxViews !== undefined) body.max_views = changes.maxViews;
   if (changes.expiresAt !== undefined) body.expires_at = changes.expiresAt;
   if (changes.deleteAt !== undefined) body.delete_at = changes.deleteAt;

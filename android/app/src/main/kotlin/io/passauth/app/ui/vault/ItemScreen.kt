@@ -66,6 +66,8 @@ import io.passauth.app.data.UrlMatcher
 import io.passauth.app.ui.HEALTH
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
+import io.passauth.app.ui.components.Alert
+import io.passauth.app.ui.components.AlertKind
 import io.passauth.app.ui.components.CardSection
 import io.passauth.app.ui.components.ChoiceRow
 import io.passauth.app.ui.components.DecisionSheet
@@ -177,6 +179,7 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
             Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            if (entry.id in v.rolledBack) Alert(io.passauth.app.data.ItemRevs.ITEM_WARNING, AlertKind.Error)
             CardSection(null) {
                 Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 44.dp, login = i.kind == io.passauth.app.data.ItemKind.Login)

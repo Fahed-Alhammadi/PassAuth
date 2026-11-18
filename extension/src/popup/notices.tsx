@@ -7,10 +7,11 @@
  * - vault invitations waiting in the web vault (servers with `vault_invitations`), linking to Settings → Vaults &
  *   sharing there;
  * - sign-ins on other devices put off with "Not now" (sign-in-requests.tsx), with "Review";
+ * - items the server sent in an older version than this browser had seen (background/item-revs.ts);
  * - signed sharing (background/signed-sharing.ts): shared vaults that failed a check and aren't used, a person whose
  *   keys changed (with their new fingerprint and "Trust the new key" once the user compared it), account-wide warnings,
  *   and invitations that can't be accepted as they are.
- * The policy, invitation and sharing notices can be dismissed for this browser session; they come back when their set
+ * The policy, invitation, older-version and sharing notices can be dismissed for this browser session; they come back when their set
  * changes.
  */
 import { Icon } from "@web/components/ui";
@@ -20,7 +21,7 @@ import { DISMISSED_KEY, FILL_PROBLEM_PREFIX } from "../shared/storage-keys";
 import type { ItemList, PolicyNotices, SharingNotice } from "../shared/types";
 import type { Ctx } from "./ctx";
 
-type Dismissed = { policy?: string; invitations?: string; sharing?: string };
+type Dismissed = { policy?: string; invitations?: string; sharing?: string; rollback?: string };
 
 /** "1 vault invitation is waiting", "3 vault invitations are waiting". */
 export const invitationsText = (n: number) => (n === 1 ? "1 vault invitation is waiting" : `${n} vault invitations are waiting`);
@@ -196,7 +197,9 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
   const signIns = ctx.signIns && ctx.signIns.putOff > 0 ? ctx.signIns : null;
   const sharing = data?.sharing;
   const sharingShown = sharing && dismissed.sharing !== sharing.key ? sharing : null;
-  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown) return null;
+  const rollback = data?.rollback;
+  const rollbackShown = rollback && dismissed.rollback !== rollback.key ? rollback : null;
+  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown) return null;
   return (
     <div className="notices">
       {signIns && (
@@ -235,6 +238,11 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
               )}
             </span>
           ))}
+        </Notice>
+      )}
+      {rollbackShown && (
+        <Notice tone="warn" onDismiss={() => dismiss("rollback", rollbackShown.key)}>
+          <span>{rollbackShown.text}</span>
         </Notice>
       )}
       {sharingShown && (

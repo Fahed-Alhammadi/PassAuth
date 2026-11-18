@@ -301,6 +301,9 @@ export function useStore(s: KeyValueStore) {
   store = s;
 }
 
+/** The device-local store in use (also for other per-account device memory, e.g. `item-revs.ts`). */
+export const deviceStore = (): KeyValueStore => store;
+
 const now = () => Math.floor(Date.now() / 1000);
 const errCode = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const wholeNumber = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER;
@@ -851,12 +854,15 @@ export function flushPins(): Promise<void> {
   return s.flushing;
 }
 
-/** Whether a v1 (legacy) account wrap of the vault may be opened (true without a session: servers without the feature). */
-export function legacyWrapAllowed(vaultId: string): boolean {
+/**
+ * Whether a v1 (legacy) account wrap of the vault at `keyEpoch` (the row's) may be opened (true without a session:
+ * servers without the feature). Refused at or below the highest epoch this account opened from a v2 wrap.
+ */
+export function legacyWrapAllowed(vaultId: string, keyEpoch: number): boolean {
   const s = session;
   if (!s) return true;
   try {
-    return core.pinsLegacyWrapAllowed(s.pins, vaultId);
+    return core.pinsLegacyWrapAllowed(s.pins, vaultId, keyEpoch);
   } catch {
     return false;
   }
@@ -1159,7 +1165,7 @@ function grandfatherCandidates(s: Session, vaults: readonly SignedVaultRow[], id
     const kind = r.key_kind === "account" || r.key_kind === "sealed" ? r.key_kind : null;
     if (!kind || !wholeNumber(r.key_epoch)) continue;
     try {
-      const key = s.account.openVaultKey(r.id, r.wrapped_key, kind, r.key_epoch, core.pinsLegacyWrapAllowed(s.pins, r.id));
+      const key = s.account.openVaultKey(r.id, r.wrapped_key, kind, r.key_epoch, core.pinsLegacyWrapAllowed(s.pins, r.id, r.key_epoch));
       try {
         out.set(r.id, key.keyId(r.id));
       } finally {
@@ -1308,9 +1314,18 @@ async function verifyVault(s: Session, row: SignedVaultRow): Promise<RowResult> 
   // (a) The key, with the row's epoch.
   let key: core.VaultKey;
   try {
-    key = s.account.openVaultKey(row.id, row.wrapped_key, kind, epoch, core.pinsLegacyWrapAllowed(s.pins, row.id));
+    key = s.account.openVaultKey(row.id, row.wrapped_key, kind, epoch, core.pinsLegacyWrapAllowed(s.pins, row.id, epoch));
   } catch {
     return { verdict: refuse(kind === "account" ? VAULT_UNOPENABLE : VAULT_REFUSED) };
+  }
+  // An own wrap bound to its epoch (v2) opened: observed as such, so v1 wraps at or below this epoch are refused later.
+  let boundWrap = false;
+  if (kind === "account") {
+    try {
+      boundWrap = core.accountWrapIsBound(row.wrapped_key);
+    } catch {
+      boundWrap = false;
+    }
   }
   let rosterVersion: number | null = null;
   let current: core.EpochPin;
@@ -1359,6 +1374,7 @@ async function verifyVault(s: Session, row: SignedVaultRow): Promise<RowResult> 
       ...(chain ? { chain_hashes: chain } : {}),
       signed_share: signedShare,
       paused,
+      ...(boundWrap ? { bound_wrap: true } : {}),
     });
   } catch {
     return { verdict: refuse() };

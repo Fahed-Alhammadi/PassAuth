@@ -164,6 +164,9 @@ targets:
         group: Tests/Shared
       - path: ../../ios/Tests/SignedSharingVectorTests.swift
         group: Tests/Shared
+      # Security round 7/8/9: epoch-bound own wraps, Send v2, item rollback detection.
+      - path: ../../ios/Tests/Sec789Tests.swift
+        group: Tests/Shared
       # Golden vectors shared with the other clients.
       - path: ../../testdata/vectors.json
         buildPhase: resources

@@ -124,6 +124,13 @@ private struct VaultList: View {
                         .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 }
             }
+            if let r = v?.rollback {
+                Section {
+                    Notice(text: r.notice, kind: .error)
+                        .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                        .accessibilityIdentifier("vault.rollbackNotice")
+                }
+            }
             if q.isEmpty && !filter.active {
                 VaultNotices(target: $noticeTarget)
             }

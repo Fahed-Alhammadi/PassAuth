@@ -249,6 +249,11 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
                 {data.vaultLabel ? ` · ${data.vaultLabel}` : ""}
               </span>
             </div>
+            {data.olderVersion && (
+              <p className="warn" role="note">
+                <Icon name="shield" size={14} /> {data.olderVersion}
+              </p>
+            )}
             {/* L6: a deleted signer's vault keeps its fingerprint line (the label alone shows no fingerprint). */}
             {data.signer && <SignerLine signer={data.signer} />}
             {canFill && (

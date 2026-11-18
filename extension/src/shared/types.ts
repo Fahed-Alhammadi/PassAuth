@@ -133,6 +133,8 @@ export interface ItemList {
   fillProblem?: string;
   /** Signed sharing: shared vaults that failed a check, account-wide warnings and invitations that can't be accepted. */
   sharing?: SharingNotice;
+  /** Items the server sent in an older version than this browser had seen (background/item-revs.ts); `key`: for dismissing. */
+  rollback?: { text: string; key: string };
 }
 
 /**
@@ -299,6 +301,8 @@ export interface ItemData {
   signer?: VaultSigner;
   /** By the index of a website in `item.login.urls`: why its regular expression is refused (it never matches). */
   regexErrors?: Record<number, string>;
+  /** The server sent an older version of this item than this browser had seen: the warning to show. */
+  olderVersion?: string;
 }
 
 /** A verification code as the background made it; `expires`: when it changes (ms, see totp.ts). */

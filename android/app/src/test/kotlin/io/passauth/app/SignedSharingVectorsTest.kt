@@ -353,9 +353,13 @@ class SignedSharingVectorsTest {
         val ownObservation = """{"vault_id":"$vaultId","key_kind":"account","key":${vaultKey.epochPinJson(vaultId, 1u)},"roster_version":null,"signed_share":false,"paused":false}"""
         val ownPins = json(pinsObserve(null, ownObservation)).jsonObject["pins"].toString()
         check(failures, "own vault pins", v["keyPinsOwn"], json(ownPins))
+        // The same own vault, its key at epoch 1 seen in a v2 (epoch-bound) account wrap: `bound_since` 1.
+        val boundObservation = """{"vault_id":"$vaultId","key_kind":"account","key":${vaultKey.epochPinJson(vaultId, 1u)},"roster_version":null,"signed_share":false,"paused":false,"bound_wrap":true}"""
+        val boundPins = json(pinsObserve(ownPins, boundObservation)).jsonObject["pins"].toString()
+        check(failures, "bound vault pins", v["keyPinsBound"], json(boundPins))
         val sets = mapOf(
             "none" to null, "withEpoch" to withEpoch, "raised" to raised, "left" to left, "grandfathered" to grandfathered,
-            "withheld" to withheld, "unsigned" to unsigned, "rosterMax" to rosterMax, "own" to ownPins,
+            "withheld" to withheld, "unsigned" to unsigned, "rosterMax" to rosterMax, "own" to ownPins, "bound" to boundPins,
         )
         // Admissions, including `chain_hashes` (a chain re-signed from version 1 without the roster the pins remember: roster_forked).
         for (c in cases("admissions")) {
@@ -405,8 +409,11 @@ class SignedSharingVectorsTest {
             check(failures, "shown email ${c.s("email")}", c.s("expected"), SignedSharing.normalized(c.s("email")))
         }
         for (c in cases("legacyWraps")) {
-            check(failures, "legacy wrap ${c.s("pins")}", c["expected"]!!.jsonPrimitive.boolean, pinsLegacyWrapAllowed(sets.getValue(c.s("pins")), vaultId))
+            val epoch = c["keyEpoch"]!!.jsonPrimitive.long
+            check(failures, "legacy wrap ${c.s("pins")}@$epoch", c["expected"]!!.jsonPrimitive.boolean, pinsLegacyWrapAllowed(sets.getValue(c.s("pins")), vaultId, epoch.toULong()))
         }
+        // Only a recorded v2 epoch (and below) refuses v1 wraps.
+        check(failures, "legacy wraps refused", "bound@0,bound@1", cases("legacyWraps").filter { !it["expected"]!!.jsonPrimitive.boolean }.joinToString(",") { "${it.s("pins")}@${it["keyEpoch"]}" })
         val own = v["ownIdentity"]!!.jsonObject
         check(failures, "own hash", own.s("hash"), signers["alice"]!!.identityHash())
         val withOwn = pinsSetOwnIdentity(pins, own.s("hash"))

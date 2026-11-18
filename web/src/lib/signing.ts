@@ -264,8 +264,11 @@ export const SEEN_PREFIX = "pa.vault-seen.";
 export const memoryKey = (scope: string) => `${MEMORY_PREFIX}${scope}`;
 export const pinsKey = (scope: string) => `${PINS_PREFIX}${scope}`;
 export const seenKey = (scope: string) => `${SEEN_PREFIX}${scope}`;
+/** Item edit counters seen here (`item-revs.ts`, same prefix): device memory per server and account like the rest. */
+const ITEM_REVS_PREFIX = "pa.item-revs.";
 /** Whether a local-storage key holds trust memory (kept when the desktop app changes server: it is per server and account). */
-export const isTrustMemoryKey = (key: string) => key.startsWith(MEMORY_PREFIX) || key.startsWith(PINS_PREFIX) || key.startsWith(SEEN_PREFIX);
+export const isTrustMemoryKey = (key: string) =>
+  key.startsWith(MEMORY_PREFIX) || key.startsWith(PINS_PREFIX) || key.startsWith(SEEN_PREFIX) || key.startsWith(ITEM_REVS_PREFIX);
 
 const GENERATED_MAX = 4;
 /** Vault ids kept in the list of vaults seen here (more are never grandfathered: decline or accept by consent). */

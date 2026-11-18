@@ -55,14 +55,18 @@ public struct Entry: Identifiable, Sendable {
     public let enc: EncryptedItem
     /// Moved to the trash at (unix seconds); nil for live items.
     public let deletedAt: Int64?
+    /// The server sent an older version of this item than this device saw (`ItemRollback`): the
+    /// newer copy is shown when this device had one.
+    public var rolledBack = false
 
-    public init(id: String, item: Item, vaultId: String, revision: Int64, enc: EncryptedItem, deletedAt: Int64?) {
+    public init(id: String, item: Item, vaultId: String, revision: Int64, enc: EncryptedItem, deletedAt: Int64?, rolledBack: Bool = false) {
         self.id = id
         self.item = item
         self.vaultId = vaultId
         self.revision = revision
         self.enc = enc
         self.deletedAt = deletedAt
+        self.rolledBack = rolledBack
     }
 }
 
@@ -201,6 +205,8 @@ public struct VaultData: Sendable {
     /// Shared vaults signed sharing's checks refused: not in `vaults`, their items nowhere (no
     /// fill, save, passkey or display); the app says why.
     public var refused: [RefusedVault] = []
+    /// Items the server sent older versions of (rollback detection); nil when none.
+    public var rollback: ItemRollback?
 
     public init() {}
 
@@ -244,6 +250,10 @@ struct OpenedVault: Sendable {
     var names: [String: String?] = [:]
     /// Signed sharing: the key pins and device memory after the checks (nil when they didn't run).
     var sharing: SharingOutputs?
+    /// Rollback detection: the item edit counters remembered after this decryption (nil: not
+    /// checked) and the rows of the copy to replace with the newer ones this device kept.
+    var revs: [String: UInt64]?
+    var keptRows: [String: SyncItem] = [:]
 }
 
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
@@ -270,6 +280,10 @@ final class Session {
     /// stores a copy of its own.
     var earlierCopy: Set<String>?
     var earlierCopyRead = false
+    /// The last `/sync` said every signed-in app of the account reads epoch-bound account wraps
+    /// (`user.account_wraps_v2`, a compatibility hint only): new and replaced personal-vault keys
+    /// are then wrapped v2. Unknown, offline or an older server → false (v1, as before).
+    var accountWrapsV2 = false
     /// The identity this device signs with: none while paused.
     var signing: SigningIdentity? { signingPaused ? nil : openedSigning }
     /// The account id the core authenticated (the unlocked account's own id): "me" for signed
@@ -1223,12 +1237,17 @@ public final class VaultRepository {
             _ = await earlierCopy(id, session, given: mode == .none ? given : nil)
         }
         let sharing = try await sharingInputs(id, session, &fresh, network: mode != .none)
-        let snapshot = fresh
+        let served = fresh
         guard sessions[id] === session, activeId == id else { return }
         let previous: OpenedVault? = copy?.account == id ? vault.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
         let invitations = isApp
-        let opened = try await core { Self.open(account, snapshot, previous: previous, invitations: invitations, sharing: sharing) }
+        let revs = store.readItemRevs(id)
+        let opened = try await core { Self.open(account, served, previous: previous, invitations: invitations, sharing: sharing, revs: revs) }
         guard sessions[id] === session, activeId == id else { return }
+        // A rolled-back item whose newer copy this device kept: the copy keeps that row.
+        let snapshot = Self.keeping(opened.keptRows, in: served)
+        if let next = opened.revs, next != revs { store.writeItemRevs(id, next) }
+        if mode == .synced { session.accountWrapsV2 = snapshot.user?["account_wraps_v2"] == .bool(true) }
         if mode != .none {
             let data = try await core { try snapshot.encoded() }
             await store.writeCacheInBackground(id, data)
@@ -1260,6 +1279,14 @@ public final class VaultRepository {
         // A vault came or went, or a key was replaced (here or on another device): personal vaults
         // may need new emergency-access wraps. The first sync after unlocking runs it from `afterOpen`.
         if let before, before != Self.keyShape(v.vaults) { vaultKeysChanged() }
+    }
+
+    /// `snapshot` with the rows this device kept (rolled-back items' newer copies) in place of the served ones.
+    nonisolated static func keeping(_ rows: [String: SyncItem], in snapshot: SyncSnapshot) -> SyncSnapshot {
+        guard !rows.isEmpty else { return snapshot }
+        var s = snapshot
+        for i in s.items.indices { if let r = rows[s.items[i].id], r.vaultId == s.items[i].vaultId { s.items[i] = r } }
+        return s
     }
 
     /// What decides which vaults get emergency-access wraps: each vault's id, key epoch, role and
@@ -1511,8 +1538,12 @@ public final class VaultRepository {
     /// `sharing` (signed sharing on): every vault is checked (`SignedSharing.checkVault`); one that
     /// fails is left out with its items and listed in `refused`, never used. Invitations are
     /// checked too (`SignedSharing.checkInvitation`).
+    ///
+    /// `revs` (rollback detection; nil: not checked): the highest item edit counter this device
+    /// saw per item. An item served with a lower one is marked; the newer copy `previous` holds is
+    /// shown instead (and its row kept in the copy, `keptRows`) when its vault's key is unchanged.
     nonisolated static func open(_ account: Account, _ snap: SyncSnapshot, previous: OpenedVault?, invitations: Bool = false,
-                                 sharing: SharingInputs? = nil) -> OpenedVault {
+                                 sharing: SharingInputs? = nil, revs: [String: UInt64]? = nil) -> OpenedVault {
         var keys: [String: VaultKey] = [:]
         var outputs = sharing.map { SharingOutputs(pins: $0.pins, pinsChanged: $0.pinsChanged, memory: $0.memory, keep: $0.keep, holdPins: $0.holdPins,
                                                       notice: $0.notice) }
@@ -1531,9 +1562,10 @@ public final class VaultRepository {
             } else {
                 // An `account` wrap opens with the row's key epoch (an epoch-bound wrap only for
                 // it; a legacy one only where the key pins allow it).
-                let legacy = sharing.map { _ in (try? pinsLegacyWrapAllowed(pinsJson: outputs?.pins, vaultId: v.id)) ?? true } ?? true
+                let epoch = UInt64(max(0, v.keyEpoch ?? 0))
+                let legacy = sharing.map { _ in (try? pinsLegacyWrapAllowed(pinsJson: outputs?.pins, vaultId: v.id, keyEpoch: epoch)) ?? true } ?? true
                 guard let k = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
-                                                        keyEpoch: UInt64(max(0, v.keyEpoch ?? 0)), legacyAllowed: legacy) else { continue }
+                                                        keyEpoch: epoch, legacyAllowed: legacy) else { continue }
                 key = k
             }
             let n = name ?? ((try? key.decryptMeta(vaultId: v.id, meta: v.meta)).flatMap { try? JSON.parse($0) }?.str("name") ?? "")
@@ -1597,19 +1629,43 @@ public final class VaultRepository {
         if let p = previous {
             for e in p.data.entries + p.data.trash { before[e.id] = e }
         }
+        var memory = revs
+        var rollback = ItemRollback()
+        var keptRows: [String: SyncItem] = [:]
         for row in snap.items {
             guard let key = keys[row.vaultId], let itemKey = row.itemKey, let data = row.data else { continue }
-            let enc = EncryptedItem(id: row.id, vaultId: row.vaultId, key: itemKey, data: data)
-            let item: Item
+            var enc = EncryptedItem(id: row.id, vaultId: row.vaultId, key: itemKey, data: data)
+            var item: Item
             if kept.contains(row.vaultId), let old = before[row.id], old.vaultId == row.vaultId, old.enc.key == itemKey, old.enc.data == data {
                 item = old.item
             } else {
                 guard let json = try? key.decryptItem(encrypted: enc), let decoded = try? ItemCodec.decode(json) else { continue }
                 item = decoded
             }
-            let e = Entry(id: row.id, item: item, vaultId: row.vaultId, revision: row.revision ?? 0, enc: enc, deletedAt: row.deletedAt)
+            var rolledBack = false
+            if var m = memory {
+                if ItemRevCheck.observe(&m, id: row.id, served: item.rev) == .rollback {
+                    rolledBack = true
+                    rollback.items.insert(row.id)
+                    // The newer copy this device has, while its vault keeps the key it was read with.
+                    if kept.contains(row.vaultId), let old = before[row.id], old.vaultId == row.vaultId, old.item.rev > item.rev {
+                        item = old.item
+                        enc = old.enc
+                        rollback.kept.insert(row.id)
+                        var r = row
+                        r.itemKey = old.enc.key
+                        r.data = old.enc.data
+                        keptRows[row.id] = r
+                    }
+                }
+                memory = m
+            }
+            let e = Entry(id: row.id, item: item, vaultId: row.vaultId, revision: row.revision ?? 0, enc: enc, deletedAt: row.deletedAt,
+                          rolledBack: rolledBack)
             if row.deletedAt == nil { out.entries.append(e) } else { out.trash.append(e) }
         }
+        if !rollback.items.isEmpty { out.rollback = rollback }
+        if let m = memory { memory = ItemRevCheck.pruned(m, keeping: Set(snap.items.map(\.id))) }
         out.entries.sort { $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending }
         out.trash.sort { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
         out.revision = snap.revision
@@ -1647,7 +1703,7 @@ public final class VaultRepository {
                 out.invitations += consent
             }
         }
-        return OpenedVault(data: out, keys: keys, headers: headers, names: names, sharing: outputs)
+        return OpenedVault(data: out, keys: keys, headers: headers, names: names, sharing: outputs, revs: memory, keptRows: keptRows)
     }
 
     // MARK: Items
@@ -1942,8 +1998,10 @@ public final class VaultRepository {
         let account = session.account
         let name = info.name
         let next = info.keyEpoch.map { UInt64(max(0, $0) + 1) }
+        // Epoch-bound (v2) when every app of the account reads it and the row has an epoch.
+        let bound = session.accountWrapsV2 ? next : nil
         let made: (wrapped: String, items: [JSON], meta: String, epochPin: String?) = try await core {
-            let nv = try account.newVaultKey(vaultId: vid)
+            let nv = try bound.map { try account.newVaultKeyBound(vaultId: vid, keyEpoch: $0) } ?? account.newVaultKey(vaultId: vid)
             let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
             return (nv.wrapped, items, meta, try next.map { try nv.key.epochPinJson(vaultId: vid, keyEpoch: $0) })
         }

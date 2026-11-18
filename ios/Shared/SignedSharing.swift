@@ -362,9 +362,12 @@ public struct Acceptance: Equatable, Sendable {
     /// What the verdict said (consent flags, `declinable`): shown, bound to the decision and
     /// accepted with the same observation.
     var flags = ConsentFlags()
+    /// An `account` row whose wrap is epoch-bound (v2): recorded in the key pins on accepting.
+    var boundWrap = false
 
     init(epochPin: String, rosterVersion: UInt64?, roster: String?, rosterHash: String? = nil, signer: SignerInfo?, kind: String = "sealed",
-         signedShare: Bool = false, chainHashes: [String: String]? = nil, invitation: Bool = false, flags: ConsentFlags = ConsentFlags()) {
+         signedShare: Bool = false, chainHashes: [String: String]? = nil, invitation: Bool = false, flags: ConsentFlags = ConsentFlags(),
+         boundWrap: Bool = false) {
         self.epochPin = epochPin
         self.rosterVersion = rosterVersion
         self.roster = roster
@@ -375,12 +378,13 @@ public struct Acceptance: Equatable, Sendable {
         self.chainHashes = chainHashes
         self.invitation = invitation
         self.flags = flags
+        self.boundWrap = boundWrap
     }
 
     /// The observation `pins_accept` gets for `vaultId` (the one the checks admitted).
     func observation(vaultId: String, paused: Bool) -> String {
         SignedSharing.observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
-                                  chainHashes: chainHashes, signedShare: signedShare, paused: paused, invitation: invitation)
+                                  chainHashes: chainHashes, signedShare: signedShare, paused: paused, invitation: invitation, boundWrap: boundWrap)
     }
 
     /// The key id of the key accepting pins (from the epoch pin), as an unsigned vault's consent
@@ -985,9 +989,12 @@ enum SignedSharing {
         guard let epochPin = try? key.epochPinJson(vaultId: v.id, keyEpoch: epoch) else { return .refused(.unverified) }
         let version = trusted.flatMap(rosterVersion)
         let hash = trusted.flatMap { try? rosterHash(rosterJson: $0) }
+        // An own wrap that is epoch-bound (v2) is recorded (`bound_since`): a v1 wrap of this
+        // vault at or below that epoch is then refused.
+        let boundWrap = kind == VaultInfo.accountKeyKind && accountWrapIsBound(wrapped: v.wrappedKey)
         guard trusted == nil || hash != nil,
               let observed = observe(pins, vaultId: v.id, kind: kind, epochPin: epochPin, rosterVersion: version, rosterHash: hash,
-                                     chainHashes: chain, signedShare: signedShare, paused: me.paused),
+                                     chainHashes: chain, signedShare: signedShare, paused: me.paused, boundWrap: boundWrap),
               let verdict = observed.admission else { return .refused(.unverified) }
         switch verdict.str("status") {
         case "ok":
@@ -1009,7 +1016,7 @@ enum SignedSharing {
             // Accepting runs `pins_accept` on this same observation.
             return .consent(Acceptance(epochPin: epochPin, rosterVersion: version, roster: trusted, rosterHash: hash,
                                        signer: signer?.needsPin == true ? signer : nil, kind: kind, signedShare: signedShare, chainHashes: chain,
-                                       flags: ConsentFlags(verdict: verdict)),
+                                       flags: ConsentFlags(verdict: verdict), boundWrap: boundWrap),
                             rejoin: verdict["rejoin"]?.bool ?? false, replaced: verdict["replaced"]?.bool ?? false,
                             own: verdict["own"]?.bool ?? false, signer: signer)
         default:
@@ -1021,9 +1028,12 @@ enum SignedSharing {
     /// The observation of a row for `pins_admit` / `pins_observe` / `pins_accept`: `signed_share`
     /// and `paused` always (required since round 4), `chain_hashes` whenever a chain was fetched.
     static func observation(vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String? = nil,
-                            chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool, invitation: Bool = false) -> String {
+                            chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool, invitation: Bool = false,
+                            boundWrap: Bool = false) -> String {
         var o: [String: JSON] = ["vault_id": .string(vaultId), "key_kind": .string(kind), "signed_share": .bool(signedShare),
                                  "paused": .bool(paused)]
+        // Only when true, and only for an `account` row (a sealed one with it is malformed).
+        if boundWrap { o["bound_wrap"] = .bool(true) }
         o["key"] = epochPin.flatMap { try? JSON.parse($0) } ?? .null
         o["roster_version"] = rosterVersion.map { .int(Int64($0)) } ?? .null
         if let rosterHash { o["roster_hash"] = .string(rosterHash) }
@@ -1035,9 +1045,10 @@ enum SignedSharing {
 
     /// `pins_observe` for a row: the verdict and the key pins with what it says to pin.
     static func observe(_ pins: String?, vaultId: String, kind: String, epochPin: String?, rosterVersion: UInt64?, rosterHash: String?,
-                        chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool) -> (admission: JSON?, pins: String?)? {
+                        chainHashes: [String: String]? = nil, signedShare: Bool, paused: Bool,
+                        boundWrap: Bool = false) -> (admission: JSON?, pins: String?)? {
         let o = observation(vaultId: vaultId, kind: kind, epochPin: epochPin, rosterVersion: rosterVersion, rosterHash: rosterHash,
-                            chainHashes: chainHashes, signedShare: signedShare, paused: paused)
+                            chainHashes: chainHashes, signedShare: signedShare, paused: paused, boundWrap: boundWrap)
         guard let text = try? pinsObserve(pinsJson: pins, observationJson: o), let j = try? JSON.parse(text) else { return nil }
         let changed = j["changed"]?.bool ?? false
         return (j["admission"], changed ? j["pins"].map(\.text) : pins)

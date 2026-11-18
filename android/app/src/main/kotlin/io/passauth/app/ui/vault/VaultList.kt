@@ -68,6 +68,7 @@ import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.components.AccountMenu
 import io.passauth.app.ui.components.Alert
+import io.passauth.app.ui.components.AlertKind
 import io.passauth.app.ui.components.PageBar
 import io.passauth.app.ui.components.SelectField
 import io.passauth.app.ui.components.SiteIcon
@@ -210,6 +211,10 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                 }
                 if (v?.offline == true) {
                     item { Alert("You're offline. Showing the copy of your vault saved on this device.", modifier = Modifier.padding(top = 8.dp)) }
+                }
+                // The server sent older versions of items than this phone saw (item edit counters).
+                v?.rollbackNotice?.let { notice ->
+                    item { Alert(notice, AlertKind.Error, modifier = Modifier.padding(top = 8.dp)) }
                 }
                 // Vaults shared with the account, waiting for an answer: one quiet line (dismissed until a new one arrives).
                 val invitations = v?.invitations.orEmpty()

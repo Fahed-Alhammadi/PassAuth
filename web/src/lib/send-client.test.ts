@@ -1,0 +1,149 @@
+/** Send v2 on the owner's side and the visitor's keys, with the real core (WASM) and a fake server. */
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import * as core from "../wasm/passauth_core";
+import { allVectors, loadCore, signedVectors, vectorAccounts } from "./test-core";
+
+type Opts = { method?: string; body?: unknown };
+const h = vi.hoisted(() => ({
+  account: null as unknown,
+  features: ["sends", "send_v2"] as string[],
+  calls: [] as { path: string; method: string; body: Record<string, unknown> }[],
+  stored: new Map<string, Record<string, unknown>>(),
+}));
+
+vi.mock("./api", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("./api")>();
+  const answer = (row: Record<string, unknown>) => ({ ...row, has_password: typeof row.access_verifier === "string", delete_at: row.delete_at ?? 9e9 });
+  return {
+    ...orig,
+    knownPublicConfig: () => ({ features: h.features }),
+    loadPublicConfig: async () => ({ features: h.features }),
+    api: async (path: string, opts: Opts = {}) => {
+      const method = opts.method ?? (opts.body === undefined ? "GET" : "POST");
+      const body = (opts.body ?? {}) as Record<string, unknown>;
+      h.calls.push({ path, method, body });
+      if (path === "/sends" && method === "POST") {
+        // Like the server: an old one drops owner_content_key.
+        const row = { ...body, id: `send-${h.stored.size + 1}`, ...(h.features.includes("send_v2") ? {} : { owner_content_key: undefined }) };
+        h.stored.set(row.id as string, row);
+        return answer(row);
+      }
+      const one = /^\/sends\/([^/]+)$/.exec(path);
+      if (one && method === "GET") return answer(h.stored.get(decodeURIComponent(one[1]))!);
+      if (one && method === "PUT") {
+        const id = decodeURIComponent(one[1]);
+        const row = { ...h.stored.get(id)!, ...body };
+        if (body.access_verifier === null) delete row.access_salt;
+        h.stored.set(id, row);
+        return answer(row);
+      }
+      throw new Error(`no route ${method} ${path}`);
+    },
+  };
+});
+vi.mock("./vault", () => ({ getAccount: () => h.account }));
+vi.stubGlobal("location", new URL("https://vault.example.test/"));
+
+import { createSend, nameOf, textOf, updateSend, getSend } from "./send-client";
+import { sendKeysHere } from "./send-kdf";
+import { readSend, type OwnedSend } from "./sends";
+
+const PW = "correct horse";
+const base = { maxViews: null, expiresAt: null, deleteAt: 9e9, hideEmail: false };
+/** The link's key, as the visitor has it. */
+const linkKey = (link: string) => link.slice(link.indexOf("#") + 1);
+const version = (field: unknown) => core.sendFieldVersion(field as string);
+const lastBody = () => h.calls[h.calls.length - 1].body;
+
+beforeAll(async () => {
+  await loadCore();
+  h.account = vectorAccounts(await signedVectors()).get("alice")!.account;
+});
+beforeEach(() => {
+  h.features = ["sends", "send_v2"];
+  h.calls = [];
+  h.stored.clear();
+});
+
+describe("Send v2 (password-derived content key)", () => {
+  it("matches the shared vectors", async () => {
+    const v = (await allVectors()).sendV2 as { key: string; password: string; salt: string; text: string; verifier: string; contentKey: string; data: string };
+    expect(sendKeysHere(v.password, v.salt, v.key)).toEqual({ verifier: v.verifier, contentKey: v.contentKey });
+    expect(core.sendOpen(v.key, v.contentKey, "data", v.data)).toBe(v.text);
+    expect(() => core.sendOpen(v.key, null, "data", v.data)).toThrow("password_required");
+  });
+
+  it("a new Send with a password is v2: the link alone doesn't open it, the owner does without the password", async () => {
+    const { send, link } = await createSend({ ...base, name: "Wi-Fi", text: "hunter2", password: PW });
+    const body = lastBody();
+    expect(version(body.name)).toBe(2);
+    expect(version(body.data)).toBe(2);
+    expect(body.owner_content_key).toEqual(expect.any(String));
+    // The visitor: the link's key and the password give the verifier the server checks and the content key.
+    const key = linkKey(link);
+    const keys = sendKeysHere(PW, body.access_salt as string, key);
+    expect(keys.verifier).toBe(body.access_verifier);
+    expect(() => core.sendOpen(key, null, "data", body.data as string)).toThrow("password_required");
+    expect(core.sendOpen(key, keys.contentKey, "data", body.data as string)).toBe("hunter2");
+    expect(() => core.sendOpen(key, sendKeysHere("wrong", body.access_salt as string, key).contentKey, "data", body.data as string)).toThrow();
+    // The owner.
+    expect(nameOf(send)).toBe("Wi-Fi");
+    expect(textOf(await getSend(send.id))).toBe("hunter2");
+  }, 60_000);
+
+  it("stays v1 without a password, and on a server without send_v2", async () => {
+    await createSend({ ...base, name: "Note", text: "plain", password: null });
+    expect(version(lastBody().name)).toBe(1);
+    expect(lastBody().owner_content_key).toBeUndefined();
+    h.features = ["sends"];
+    const { send } = await createSend({ ...base, name: "Old", text: "server", password: PW });
+    expect(version(lastBody().data)).toBe(1);
+    expect(lastBody().owner_content_key).toBeUndefined();
+    expect(lastBody().access_verifier).toEqual(expect.any(String));
+    expect(textOf(await getSend(send.id))).toBe("server");
+  }, 60_000);
+
+  it("edits keep the format; a new password re-keys both fields; removing it goes back to v1", async () => {
+    const { send, link } = await createSend({ ...base, name: "Wi-Fi", text: "one", password: PW });
+    const key = linkKey(link);
+    const first = lastBody();
+    // Text only: v2 with the same content key, nothing else re-keyed.
+    let s: OwnedSend = await updateSend(send, { text: "two" });
+    expect(lastBody()).toEqual({ data: expect.any(String) });
+    expect(version(lastBody().data)).toBe(2);
+    expect(textOf(await getSend(s.id))).toBe("two");
+    // Settings only.
+    s = await updateSend(s, { disabled: true });
+    expect(lastBody()).toEqual({ disabled: true });
+    // A new password: new salt and content key, name and text sent again with it.
+    s = await updateSend(s, { password: "new password" });
+    const changed = lastBody();
+    expect(Object.keys(changed).sort()).toEqual(["access_salt", "access_verifier", "data", "name", "owner_content_key"]);
+    expect(changed.access_salt).not.toBe(first.access_salt);
+    const ck = sendKeysHere("new password", changed.access_salt as string, key).contentKey;
+    expect(core.sendOpen(key, ck, "data", changed.data as string)).toBe("two");
+    expect(core.sendOpen(key, ck, "name", changed.name as string)).toBe("Wi-Fi");
+    expect(nameOf(s)).toBe("Wi-Fi");
+    // Removing it: v1 again, the content key cleared, the link alone opens it.
+    s = await updateSend(s, { password: null });
+    const removed = lastBody();
+    expect(removed).toMatchObject({ access_verifier: null, owner_content_key: null });
+    expect(version(removed.data)).toBe(1);
+    expect(core.sendOpen(key, null, "data", removed.data as string)).toBe("two");
+    expect(readSend({ ...h.stored.get(s.id), has_password: false, delete_at: 9e9 })!.ownerContentKey).toBeNull();
+  }, 60_000);
+
+  it("setting a password on a v1 Send makes it v2", async () => {
+    const { send, link } = await createSend({ ...base, name: "Note", text: "plain", password: null });
+    await updateSend(send, { password: PW });
+    const b = lastBody();
+    expect(version(b.name)).toBe(2);
+    expect(core.sendOpen(linkKey(link), sendKeysHere(PW, b.access_salt as string, linkKey(link)).contentKey, "data", b.data as string)).toBe("plain");
+  }, 60_000);
+
+  it("a v2 Send whose content key can't be opened shows as unreadable", async () => {
+    const { send } = await createSend({ ...base, name: "Wi-Fi", text: "x", password: PW });
+    expect(nameOf({ ...send, ownerContentKey: null })).toBeNull();
+    expect(nameOf({ ...send, ownerContentKey: "garbage" })).toBeNull();
+  }, 60_000);
+});

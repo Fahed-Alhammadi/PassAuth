@@ -195,7 +195,7 @@ describe("signed sharing vectors", () => {
       paused: false,
     }).pins;
     expect(own).toEqual(v.keyPinsOwn);
-    const sets: Record<string, core.KeyPins | null> = { none: null, withEpoch, raised, left, grandfathered, withheld, unsigned, rosterMax, own };
+    const sets: Record<string, core.KeyPins | null> = { none: null, withEpoch, raised, left, grandfathered, withheld, unsigned, rosterMax, own, bound: v.keyPinsBound };
     for (const c of v.admissions) expect(core.pinsAdmit(sets[c.pins], c.observation), JSON.stringify(c)).toEqual(c.expected);
     // Some admissions carry `chain_hashes` (round 4): a chain that forks the pinned roster is refused.
     expect(v.admissions.some((c) => c.observation.chain_hashes)).toBe(true);
@@ -216,7 +216,9 @@ describe("signed sharing vectors", () => {
       step = c.accept ? core.pinsAccept(step, c.observation) : observed.pins;
       if (c.accept) expect(step, "accepted").toEqual(c.accepted);
     }
-    for (const c of v.legacyWraps) expect(core.pinsLegacyWrapAllowed(sets[c.pins], v.vault.id)).toBe(c.expected);
+    // v1 own wraps are refused at or below the highest epoch opened from a v2 (epoch-bound) wrap, allowed above it.
+    expect(v.legacyWraps.some((c) => c.pins === "bound")).toBe(true);
+    for (const c of v.legacyWraps) expect(core.pinsLegacyWrapAllowed(sets[c.pins], v.vault.id, c.keyEpoch), JSON.stringify(c)).toBe(c.expected);
   });
 
   it("normalizes emails for comparing and showing (punycode domains)", () => {

@@ -86,9 +86,26 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
         if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
     }.getOrNull()
 
-    /** Deletes account [id]'s offline copy and its profile picture (log out, account removed). */
+    private fun revsFile(id: String) = File(File(context.noBackupFilesDir, "vault"), "$id.revs")
+
+    /** The highest item edit counters this phone saw of account [id] ([ItemRevs]), with the offline copy. */
+    fun writeRevs(id: String, json: String) {
+        val f = revsFile(id)
+        f.parentFile?.mkdirs()
+        val tmp = File(f.parentFile, "${f.name}.tmp")
+        tmp.writeBytes(Keystore.encrypt(Keystore.storeKey(), json.encodeToByteArray()))
+        tmp.renameTo(f)
+    }
+
+    fun readRevs(id: String): String? = runCatching {
+        val f = revsFile(id)
+        if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
+    }.getOrNull()
+
+    /** Deletes account [id]'s offline copy (with its item edit counters) and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
         cacheFile(id).delete()
+        revsFile(id).delete()
         avatars.delete(id)
     }
 

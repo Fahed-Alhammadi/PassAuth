@@ -99,6 +99,8 @@ fun SendsScreen(ctx: UiCtx) {
     var limits by remember { mutableStateOf(Sends.Limits(Sends.DEFAULT_MAX_DAYS, Sends.DEFAULT_MAX_BYTES)) }
     var sends by remember { mutableStateOf<List<OwnedSend>?>(null) }
     var names by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
+    // Sends whose link key opens although their text doesn't (a password Send without a readable content key).
+    var linkable by remember { mutableStateOf<Set<String>>(emptySet()) }
     var error by remember { mutableStateOf<String?>(null) }
     var editing by remember { mutableStateOf<OwnedSend?>(null) }
     var creating by remember { mutableStateOf(false) }
@@ -116,6 +118,9 @@ fun SendsScreen(ctx: UiCtx) {
             val list = ctx.repo.sends().list()
             // Names are decrypted once per Send (their key is unwrapped with the account key).
             names = withContext(Dispatchers.Default) { list.associate { it.id to ctx.repo.sends().nameOf(it) } }
+            linkable = withContext(Dispatchers.Default) {
+                list.filter { names[it.id] == null && runCatching { ctx.repo.sends().keyOf(it) }.isSuccess }.map { it.id }.toSet()
+            }
             sends = list
             error = null
         } catch (e: CancellationException) {
@@ -172,7 +177,7 @@ fun SendsScreen(ctx: UiCtx) {
                 }
                 list != null -> list.forEach { s ->
                     SendCard(
-                        ctx, s, names[s.id], enabled,
+                        ctx, s, names[s.id], s.id in linkable, enabled,
                         onEdit = { editing = s },
                         onToggle = {
                             ctx.launch {
@@ -231,7 +236,7 @@ fun SendsScreen(ctx: UiCtx) {
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun SendCard(ctx: UiCtx, s: OwnedSend, name: String?, enabled: Boolean, onEdit: () -> Unit, onToggle: () -> Unit, onDelete: () -> Unit) {
+private fun SendCard(ctx: UiCtx, s: OwnedSend, name: String?, linkOnly: Boolean, enabled: Boolean, onEdit: () -> Unit, onToggle: () -> Unit, onDelete: () -> Unit) {
     val now = nowSeconds()
     val state = Sends.state(s, now)
     val facts = listOfNotNull(
@@ -256,9 +261,13 @@ private fun SendCard(ctx: UiCtx, s: OwnedSend, name: String?, enabled: Boolean, 
                 }
                 StateBadge(state)
             }
-            if (!readable) Muted("This Send was made with keys your account no longer has. Delete it and make a new one.")
+            when {
+                // Send v2 made by an app of this account whose content key this phone can't open (or an app from before v2 here).
+                !readable && linkOnly -> Muted("This Send is protected with its password and can't be read on this phone. You can still copy its link, turn it off or delete it.")
+                !readable -> Muted("This Send was made with keys your account no longer has. Delete it and make a new one.")
+            }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (readable) {
+                if (readable || linkOnly) {
                     OutlinedButton(onClick = {
                         ctx.launch {
                             val key = withContext(Dispatchers.Default) { ctx.repo.sends().keyOf(s) }

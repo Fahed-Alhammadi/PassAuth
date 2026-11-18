@@ -9,6 +9,7 @@ import { withAttachmentsOf } from "../lib/attachments";
 import { clearDraft, setEditorDirty, useDraft } from "../lib/drafts";
 import { attachFiles } from "../lib/files";
 import { isWeak } from "../lib/health";
+import { ROLLBACK_ITEM } from "../lib/item-revs";
 import { useBreachCheck, useHealthReport } from "../lib/health-session";
 import { authorName, passkeysMissingFrom, versionLabel, type ItemVersion } from "../lib/history";
 import { patternNote } from "../lib/patterns";
@@ -398,6 +399,11 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
       {entry.deletedAt && (
         <div className="alert small" role="note">
           This item is in the trash. Restore it to use it again.
+        </div>
+      )}
+      {entry.rollback && (
+        <div className="alert alert-warn small" role="alert">
+          {ROLLBACK_ITEM}
         </div>
       )}
       <ErrorText error={error} />

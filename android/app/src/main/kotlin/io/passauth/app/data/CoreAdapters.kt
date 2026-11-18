@@ -11,6 +11,10 @@ import io.passauth.core.sendEncrypt
 import io.passauth.core.sendNewKey
 import io.passauth.core.sendPasswordSalt
 import io.passauth.core.sendPasswordVerifier
+import io.passauth.core.sendPasswordKeys
+import io.passauth.core.sendEncryptV2
+import io.passauth.core.sendOpen
+import io.passauth.core.sendFieldVersion
 
 /*
  * The core's handles behind the interfaces the Send, attachment and emergency flows are written
@@ -39,6 +43,13 @@ class CoreSendCrypto(private val account: Account) : SendCrypto {
     override fun unwrap(wrapped: String): String = account.unwrapSendKey(wrapped)
     override fun passwordSalt(): String = sendPasswordSalt()
     override fun verifier(password: String, salt: String): String = sendPasswordVerifier(password, salt)
+    override fun passwordKeys(password: String, salt: String, key: String): SendKeys =
+        sendPasswordKeys(password, salt, key).let { SendKeys(it.verifier, it.contentKey) }
+    override fun encryptV2(contentKey: String, field: String, plain: String): String = sendEncryptV2(contentKey, field, plain)
+    override fun open(key: String, contentKey: String?, field: String, cipher: String): String = sendOpen(key, contentKey, field, cipher)
+    override fun fieldVersion(cipher: String): Int = sendFieldVersion(cipher).toInt()
+    override fun wrapContent(contentKey: String): String = account.wrapSendContentKey(contentKey)
+    override fun unwrapContent(wrapped: String): String = account.unwrapSendContentKey(wrapped)
 }
 
 /** [vaultKey]: the key this app holds now for a vault of its own (null when it has none). */

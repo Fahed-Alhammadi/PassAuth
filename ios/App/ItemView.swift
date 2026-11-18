@@ -61,6 +61,13 @@ struct ItemView: View {
                 .padding(.vertical, 4)
                 .paRow()
             }
+            if entry.rolledBack {
+                Section {
+                    Notice(text: ItemRollback.itemWarning, kind: .error)
+                        .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                        .accessibilityIdentifier("item.rollbackWarning")
+                }
+            }
             if trashed {
                 Section {
                     Notice(text: "This item is in the trash" + (entry.deletedAt.map { " since \(formatDate($0))" } ?? "") + ".")

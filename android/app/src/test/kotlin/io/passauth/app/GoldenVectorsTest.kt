@@ -214,4 +214,82 @@ class GoldenVectorsTest {
         }
         assertTrue(failures.joinToString("\n"), failures.isEmpty())
     }
+
+    /** Send v2: one Argon2id run gives the server's verifier and the content key; the v2 field opens with it (and not without). */
+    @Test
+    fun sendV2() {
+        val v = vectors["sendV2"]!!.jsonObject
+        val keys = io.passauth.core.sendPasswordKeys(v.s("password"), v.s("salt"), v.s("key"))
+        assertEquals(v.s("verifier"), keys.verifier)
+        assertEquals(v.s("contentKey"), keys.contentKey)
+        assertEquals(v.s("verifier"), io.passauth.core.sendPasswordVerifier(v.s("password"), v.s("salt")))
+        assertEquals(2, io.passauth.core.sendFieldVersion(v.s("data")).toInt())
+        assertEquals(v.s("text"), io.passauth.core.sendOpen(v.s("key"), keys.contentKey, "data", v.s("data")))
+        try {
+            io.passauth.core.sendOpen(v.s("key"), null, "data", v.s("data"))
+            fail("a v2 field opened without its content key")
+        } catch (_: io.passauth.core.CoreException.PasswordRequired) {
+        }
+    }
+
+    /** The item edit counter: the rollback rule ([io.passauth.core.itemRevCheck]) and the chain of writes. */
+    @Test
+    fun itemRev() {
+        val v = vectors["itemRev"]!!.jsonObject
+        val failures = mutableListOf<String>()
+        val checks = v["checks"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(checks.size >= 5)
+        for (c in checks) {
+            val remembered = (c["remembered"] as? JsonPrimitive)?.contentOrNull?.toULong()
+            val served = c.s("served").toULong()
+            check(failures, "itemRevCheck($remembered, $served)", c.s("expected"), io.passauth.core.itemRevCheck(remembered, served))
+        }
+        // The chain through this app's own model (ItemCodec keeps `rev`): encrypt (1), update (2),
+        // update with an item of rev 0 (3), restore of the first version (4), move to another vault (5).
+        val account = alice()
+        val vault = account.newVaultKey("v1").key
+        val other = account.newVaultKey("v2").key
+        fun rev(k: io.passauth.core.VaultKey, e: EncryptedItem) = io.passauth.app.data.ItemCodec.decode(k.decryptItem(e)).rev
+        val item = Item(name = "Mail")
+        val e1 = vault.encryptItem(io.passauth.app.data.ItemCodec.encode(item), "i1", "v1")
+        val first = io.passauth.app.data.ItemCodec.decode(vault.decryptItem(e1))
+        val e2 = vault.updateItem(e1, io.passauth.app.data.ItemCodec.encode(first.copy(name = "Mail 2")))
+        val e3 = vault.updateItem(e2, io.passauth.app.data.ItemCodec.encode(item.copy(name = "Old app")))
+        val e4 = vault.updateItem(e3, io.passauth.app.data.ItemCodec.encode(first))
+        val e5 = other.encryptItem(vault.decryptItem(e4), "i1", "v2")
+        val chain = listOf(rev(vault, e1), rev(vault, e2), rev(vault, e3), rev(vault, e4), rev(other, e5))
+        check(failures, "rev chain", v["chain"]!!.jsonArray.map { it.jsonPrimitive.content.toLong() }, chain)
+        // The editor's copy keeps `rev` but a rev alone never makes two items differ in what the user sees.
+        check(failures, "rev kept through the model", 2L, io.passauth.app.data.ItemCodec.decode(io.passauth.app.data.ItemCodec.encode(io.passauth.app.data.ItemCodec.decode(vault.decryptItem(e2)))).rev)
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
+    /** Account wraps v2: bound to the epoch given; a v1 wrap is opened only where the pins allow it. */
+    @Test
+    fun boundAccountWraps() {
+        val account = alice()
+        val made = account.newVaultKeyBound("v1", 3u)
+        assertTrue(io.passauth.core.accountWrapIsBound(made.wrapped))
+        account.openVaultKey("v1", made.wrapped, "account", 3u, false).close()
+        try {
+            account.openVaultKey("v1", made.wrapped, "account", 2u, true)
+            fail("a v2 wrap opened at another epoch")
+        } catch (_: io.passauth.core.CoreException) {
+        }
+        val rewrapped = made.key.wrapForBound(account, "v1", 4u)
+        assertTrue(io.passauth.core.accountWrapIsBound(rewrapped))
+        val legacy = made.key.wrapFor(account, "v1")
+        assertTrue(!io.passauth.core.accountWrapIsBound(legacy))
+        // The app's own reading of the server's hint: only a JSON true.
+        assertTrue(io.passauth.app.data.SignedSharing.accountWrapsV2(Json.parseToJsonElement("""{"account_wraps_v2":true}""")))
+        for (no in listOf("""{"account_wraps_v2":"true"}""", """{"account_wraps_v2":1}""", "{}", "null")) {
+            assertTrue(no, !io.passauth.app.data.SignedSharing.accountWrapsV2(Json.parseToJsonElement(no)))
+        }
+    }
+
+    /** The vectors' account "alice" (signed sharing section), opened from its session bytes. */
+    private fun alice(): io.passauth.core.Account {
+        val a = vectors["signedSharing"]!!.jsonObject["accounts"]!!.jsonArray.map { it.jsonObject }.first { it.s("name") == "alice" }
+        return io.passauth.core.accountFromSessionBytes(a.s("id"), java.util.Base64.getUrlDecoder().decode(a.s("sessionBytes")))
+    }
 }

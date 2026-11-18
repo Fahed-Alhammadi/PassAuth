@@ -61,7 +61,8 @@ interface SharingVectors {
   merges: ({ name: string; base: core.KeyPins; ours: core.KeyPins } & Outcome)[];
   mergesLastKnown: ({ name: string; base: core.KeyPins; lastKnown: core.KeyPins } & Outcome)[];
   declines: { pins: string; vaultId: string; currentRow: boolean; expected: core.KeyPins }[];
-  legacyWraps: { pins: string; expected: boolean }[];
+  keyPinsBound: core.KeyPins;
+  legacyWraps: { pins: string; keyEpoch: number; expected: boolean }[];
   ownIdentity: { hash: string; pins: core.KeyPins; checks: { pins: string; listed: string | null; expected: string }[] };
 }
 
@@ -267,7 +268,10 @@ test("signedSharing vectors: key pins, pin checks, reviews, epochs, tombstones, 
     if (c.accept) expect(step).toStrictEqual(c.accepted);
   }
   for (const c of V.emails) expect(core.normalizeEmail(c.email), c.email).toBe(c.expected);
-  for (const c of V.legacyWraps) expect(core.pinsLegacyWrapAllowed(sets[c.pins], VID)).toBe(c.expected);
+  // Item 7: a v1 (unbound) wrap is refused for an epoch at or below the one this account opened from a bound wrap.
+  const withBound: Record<string, core.KeyPins | null> = { ...sets, bound: V.keyPinsBound };
+  expect(V.legacyWraps.some((c) => c.pins === "bound" && !c.expected)).toBe(true);
+  for (const c of V.legacyWraps) expect(core.pinsLegacyWrapAllowed(withBound[c.pins], VID, c.keyEpoch), JSON.stringify(c)).toBe(c.expected);
   expect(core.pinsSetOwnIdentity(V.keyPins, V.ownIdentity.hash)).toStrictEqual(V.ownIdentity.pins);
   for (const c of V.ownIdentity.checks) expect(core.pinsCheckOwnIdentity(c.pins === "withOwn" ? V.ownIdentity.pins : null, c.listed), JSON.stringify(c)).toBe(c.expected);
   expect(codeOf(() => core.pinsSetOwnIdentity(V.ownIdentity.pins, ident("bob").hash))).toBe("identity_mismatch");
@@ -725,6 +729,39 @@ test("L8: while sharing is paused, an own (account-wrapped) vault with a roster 
   // Not with another remembered identity, and not for a shared (sealed) row.
   expect(why(await check(w, row, { ...paused, pins: core.pinsSetOwnIdentity(null, ident("carol").hash) }))).toBe("not_listed");
   k.free();
+});
+
+test("item 7: an own vault opened from an epoch-bound (v2) wrap is recorded in the pins (bound_since), so a v1 wrap for that epoch is refused from then on; a v1 wrap records nothing", async () => {
+  const w = world();
+  const ownRow = (wrapped: string, epoch: number) => ({
+    id: OTHER,
+    meta: "",
+    role: "owner" as const,
+    wrapped_key: wrapped,
+    key_kind: "account" as const,
+    key_epoch: epoch,
+    share: null,
+    member_roster: null,
+    member_roster_seq: 0,
+  });
+  const bound = w.bob.newVaultKeyBound(OTHER, 0);
+  expect(core.accountWrapIsBound(bound.wrapped)).toBe(true);
+  const r = await check(w, ownRow(bound.wrapped, 0), { fetchRosters: async () => [] });
+  expect(r.trust.state === "ok" || r.trust.state === "unsigned", JSON.stringify(r.trust)).toBe(true);
+  expect(r.pins?.epochs?.[OTHER]?.bound_since).toBe(0);
+  expect(core.pinsLegacyWrapAllowed(r.pins, OTHER, 0)).toBe(false);
+  // A later key replacement written v1 by an app while the gate was off still opens.
+  expect(core.pinsLegacyWrapAllowed(r.pins, OTHER, 1)).toBe(true);
+  // A v1 (unbound) wrap: no mark.
+  const legacy = w.bob.newVaultKey(OTHER);
+  expect(core.accountWrapIsBound(legacy.wrapped)).toBe(false);
+  const r1 = await check(w, ownRow(legacy.wrapped, 0), { fetchRosters: async () => [] });
+  expect(r1.pins?.epochs?.[OTHER]?.bound_since ?? null).toBe(null);
+  // Never on a shared (sealed) row: its wrap isn't an account wrap at all.
+  const shared = await check(w, signedRow(w));
+  expect(shared.pins?.epochs?.[VID]?.bound_since ?? null).toBe(null);
+  bound.free();
+  legacy.free();
 });
 
 test("L6 and invitations: labels and invitation texts lead with the pinned email; the server's names only as 'listed by your server as'", () => {

@@ -16,13 +16,22 @@ import kotlinx.serialization.json.put
  * fragment and keeps the key wrapped by the account key (`owner_key`), so the owner can copy the
  * link and edit the Send later. The server stores ciphertext only and decides who may open it, how
  * often and until when; an optional password is checked by the server with a verifier the
- * visitor's app derives from it (`access_salt`), not used for encryption.
+ * visitor's app derives from it (`access_salt`). Send v2 ([Sends.FEATURE_V2]): a Send with a
+ * password is also encrypted with it (content key from the link key and the password); the owner
+ * keeps that content key wrapped by the account key (`owner_content_key`). Without a password, or
+ * on servers without v2: v1, encrypted with the link key only.
  *
  * The web vault's `lib/sends.ts`, with the same rules; pure and unit-tested in SendsTest.
  * [SendActions] encrypts and talks to the server.
  */
 object Sends {
     const val FEATURE = "sends"
+
+    /**
+     * Send v2 (servers that list it): a Send with a password is encrypted with a key that needs the
+     * link AND the password (`owner_content_key` lets the owner read it without the password).
+     */
+    const val FEATURE_V2 = "send_v2"
 
     /** The link to share: the server's address, the Send's id and, after `#`, its key. */
     fun link(origin: String, id: String, key: String): String =
@@ -36,8 +45,8 @@ object Sends {
 
     // -------------------------------------------------------------- sizes
 
-    /** Bytes the core adds when it encrypts a field: a version byte, the 24-byte nonce and the 16-byte tag. */
-    private const val OVERHEAD = 1 + 24 + 16
+    /** Bytes the core adds when it encrypts a field: the v2 marker byte (password Sends), a version byte, the 24-byte nonce and the 16-byte tag. */
+    private const val OVERHEAD = 1 + 1 + 24 + 16
 
     fun utf8Length(text: String): Int = text.toByteArray(Charsets.UTF_8).size
 
@@ -133,6 +142,7 @@ object Sends {
             createdAt = num(s["created_at"]) ?: 0,
             updatedAt = num(s["updated_at"]) ?: 0,
             data = text(s["data"]),
+            ownerContentKey = text(s["owner_content_key"]),
         )
     }
 
@@ -169,6 +179,7 @@ object Sends {
                 put("access_verifier", p.verifier)
             }
         }
+        changes.ownerContentKey?.let { put("owner_content_key", it.value?.let(::JsonPrimitive) ?: JsonNull) }
         changes.maxViews?.let { put("max_views", it.value?.let(::JsonPrimitive) ?: JsonNull) }
         changes.expiresAt?.let { put("expires_at", it.value?.let(::JsonPrimitive) ?: JsonNull) }
         changes.deleteAt?.let { put("delete_at", it) }
@@ -201,6 +212,8 @@ data class OwnedSend(
     val updatedAt: Long = 0,
     /** Encrypted text: only in `GET /sends/{id}`. */
     val data: String? = null,
+    /** Send v2: the content key (link key + password) wrapped by the account key; null for v1 Sends. */
+    val ownerContentKey: String? = null,
 )
 
 enum class SendState(val label: String) {
@@ -232,6 +245,8 @@ data class SendChanges(
     val deleteAt: Long? = null,
     val disabled: Boolean? = null,
     val hideEmail: Boolean? = null,
+    /** Send v2's `owner_content_key`: set (a new password) or cleared (null value; back to v1); null = unchanged. */
+    val ownerContentKey: Change<String>? = null,
 )
 
 /** A new Send, in plain text. */
@@ -267,22 +282,59 @@ interface SendCrypto {
     fun unwrap(wrapped: String): String
     fun passwordSalt(): String
     fun verifier(password: String, salt: String): String
+
+    /** Send v2: the verifier and the content key, from one Argon2id run over [password] (and the link [key]). */
+    fun passwordKeys(password: String, salt: String, key: String): SendKeys
+    fun encryptV2(contentKey: String, field: String, plain: String): String
+
+    /** A field of either version ([contentKey] needed for v2: else a `PasswordRequired` error). */
+    fun open(key: String, contentKey: String?, field: String, cipher: String): String
+
+    /** 1 or 2: a field's format, by its first byte. */
+    fun fieldVersion(cipher: String): Int
+    fun wrapContent(contentKey: String): String
+    fun unwrapContent(wrapped: String): String
 }
+
+/** What a Send v2 password gives: the server's verifier and the content key (memory only). */
+data class SendKeys(val verifier: String, val contentKey: String)
 
 /**
  * Send, the owner's side (the web vault's `send-client.ts`): encrypt, list, change and delete
  * Sends over [transport]. [crypto] is looked up for each call: a lock frees the account key.
+ * [sendV2]: whether the server takes Send v2 (`/api/config` features has `send_v2`; an older server
+ * would drop `owner_content_key`): only then a Send with a password is written v2.
  */
-class SendActions(private val transport: SecurityTransport, private val crypto: () -> SendCrypto) {
+class SendActions(
+    private val transport: SecurityTransport,
+    private val sendV2: suspend () -> Boolean = { false },
+    private val crypto: () -> SendCrypto,
+) {
     private fun path(id: String) = "/sends/${URLEncoder.encode(id, "UTF-8").replace("+", "%20")}"
 
     /** The Send's key (for its link and its text), from its `owner_key`. */
     fun keyOf(s: OwnedSend): String = crypto().unwrap(s.ownerKey)
 
-    /** The Send's name, or null when it can't be decrypted (made by an account key this account no longer has). */
+    /** Send v2's content key from `owner_content_key` (null: a v1 Send, or one this account can't open). */
+    private fun contentKeyOf(c: SendCrypto, s: OwnedSend): String? = s.ownerContentKey?.let { w ->
+        try {
+            c.unwrapContent(w)
+        } catch (e: Exception) {
+            if (e is UserException) throw e
+            null
+        }
+    }
+
+    /** A Send's field, v1 or v2 (by its first byte). */
+    private fun open(c: SendCrypto, s: OwnedSend, field: String, cipher: String): String =
+        c.open(c.unwrap(s.ownerKey), contentKeyOf(c, s), field, cipher)
+
+    /** Whether the Send's fields are v2 (encrypted with its password too). */
+    private fun isV2(c: SendCrypto, s: OwnedSend): Boolean = runCatching { c.fieldVersion(s.name) == 2 }.getOrDefault(s.ownerContentKey != null)
+
+    /** The Send's name, or null when it can't be decrypted (made by an account key this account no longer has; a v2 Send without a readable content key). */
     fun nameOf(s: OwnedSend): String? = try {
-        val c = crypto()
-        c.decrypt(c.unwrap(s.ownerKey), "name", s.name)
+        open(crypto(), s, "name", s.name)
     } catch (e: Exception) {
         if (e is UserException) throw e
         null
@@ -291,8 +343,12 @@ class SendActions(private val transport: SecurityTransport, private val crypto: 
     /** The Send's text (`data`, from `GET /sends/{id}`). */
     fun textOf(s: OwnedSend): String {
         val data = s.data ?: throw UserException(UNEXPECTED)
-        val c = crypto()
-        return c.decrypt(c.unwrap(s.ownerKey), "data", data)
+        return try {
+            open(crypto(), s, "data", data)
+        } catch (e: io.passauth.core.CoreException) {
+            if (s.ownerContentKey != null || isV2(crypto(), s)) throw UserException(UNREADABLE)
+            throw e
+        }
     }
 
     suspend fun list(): List<OwnedSend> = Sends.readList(transport.call("/sends", null, "GET", true, emptyMap()))
@@ -300,61 +356,120 @@ class SendActions(private val transport: SecurityTransport, private val crypto: 
     /** One Send with its text. */
     suspend fun get(id: String): OwnedSend = Sends.read(transport.call(path(id), null, "GET", true, emptyMap())) ?: throw UserException(UNEXPECTED)
 
-    /** A new password's salt and verifier (Argon2id, about a second): the server keeps only the verifier's hash. */
+    /** A new password's salt and verifier (Argon2id, about a second): the server keeps only the verifier's hash. v1 only. */
     private fun passwordFields(c: SendCrypto, password: String): SendPassword.Set {
         val salt = c.passwordSalt()
         return SendPassword.Set(salt, c.verifier(password, salt))
     }
 
-    /** The `POST /sends` body for [d] encrypted with [key]. */
-    fun createBody(d: NewSend, key: String): JsonObject {
+    /** The `POST /sends` body for [d] encrypted with [key]; with a password and [v2], a Send v2. */
+    fun createBody(d: NewSend, key: String, v2: Boolean = false): JsonObject {
         val c = crypto()
-        val pw = d.password?.takeIf { it.isNotEmpty() }?.let { passwordFields(c, it) }
+        val password = d.password?.takeIf { it.isNotEmpty() }
+        var salt: String? = null
+        var verifier: String? = null
+        var name: String
+        var data: String
+        var ownerContentKey: String? = null
+        if (password != null && v2) {
+            salt = c.passwordSalt()
+            val keys = c.passwordKeys(password, salt, key)
+            verifier = keys.verifier
+            name = c.encryptV2(keys.contentKey, "name", d.name)
+            data = c.encryptV2(keys.contentKey, "data", d.text)
+            ownerContentKey = c.wrapContent(keys.contentKey)
+        } else {
+            password?.let { passwordFields(c, it) }?.let { salt = it.salt; verifier = it.verifier }
+            name = c.encrypt(key, "name", d.name)
+            data = c.encrypt(key, "data", d.text)
+        }
         return buildJsonObject {
             put("kind", "text")
-            put("name", c.encrypt(key, "name", d.name))
-            put("data", c.encrypt(key, "data", d.text))
+            put("name", name)
+            put("data", data)
             put("owner_key", c.wrap(key))
             put("max_views", d.maxViews?.let(::JsonPrimitive) ?: JsonNull)
             put("expires_at", d.expiresAt?.let(::JsonPrimitive) ?: JsonNull)
             put("delete_at", d.deleteAt)
             put("hide_email", d.hideEmail)
             put("disabled", false)
-            if (pw != null) {
-                put("access_salt", pw.salt)
-                put("access_verifier", pw.verifier)
+            if (salt != null && verifier != null) {
+                put("access_salt", salt)
+                put("access_verifier", verifier)
             }
+            ownerContentKey?.let { put("owner_content_key", it) }
         }
     }
 
     /** Encrypt and save a new Send; returns it with its key (the link is made from [server]'s address). */
     suspend fun create(d: NewSend): Pair<OwnedSend, String> {
+        val v2 = !d.password.isNullOrEmpty() && sendV2()
         val key = crypto().newKey()
-        val send = Sends.read(transport.call("/sends", createBody(d, key), "POST", true, emptyMap())) ?: throw UserException(UNEXPECTED)
+        val send = Sends.read(transport.call("/sends", createBody(d, key, v2), "POST", true, emptyMap())) ?: throw UserException(UNEXPECTED)
         return send to key
     }
 
-    /** The changes [edit] makes to [s]: only what changed; name and text encrypted again with the same key (the link has it). */
-    fun changesOf(s: OwnedSend, edit: SendEdit): SendChanges {
+    /**
+     * The changes [edit] makes to [s]: only what changed, name and text encrypted again with the
+     * same link key (the link has it). A new password with [v2] makes (or keeps) it a v2 Send: both
+     * fields encrypted again with the new content key (so [s] must have its `data`); removing the
+     * password of a v2 Send turns it back into v1 the same way.
+     */
+    fun changesOf(s: OwnedSend, edit: SendEdit, v2: Boolean = false): SendChanges {
         val c = crypto()
-        var name: String? = null
-        var data: String? = null
-        if (edit.name != null || edit.text != null) {
-            val key = c.unwrap(s.ownerKey)
-            if (edit.name != null) name = c.encrypt(key, "name", edit.name)
-            if (edit.text != null) data = c.encrypt(key, "data", edit.text)
+        val key = c.unwrap(s.ownerKey)
+        val wasV2 = isV2(c, s)
+        // Asked only when a field is encrypted or read again: settings change without it.
+        val content: String? by lazy { if (wasV2) contentKeyOf(c, s) ?: throw UserException(UNREADABLE) else null }
+        val newPassword = edit.password?.takeIf { it.isNotEmpty() }
+        val removing = edit.password != null && edit.password.isEmpty()
+        // Both fields again in plain text, when the format or the content key changes.
+        fun plain(): Pair<String, String> {
+            val name = edit.name ?: c.open(key, content, "name", s.name)
+            val text = edit.text ?: c.open(key, content, "data", s.data ?: throw UserException(UNEXPECTED))
+            return name to text
         }
-        val password = when {
-            edit.password == null -> SendPassword.Keep
-            edit.password.isEmpty() -> SendPassword.Remove
-            else -> passwordFields(c, edit.password)
+        return when {
+            newPassword != null && v2 -> {
+                val (name, text) = plain()
+                val salt = c.passwordSalt()
+                val keys = c.passwordKeys(newPassword, salt, key)
+                SendChanges(
+                    c.encryptV2(keys.contentKey, "name", name), c.encryptV2(keys.contentKey, "data", text),
+                    SendPassword.Set(salt, keys.verifier), edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail,
+                    ownerContentKey = Change(c.wrapContent(keys.contentKey)),
+                )
+            }
+            wasV2 && (removing || newPassword != null) -> {
+                // Back to v1 (no password, or a server without v2 now): encrypted with the link key alone.
+                val (name, text) = plain()
+                SendChanges(
+                    c.encrypt(key, "name", name), c.encrypt(key, "data", text),
+                    if (removing) SendPassword.Remove else passwordFields(c, newPassword!!),
+                    edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail,
+                    ownerContentKey = Change(null),
+                )
+            }
+            else -> {
+                fun seal(field: String, plain: String) = content?.let { c.encryptV2(it, field, plain) } ?: c.encrypt(key, field, plain)
+                val password = when {
+                    edit.password == null -> SendPassword.Keep
+                    removing -> SendPassword.Remove
+                    else -> passwordFields(c, newPassword!!)
+                }
+                SendChanges(edit.name?.let { seal("name", it) }, edit.text?.let { seal("data", it) }, password, edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail)
+            }
         }
-        return SendChanges(name, data, password, edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail)
     }
 
     /** Save changes to a Send. */
-    suspend fun update(s: OwnedSend, edit: SendEdit): OwnedSend =
-        Sends.read(transport.call(path(s.id), Sends.changesBody(changesOf(s, edit)), "PUT", true, emptyMap())) ?: throw UserException(UNEXPECTED)
+    suspend fun update(s: OwnedSend, edit: SendEdit): OwnedSend {
+        val v2 = !edit.password.isNullOrEmpty() && sendV2()
+        // A change of the format needs the text too (the list has none).
+        val needsText = edit.password != null && s.data == null && (v2 || s.ownerContentKey != null || isV2(crypto(), s))
+        val full = if (needsText) get(s.id) else s
+        return Sends.read(transport.call(path(s.id), Sends.changesBody(changesOf(full, edit, v2)), "PUT", true, emptyMap())) ?: throw UserException(UNEXPECTED)
+    }
 
     /** Delete a Send; one already gone counts as done. */
     suspend fun delete(id: String) {
@@ -367,5 +482,6 @@ class SendActions(private val transport: SecurityTransport, private val crypto: 
 
     companion object {
         const val UNEXPECTED = "The server sent an unexpected response. Try again."
+        const val UNREADABLE = "This Send is protected with its password and can't be read on this phone. You can still turn it off, delete it or copy its link."
     }
 }

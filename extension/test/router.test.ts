@@ -26,6 +26,8 @@ const v = vi.hoisted(() => {
     checkSession: nothing,
     invitations: () => ({ count: 0, key: "" }),
     sharingNotice: () => null,
+    rollbackSummary: () => null,
+    rolledBack: () => false,
     sharingIdentity: () => ({ fingerprint: null, paused: false }),
     trustNewKey: nothing,
     vaultTrust: () => ({}),

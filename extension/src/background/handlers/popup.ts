@@ -16,6 +16,7 @@ import { afterUnlock, openPopup, orderedMatches } from "../commands";
 import { createDeviceRequest, discardDeviceSession, pollDeviceRequest, startDeviceSignIn, verifyDeviceTwoStep } from "../device-sign-in";
 import { fill } from "../fill";
 import { fillProblem } from "../fill-problems";
+import { ROLLBACK_ITEM_TEXT } from "../item-revs";
 import { markUsed } from "../last-used";
 import { ensureLive } from "../live-sync";
 import { decide, pendingRequest } from "../passkey-handler";
@@ -86,12 +87,14 @@ export const popupHandlers = {
       const suggested = url ? await orderedMatches(url) : [];
       const invitations = vault.invitations();
       const sharing = vault.sharingNotice();
+      const rollback = vault.rollbackSummary();
       const problem = url && tabId !== undefined ? await fillProblem(tabId, url) : undefined;
       return {
         suggested: suggested.map(vault.summarize),
         all: vault.allEntries().map(vault.summarize),
         ...(invitations.count ? { invitations } : {}),
         ...(sharing ? { sharing } : {}),
+        ...(rollback ? { rollback } : {}),
         ...(problem ? { fillProblem: problem } : {}),
       };
     },
@@ -110,6 +113,7 @@ export const popupHandlers = {
         canWrite: vault.canWrite(e),
         weakPassword: vault.weakPassword(e.item.login?.password ?? ""),
         ...(Object.keys(errors).length ? { regexErrors: errors } : {}),
+        ...(vault.rolledBack(e.id) ? { olderVersion: ROLLBACK_ITEM_TEXT } : {}),
       };
     },
   },

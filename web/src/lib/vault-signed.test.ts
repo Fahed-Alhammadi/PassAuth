@@ -7,6 +7,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as core from "../wasm/passauth_core";
+import { ROLLBACK_KEPT, ROLLBACK_SHOWN } from "./item-revs";
 import { loadCore, signedVectors, unb64, vectorAccounts, type SignedVectors } from "./test-core";
 
 type Opts = { method?: string; body?: unknown };
@@ -117,6 +118,8 @@ interface World {
   noEpoch?: boolean;
   /** The server leaves the vault out of `/sync` but still answers its members list (a server omitting it on purpose). */
   omitOnly?: boolean;
+  /** `/sync` `user.account_wraps_v2` (undefined: left out, a server from before). */
+  wrapsV2?: unknown;
 }
 let w: World;
 
@@ -169,7 +172,15 @@ function sync() {
   const rec = w.identity.get(me);
   return {
     revision: w.revision,
-    user: { id: syncAs ?? me, email: EMAIL[nameOf(me)], name: nameOf(me), email_verified: true, identity: rec ?? null, key_pins_seq: w.pins.get(me)?.seq ?? 0 },
+    user: {
+      id: syncAs ?? me,
+      email: EMAIL[nameOf(me)],
+      name: nameOf(me),
+      email_verified: true,
+      identity: rec ?? null,
+      key_pins_seq: w.pins.get(me)?.seq ?? 0,
+      ...(w.wrapsV2 !== undefined ? { account_wraps_v2: w.wrapsV2 } : {}),
+    },
     bundle: { account_id: me },
     vaults: active ? [vaultRow(me)] : [],
     items: active ? [...w.vault.items.values()] : [],
@@ -882,5 +893,129 @@ describe("round 5 (web)", () => {
     await signIn("bob");
     await declineInvitation(vid());
     expect(savedPins("bob")?.left?.[vid()]).toBeUndefined();
+  });
+});
+
+describe("security round 7/9 (web)", () => {
+  const savedPins = (name: string) => {
+    const key = [...storage.keys()].find((k) => k.startsWith("pa.key-pins.") && k.endsWith(id(name)));
+    if (!key) return null;
+    const l = JSON.parse(storage.get(key)!) as { seq: number; sealed: string };
+    return accounts.get(name)!.account.openKeyPins(l.sealed, l.seq);
+  };
+  const ownWrap = () => {
+    const body = lastCall((c) => c.path.endsWith("/rotate"))!.body as { keys: { user_id: string; wrapped_key: string }[] };
+    return body.keys.find((k) => k.user_id === id("alice"))!.wrapped_key;
+  };
+  const rekeyAlone = () => rotateVaultKeys([vid()], new Map([[vid(), [id("alice")]]]));
+
+  it("7: re-keys an own vault with an epoch-bound wrap only when the sync says every app reads it, then refuses a v1 wrap at that epoch", async () => {
+    w.wrapsV2 = true;
+    await signIn("alice");
+    await rekeyAlone();
+    const wrapped = ownWrap();
+    expect(core.accountWrapIsBound(wrapped)).toBe(true);
+    expect(w.vault.epoch).toBe(1);
+    // Opened from the v2 wrap: recorded in the key pins (bound_since), so a v1 wrap at or below epoch 1 is refused.
+    expect(getState().vaults.map((x) => x.id)).toEqual([vid()]);
+    expect(savedPins("alice")?.epochs?.[vid()]?.bound_since).toBe(1);
+    // The server serves a v1 wrap of the same key at the same epoch: never opened.
+    const alice = accounts.get("alice")!.account;
+    const key = alice.openVaultKey(vid(), wrapped, "account", 1, false);
+    const legacy = key.wrapFor(alice, vid());
+    key.free();
+    expect(core.accountWrapIsBound(legacy)).toBe(false);
+    w.vault.members.set(id("alice"), { ...w.vault.members.get(id("alice"))!, wrapped_key: legacy });
+    w.revision++;
+    await syncNow();
+    expect(getState().vaults).toHaveLength(0);
+    expect(getState().blockedVaults.map((b) => b.id)).toEqual([vid()]);
+  });
+
+  it("7: writes v1 wraps when the hint is missing, not true, or false", async () => {
+    for (const hint of [undefined, "true", 1, false]) {
+      newWorld(["vault_invitations", "signed_sharing"]);
+      w.wrapsV2 = hint;
+      await signIn("alice");
+      await rekeyAlone();
+      expect(core.accountWrapIsBound(ownWrap()), String(hint)).toBe(false);
+      // Still opens (legacy allowed: nothing bound yet).
+      expect(getState().vaults.map((x) => x.id)).toEqual([vid()]);
+      expect(savedPins("alice")?.epochs?.[vid()]?.bound_since ?? null).toBeNull();
+    }
+  });
+
+  const serve = (row: { item_key: string; data: string }) => {
+    w.vault.items.set("item-1", { ...w.vault.items.get("item-1")!, item_key: row.item_key, data: row.data, revision: w.vault.items.get("item-1")!.revision + 1 });
+    w.revision++;
+  };
+  const shown = () => getState().items.find((e) => e.id === "item-1")!;
+  const remembered = () => {
+    const key = [...storage.keys()].find((k) => k.startsWith("pa.item-revs.") && k.endsWith(id("alice")));
+    return key ? (JSON.parse(storage.get(key)!) as Record<string, number>) : null;
+  };
+
+  it("9: an older version served after a newer one keeps the newer copy shown and warns; after a reload it shows the served one, warned", async () => {
+    await signIn("alice");
+    expect(shown().item.rev).toBe(1);
+    expect(remembered()).toEqual({ "item-1": 1 });
+    const old = { ...w.vault.items.get("item-1")! };
+    await updateItem(shown(), { ...shown().item, name: "Mail 2" });
+    expect(shown().item).toMatchObject({ name: "Mail 2", rev: 2 });
+    expect(remembered()).toEqual({ "item-1": 2 });
+    // The server serves the first version again.
+    serve(old);
+    await syncNow();
+    expect(shown()).toMatchObject({ rollback: true, item: { name: "Mail 2", rev: 2 } });
+    expect(getState().warnings).toContain(ROLLBACK_KEPT);
+    expect(remembered()).toEqual({ "item-1": 2 });
+    // A new page (nothing newer in memory): the served copy, warned.
+    await signIn("alice");
+    expect(shown()).toMatchObject({ rollback: true, item: { name: "Mail", rev: 1 } });
+    expect(getState().warnings).toContain(ROLLBACK_SHOWN);
+    expect(getState().warnings).not.toContain(ROLLBACK_KEPT);
+    expect(remembered()).toEqual({ "item-1": 2 });
+  });
+
+  it("9: an edit of the warned copy saves over the server's older one with a higher counter", async () => {
+    await signIn("alice");
+    const old = { ...w.vault.items.get("item-1")! };
+    await updateItem(shown(), { ...shown().item, name: "Mail 2" });
+    serve(old);
+    await syncNow();
+    await updateItem(shown(), { ...shown().item, name: "Mail 3" });
+    expect(shown().rollback).toBeUndefined();
+    expect(shown().item).toMatchObject({ name: "Mail 3", rev: 3 });
+    expect(getState().warnings).not.toContain(ROLLBACK_KEPT);
+  });
+
+  it("9: the same counter with other content is accepted (an edit by an app from before the counter)", async () => {
+    await signIn("alice");
+    const key = accounts.get("alice")!.account.openVaultKey(vid(), v.vault.wrappedKey, "account", 0, true);
+    // An app that drops `rev` writes 0 + 1 = 1 again.
+    const other = key.encryptItem({ ...emptyItem("login"), name: "Other", created_at: 1, updated_at: 2, rev: 0 }, "item-1", vid()) as { key: string; data: string };
+    key.free();
+    serve({ item_key: other.key, data: other.data });
+    await syncNow();
+    expect(shown().item.name).toBe("Other");
+    expect(shown().rollback).toBeUndefined();
+    expect(getState().warnings.some((x) => x.startsWith("Your server sent older"))).toBe(false);
+  });
+
+  it("9: forgets the counters of items the server no longer has", async () => {
+    await signIn("alice");
+    expect(remembered()).toEqual({ "item-1": 1 });
+    w.vault.items.delete("item-1");
+    w.revision++;
+    await syncNow();
+    expect(remembered()).toEqual({});
+  });
+
+  it("9: a key replacement counts the counter up and isn't taken for a change by someone else", async () => {
+    await signIn("alice");
+    await rekeyAlone();
+    expect(shown().item.rev).toBe(2);
+    expect(shown().rollback).toBeUndefined();
+    expect(remembered()).toEqual({ "item-1": 2 });
   });
 });
