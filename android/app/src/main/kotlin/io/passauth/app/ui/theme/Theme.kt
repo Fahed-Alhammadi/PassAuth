@@ -26,6 +26,22 @@ object Brand {
     val ringBrush get() = Brush.linearGradient(listOf(Blue, Cyan))
 }
 
+/**
+ * Settings row tiles (white symbol on a coloured rounded square, the same tones as the iOS app): fixed, deep
+ * tones in light and dark mode so the white symbol keeps ≥3:1 contrast.
+ */
+object TileColors {
+    val Blue = Color(0xFF0866ED)
+    val Green = Color(0xFF248A3D)
+    val Teal = Color(0xFF12869C)
+    val Orange = Color(0xFFD96C00)
+    val Red = Color(0xFFD7302A)
+    val Indigo = Color(0xFF5856D6)
+    val Purple = Color(0xFF9A45C9)
+    val Pink = Color(0xFFD62D5A)
+    val Gray = Color(0xFF7C7C82)
+}
+
 /** The spacing scale every screen uses (4 / 8 / 12 / 16 / 24 / 32). */
 object Space {
     val xs = 4.dp

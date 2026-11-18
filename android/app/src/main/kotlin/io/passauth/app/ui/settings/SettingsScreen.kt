@@ -2,6 +2,43 @@ package io.passauth.app.ui.settings
 
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material.icons.filled.ContactEmergency
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.HealthAndSafety
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PanTool
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.PanTool
+import androidx.compose.material.icons.outlined.PersonAdd
+import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import io.passauth.app.data.MAX_ACCOUNTS
+import io.passauth.app.ui.components.Avatar
+import io.passauth.app.ui.components.GroupCard
+import io.passauth.app.ui.components.initials
+import io.passauth.app.ui.theme.TileColors
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -89,7 +126,6 @@ import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.permissions.PermissionsSettings
 import io.passauth.app.ui.permissions.turnOnBiometricUnlock
 import io.passauth.app.ui.biometricsAvailable
-import io.passauth.app.ui.components.AccountMenu
 import io.passauth.app.ui.components.Alert
 import io.passauth.app.ui.components.AlertKind
 import io.passauth.app.ui.components.CardSection
@@ -133,25 +169,26 @@ private fun formatTime(ms: Long): String {
     }
 }
 
-private data class Section(val key: String, val title: String, val icon: ImageVector)
+private data class Section(val key: String, val title: String, val icon: ImageVector, val tint: Color)
 
+/** Pages opened from the settings list; account and about have their own layouts. */
 private val SECTIONS = listOf(
-    Section("security", "Account security", Icons.Outlined.Lock),
-    Section("autofill", "Autofill", Icons.Outlined.AutoFixHigh),
-    Section("permissions", "Permissions", Icons.Outlined.VerifiedUser),
-    Section("vault", "Vault options", Icons.Outlined.Inventory2),
-    Section("appearance", "Appearance", Icons.Outlined.Palette),
-    Section("about", "About", Icons.Outlined.Info),
+    Section("account", "Account", Icons.Filled.Person, TileColors.Blue),
+    Section("security", "Account security", Icons.Filled.Lock, TileColors.Blue),
+    Section("autofill", "Autofill", Icons.Filled.Key, TileColors.Orange),
+    Section("permissions", "Permissions", Icons.Filled.PanTool, TileColors.Gray),
+    Section("vault", "Vault options", Icons.Filled.Inventory2, TileColors.Purple),
+    Section("appearance", "Appearance", Icons.Filled.Palette, TileColors.Pink),
+    Section("about", "About PassAuth", Icons.Filled.Info, TileColors.Gray),
 )
 
-/** Sharing tools, each on its own page. */
-private val TOOLS = listOf(
-    Section("sends", "Send", Icons.AutoMirrored.Outlined.Send),
-    Section("emergency", "Emergency access", Icons.Outlined.ContactEmergency),
-    Section("sharing", "Shared vaults and keys", Icons.Outlined.Key),
-)
+private fun section(key: String) = SECTIONS.first { it.key == key }
 
-/** Settings: a list of categories, each opening its own page (like the extension popup). */
+/**
+ * Settings: the account card on top, then one group per job without header labels (like the iOS app): what you do
+ * with the vault, how it's protected and filled, how the app looks and what it may use, and About. Everything about
+ * the account itself (switching, adding, locking, logging out, deleting) is on the Account page behind the card.
+ */
 @Composable
 fun SettingsScreen(ctx: UiCtx, section: String?) {
     if (section == "export") return ExportScreen(ctx)
@@ -164,64 +201,48 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
     if (section == "sharing") return SharingScreen(ctx)
     val open = SECTIONS.firstOrNull { it.key == section }
     if (open == null) {
-        Scaffold(topBar = { PageBar("Settings", brand = true) { AccountMenu(ctx) } }) { padding ->
-            Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                CardSection(null) {
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(HEALTH)) }.padding(vertical = Space.m),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(Space.m),
-                    ) {
-                        Icon(Icons.Outlined.HealthAndSafety, null, tint = MaterialTheme.colorScheme.primary)
-                        Text("Password health", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
-                    }
+        Scaffold(topBar = { PageBar("Settings", brand = true) }) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(Space.xl)) {
+                val vault by ctx.repo.vault.collectAsStateWithLifecycle()
+                val waiting = vault?.invitations.orEmpty().size
+                GroupCard {
+                    AccountCard(ctx)
                     // Vaults shared with the account, waiting for an answer (servers with invitations).
-                    val vault by ctx.repo.vault.collectAsStateWithLifecycle()
-                    val waiting = vault?.invitations.orEmpty().size
                     if (waiting > 0) {
-                        HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Invitations()) }.padding(vertical = Space.m)
-                                .semantics(mergeDescendants = true) { contentDescription = "Vault invitations, $waiting waiting" },
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(Space.m),
-                        ) {
-                            Icon(Icons.Outlined.GroupAdd, null, tint = MaterialTheme.colorScheme.primary)
-                            Text("Vault invitations", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                        TileDivider()
+                        TileRow("Vault invitations", Icons.Filled.GroupAdd, TileColors.Blue, { ctx.go(Route.Invitations()) }, "Vault invitations, $waiting waiting") {
                             CountBadge(waiting)
-                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
                         }
                     }
                 }
-                CardSection(null) {
-                    TOOLS.forEachIndexed { n, s ->
-                        if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = Space.m),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(Space.m),
-                        ) {
-                            Icon(s.icon, null, tint = MaterialTheme.colorScheme.primary)
-                            Text(s.title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
-                        }
-                    }
+                TileGroup {
+                    TileRow("Password health", Icons.Filled.HealthAndSafety, TileColors.Green, { ctx.go(Route.Settings(HEALTH)) })
+                    TileDivider()
+                    TileRow("Send", Icons.AutoMirrored.Filled.Send, TileColors.Teal, { ctx.go(Route.Settings("sends")) })
+                    TileDivider()
+                    TileRow("Shared vaults and keys", Icons.Filled.Group, TileColors.Indigo, { ctx.go(Route.Settings("sharing")) })
+                    TileDivider()
+                    TileRow("Emergency access", Icons.Filled.ContactEmergency, TileColors.Red, { ctx.go(Route.Settings("emergency")) })
+                    TileDivider()
+                    PageRow(ctx, section("vault"))
                 }
-                CardSection(null) {
-                    SECTIONS.forEachIndexed { n, s ->
-                        // Inset to the text column, like every list in the app.
-                        if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
-                        Row(
-                            Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button) { ctx.go(Route.Settings(s.key)) }.padding(vertical = Space.m),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(Space.m),
-                        ) {
-                            Icon(s.icon, null, tint = MaterialTheme.colorScheme.primary)
-                            Text(s.title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-                            Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
-                        }
-                    }
+                TileGroup {
+                    PageRow(ctx, section("security"))
+                    TileDivider()
+                    PageRow(ctx, section("autofill"))
+                }
+                TileGroup {
+                    PageRow(ctx, section("appearance"))
+                    TileDivider()
+                    PageRow(ctx, section("permissions"))
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+                    TileGroup { PageRow(ctx, section("about")) }
+                    Text(
+                        "Version ${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
+                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }
@@ -232,19 +253,178 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
             Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            CardSection(null) {
-                Column(Modifier.padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    when (open.key) {
-                        "security" -> Security(ctx)
-                        "autofill" -> Autofill(ctx)
-                        "permissions" -> PermissionsSettings(ctx)
-                        "vault" -> VaultOptions(ctx)
-                        "appearance" -> Appearance(ctx)
-                        else -> About(ctx)
+            when (open.key) {
+                "account" -> Account(ctx)
+                "about" -> About(ctx)
+                else -> CardSection(null) {
+                    Column(Modifier.padding(vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        when (open.key) {
+                            "security" -> Security(ctx)
+                            "autofill" -> Autofill(ctx)
+                            "permissions" -> PermissionsSettings(ctx)
+                            "vault" -> VaultOptions(ctx)
+                            else -> Appearance(ctx)
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** A grouped card holding tile rows (no inner padding: rows are full-width touch targets). */
+@Composable
+private fun TileGroup(content: @Composable ColumnScope.() -> Unit) = GroupCard { Column(content = content) }
+
+/** The tile's side, growing a little with the font scale (like the iOS app). */
+@Composable
+private fun tileSide() = (29 * LocalDensity.current.fontScale.coerceIn(1f, 1.5f)).dp
+
+/** Divider between tile rows, inset to the text column. */
+@Composable
+private fun TileDivider() = HorizontalDivider(Modifier.padding(start = Space.l + tileSide() + 14.dp), color = PassAuthTheme.colors.line)
+
+/** A settings row: white symbol on a coloured rounded square, the title, an optional trailing part and a chevron. */
+@Composable
+private fun TileRow(
+    title: String,
+    icon: ImageVector,
+    tint: Color,
+    onClick: () -> Unit,
+    description: String? = null,
+    trailing: @Composable () -> Unit = {},
+) {
+    val side = tileSide()
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = Space.l, vertical = Space.m)
+            .then(if (description != null) Modifier.semantics(mergeDescendants = true) { contentDescription = description } else Modifier),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Box(Modifier.size(side).clip(RoundedCornerShape(side * 0.24f)).background(tint), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(side * 0.6f))
+        }
+        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        trailing()
+        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+    }
+}
+
+@Composable
+private fun PageRow(ctx: UiCtx, s: Section) = TileRow(s.title, s.icon, s.tint, { ctx.go(Route.Settings(s.key)) })
+
+/** The account card at the top of Settings: avatar, name, email and server; opens the Account page. */
+@Composable
+private fun AccountCard(ctx: UiCtx) {
+    val s = ctx.state
+    Row(
+        Modifier.fillMaxWidth().clickable(role = Role.Button) { ctx.go(Route.Settings("account")) }
+            .padding(horizontal = Space.l, vertical = Space.m)
+            .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Avatar(initials(s.name, s.email), 52.dp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(s.name.ifEmpty { s.email }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (s.name.isNotEmpty()) Text(s.email, style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Icon(Icons.Outlined.Dns, null, tint = PassAuthTheme.colors.muted, modifier = Modifier.size(14.dp))
+                Text(hostOf(s.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
+    }
+}
+
+/**
+ * Settings → Account: everything about the signed-in account in one place. Who and where, the accounts on this
+ * device (switch, add), then Lock and Log out, then Delete account at the bottom.
+ */
+@Composable
+private fun ColumnScope.Account(ctx: UiCtx) {
+    val s = ctx.state
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = Space.s).semantics(mergeDescendants = true) {},
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Space.s),
+    ) {
+        Avatar(initials(s.name, s.email), 72.dp)
+        Text(s.name.ifEmpty { s.email }, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+        if (s.name.isNotEmpty()) Text(s.email, style = MaterialTheme.typography.bodyMedium, color = PassAuthTheme.colors.muted)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+        CardSection(null) { KeyValue("Server") { ValueText(s.server) } }
+        Muted("To use another PassAuth server, add an account or log out and choose \"Change server\" on the sign-in screen.")
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+        CardSection("Accounts on this device") {
+            s.accounts.forEachIndexed { n, a ->
+                if (n > 0) HorizontalDivider(Modifier.padding(start = 34.dp + Space.m), color = PassAuthTheme.colors.line)
+                val current = a.id == s.activeId
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                        .clickable(role = Role.Button, enabled = !current) { ctx.launch { ctx.repo.switchAccount(a.id) } }
+                        .padding(vertical = Space.s)
+                        .semantics(mergeDescendants = true) { if (current) contentDescription = "${a.name.ifEmpty { a.email }}, current account" },
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Space.m),
+                ) {
+                    Avatar(initials(a.name, a.email), 34.dp)
+                    Column(Modifier.weight(1f)) {
+                        Text(a.name.ifEmpty { a.email }, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(hostOf(a.server), style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(statusLabel(a.status), style = MaterialTheme.typography.labelMedium, color = PassAuthTheme.colors.muted)
+                    if (current) Icon(Icons.Outlined.Check, null, tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+            if (s.accounts.size < MAX_ACCOUNTS) {
+                HorizontalDivider(Modifier.padding(start = 34.dp + Space.m), color = PassAuthTheme.colors.line)
+                ActionRow("Add account", Icons.Outlined.PersonAdd, MaterialTheme.colorScheme.primary) { ctx.launch { ctx.repo.addAccount() } }
+            }
+        }
+        Muted("Up to $MAX_ACCOUNTS accounts, on the same or different PassAuth servers. Tap one to switch.")
+    }
+    var loggingOut by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+        CardSection(null) {
+            ActionRow("Lock", Icons.Outlined.Lock, MaterialTheme.colorScheme.primary) { ctx.launch { ctx.repo.lock() } }
+            HorizontalDivider(Modifier.padding(start = 34.dp + Space.m), color = PassAuthTheme.colors.line)
+            ActionRow("Log out", Icons.AutoMirrored.Outlined.Logout, MaterialTheme.colorScheme.error) { loggingOut = true }
+        }
+        Muted("Locking keeps the encrypted vault on this device. Logging out removes it.")
+    }
+    if (loggingOut) LogoutSheet(ctx) { loggingOut = false }
+    var deleting by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
+        CardSection(null) {
+            ActionRow("Delete account", Icons.Outlined.DeleteForever, MaterialTheme.colorScheme.error, chevron = true) { deleting = true }
+        }
+        Muted("Permanently deletes ${s.email} from ${hostOf(s.server)}, with every vault you own and every item in them.")
+    }
+    if (deleting) DeleteAccountDialog(ctx) { deleting = false }
+}
+
+private fun statusLabel(s: io.passauth.app.data.Status) = when (s) {
+    io.passauth.app.data.Status.Unlocked -> "Unlocked"
+    io.passauth.app.data.Status.Locked -> "Locked"
+    io.passauth.app.data.Status.LoggedOut -> "Logged out"
+    io.passauth.app.data.Status.Setup -> ""
+}
+
+/** A tappable action in a card: icon and title in the action's colour. */
+@Composable
+private fun ActionRow(title: String, icon: ImageVector, color: Color, chevron: Boolean = false, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClick = onClick).padding(vertical = Space.s),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Space.m),
+    ) {
+        Box(Modifier.size(34.dp), contentAlignment = Alignment.Center) { Icon(icon, null, tint = color) }
+        Text(title, style = MaterialTheme.typography.bodyLarge, color = color, modifier = Modifier.weight(1f))
+        if (chevron) Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null, tint = PassAuthTheme.colors.muted)
     }
 }
 
@@ -515,44 +695,96 @@ private fun ColumnScope.Appearance(ctx: UiCtx) {
     )
 }
 
+private object AboutLinks {
+    const val WEBSITE = "https://fahed-alhammadi.github.io/PassAuth/"
+    const val HELP = "https://fahed-alhammadi.github.io/PassAuth/support.html"
+    const val FEEDBACK = "https://github.com/Fahed-Alhammadi/PassAuth/issues"
+    const val PRIVACY = "https://fahed-alhammadi.github.io/PassAuth/privacy.html"
+    const val RATE = "https://play.google.com/store/apps/details?id=io.passauth.app"
+}
+
+/**
+ * Settings → About PassAuth (the same layout as the iOS app): one bold element, the brand panel with the app icon,
+ * name, copyright line and version; below it what you do (help, feedback, rating), then what you read (website,
+ * privacy policy).
+ */
 @Composable
 private fun ColumnScope.About(ctx: UiCtx) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        LogoMark(64.dp)
-        Text(
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("Pass")
-                withStyle(androidx.compose.ui.text.SpanStyle(color = Brand.Blue)) { append("Auth") }
-            },
-            style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
-        )
-        Muted("Version ${BuildConfig.VERSION_NAME}")
-        Muted("© Fahed Alhammadi")
+    BrandPanel()
+    CardSection(null) {
+        LinkRow("Help", null, Icons.AutoMirrored.Outlined.HelpOutline) { ctx.openUrl(AboutLinks.HELP) }
+        LinkDivider()
+        LinkRow("Send feedback", null, Icons.AutoMirrored.Outlined.Chat) { ctx.openUrl(AboutLinks.FEEDBACK) }
+        LinkDivider()
+        LinkRow("Rate PassAuth", null, Icons.Outlined.StarOutline) { ctx.openUrl(AboutLinks.RATE) }
     }
-    KeyValue("Signed in as") { ValueText(ctx.state.email) }
-    KeyValue("Server") { ValueText(ctx.state.server) }
-    Muted("To use another PassAuth server, log out and choose \"Change server\" on the sign-in screen.")
-    var loggingOut by remember { mutableStateOf(false) }
-    OutlinedButton(onClick = { loggingOut = true }) {
-        Icon(Icons.AutoMirrored.Outlined.Logout, null, Modifier.size(18.dp))
-        Spacer(Modifier.size(8.dp))
-        Text("Log out")
+    CardSection(null) {
+        LinkRow("Website", "fahed-alhammadi.github.io/PassAuth", Icons.Outlined.Language) { ctx.openUrl(AboutLinks.WEBSITE) }
+        LinkDivider()
+        LinkRow("Privacy policy", null, Icons.Outlined.PanTool) { ctx.openUrl(AboutLinks.PRIVACY) }
     }
-    if (loggingOut) LogoutSheet(ctx) { loggingOut = false }
-    HorizontalDivider(color = PassAuthTheme.colors.line)
-    Text("Delete account", style = MaterialTheme.typography.labelLarge, modifier = Modifier.semantics { heading() })
-    Muted("Permanently delete ${ctx.state.email} from ${hostOf(ctx.state.server)}, with every vault you own and every item in them.")
-    var deleting by remember { mutableStateOf(false) }
-    OutlinedButton(
-        onClick = { deleting = true },
-        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+    Text(
+        "Open source under the MIT License.",
+        style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted,
+        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = Space.s),
+    )
+}
+
+/** Navy into the brand blue (the shield's own gradient), a large faint shield behind, the app icon, name, © and version. */
+@Composable
+private fun BrandPanel() {
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        Modifier.fillMaxWidth().clip(shape)
+            .background(Brush.linearGradient(listOf(Brand.Navy, Color(0xFF0A3FA8))))
+            .semantics(mergeDescendants = true) {},
     ) {
-        Icon(Icons.Outlined.DeleteForever, null, Modifier.size(18.dp))
-        Spacer(Modifier.size(8.dp))
-        Text("Delete account…")
+        LogoMark(260.dp, Modifier.align(Alignment.BottomEnd).offset(x = 70.dp, y = 50.dp).alpha(0.04f))
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = Space.xl).padding(top = 36.dp, bottom = 30.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier.size(88.dp).shadow(14.dp, RoundedCornerShape(20.dp))
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Brush.verticalGradient(listOf(Color.White, Color(0xFFDCE7FD)))),
+                contentAlignment = Alignment.Center,
+            ) { LogoMark(56.dp) }
+            Text("PassAuth", color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
+            Text(
+                "© 2026 Fahed Alhammadi. All rights reserved.",
+                color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp),
+            )
+            Text(
+                "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                color = Brand.Cyan, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 16.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.1f))
+                    .padding(horizontal = 12.dp, vertical = 5.dp),
+            )
+        }
     }
-    if (deleting) DeleteAccountDialog(ctx) { deleting = false }
+}
+
+@Composable
+private fun LinkDivider() = HorizontalDivider(Modifier.padding(start = 24.dp + 14.dp), color = PassAuthTheme.colors.line)
+
+/** A link row: icon in the accent colour, the name, an optional address under it, and the "opens outside the app" arrow. */
+@Composable
+private fun LinkRow(title: String, detail: String?, icon: ImageVector, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClickLabel = "Open in the browser", onClick = onClick)
+            .padding(vertical = Space.s),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (detail != null) Text(detail, style = MaterialTheme.typography.bodySmall, color = PassAuthTheme.colors.muted)
+        }
+        Icon(Icons.AutoMirrored.Outlined.OpenInNew, null, tint = PassAuthTheme.colors.muted, modifier = Modifier.size(18.dp))
+    }
 }
 
 private fun hostOf(server: String) = io.passauth.app.data.UrlMatcher.parse(server)?.host ?: server
