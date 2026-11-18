@@ -1,9 +1,9 @@
-New in 0.9.1
-• Settings is reorganised: your account is at the top, then grouped rows with coloured icons (vault tools, security and AutoFill, appearance and permissions, About).
-• Everything about your account is on one page: tap your name to see the server, switch or add accounts, lock, log out or delete the account.
-• New About PassAuth page with the version, help, feedback, rating, website and privacy policy.
+New in 0.10.0
+• Profile picture: tap the circle on the Account page (Settings → your name) to choose a photo or remove it. It is encrypted before it leaves your phone and appears on your other devices. Without a photo your initials show as before.
+• With website icons turned off, logins now show a globe instead of the first letter of their name.
 
 Please test:
-1. Open Settings and check every row opens the right page.
-2. Tap your name: switch to another account and back, add an account, lock and log out.
-3. Open About PassAuth and try each link.
+1. Settings → your name → tap the big circle → Choose photo… and pick a photo. Check it shows on the Account page, the Settings card and the account menu.
+2. Open PassAuth on another device signed in to the same account and check the photo appears there after a moment.
+3. Remove the photo and check your initials come back.
+4. Turn website icons off in Settings and check the vault list shows globes.
