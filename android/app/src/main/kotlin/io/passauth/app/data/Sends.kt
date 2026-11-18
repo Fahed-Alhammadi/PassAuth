@@ -45,16 +45,20 @@ object Sends {
 
     // -------------------------------------------------------------- sizes
 
-    /** Bytes the core adds when it encrypts a field: the v2 marker byte (password Sends), a version byte, the 24-byte nonce and the 16-byte tag. */
-    private const val OVERHEAD = 1 + 1 + 24 + 16
+    /** Bytes the core adds when it encrypts a field: a version byte, the 24-byte nonce and the 16-byte tag. */
+    private const val OVERHEAD = 1 + 24 + 16
+
+    /** The marker byte in front of a password Send's (v2) fields. */
+    private const val V2_MARKER = 1
 
     fun utf8Length(text: String): Int = text.toByteArray(Charsets.UTF_8).size
 
     /** Characters of the encrypted field (unpadded base64url) for [plainBytes] bytes of text: what the server limits. */
-    fun encryptedFieldLength(plainBytes: Int): Int = Math.ceil(((plainBytes + OVERHEAD).toLong() * 4) / 3.0).toInt()
+    fun encryptedFieldLength(plainBytes: Int, v2: Boolean = false): Int =
+        Math.ceil(((plainBytes + OVERHEAD + (if (v2) V2_MARKER else 0)).toLong() * 4) / 3.0).toInt()
 
     /** The most text (UTF-8 bytes) that fits the server's limit on the encrypted text (`limits.send_max_bytes`). */
-    fun maxTextBytes(maxEncrypted: Int): Int = maxOf(0, Math.floor(maxEncrypted * 3 / 4.0).toInt() - OVERHEAD)
+    fun maxTextBytes(maxEncrypted: Int): Int = maxOf(0, Math.floor(maxEncrypted * 3 / 4.0).toInt() - OVERHEAD - V2_MARKER)
 
     /** The server's limit on a Send's encrypted text when `/api/config` doesn't say (1 MiB). */
     const val DEFAULT_MAX_BYTES = 1024 * 1024

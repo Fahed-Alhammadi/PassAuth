@@ -43,8 +43,8 @@ class SendsTest {
     @Test
     fun knowsTheMostTextThatFits() {
         val max = Sends.maxTextBytes(Sends.DEFAULT_MAX_BYTES)
-        assertTrue(Sends.encryptedFieldLength(max) <= Sends.DEFAULT_MAX_BYTES)
-        assertTrue(Sends.encryptedFieldLength(max + 1) > Sends.DEFAULT_MAX_BYTES)
+        assertTrue(Sends.encryptedFieldLength(max, v2 = true) <= Sends.DEFAULT_MAX_BYTES)
+        assertTrue(Sends.encryptedFieldLength(max + 1, v2 = true) > Sends.DEFAULT_MAX_BYTES)
         assertEquals(0, Sends.maxTextBytes(10))
     }
 

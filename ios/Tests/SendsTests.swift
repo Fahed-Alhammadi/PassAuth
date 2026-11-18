@@ -30,8 +30,8 @@ final class SendsTests: XCTestCase {
 
     func testKnowsTheMostTextThatFits() {
         let max = SendRules.maxTextBytes(SendRules.defaultMaxBytes)
-        XCTAssertLessThanOrEqual(SendRules.encryptedFieldLength(max), SendRules.defaultMaxBytes)
-        XCTAssertGreaterThan(SendRules.encryptedFieldLength(max + 1), SendRules.defaultMaxBytes)
+        XCTAssertLessThanOrEqual(SendRules.encryptedFieldLength(max, v2: true), SendRules.defaultMaxBytes)
+        XCTAssertGreaterThan(SendRules.encryptedFieldLength(max + 1, v2: true), SendRules.defaultMaxBytes)
         XCTAssertEqual(SendRules.maxTextBytes(10), 0)
     }
 

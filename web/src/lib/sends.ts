@@ -47,17 +47,19 @@ export function parseSendLocation(pathname: string, hash: string): { id: string 
 
 // ------------------------------------------------------------------ sizes
 
-/** Bytes the core adds when it encrypts a field: the v2 marker byte (password Sends), a version byte, the 24-byte nonce and the 16-byte tag. */
-const OVERHEAD = 1 + 1 + 24 + 16;
+/** Bytes the core adds when it encrypts a field: a version byte, the 24-byte nonce and the 16-byte tag. */
+const OVERHEAD = 1 + 24 + 16;
+/** The marker byte in front of a password Send's (v2) fields. */
+const V2_MARKER = 1;
 
 /** UTF-8 bytes of `text`. */
 export const utf8Length = (text: string): number => new TextEncoder().encode(text).length;
 
 /** Characters of the encrypted field (unpadded base64url) for `plainBytes` bytes of text: what the server limits. */
-export const encryptedFieldLength = (plainBytes: number): number => Math.ceil(((plainBytes + OVERHEAD) * 4) / 3);
+export const encryptedFieldLength = (plainBytes: number, v2 = false): number => Math.ceil(((plainBytes + OVERHEAD + (v2 ? V2_MARKER : 0)) * 4) / 3);
 
 /** The most text (UTF-8 bytes) that fits the server's limit on the encrypted text (`limits.send_max_bytes`). */
-export const maxTextBytes = (maxEncrypted: number): number => Math.max(0, Math.floor((maxEncrypted * 3) / 4) - OVERHEAD);
+export const maxTextBytes = (maxEncrypted: number): number => Math.max(0, Math.floor((maxEncrypted * 3) / 4) - OVERHEAD - V2_MARKER);
 
 /** The server's limit on a Send's encrypted text when `/api/config` doesn't say (1 MiB). */
 export const DEFAULT_SEND_MAX_BYTES = 1024 * 1024;

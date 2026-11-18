@@ -34,16 +34,18 @@ public enum SendRules {
 
     // MARK: Sizes
 
-    /// Bytes the core adds when it encrypts a field: the v2 marker byte (password Sends), a version byte, the 24-byte nonce, the 16-byte tag.
-    static let overhead = 1 + 1 + 24 + 16
+    /// Bytes the core adds when it encrypts a field: a version byte, the 24-byte nonce, the 16-byte tag.
+    static let overhead = 1 + 24 + 16
+    /// The marker byte in front of a password Send's (v2) fields.
+    static let v2Marker = 1
 
     public static func utf8Length(_ text: String) -> Int { text.utf8.count }
 
     /// Characters of the encrypted field (unpadded base64url) for `plainBytes` bytes of text.
-    public static func encryptedFieldLength(_ plainBytes: Int) -> Int { ((plainBytes + overhead) * 4 + 2) / 3 }
+    public static func encryptedFieldLength(_ plainBytes: Int, v2: Bool = false) -> Int { ((plainBytes + overhead + (v2 ? v2Marker : 0)) * 4 + 2) / 3 }
 
     /// The most text (UTF-8 bytes) that fits the server's limit on the encrypted text.
-    public static func maxTextBytes(_ maxEncrypted: Int) -> Int { max(0, (maxEncrypted * 3) / 4 - overhead) }
+    public static func maxTextBytes(_ maxEncrypted: Int) -> Int { max(0, (maxEncrypted * 3) / 4 - overhead - v2Marker) }
 
     public static let defaultMaxBytes = 1024 * 1024
     public static let defaultMaxDays = 30

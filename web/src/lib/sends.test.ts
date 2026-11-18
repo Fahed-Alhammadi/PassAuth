@@ -78,8 +78,8 @@ describe("sizes", () => {
 
   it("knows the most text that fits", () => {
     const max = maxTextBytes(DEFAULT_SEND_MAX_BYTES);
-    expect(encryptedFieldLength(max)).toBeLessThanOrEqual(DEFAULT_SEND_MAX_BYTES);
-    expect(encryptedFieldLength(max + 1)).toBeGreaterThan(DEFAULT_SEND_MAX_BYTES);
+    expect(encryptedFieldLength(max, true)).toBeLessThanOrEqual(DEFAULT_SEND_MAX_BYTES);
+    expect(encryptedFieldLength(max + 1, true)).toBeGreaterThan(DEFAULT_SEND_MAX_BYTES);
     expect(maxTextBytes(10)).toBe(0);
   });
 
