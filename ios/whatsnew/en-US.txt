@@ -1,9 +1,9 @@
-New in 0.10.0
-• Profile picture: tap the circle on the Account page (Settings → your name) to choose a photo or remove it. It is encrypted before it leaves your phone and appears on your other devices. Without a photo your initials show as before.
-• With website icons turned off, logins now show a globe instead of the first letter of their name.
+New in 0.11.0
+• Sends with a password are now locked with that password: the link alone can no longer open the text, not even with the server's data. Your own devices still open and edit your Sends.
+• PassAuth now notices if your server ever sends an older version of an item. It warns you on the item and keeps the newer copy when it has one.
+• Personal vault keys are stored in a stronger format once every device on your account has this update.
 
 Please test:
-1. Settings → your name → tap the big circle → Choose photo… and pick a photo. Check it shows on the Account page, the Settings card and the account menu.
-2. Open PassAuth on another device signed in to the same account and check the photo appears there after a moment.
-3. Remove the photo and check your initials come back.
-4. Turn website icons off in Settings and check the vault list shows globes.
+1. Create a Send with a password, open its link in a browser and check the text only appears after the right password.
+2. Change the Send's password and remove it again; check the Send still opens each time.
+3. Edit a few logins on this phone and on another device and check nothing shows an "older version" warning.

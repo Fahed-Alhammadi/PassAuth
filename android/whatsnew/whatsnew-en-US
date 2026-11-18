@@ -1,2 +1,3 @@
-• Profile picture: tap the circle on the Account page to choose a photo or remove it. It's encrypted before it leaves your phone and appears on your other devices. Without a photo your initials show as before.
-• With website icons turned off, logins now show a globe instead of the first letter of their name.
+• Sends with a password are now locked with that password: the link alone can no longer open the text. Your own devices still open and edit your Sends.
+• PassAuth warns you if your server ever sends an older version of an item, and keeps the newer copy when it has one.
+• Personal vault keys use a stronger format once all your devices have this update.
