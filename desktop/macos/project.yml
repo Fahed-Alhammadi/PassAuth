@@ -167,6 +167,10 @@ targets:
       # Security round 7/8/9: epoch-bound own wraps, Send v2, item rollback detection.
       - path: ../../ios/Tests/Sec789Tests.swift
         group: Tests/Shared
+      # Vault manifests: the checks, what writes carry, summary rows (this extension keeps trashed
+      # items without their data) and the refusal of servers without signed sharing.
+      - path: ../../ios/Tests/VaultManifestTests.swift
+        group: Tests/Shared
       # Golden vectors shared with the other clients.
       - path: ../../testdata/vectors.json
         buildPhase: resources

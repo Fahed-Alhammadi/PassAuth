@@ -49,7 +49,7 @@ final class DeviceLoginContractTests: XCTestCase {
             if let remember { s.secrets.rememberTokens["\(server)|a@example.com"] = remember }
             configure(&s)
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] }).allowingOlderServers()
         repo.isApp = true
         repo.deviceLoginSleep = { _ in }
         return repo

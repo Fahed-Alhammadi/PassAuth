@@ -560,6 +560,9 @@ extension VaultRepository {
     /// Worth trying the save again after a sync: not an answer that will stay the same.
     public nonisolated static func retryAttachmentSave(_ e: Error) -> Bool {
         if e is ConflictError { return true }
+        // Vault manifests: three sends each met another device's write; the vault is synced and
+        // checked again before the next try.
+        if let u = e as? UserError, u.message == ManifestText.busy { return true }
         guard let a = e as? ApiError else { return !(e is UserError) }
         return a.status == 409 || a.status == 429 || (a.status >= 500 && a.status != 507 && !a.hasCode("insufficient_storage"))
     }

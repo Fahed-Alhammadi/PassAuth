@@ -34,7 +34,7 @@ final class SessionsTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        return VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        return VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] }).allowingOlderServers()
     }
 
     func testSessionsListedWithTheirAppAndSignedOut() async throws {

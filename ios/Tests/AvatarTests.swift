@@ -121,7 +121,7 @@ final class AvatarTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] }).allowingOlderServers()
         repo.isApp = true
         repo.avatarCache = AvatarCache(directory: avatarDir)
         ScriptedServer.syncBodies = [try syncBody(f, avatarSeq: avatarSeq)]

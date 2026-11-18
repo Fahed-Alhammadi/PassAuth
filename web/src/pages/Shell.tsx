@@ -4,14 +4,15 @@ import { SignInRequestSheet } from "../components/DeviceSignIn";
 import { SigningNotices } from "../components/SignedSharing";
 import { StartNewListButton, UseServerListButton } from "../components/EmergencyRoster";
 import { Wordmark } from "../components/Logo";
-import { Icon, toast, type IconName } from "../components/ui";
-import { api, friendlyError, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
+import { ConfirmDialog, Icon, toast, type IconName } from "../components/ui";
+import { SERVER_UPDATE_NEEDED, api, friendlyError, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { keepDraftFor } from "../lib/drafts";
 import { invitationNotice, invitationsKey } from "../lib/invitations";
 import { getDesktop } from "../lib/platform";
+import { USE_SERVER_COPY, USE_SERVER_COPY_BODY, USE_SERVER_COPY_TITLE, VAULT_WARNING, VAULT_WARNING_READER } from "../lib/manifest";
 import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
 import { ROSTER_ROLLED_BACK, ROSTER_UNREADABLE } from "../lib/emergency-client";
-import { dismissWarnings, lock, logout, useVault } from "../lib/vault";
+import { acceptServerCopy, dismissWarnings, lock, logout, useVault } from "../lib/vault";
 import { kindOf, type ItemKind } from "../lib/types";
 
 const KINDS: [ItemKind, string, IconName][] = [
@@ -236,9 +237,59 @@ function writeSession(key: string, value: string) {
   }
 }
 
+/**
+ * Vault manifests: one warning for each vault whose items don't match its record of changes (`Vault.manifestWarning`).
+ * The vault stays readable and takes no changes; someone who can edit it may accept the server's copy, after a
+ * confirmation that says what that means.
+ */
+export function ManifestNotices() {
+  const { vaults } = useVault();
+  const [asking, setAsking] = useState<string | null>(null);
+  const flagged = vaults.filter((v) => v.manifestWarning);
+  const target = flagged.find((v) => v.id === asking);
+  if (!flagged.length) return null;
+  return (
+    <>
+      {flagged.map((v) => (
+        <div key={v.id} className="alert alert-warn small notice" role="alert" data-manifest-warning={v.id}>
+          <div className="grow">
+            <span>
+              <strong>{v.name}:</strong> {VAULT_WARNING}
+            </span>
+            <div className="row">
+              {v.role === "read" ? (
+                <span className="muted">{VAULT_WARNING_READER}</span>
+              ) : (
+                <button type="button" className="link" onClick={() => setAsking(v.id)}>
+                  {USE_SERVER_COPY}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+      {target && (
+        <ConfirmDialog
+          title={USE_SERVER_COPY_TITLE}
+          subtitle={target.name}
+          icon="shield"
+          action={USE_SERVER_COPY}
+          onClose={() => setAsking(null)}
+          onConfirm={async () => {
+            await acceptServerCopy(target.id);
+            setAsking(null);
+          }}
+        >
+          <p className="card-text">{USE_SERVER_COPY_BODY}</p>
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
 /** Account and vault notices shown above the item list, in the page flow (never over the toolbar). */
 export function Notices() {
-  const { email, emailVerified, warnings, pendingRotations, vaults, invitations, policyViolations, emergencyNotice } = useVault();
+  const { email, emailVerified, warnings, pendingRotations, vaults, invitations, policyViolations, emergencyNotice, serverOutdated } = useVault();
   const policies = usePolicies();
   const [hideVerify, setHideVerify] = useState(() => readSession(VERIFY_DISMISSED) === "1");
   const [invitesDismissed, setInvitesDismissed] = useState(() => readSession(INVITATIONS_DISMISSED));
@@ -266,6 +317,13 @@ export function Notices() {
 
   return (
     <>
+      {serverOutdated && (
+        <div className="alert alert-warn small notice" role="alert" data-server-outdated>
+          <div className="grow">
+            <span>{SERVER_UPDATE_NEEDED} Changes aren't saved or synced until then.</span>
+          </div>
+        </div>
+      )}
       {policyLines.length > 0 && (
         <div className="alert alert-warn small notice" role="note">
           <div className="grow">
@@ -373,6 +431,7 @@ export function Notices() {
         </div>
       )}
       <SigningNotices link />
+      <ManifestNotices />
       {warnings.length > 0 && (
         <div className="alert alert-warn small notice" role="alert">
           <div className="grow">

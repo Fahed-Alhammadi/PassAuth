@@ -207,6 +207,7 @@ public final class SecureStore {
     public func deleteCache(_ id: String) {
         try? FileManager.default.removeItem(at: cacheURL(id))
         try? FileManager.default.removeItem(at: revsURL(id))
+        try? FileManager.default.removeItem(at: manifestsURL(id))
     }
 
     // MARK: Item edit counters seen (rollback detection), next to the offline copy
@@ -232,6 +233,33 @@ public final class SecureStore {
         guard let plain = try? JSONEncoder().encode(merged), let blob = seal(plain, aad: "revs:\(id)") else { return }
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
         write(blob, to: revsURL(id))
+    }
+
+    // MARK: Vault manifest versions seen (rollback detection), next to the item edit counters
+
+    private func manifestsURL(_ id: String) -> URL {
+        cacheDir.appendingPathComponent("\(id.filter { $0.isLetter || $0.isNumber || $0 == "-" }).manifests")
+    }
+
+    /// The highest manifest version this device saw per vault id of the account; empty when none
+    /// was kept (a new device: the first manifest seen is trusted), nil when the file exists but
+    /// can't be read now. Entries of vaults that are gone stay (vault ids are never reused; a
+    /// server could hide a vault and show it again).
+    public func readManifestVersions(_ id: String) -> [String: UInt64]? {
+        guard let blob = try? Data(contentsOf: manifestsURL(id)) else { return [:] }
+        guard let plain = open(blob, aad: "manifests:\(id)") else { return nil }
+        return try? JSONDecoder().decode([String: UInt64].self, from: plain)
+    }
+
+    /// Store `versions` merged into what is on the device: the higher number per vault, so
+    /// neither the app nor an AutoFill extension lowers what the other saw. Nothing is written
+    /// while the stored ones can't be read.
+    public func writeManifestVersions(_ id: String, _ versions: [String: UInt64]) {
+        guard let disk = readManifestVersions(id) else { return }
+        let merged = VaultManifest.merged(disk, versions.filter { $0.value > 0 })
+        guard merged != disk, let plain = try? JSONEncoder().encode(merged), let blob = seal(plain, aad: "manifests:\(id)") else { return }
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
+        write(blob, to: manifestsURL(id))
     }
 
     // MARK: Encryption

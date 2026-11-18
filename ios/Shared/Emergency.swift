@@ -503,11 +503,19 @@ public enum Emergency {
             public var id: String
             public var meta: String
             public var wrappedKey: String
+            /// Vault manifests: the vault key's epoch, the vault's sealed manifest and its
+            /// version (0: none), from the same snapshot as the items.
+            public var keyEpoch: Int64
+            public var manifest: String?
+            public var manifestSeq: Int64
 
-            public init(id: String, meta: String, wrappedKey: String) {
+            public init(id: String, meta: String, wrappedKey: String, keyEpoch: Int64 = 0, manifest: String? = nil, manifestSeq: Int64 = 0) {
                 self.id = id
                 self.meta = meta
                 self.wrappedKey = wrappedKey
+                self.keyEpoch = keyEpoch
+                self.manifest = manifest
+                self.manifestSeq = manifestSeq
             }
         }
 
@@ -540,7 +548,9 @@ public enum Emergency {
         guard let v, case .object = v, !str(v["sealed_key"]).isEmpty, case .array(let vs)? = v["vaults"], case .array(let items)? = v["items"] else { return nil }
         let vaults = vs.compactMap { r -> GrantorVaultData.Vault? in
             guard !str(r["id"]).isEmpty, !str(r["meta"]).isEmpty, !str(r["wrapped_key"]).isEmpty else { return nil }
-            return GrantorVaultData.Vault(id: str(r["id"]), meta: str(r["meta"]), wrappedKey: str(r["wrapped_key"]))
+            return GrantorVaultData.Vault(id: str(r["id"]), meta: str(r["meta"]), wrappedKey: str(r["wrapped_key"]),
+                                          keyEpoch: max(0, num(r["key_epoch"]) ?? 0), manifest: r["manifest"]?.string,
+                                          manifestSeq: max(0, num(r["manifest_seq"]) ?? 0))
         }
         let rows = items.compactMap { r -> GrantorVaultData.Row? in
             guard !str(r["id"]).isEmpty, !str(r["vault_id"]).isEmpty, !str(r["item_key"]).isEmpty, !str(r["data"]).isEmpty else { return nil }

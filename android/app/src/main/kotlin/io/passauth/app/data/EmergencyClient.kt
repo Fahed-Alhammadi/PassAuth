@@ -29,6 +29,13 @@ interface EmergencyKeyHandle : AutoCloseable {
 interface OpenedVaultKey : AutoCloseable {
     fun decryptMeta(vaultId: String, meta: String): String
     fun decryptItem(id: String, vaultId: String, key: String, data: String): String
+
+    /**
+     * Are [itemsJson] (every item row of the vault, as sent) exactly what the vault's manifest
+     * records ([Manifests]; the core's `manifestVerify` without device memory)? Only asked for a
+     * vault that has one.
+     */
+    fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, sealed: String?, itemsJson: String): Boolean
 }
 
 class NewEmergencyKeyHandle(val wrapped: String, val key: EmergencyKeyHandle) : AutoCloseable {
@@ -104,7 +111,14 @@ class RosterChangedError : UserException("Your server's list of emergency contac
 data class GrantorEntry(val id: String, val vaultId: String, val item: Item, val deletedAt: Long?)
 
 /** A grantor's vaults, decrypted for viewing: memory only. */
-data class GrantorVault(val grant: Grant, val vaults: List<Pair<String, String>>, val items: List<GrantorEntry>, val failed: Int)
+data class GrantorVault(
+    val grant: Grant,
+    val vaults: List<Pair<String, String>>,
+    val items: List<GrantorEntry>,
+    val failed: Int,
+    /** Vaults (names) whose items aren't what their manifest records ([Manifests.WARNING]). */
+    val mismatched: List<String> = emptyList(),
+)
 
 /**
  * Emergency access requests and keys (the web vault's `emergency-client.ts`, same flows and words;
@@ -626,6 +640,7 @@ class EmergencyClient(private val env: EmergencyEnv) {
         }
         val vaults = mutableListOf<Pair<String, String>>()
         val items = mutableListOf<GrantorEntry>()
+        val mismatched = mutableListOf<String>()
         var failed = 0
         key.use { k ->
             for (v in data.vaults) {
@@ -643,6 +658,16 @@ class EmergencyClient(private val env: EmergencyEnv) {
                         null
                     } ?: "Vault"
                     vaults += v.id to name
+                    // A vault with a manifest: the rows sent must be exactly what it records (read-only check, nothing remembered).
+                    if (v.manifestSeq > 0) {
+                        val sent = kotlinx.serialization.json.JsonArray(data.rawItems.filter { (it["vault_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content == v.id })
+                        val ok = try {
+                            vk.manifestMatches(v.id, v.keyEpoch, v.manifestSeq, v.manifest, sent.toString())
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (!ok) mismatched += name
+                    }
                     for (r in rows) {
                         try {
                             items += GrantorEntry(r.id, v.id, ItemCodec.decode(vk.decryptItem(r.id, v.id, r.key, r.data)), r.deletedAt)
@@ -654,6 +679,6 @@ class EmergencyClient(private val env: EmergencyEnv) {
             }
         }
         items.sortWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.item.name })
-        return GrantorVault(grant, vaults, items, failed)
+        return GrantorVault(grant, vaults, items, failed, mismatched)
     }
 }

@@ -30,6 +30,9 @@ export interface Snapshot {
    * The cursor stays behind them, so the next delta sends those rows again and they are merged over what was shown.
    */
   own: Readonly<Record<string, number>>;
+  /** Vault manifests: the server's clock and trash retention of the last answer merged in (servers with `vault_manifest`). */
+  serverTime?: number;
+  trashDays?: number;
 }
 
 export interface Merged {
@@ -45,6 +48,7 @@ export interface Merged {
 export class DeltaError extends Error {}
 
 const isString = (v: unknown): v is string => typeof v === "string";
+const wholeNumber = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /**
  * Every field of the answer that the app keeps or hands to the core has its type (the core's string parameters must
@@ -104,6 +108,8 @@ export function mergeSync(prev: Snapshot | null, resp: SyncResponse): Merged | n
       // Not a change since the cursor: the whole list, every time (an accepted vault then arrives whole, as `reset`).
       invitations: readInvitations(resp.invitations),
       own: {},
+      ...(wholeNumber(resp.server_time) ? { serverTime: resp.server_time } : {}),
+      ...(wholeNumber(resp.trash_days) ? { trashDays: resp.trash_days } : {}),
     },
     behind,
   };
@@ -116,10 +122,19 @@ export function knownSeq(s: Snapshot | null, vaultId: string): number | undefine
   return Math.max(v.seq, s.own[vaultId] ?? v.seq);
 }
 
-/** One of this client's own item writes, as the server stored it. */
+/** The vault manifest a write carried (`manifest.ts`): the vault's manifest version after the write and its sealed text. */
+export interface SentManifest {
+  seq: number;
+  sealed: string;
+}
+
+/**
+ * One of this client's own item writes, as the server stored it. `manifest`: the vault manifest the write carried and
+ * the server stored with it (its answer's `manifest_seq` is that version); the vault row then holds it too.
+ */
 export type OwnWrite =
-  | { kind: "upsert"; row: SyncItemRow; vaultSeq: number }
-  | { kind: "remove"; id: string; vaultId: string; vaultSeq: number };
+  | { kind: "upsert"; row: SyncItemRow; vaultSeq: number; manifest?: SentManifest }
+  | { kind: "remove"; id: string; vaultId: string; vaultSeq: number; manifest?: SentManifest };
 
 /** Show an own write without asking the server; only after `afterWrite` said "apply". */
 export function applyOwnWrite(s: Snapshot, w: OwnWrite): Snapshot {
@@ -127,7 +142,20 @@ export function applyOwnWrite(s: Snapshot, w: OwnWrite): Snapshot {
   const vaultId = w.kind === "upsert" ? w.row.vault_id : w.vaultId;
   if (w.kind === "upsert") items.set(w.row.id, w.row);
   else if (items.get(w.id)?.vault_id === w.vaultId) items.delete(w.id);
-  return { ...s, items, own: { ...s.own, [vaultId]: w.vaultSeq } };
+  const next = { ...s, items, own: { ...s.own, [vaultId]: w.vaultSeq } };
+  return w.manifest ? applyOwnManifest(next, vaultId, w.manifest, w.vaultSeq) : next;
+}
+
+/**
+ * The vault row holds a manifest this client stored itself (with an own write shown without asking, a first manifest
+ * or a new baseline) and the vault's number after that request. The items are untouched.
+ */
+export function applyOwnManifest(s: Snapshot, vaultId: string, manifest: SentManifest, vaultSeq: number): Snapshot {
+  return {
+    ...s,
+    vaults: s.vaults.map((v) => (v.id === vaultId ? { ...v, manifest: manifest.sealed, manifest_seq: manifest.seq } : v)),
+    own: { ...s.own, [vaultId]: vaultSeq },
+  };
 }
 
 /**
@@ -136,10 +164,20 @@ export function applyOwnWrite(s: Snapshot, w: OwnWrite): Snapshot {
  * - "apply": it is exactly the next number, so nothing else happened in the vault and the write can be shown as sent
  *   (`canApply`: the client knows the stored row, i.e. a create, an edit in place, a restore or a delete for good);
  * - "sync": anything else (other writes in between, numbers out of order, a move, a server without numbers).
+ *
+ * Vault manifests (`manifest`, optional): `sent` is the manifest version the write carried (undefined: none) and
+ * `answered` the answer's `manifest_seq`. A write is shown as sent only when the two agree: a write that carried one
+ * must be answered with exactly that version, and one that carried none must not be answered with a version above 0.
  */
-export function afterWrite(known: number | undefined, vaultSeq: unknown, canApply: boolean): "none" | "apply" | "sync" {
+export function afterWrite(
+  known: number | undefined,
+  vaultSeq: unknown,
+  canApply: boolean,
+  manifest?: { sent: number | undefined; answered: unknown },
+): "none" | "apply" | "sync" {
   if (known === undefined || typeof vaultSeq !== "number") return "sync";
   if (vaultSeq <= known) return "none";
+  if (manifest && (manifest.sent === undefined ? typeof manifest.answered === "number" && manifest.answered > 0 : manifest.answered !== manifest.sent)) return "sync";
   return vaultSeq === known + 1 && canApply ? "apply" : "sync";
 }
 

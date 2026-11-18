@@ -80,6 +80,8 @@ const SERVER_TYPES = [
   "vault.created",
   "vault.deleted",
   "vault.key_rotated",
+  "vault.manifest_reset",
+  "vault.manifest_started",
   "vault.renamed",
 ];
 

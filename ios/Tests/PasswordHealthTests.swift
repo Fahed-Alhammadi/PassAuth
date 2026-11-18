@@ -485,7 +485,7 @@ final class HealthSessionTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] }).allowingOlderServers()
         try await repo.unlock(password: password, secretKey: nil)
         return repo
     }

@@ -19,7 +19,7 @@ import { WEAK_BITS } from "@web/lib/health";
 import type { Bundle, EncryptedItem, Item, LoginFinishResponse, PreloginResponse, Role, SyncItemRow, SyncResponse, SyncVaultRow } from "@web/lib/types";
 import { isSyncResponse, kindOf, siteHost } from "@web/lib/types";
 import { AppError, codeOf, EXPIRED, FAILED, lockedError, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
-import { log, logged } from "../shared/log";
+import { log, logged, loggedAs } from "../shared/log";
 import { POPUP_VIEW_KEY } from "../shared/storage-keys";
 import { totpExpiry } from "../shared/totp";
 import type {
@@ -38,11 +38,44 @@ import type {
   VaultSigner,
 } from "../shared/types";
 import * as core from "../wasm/passauth_core";
-import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, refreshServerInfo, serverConfig, serverInfo } from "./api";
+import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, outdatedServer, refreshServerInfo, refuseOutdated, serverConfig, serverInfo, serverOutdated } from "./api";
 import { AVATAR_FEATURE, avatarSeqOf, avatars, deleteAvatar, refreshAvatar, uploadAvatar } from "./avatar";
 import { initCore } from "./core";
 import { emptyRevMemory, itemRevOf, noteServed, pruneRevMemory, readRevMemory, rollbackNotice, storedRevMemory } from "./item-revs";
 import { forgetLastUsed } from "./last-used";
+import {
+  dueTrash,
+  entryOf,
+  epochOf,
+  MANIFEST_BUSY,
+  MANIFEST_BUSY_TEXT,
+  MANIFEST_FEATURE,
+  MANIFEST_HELD,
+  MANIFEST_HELD_TEXT,
+  MANIFEST_TRIES,
+  type ManifestEntry,
+  type ManifestItem,
+  type ManifestMemory,
+  type ManifestNotice,
+  type ManifestStatus,
+  manifestItem,
+  manifestItems,
+  manifestNotice,
+  manifestSeqOf,
+  manifestTextOf,
+  mayStart,
+  purgeBatch,
+  readManifestMemory,
+  readServed,
+  rememberManifest,
+  SERVED_HASH,
+  type Served,
+  storedManifestMemory,
+  unresolved,
+  verifyVault,
+  withManifest,
+  writeQuery,
+} from "./manifests";
 import { type IndexedLogin, type MatchIndex, matchIndex } from "./match-index";
 import { forgetPolicyState, noteTwoStepDone, policyState } from "./policies";
 import {
@@ -145,6 +178,15 @@ let decrypted = new Map<string, { row: SyncItemRow; entry: Entry | null }>();
  */
 let revMem = emptyRevMemory();
 let revGen = -1;
+/**
+ * Vault manifests (manifests.ts). `manifestMem`: the highest manifest version this browser has seen per vault, read
+ * and kept with the item edit counters (same offline copy, same `revGen`). `manifestStates`: the core's last verdict
+ * on each open vault, for the snapshot shown: an unresolved vault ("rollback", "mismatch") stays readable, shows the
+ * warning and takes no writes. `upkeepTried`: the one try per vault state at starting a manifest or deleting old trash.
+ */
+let manifestMem: ManifestMemory = new Map();
+let manifestStates = new Map<string, ManifestStatus>();
+const upkeepTried = new Map<string, string>();
 /**
  * Signed sharing for the loaded account (signed-sharing.ts): checks run (`sharingOn`) on servers with `signed_sharing`
  * and for accounts this browser has seen anything signed for. `verdicts`: each vault row's last check, which
@@ -295,6 +337,8 @@ export async function setServer(url: string) {
   const cfg = await serverConfig(origin);
   if (cfg?.name !== "PassAuth") throw new Error("No PassAuth server answered at that address.");
   forgetServerFeatures(origin);
+  // A server from before signed sharing (or one that doesn't list it) is refused before any sign-in (asked again: an upgraded server passes).
+  await refuseOutdated(origin);
   await clearUnlocked();
   await local.set({ server: origin, tokens: null });
 }
@@ -839,8 +883,12 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
       await loadRevMemory(id, { copy });
       if (gen !== generation || currentId !== id || loaded) return;
       show(snap);
+      // The copy against its vaults' manifests, now that the keys are here (also a copy from before manifests).
+      const incomplete = verifyManifests(snap, false);
       syncAvatar(id, snap.user);
-      void refreshIfStale().catch(logged("Checking for changes"));
+      // Trash rows kept before the server sent their hashes: one sync fetches the vault whole (`syncNow`).
+      if (incomplete) void sync().catch(logged("Syncing"));
+      else void refreshIfStale().catch(logged("Checking for changes"));
       return;
     }
     await sync();
@@ -918,6 +966,9 @@ function unload() {
   decrypted = new Map();
   revMem = emptyRevMemory();
   revGen = -1;
+  manifestMem = new Map();
+  manifestStates = new Map();
+  upkeepTried.clear();
   opening = null;
   sharingOn = false;
   verdicts = new Map();
@@ -1094,21 +1145,38 @@ async function syncNow() {
   const delta = await deltaFor(id);
   if (stale()) return;
   // Older servers get the whole vault every time, as before; a copy without a cursor gets it once.
-  let merged = await fetchSync(id, delta, delta ? synced : null, stale);
+  const base = delta ? synced : null;
+  let merged = await fetchSync(id, delta, base, stale);
+  let full = !base?.cursor;
   // A delta this browser can't use (malformed, or about data it doesn't have): everything, once.
-  if (merged === "full") merged = await fetchSync(id, delta, null, stale);
+  if (merged === "full") {
+    merged = await fetchSync(id, delta, null, stale);
+    full = true;
+  }
   if (!merged || merged === "full" || stale()) return;
-  await accept(merged.snapshot, id);
+  let incomplete = await accept(merged.snapshot, id, full);
+  if (incomplete && !full && !stale()) {
+    // Vault manifests: the copy holds trash rows from before the server sent their hashes. Everything, once; what is
+    // still incomplete then counts as a mismatch (`verifyManifests`).
+    const again = await fetchSync(id, delta, null, stale);
+    if (!again || again === "full" || stale()) return;
+    merged = again;
+    incomplete = await accept(merged.snapshot, id, true);
+  }
   await noteTwoStepDone(id);
   // Not expected: the answer was older than an own write already shown. Ask again rather than keep it stale.
   if (merged.behind) void sync().catch(logged("Syncing again"));
+  else if (!stale() && (await manifestUpkeep(id, merged.served, stale).catch(loggedAs(false, "Vault manifest upkeep")))) void sync().catch(logged("Syncing again"));
 }
+
+/** A merged answer with the server's clock and trash setting it came with (vault manifests: old trash). */
+type Fetched = Merged & { served: Served };
 
 /**
  * One `GET /sync`: with `base`'s cursor only what changed since (`trash=summary`), merged into `base`. Null when the
  * answer is dropped (locked or switched meanwhile, or older than what is shown); "full" when a delta can't be used.
  */
-async function fetchSync(id: string, delta: boolean, base: Snapshot | null, stale: () => boolean): Promise<Merged | "full" | null> {
+async function fetchSync(id: string, delta: boolean, base: Snapshot | null, stale: () => boolean): Promise<Fetched | "full" | null> {
   const since = base?.cursor ?? null;
   const path = !delta ? "/sync" : since ? `/sync?since=${encodeURIComponent(since)}&trash=summary` : "/sync?trash=summary";
   const data = await api<unknown>(path, { accountId: id });
@@ -1124,7 +1192,7 @@ async function fetchSync(id: string, delta: boolean, base: Snapshot | null, stal
   } catch (e) {
     log.debug("A sync answer couldn't be used:", e);
   }
-  if (merged) return withSignedInvitations(merged, data);
+  if (merged) return { ...withSignedInvitations(merged, data), served: readServed(data) };
   if (since) return "full";
   throw new AppError(FAILED, UNEXPECTED_SYNC);
 }
@@ -1135,7 +1203,11 @@ function withSignedInvitations(merged: Merged, data: SyncResponse): Merged {
 }
 
 /** A new snapshot for the loaded account: its owner checked, its shared vaults checked, shown, kept as its offline copy, and the time noted. */
-async function accept(snap: Snapshot, id: string) {
+/**
+ * `full`: the snapshot is one full answer (not a delta merged into the copy). Resolves to whether a vault's rows are
+ * incomplete for its manifest (trash rows kept before the server sent their hashes): then the caller fetches everything.
+ */
+async function accept(snap: Snapshot, id: string, full: boolean): Promise<boolean> {
   const gen = generation;
   if (account && !ownSnapshot(account, snap)) {
     // Review H1: an answer for another account than the one the core authenticated is never shown or kept.
@@ -1143,10 +1215,12 @@ async function accept(snap: Snapshot, id: string) {
     throw new AppError(FAILED, WRONG_ACCOUNT_TEXT);
   }
   await checkSharing(snap, id, "sync");
-  if (gen !== generation || currentId !== id || !account) return;
+  if (gen !== generation || currentId !== id || !account) return false;
   await loadRevMemory(id);
-  if (gen !== generation || currentId !== id || !account) return;
+  if (gen !== generation || currentId !== id || !account) return false;
   show(snap);
+  // Vault manifests: the rows of this one answer (applied to the copy) against each vault's manifest in it.
+  const incomplete = verifyManifests(snap, full);
   await persist(id);
   await local.set({ lastSync: Date.now(), name: typeof snap.user?.name === "string" ? snap.user.name : "" }, id);
   syncAvatar(id, snap.user);
@@ -1154,13 +1228,14 @@ async function accept(snap: Snapshot, id: string) {
     sharingResync = false;
     void sync().catch(logged("Syncing again"));
   }
+  return incomplete;
 }
 
 /** A whole vault fetched while unlocking (no offline copy, or a newer account bundle). */
 async function acceptFull(data: SyncResponse, id: string) {
   const merged = mergeSync(null, data);
   if (!merged || !account || currentId !== id) return;
-  await accept(withSignedInvitations(merged, data).snapshot, id);
+  await accept(withSignedInvitations(merged, data).snapshot, id, true);
 }
 
 /** The account id the core authenticated (the unlocked account's own), never `/sync` `user.id` (review H1). */
@@ -1635,7 +1710,13 @@ async function checkSharing(snap: Snapshot, id: string, mode: "sync" | "open", s
     const remembered = unreadable || remembersSigned(memory);
     // Features unknown: checked, unless the rows can't be from a signing server (they always name key epochs).
     const unknownOn = features === undefined && rows.some((r) => r.key_epoch !== undefined && r.key_epoch !== null);
-    const on = !!features?.has("signed_sharing") || remembered || signedData || unknownOn;
+    // A sync answer is always checked: a server that doesn't sign is refused before it is asked (api.ts
+    // `serverOutdated`), and one whose features can't be read gets no benefit of the doubt (it could leave out the
+    // key epochs to pass for an old server on a new browser). Only an offline copy written with the checks off, before
+    // this version (no verdicts in it), is still read as it was stored.
+    // A copy this version (or any with signed sharing) wrote with the checks on carries its verdicts (`stored`): they
+    // keep deciding which vaults open, also while the server is one this app refuses.
+    const on = mode === "sync" || stored !== undefined || !!features?.has("signed_sharing") || remembered || signedData || unknownOn;
     if (!on) {
       sharingOn = false;
       memoryUnreadable = false;
@@ -2122,7 +2203,8 @@ function persist(id: string): Promise<void> {
   const p = storing.then(async () => {
     if (gen !== generation || currentId !== id || !synced) return;
     // The item edit counters only once read for this generation (else the stored ones would be replaced by none).
-    const revs = revGen === gen ? storedRevMemory(revMem) : await keptRevMemory(id);
+    // The manifest versions seen share that memory's lifetime (and its rule).
+    const revs = revGen === gen ? { ...storedRevMemory(revMem), ...storedManifestMemory(manifestMem) } : await keptRevMemory(id);
     await syncCache.set(id, sharingOn ? { ...toStored(synced), ...revs, trust: Object.fromEntries(verdicts) } : { ...toStored(synced), ...revs, checks: "off" });
   });
   storing = p.catch(() => {});
@@ -2132,7 +2214,7 @@ function persist(id: string): Promise<void> {
 /** The item edit counters in `id`'s offline copy, as stored (none when the copy isn't this account's). */
 async function keptRevMemory(id: string) {
   const copy = await syncCache.get(id);
-  return account && copy && copy.user?.id === meOf(account) ? storedRevMemory(readRevMemory(copy)) : {};
+  return account && copy && copy.user?.id === meOf(account) ? { ...storedRevMemory(readRevMemory(copy)), ...storedManifestMemory(readManifestMemory(copy)) } : {};
 }
 
 /**
@@ -2144,7 +2226,9 @@ async function loadRevMemory(id: string, read?: { copy: StoredSync | undefined }
   const gen = generation;
   const copy = read ? read.copy : await syncCache.get(id);
   if (gen !== generation || revGen === generation || currentId !== id) return;
-  revMem = account && copy && copy.user?.id === meOf(account) ? readRevMemory(copy) : emptyRevMemory();
+  const mine = !!account && !!copy && copy.user?.id === meOf(account);
+  revMem = mine ? readRevMemory(copy) : emptyRevMemory();
+  manifestMem = mine ? readManifestMemory(copy) : new Map();
   revGen = gen;
 }
 
@@ -2154,6 +2238,181 @@ export const rolledBack = (id: string): boolean => revMem.rolledBack.has(id);
 /** The vault-wide notice about items a server sent in an older version, or null. */
 export function rollbackSummary(): { text: string; key: string } | null {
   return rollbackNotice(revMem, new Set(entries.map((e) => e.id)));
+}
+
+// ----------------------------------------------------------- vault manifests
+
+/** The loaded snapshot's row of a vault. */
+const rowOf = (vaultId: string): SyncVaultRow | undefined => synced?.vaults.find((v) => v.id === vaultId);
+
+/**
+ * Check every open vault of `snap` (just shown) against its manifest: the core's verdict on the vault row, the version
+ * this browser remembers and every row of the vault in the copy. Called only for a state the server sent as one answer
+ * (applied to the copy) or for the offline copy at unlock, never after an own write shown without asking (this browser
+ * made that manifest). "ok" raises the remembered version; nothing else is ever remembered. `full`: `snap` is one full
+ * answer, so rows without data or hash can't be from an older copy any more: "incomplete" counts as a mismatch.
+ * Returns whether a vault is incomplete (the caller fetches everything once).
+ *
+ * The verdict rests on the rows alone, not on the server's feature list: a vault whose manifest this browser has seen
+ * stays checked on a server that stops listing the feature ("rollback").
+ */
+function verifyManifests(snap: Snapshot, full: boolean): boolean {
+  const items = manifestItems(snap);
+  const rows = new Map(snap.vaults.map((v) => [v.id, v]));
+  const next = new Map<string, ManifestStatus>();
+  let incomplete = false;
+  for (const vault of vaults) {
+    const row = rows.get(vault.id);
+    if (!row) continue;
+    const check = verifyVault(vault.key, row, manifestMem.get(vault.id), items.get(vault.id) ?? []);
+    let status = check.status;
+    if (status === "ok") rememberManifest(manifestMem, vault.id, check.version);
+    else if (status === "incomplete") {
+      if (full) status = "mismatch";
+      else incomplete = true;
+    }
+    if (unresolved(status) && !unresolved(manifestStates.get(vault.id))) log.warn(`A vault doesn't match its manifest (${status}); nothing is written into it until that is resolved.`);
+    next.set(vault.id, status);
+  }
+  manifestStates = next;
+  return incomplete;
+}
+
+/** The popup's warning about vaults that don't match their manifest, or null. */
+export function manifestSummary(): ManifestNotice | null {
+  return manifestNotice(vaults, manifestStates);
+}
+
+/** Whether the vault shows the manifest warning (its item pages say so too). */
+export const manifestWarned = (vaultId: string): boolean => unresolved(manifestStates.get(vaultId));
+
+const heldError = () => new AppError(MANIFEST_HELD, MANIFEST_HELD_TEXT, true);
+const busyError = () => new AppError(MANIFEST_BUSY, MANIFEST_BUSY_TEXT, true);
+
+/**
+ * The server refused a write for the vault's manifest: something else was written into the vault since this browser's
+ * copy (409 `manifest_conflict`), or the copy still said the vault has no manifest (400 `manifest_required`). Both mean:
+ * sync, check, compute again, send again.
+ */
+const manifestRefused = (e: unknown): boolean => e instanceof ApiError && (e.code === "manifest_conflict" || e.code === "manifest_required");
+
+/**
+ * Before a write into `vaultId`: a vault whose rows are incomplete for its manifest (an offline copy from before the
+ * server sent trash hashes, its full fetch still on its way) is synced first.
+ */
+async function manifestSettled(vaultId: string, gen: number): Promise<void> {
+  if (manifestStates.get(vaultId) === "incomplete") await syncFor(gen);
+}
+
+/**
+ * The manifest to send with a write into `vault`: `removed` = the affected rows as the copy holds them (before the
+ * write), `added` = as they are after it. Null when the vault has no manifest (the write goes as it always did).
+ * Refused here, before anything is sent, while the vault's warning is unresolved.
+ */
+function nextManifest(vault: Vault, removed: SyncItemRow[], added: ManifestItem[]): ManifestEntry | null {
+  const row = rowOf(vault.id);
+  const status = manifestStates.get(vault.id);
+  if (unresolved(status) || status === "incomplete") throw heldError();
+  if (!row || manifestSeqOf(row) === 0) return null;
+  const sealed = manifestTextOf(row);
+  // A vault with a manifest and no "ok" for the row shown: never written from here.
+  if (status !== "ok" || !sealed) throw heldError();
+  try {
+    return entryOf(vault.id, vault.key.manifestNext(vault.id, epochOf(row), manifestSeqOf(row), sealed, removed.map(manifestItem), added));
+  } catch (e) {
+    log.warn("Computing a vault's next manifest failed:", coreCode(e));
+    throw new AppError(FAILED, "PassAuth couldn't prepare this change. Sync and try again.", true);
+  }
+}
+
+/** What the manifest endpoints answer. */
+type ManifestAnswer = { vault_seq?: unknown; manifest_seq?: unknown } | null;
+
+/**
+ * Whether an own manifest write can be shown without asking: the server stored exactly the version sent, as the
+ * vault's next write (`known`: the vault's number the write was computed from), and nothing else was shown meanwhile.
+ */
+function ownManifestApplies(vaultId: string, known: number | undefined, sent: ManifestEntry, answer: ManifestAnswer): answer is { vault_seq: number; manifest_seq: number } {
+  const row = rowOf(vaultId);
+  return !!synced && !!row && known !== undefined && answer?.manifest_seq === sent.seq && answer.vault_seq === known + 1 && knownSeq(synced, vaultId) === known && manifestSeqOf(row) === sent.seq - 1;
+}
+
+/**
+ * After a sync, for every open vault this account may write to, on servers with `vault_manifest` (one try each per
+ * vault state, every failure ignored: another device probably did it, and the next sync decides again):
+ * - a vault without a manifest gets its first one when the server says every member's apps can keep it (`mayStart`);
+ * - a vault with one (verdict "ok") has its old trash deleted for good: the server's sweeper skips such vaults, since
+ *   only an app can write the manifest that goes with the deletion (`dueTrash`: the server's own clock and setting).
+ * Resolves to whether a sync should follow (a purge the copy couldn't apply itself).
+ */
+async function manifestUpkeep(id: string, served: Served, stale: () => boolean): Promise<boolean> {
+  const server = (await local.account(id)).data?.server ?? "";
+  const info = server ? await serverInfo(server) : null;
+  if (!info?.features.has(MANIFEST_FEATURE)) return false;
+  let again = false;
+  for (const vault of [...vaults]) {
+    if (stale() || !synced) return false;
+    const row = rowOf(vault.id);
+    if (!row || vault.role === "read") continue;
+    const status = manifestStates.get(vault.id);
+    const known = knownSeq(synced, vault.id);
+    if (known === undefined) continue;
+    if (status === "none") {
+      const rows = manifestItems(synced).get(vault.id) ?? [];
+      if (!mayStart({ features: info.features, row, role: vault.role, status, remembered: manifestMem.get(vault.id), items: rows })) continue;
+      if (upkeepTried.get(vault.id) === `start:${known}`) continue;
+      upkeepTried.set(vault.id, `start:${known}`);
+      let sent: ManifestEntry;
+      let answer: ManifestAnswer;
+      try {
+        sent = { vault_id: vault.id, seq: 1, sealed: vault.key.manifestStart(vault.id, epochOf(row), 1, rows) };
+        answer = await api<ManifestAnswer>(`/vaults/${encodeURIComponent(vault.id)}/manifest`, { method: "PUT", body: { base_seq: 0, seq: 1, sealed: sent.sealed, vault_seq: known }, accountId: id });
+      } catch (e) {
+        log.debug("Starting a vault's manifest didn't work now:", codeOf(e) ?? e);
+        continue;
+      }
+      if (stale() || !synced) return false;
+      if (!ownManifestApplies(vault.id, known, sent, answer)) continue; // the next sync brings it
+      synced = withManifest(synced, sent, answer.vault_seq);
+      rememberManifest(manifestMem, vault.id, sent.seq);
+      manifestStates.set(vault.id, "ok");
+      await persist(id);
+    } else if (status === "ok" && manifestSeqOf(row) > 0) {
+      const due = dueTrash(synced.items.values(), vault.id, served).slice(0, purgeBatch(info.limits));
+      if (!due.length || upkeepTried.get(vault.id) === `purge:${known}`) continue;
+      upkeepTried.set(vault.id, `purge:${known}`);
+      let sent: ManifestEntry | null;
+      let answer: ManifestAnswer;
+      try {
+        sent = nextManifest(vault, due, []);
+        if (!sent) continue;
+        answer = await api<ManifestAnswer>(`/vaults/${encodeURIComponent(vault.id)}/trash/purge`, {
+          body: { items: due.map((r) => ({ id: r.id, revision: r.revision })), manifests: [sent] },
+          accountId: id,
+        });
+      } catch (e) {
+        log.debug("Deleting a vault's old trash didn't work now:", codeOf(e) ?? e);
+        continue;
+      }
+      if (stale() || !synced) return false;
+      if (!ownManifestApplies(vault.id, known, sent, answer)) {
+        again = true;
+        continue;
+      }
+      // The trash is never shown: the rows go from the copy, nothing is decrypted again.
+      const items = new Map(synced.items);
+      for (const r of due) items.delete(r.id);
+      synced = withManifest({ ...synced, items }, sent, answer.vault_seq);
+      rememberManifest(manifestMem, vault.id, sent.seq);
+      await persist(id);
+    }
+  }
+  return again;
+}
+
+/** Whether the active account's server is one this app refuses ("Update your PassAuth server…"), as far as known. */
+export async function serverNeedsUpdate(): Promise<boolean> {
+  return outdatedServer((await local.account()).data?.server ?? "");
 }
 
 const byName = new Intl.Collator(undefined, { sensitivity: "base" });
@@ -2257,7 +2516,8 @@ function materialize(snap: Snapshot) {
         });
         const mine = held.mine;
         if (how === "keep" && mine) {
-          const keptRow: SyncItemRow = { ...row, item_key: mine.enc.key, data: mine.enc.data };
+          // Vault manifests are about the server's rows: the kept copy carries the hash of the data the server sent.
+          const keptRow = { ...row, item_key: mine.enc.key, data: mine.enc.data, [SERVED_HASH]: core.manifestDataHash(row.data) } as SyncItemRow;
           snap.items.set(row.id, keptRow);
           copies.set(row.id, { row: keptRow, entry: mine });
           list.push(mine);
@@ -2326,7 +2586,8 @@ export async function checkForChanges(): Promise<LiveCheck> {
   if (!id || !data?.server || !data.tokens) return "signed_out";
   const info = await serverInfo(data.server);
   if (!info) return "offline";
-  if (!info.features.has("delta_sync")) return "unsupported";
+  // A server this app refuses is never asked (no socket either).
+  if (serverOutdated(info) || !info.features.has("delta_sync")) return "unsupported";
   try {
     const r = await revisionOf(id);
     if ((await activeId()) === id && isStale(r, await snapshotOf(id)) && (await ensureUnlocked())) await sync();
@@ -2489,7 +2750,7 @@ async function syncFor(gen: number) {
 }
 
 /** What item writes answer: the item's new revision and, with delta sync, the vault's number after the write. */
-type WriteAnswer = { revision?: unknown; vault_seq?: unknown } | null;
+type WriteAnswer = { revision?: unknown; vault_seq?: unknown; manifest_seq?: unknown } | null;
 
 /**
  * After one of this browser's item writes, bring the vault up to date with the least work. Without delta sync: a
@@ -2497,20 +2758,28 @@ type WriteAnswer = { revision?: unknown; vault_seq?: unknown } | null;
  * since brought the write; exactly the next one → the write was the only change, so `own()` (the row as the server
  * stored it) is shown and kept without asking; anything else → a delta sync. A sync that was already asking before
  * the write was answered may not include it, so it is waited for first.
+ *
+ * `sent`: the manifest the write carried (null: the vault has none). Then the write is shown without asking only when
+ * the answer's `manifest_seq` is the version sent and the copy still holds the one before it; the vault row gets the
+ * manifest sent, and its version is remembered. Anything else → a sync, which checks the vault.
  */
-async function settle(vaultId: string | undefined, answer: WriteAnswer, own?: (vaultSeq: number) => OwnWrite | null): Promise<void> {
+async function settle(vaultId: string | undefined, answer: WriteAnswer, own?: (vaultSeq: number) => OwnWrite | null, sent?: ManifestEntry | null): Promise<void> {
   const gen = generation;
   const id = currentId;
   const vaultSeq = answer?.vault_seq;
   if (!vaultId || typeof vaultSeq !== "number" || !synced?.cursor) return sync();
   await syncIdle();
   if (gen !== generation || currentId !== id || !synced) return;
-  const action = afterWrite(knownSeq(synced, vaultId), vaultSeq, !!own);
+  const row = rowOf(vaultId);
+  const mine = !sent || (answer?.manifest_seq === sent.seq && !!row && manifestSeqOf(row) === sent.seq - 1);
+  const action = afterWrite(knownSeq(synced, vaultId), vaultSeq, !!own && mine);
   if (action === "none") return;
   if (action === "apply" && own) {
     const write = own(vaultSeq);
     if (write) {
-      show(applyOwnWrite(synced, write));
+      const next = applyOwnWrite(synced, write);
+      if (sent) rememberManifest(manifestMem, vaultId, sent.seq);
+      show(sent ? withManifest(next, sent) : next);
       await persist(id);
       return;
     }
@@ -2551,17 +2820,30 @@ export async function createItem(item: Item, vaultId?: string, id?: string): Pro
   const now = Math.floor(Date.now() / 1000);
   const plain: Item = { ...item, created_at: now, updated_at: now };
   const features = (await serverInfo((await local.account(owner)).data?.server ?? ""))?.features ?? new Set<string>();
-  for (let attempt = 0; ; attempt++) {
+  let keyRetried = false;
+  for (let tries = 1; ; ) {
     if (gen !== generation || !account) throw lockedError();
+    await manifestSettled(target, gen);
     const vault = vaults.find((v) => v.id === target);
     if (!vault || vault.role === "read") throw new Error(vaultId ? "You can't add items to that vault." : "PassAuth couldn't find your own vault to save to.");
     const enc = vault.key.encryptItem(plain, itemId, vault.id) as EncryptedItem;
+    // Vault manifests: the vault's next manifest, with this item added.
+    const sent = nextManifest(vault, [], [{ id: itemId, deleted_at: null, data: enc.data }]);
     let answer: WriteAnswer;
     try {
-      answer = await api<WriteAnswer>("/items", { body: withEpoch(enc, vault, features), accountId: owner });
+      answer = await api<WriteAnswer>("/items", { body: { ...withEpoch(enc, vault, features), ...(sent ? { manifests: [sent] } : {}) }, accountId: owner });
     } catch (e) {
-      if (attempt === 0 && isCode(e, "vault_key_changed")) {
+      if (!keyRetried && isCode(e, "vault_key_changed")) {
         // A member was removed and the vault has a new key: sync brings it; the item is encrypted again with it, once.
+        keyRetried = true;
+        await syncFor(gen);
+        continue;
+      }
+      if (manifestRefused(e)) {
+        // Something else was written into the vault: sync (which checks it), then the same item with the manifest
+        // computed again, three tries in all.
+        if (tries >= MANIFEST_TRIES) throw busyError();
+        tries++;
         await syncFor(gen);
         continue;
       }
@@ -2569,10 +2851,15 @@ export async function createItem(item: Item, vaultId?: string, id?: string): Pro
       if (isCode(e, "item_exists") && (await arrivedEarlier(itemId, target, plain, gen))) return itemId;
       throw e;
     }
-    await settle(target, answer, (vaultSeq) => {
-      const row = storedRow(enc, answer, undefined);
-      return row && { kind: "upsert", row, vaultSeq };
-    });
+    await settle(
+      target,
+      answer,
+      (vaultSeq) => {
+        const row = storedRow(enc, answer, undefined);
+        return row && { kind: "upsert", row, vaultSeq };
+      },
+      sent,
+    );
     return itemId;
   }
 }
@@ -2594,8 +2881,11 @@ export async function updateItem(entry: Entry, item: Item) {
   const gen = generation;
   const features = (await serverInfo((await local.account(currentId)).data?.server ?? ""))?.features ?? new Set<string>();
   let base = entry;
-  for (let attempt = 0; ; attempt++) {
+  let keyRetried = false;
+  const changedElsewhere = () => new ApiError(409, "revision_conflict", "This item was changed on another device. PassAuth has the latest version now; check it and try again.");
+  for (let tries = 1; ; ) {
     if (gen !== generation || !account) throw lockedError();
+    await manifestSettled(base.vaultId, gen);
     const vault = vaults.find((v) => v.id === base.vaultId);
     if (!vault) throw new Error("Vault not found.");
     if (vault.role === "read") throw new Error("You can only view items in this vault.");
@@ -2607,47 +2897,100 @@ export async function updateItem(entry: Entry, item: Item) {
       next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
     }
     const enc = vault.key.updateItem(base.enc, next) as EncryptedItem;
+    // Vault manifests: the row as the copy holds it goes, the same row with the new data comes.
+    const before = synced?.items.get(base.id);
+    const held = before?.vault_id === vault.id ? before : undefined;
+    const sent = nextManifest(vault, held ? [held] : [], [{ id: base.id, deleted_at: held?.deleted_at ?? null, data: enc.data }]);
+    if (sent && !held) {
+      // The copy no longer has the item in this vault: it changed on another device.
+      await sync().catch(logged("Syncing after a conflict"));
+      throw changedElsewhere();
+    }
     let answer: WriteAnswer;
     try {
-      answer = await api<WriteAnswer>(`/items/${base.id}`, { method: "PUT", body: withEpoch({ ...enc, revision: base.revision }, vault, features), accountId: currentId });
+      answer = await api<WriteAnswer>(`/items/${base.id}`, {
+        method: "PUT",
+        body: { ...withEpoch({ ...enc, revision: base.revision }, vault, features), ...(sent ? { manifests: [sent] } : {}) },
+        accountId: currentId,
+      });
     } catch (e) {
       if (isCode(e, "revision_conflict")) {
         // Changed on another device: get the latest so the next try starts from it.
         await sync().catch(logged("Syncing after a conflict"));
         throw e;
       }
-      if (attempt > 0 || !isCode(e, "vault_key_changed")) throw e;
-      // The vault has a new key (a member was removed): sync brings it and the item re-encrypted under it.
-      // The same change is then applied to that copy, once, unless the item itself was changed meanwhile.
+      if (manifestRefused(e)) {
+        // Something else was written into the vault (not this item: that is a revision conflict). Three tries in all.
+        if (tries >= MANIFEST_TRIES) throw busyError();
+        tries++;
+      } else if (!keyRetried && isCode(e, "vault_key_changed")) keyRetried = true;
+      else throw e;
+      // A new vault key (a member was removed) or other writes into the vault: sync brings them (and checks the vault).
+      // The same change is then applied to that copy, unless the item itself was changed meanwhile.
       await syncFor(gen);
       const fresh = getEntry(base.id);
-      if (!fresh || fresh.vaultId !== base.vaultId || !sameContent(fresh.item, base.item)) {
-        throw new ApiError(409, "revision_conflict", "This item was changed on another device. PassAuth has the latest version now; check it and try again.");
-      }
+      if (!fresh || fresh.vaultId !== base.vaultId || !sameContent(fresh.item, base.item)) throw changedElsewhere();
       base = fresh;
       continue;
     }
     // An edit in place: the row as stored is known (the item keeps its vault, times and trash state).
     const vaultId = base.vaultId;
-    await settle(vaultId, answer, (vaultSeq) => {
-      const before = synced?.items.get(enc.id);
-      const row = before?.vault_id === vaultId ? storedRow(enc, answer, before) : null;
-      return row && { kind: "upsert", row, vaultSeq };
-    });
+    await settle(
+      vaultId,
+      answer,
+      (vaultSeq) => {
+        const stored = synced?.items.get(enc.id);
+        const row = stored?.vault_id === vaultId ? storedRow(enc, answer, stored) : null;
+        return row && { kind: "upsert", row, vaultSeq };
+      },
+      sent,
+    );
     return;
   }
 }
 
 export async function trashItem(entry: Entry) {
   if (!canWrite(entry)) throw new Error("You can only view items in this vault.");
-  const answer = await api<WriteAnswer>(`/items/${entry.id}`, { method: "DELETE" });
-  // Shown as in the trash (which the extension never shows) until the next delta brings the server's own row.
-  await settle(entry.vaultId, answer, (vaultSeq) => {
+  const gen = generation;
+  const owner = currentId;
+  for (let tries = 1; ; tries++) {
+    if (gen !== generation || !account) throw lockedError();
+    await manifestSettled(entry.vaultId, gen);
+    // Refused here while the vault's warning is unresolved (also for an item the copy no longer lists).
+    if (unresolved(manifestStates.get(entry.vaultId))) throw heldError();
+    const vault = vaults.find((v) => v.id === entry.vaultId);
     const before = synced?.items.get(entry.id);
-    if (!before || before.vault_id !== entry.vaultId || typeof answer?.revision !== "number") return null;
+    const held = before?.vault_id === entry.vaultId ? before : undefined;
+    // After a refusal and the sync that followed: gone, or in the trash already. Nothing is left to do.
+    if (tries > 1 && (!held || held.deleted_at)) return;
     const now = Math.floor(Date.now() / 1000);
-    return { kind: "upsert", vaultSeq, row: { ...before, deleted_at: now, revision: answer.revision, updated_at: now } };
-  });
+    // Vault manifests: the same row (same data), now in the trash; with it the item's revision, so "this item changed"
+    // and "something else in the vault changed" are told apart by the server.
+    const sent = vault && held ? nextManifest(vault, [held], [{ ...manifestItem(held), deleted_at: now }]) : null;
+    let answer: WriteAnswer;
+    try {
+      answer = await api<WriteAnswer>(`/items/${entry.id}${writeQuery(sent && held ? held.revision : undefined, sent)}`, { method: "DELETE", accountId: owner });
+    } catch (e) {
+      // Other writes into the vault, or (with a manifest) this item changed elsewhere: sync and try again, three tries in all.
+      if (!manifestRefused(e) && !(sent && isCode(e, "revision_conflict"))) throw e;
+      if (tries >= MANIFEST_TRIES) throw busyError();
+      await syncFor(gen);
+      continue;
+    }
+    // Shown as in the trash (which the extension never shows) until the next delta brings the server's own row. The
+    // row keeps its data until then, so the vault's manifest still counts it.
+    await settle(
+      entry.vaultId,
+      answer,
+      (vaultSeq) => {
+        const stored = synced?.items.get(entry.id);
+        if (!stored || stored.vault_id !== entry.vaultId || typeof answer?.revision !== "number") return null;
+        return { kind: "upsert", vaultSeq, row: { ...stored, deleted_at: now, revision: answer.revision, updated_at: now } };
+      },
+      sent,
+    );
+    return;
+  }
 }
 
 /** Vaults the user can add items to, and folder names in use (for the item editor). */

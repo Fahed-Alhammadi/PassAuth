@@ -114,9 +114,12 @@ data class GrantorVaultData(
     val sealedKey: String,
     val vaults: List<GrantorVaultRow>,
     val items: List<GrantorItemRow>,
+    /** Every item row as sent (also ones this app can't read), for the vaults' manifests ([Manifests]). */
+    val rawItems: List<JsonObject> = emptyList(),
 )
 
-data class GrantorVaultRow(val id: String, val meta: String, val wrappedKey: String)
+/** [keyEpoch], [manifest], [manifestSeq]: the vault's manifest as the server sends it with the vault (0: none). */
+data class GrantorVaultRow(val id: String, val meta: String, val wrappedKey: String, val keyEpoch: Long = 0, val manifest: String? = null, val manifestSeq: Long = 0)
 data class GrantorItemRow(val id: String, val vaultId: String, val key: String, val data: String, val deletedAt: Long?, val updatedAt: Long)
 
 object Emergency {
@@ -497,13 +500,13 @@ object Emergency {
         val vaults = vaultsRaw.mapNotNull { raw ->
             val r = raw as? JsonObject ?: return@mapNotNull null
             if (str(r["id"]).isEmpty() || str(r["meta"]).isEmpty() || str(r["wrapped_key"]).isEmpty()) null
-            else GrantorVaultRow(str(r["id"]), str(r["meta"]), str(r["wrapped_key"]))
+            else GrantorVaultRow(str(r["id"]), str(r["meta"]), str(r["wrapped_key"]), long(r["key_epoch"]) ?: 0, str(r["manifest"]).ifEmpty { null }, long(r["manifest_seq"]) ?: 0)
         }
         val items = itemsRaw.mapNotNull { raw ->
             val r = raw as? JsonObject ?: return@mapNotNull null
             if (str(r["id"]).isEmpty() || str(r["vault_id"]).isEmpty() || str(r["item_key"]).isEmpty() || str(r["data"]).isEmpty()) null
             else GrantorItemRow(str(r["id"]), str(r["vault_id"]), str(r["item_key"]), str(r["data"]), long(r["deleted_at"]), long(r["updated_at"]) ?: 0)
         }
-        return GrantorVaultData(long(v["key_version"]), sealedKey, vaults, items)
+        return GrantorVaultData(long(v["key_version"]), sealedKey, vaults, items, itemsRaw.mapNotNull { it as? JsonObject })
     }
 }

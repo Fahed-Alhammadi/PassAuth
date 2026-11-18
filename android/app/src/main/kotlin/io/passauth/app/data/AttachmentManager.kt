@@ -223,7 +223,11 @@ class AttachmentManager(private val context: Context, private val repo: VaultRep
     }
 
     /** Worth trying the save again after a sync: not an answer that will stay the same (a full storage, a gone item). */
-    private fun retrySave(e: Exception) = e !is ApiException || e.status == 409 || e.status == 429 || (e.status >= 500 && e.status != 507)
+    private fun retrySave(e: Exception) = when {
+        // A vault held back for its manifest warning stays held until the user resolves it.
+        e is UserException && e.message == Manifests.HELD -> false
+        else -> e !is ApiException || e.status == 409 || e.status == 429 || (e.status >= 500 && e.status != 507)
+    }
 
     /** Save the item with [att] added to its list, starting from the item as last synced each try. */
     private suspend fun listInItem(itemId: String, att: Attachment) {

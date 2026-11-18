@@ -13,6 +13,7 @@ import type { Snapshot, SyncNotice } from "@web/lib/delta";
 import { readInvitations } from "@web/lib/invitations";
 import { isSyncResponse, isSyncVaultRow, type SyncInvitation, type SyncItemRow, type SyncResponse } from "@web/lib/types";
 import type { StoredRevMemory } from "./item-revs";
+import type { StoredManifestMemory } from "./manifests";
 import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
 
 /**
@@ -22,9 +23,11 @@ import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
  */
 /*
  * `itemRevs` / `rolledBack` (item-revs.ts): the highest item edit counters seen and the items a server sent in an
- * older version, kept with the rows so they share the copy's lifetime.
+ * older version, kept with the rows so they share the copy's lifetime. `manifests` (manifests.ts): the highest vault
+ * manifest version seen per vault, kept the same way. The rows themselves carry the rest: each vault row its `manifest`
+ * and `manifest_seq`, each row without data (a trash summary) the server's `data_sha256`.
  */
-export interface StoredSync extends SyncResponse, StoredRevMemory {
+export interface StoredSync extends SyncResponse, StoredRevMemory, StoredManifestMemory {
   own?: Record<string, number>;
   /**
    * Signed sharing: each vault's last verdict with the row it was made for (signed-sharing.ts `stampOf`), so an

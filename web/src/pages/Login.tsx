@@ -3,7 +3,7 @@ import { Link, Navigate, useLocation, useNavigate } from "react-router";
 import { LoginPhrase } from "../components/DeviceSignIn";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, Icon, PasswordField, SheetActions, type IconName } from "../components/ui";
-import { errorMessage, friendlyError, hasErrorCode, hasFeature, usePublicConfig } from "../lib/api";
+import { SERVER_UPDATE_NEEDED, errorMessage, friendlyError, hasErrorCode, hasFeature, serverTooOld, usePublicConfig } from "../lib/api";
 import { CODE_FORMAT, CODE_STOPPED, DEVICE_LOGIN_FEATURE, codeDigits, countdown, wrongCodeText, type DeviceLoginRun, type DeviceLoginState } from "../lib/device-login";
 import { startDeviceLogin } from "../lib/device-login-client";
 import { getDesktop } from "../lib/platform";
@@ -75,7 +75,9 @@ export function LoginPage() {
   const deviceTurn = useRef<object | null>(null);
   const emailInput = useRef<HTMLInputElement>(null);
   const desktop = getDesktop();
-  const canUseDevice = hasFeature(config, DEVICE_LOGIN_FEATURE);
+  // A server too old for this app: nothing is sent to it, and the screen says what to do.
+  const outdated = serverTooOld(config);
+  const canUseDevice = !outdated && hasFeature(config, DEVICE_LOGIN_FEATURE);
 
   // Leaving the page ends a request that is still waiting, and drops a sign-in waiting for its two-step login.
   useEffect(
@@ -379,7 +381,7 @@ export function LoginPage() {
                 />
               </label>
             )}
-            <ErrorText error={error} />
+            <ErrorText error={outdated ? SERVER_UPDATE_NEEDED : error} />
             <SheetActions
               quiet={
                 <>
@@ -388,7 +390,7 @@ export function LoginPage() {
                       Sign in with another device
                     </button>
                   )}
-                  {config?.signups_allowed !== false && (
+                  {config?.signups_allowed !== false && !outdated && (
                     <Link className="btn btn-text" to="/register">
                       Create an account
                     </Link>
@@ -396,7 +398,7 @@ export function LoginPage() {
                 </>
               }
             >
-              <button className="btn btn-accent btn-block" disabled={busy || !email || !password}>
+              <button className="btn btn-accent btn-block" disabled={busy || outdated || !email || !password}>
                 {busy ? "Signing in…" : "Sign in"}
               </button>
             </SheetActions>

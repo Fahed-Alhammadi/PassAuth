@@ -177,7 +177,7 @@ final class AccountSecurityRepoTests: XCTestCase {
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
             s.secrets.rememberTokens["\(self.server)|\(self.email)"] = "remember-me"
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [SecurityServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [SecurityServer.self] }).allowingOlderServers()
         try await repo.unlock(password: oldPassword, secretKey: nil)
         return (repo, store, created)
     }
@@ -273,7 +273,7 @@ final class AccountSecurityRepoTests: XCTestCase {
             s.file.accounts["acc"] = AccountData(server: self.server)
             s.file.activeId = "acc"
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [SecurityServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [SecurityServer.self] }).allowingOlderServers()
         let done = try await repo.register(email: email, name: "Alex", password: newPassword, withSecretKey: false)
         XCTAssertNil(done.secretKey)
         let finish = try XCTUnwrap(SecurityServer.recorded.first { $0.path == "/api/auth/register/finish" })

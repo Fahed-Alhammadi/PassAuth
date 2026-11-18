@@ -16,7 +16,7 @@ let server: FakeServer;
 /** A server with the `policies` feature and these policies. */
 function withPolicies(s: FakeServer, policies: Record<string, unknown>) {
   s.features = [...s.features, "policies"];
-  s.handlers["GET /config"] = () => ({ body: { name: "PassAuth", api: 2, features: s.features, policies } });
+  s.handlers["GET /config"] = () => ({ body: { name: "PassAuth", api: 2, features: [...s.features, "signed_sharing"], policies } });
 }
 
 beforeEach(async () => {
@@ -108,7 +108,7 @@ test("quota_exceeded and two_step_required in plain words", () => {
 test("a policy the admin changed applies at the next unlock: refreshServerInfo asks again; unreachable keeps what was known", async () => {
   let max = 240;
   withPolicies(server, {});
-  server.handlers["GET /config"] = () => ({ body: { name: "PassAuth", api: 2, features: server.features, policies: { max_vault_timeout_minutes: max } } });
+  server.handlers["GET /config"] = () => ({ body: { name: "PassAuth", api: 2, features: [...server.features, "signed_sharing"], policies: { max_vault_timeout_minutes: max } } });
   expect(await timeoutLimit()).toBe(240);
   max = 30;
   // Cached for an hour otherwise …
@@ -141,8 +141,8 @@ test("website icons: the setting and the server together (API 2 servers list `ic
   forgetServerFeatures();
   expect((await serverInfo("https://vault.test"))?.api).toBe(2);
   expect(await iconsShown("https://vault.test", true)).toBe(false);
-  // An older server (no `api`): icons as before.
-  server.features = [];
+  // An older server (no `api`): icons as before (the rule; this version refuses to use such a server otherwise).
+  server.outdated = "old";
   forgetServerFeatures();
   expect(await iconsShown("https://vault.test", true)).toBe(true);
 });

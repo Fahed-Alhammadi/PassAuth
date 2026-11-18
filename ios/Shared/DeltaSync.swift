@@ -30,10 +30,17 @@ public struct SyncVault: Codable, Equatable, Sendable {
     /// and its version (0 = none); nil from older servers.
     public var memberRoster: String?
     public var memberRosterSeq: Int64?
+    /// Vault manifests (servers with `vault_manifest`): the vault's sealed manifest and its
+    /// version (0 or nil: the vault has none), read in the same snapshot as the answer's items;
+    /// `manifestOk`: while it has none, its first one may be started now.
+    public var manifest: String?
+    public var manifestSeq: Int64?
+    public var manifestOk: Bool?
 
     public init(id: String, meta: String = "", role: String = "owner", wrappedKey: String = "", keyKind: String = "account",
                 rotationPending: Int64? = nil, keyEpoch: Int64? = nil, seq: Int64? = nil, share: JSON? = nil,
-                memberRoster: String? = nil, memberRosterSeq: Int64? = nil) {
+                memberRoster: String? = nil, memberRosterSeq: Int64? = nil,
+                manifest: String? = nil, manifestSeq: Int64? = nil, manifestOk: Bool? = nil) {
         self.id = id
         self.meta = meta
         self.role = role
@@ -45,13 +52,20 @@ public struct SyncVault: Codable, Equatable, Sendable {
         self.share = share
         self.memberRoster = memberRoster
         self.memberRosterSeq = memberRosterSeq
+        self.manifest = manifest
+        self.manifestSeq = manifestSeq
+        self.manifestOk = manifestOk
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, meta, role, seq, share
+        case id, meta, role, seq, share, manifest
         case wrappedKey = "wrapped_key", keyKind = "key_kind", rotationPending = "rotation_pending", keyEpoch = "key_epoch"
         case memberRoster = "member_roster", memberRosterSeq = "member_roster_seq"
+        case manifestSeq = "manifest_seq", manifestOk = "manifest_ok"
     }
+
+    /// The manifest's version; 0: the vault has none.
+    public var manifestVersion: Int64 { max(0, manifestSeq ?? 0) }
 
     /// The same vault key as `other` describes (wrapping, kind and epoch): an opened key can be kept.
     public func sameKey(as other: SyncVault) -> Bool {
@@ -71,9 +85,17 @@ public struct SyncItem: Codable, Equatable, Sendable {
     public var deletedAt: Int64?
     public var createdAt: Int64?
     public var updatedAt: Int64?
+    /// SHA-256 of the `data` text (base64url), on rows that come without `data` (`trash=summary`,
+    /// servers with `vault_manifest`): what the vault's manifest is checked with for that row.
+    public var dataSha256: String?
+    /// Only in this device's copy, on a row it kept from a newer copy of its own after the
+    /// server sent an older version of the item (item rollback): the hash of the data the server
+    /// sent. The vault's manifest is checked (and advanced) with it, since that is what the
+    /// manifest records for the row.
+    public var servedSha256: String?
 
     public init(id: String, vaultId: String, itemKey: String?, data: String?, revision: Int64? = nil, deletedAt: Int64? = nil,
-                createdAt: Int64? = nil, updatedAt: Int64? = nil) {
+                createdAt: Int64? = nil, updatedAt: Int64? = nil, dataSha256: String? = nil) {
         self.id = id
         self.vaultId = vaultId
         self.itemKey = itemKey
@@ -82,11 +104,13 @@ public struct SyncItem: Codable, Equatable, Sendable {
         self.deletedAt = deletedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.dataSha256 = dataSha256
     }
 
     enum CodingKeys: String, CodingKey {
         case id, data, revision
         case vaultId = "vault_id", itemKey = "item_key", deletedAt = "deleted_at", createdAt = "created_at", updatedAt = "updated_at"
+        case dataSha256 = "data_sha256", servedSha256 = "served_sha256"
     }
 }
 
@@ -121,6 +145,15 @@ public struct SyncResponse: Decodable, Sendable {
     /// `vault_invitations`); read leniently (`SyncInvitation.read`), so a malformed entry never
     /// makes the answer unreadable.
     public var invitations: JSON?
+    /// The server's clock when the answer was read (unix seconds) and its trash retention in days
+    /// (0: kept forever); servers with `vault_manifest` (old trash is then deleted by the apps).
+    public var serverTime: Int64?
+    public var trashDays: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case revision, cursor, user, bundle, vaults, items, deleted, reset, delta, invitations
+        case serverTime = "server_time", trashDays = "trash_days"
+    }
 }
 
 /// What this device has of an account: the sync revision of its copy and each vault's
@@ -152,6 +185,10 @@ public struct SyncSnapshot: Codable, Equatable, Sendable {
     /// The pending vault invitations of the last answer (each answer, full or delta, lists them
     /// all); empty from servers without them and in copies stored before them.
     public var invitations: [SyncInvitation]
+    /// The server's clock and trash retention of the answer this copy was last synced with
+    /// (`SyncResponse`); not stored with the copy (nil in one read from the device).
+    public var serverTime: Int64?
+    public var trashDays: Int64?
 
     public init(revision: Int64, cursor: String?, user: JSON?, bundle: JSON?, vaults: [SyncVault], items: [SyncItem], invitations: [SyncInvitation] = []) {
         self.revision = revision
@@ -233,7 +270,10 @@ public enum SyncMerge {
         guard items.allSatisfy({ ($0.itemKey != nil && $0.data != nil) || $0.deletedAt != nil }) else { return nil }
         let invitations = SyncInvitation.read(r.invitations)
         guard r.delta == true else {
-            return SyncSnapshot(revision: revision, cursor: r.cursor, user: r.user, bundle: bundle, vaults: vaults, items: items, invitations: invitations)
+            var full = SyncSnapshot(revision: revision, cursor: r.cursor, user: r.user, bundle: bundle, vaults: vaults, items: items, invitations: invitations)
+            full.serverTime = r.serverTime
+            full.trashDays = r.trashDays
+            return full
         }
         guard let base else { return nil }
         let gone = Set((r.deleted ?? []).map { RowKey(vault: $0.vaultId, id: $0.id) })
@@ -247,8 +287,11 @@ public enum SyncMerge {
         var seen = Set<String>()
         rows += items.reversed().filter { seen.insert($0.id).inserted }.reversed()
         rows.removeAll { !readable.contains($0.vaultId) }
-        return SyncSnapshot(revision: revision, cursor: r.cursor, user: r.user ?? base.user, bundle: bundle ?? base.bundle, vaults: vaults, items: rows,
-                            invitations: invitations)
+        var merged = SyncSnapshot(revision: revision, cursor: r.cursor, user: r.user ?? base.user, bundle: bundle ?? base.bundle, vaults: vaults, items: rows,
+                                  invitations: invitations)
+        merged.serverTime = r.serverTime
+        merged.trashDays = r.trashDays
+        return merged
     }
 
     /// This device's own `change` in `vaultId`, applied to the copy after the server answered
@@ -256,10 +299,20 @@ public enum SyncMerge {
     /// replaced or removed and the vault's number set. Revision, cursor and invitations stay (the
     /// next delta from that cursor brings the row again). nil when the copy can't take it (vault
     /// or item not there, a summary row to restore): sync instead.
-    public static func applyLocal(_ change: LocalChange, vaultId: String, vaultSeq: Int64, to s: SyncSnapshot) -> SyncSnapshot? {
+    ///
+    /// `manifest`: the vault manifest this device sent with the write, which the server answered
+    /// as the vault's current one (`manifest_seq`): the vault row takes it together with the
+    /// change, so the copy still matches its manifest.
+    public static func applyLocal(_ change: LocalChange, vaultId: String, vaultSeq: Int64, manifest: ManifestEntry? = nil,
+                                  to s: SyncSnapshot) -> SyncSnapshot? {
         guard let v = s.vaults.firstIndex(where: { $0.id == vaultId }) else { return nil }
         var next = s
         next.vaults[v].seq = vaultSeq
+        if let manifest {
+            guard manifest.vaultId == vaultId else { return nil }
+            next.vaults[v].manifest = manifest.sealed
+            next.vaults[v].manifestSeq = Int64(clamping: manifest.seq)
+        }
         switch change {
         case .put(let row):
             guard row.vaultId == vaultId, row.itemKey != nil, row.data != nil else { return nil }
@@ -273,6 +326,8 @@ public enum SyncMerge {
             next.items[i].revision = revision
             next.items[i].updatedAt = at
             if summary {
+                // The manifest is checked with the hash of the data the row no longer carries.
+                if let data = next.items[i].data { next.items[i].dataSha256 = VaultManifest.dataHash(data) }
                 next.items[i].itemKey = nil
                 next.items[i].data = nil
             }
@@ -281,6 +336,7 @@ public enum SyncMerge {
                   next.items[i].itemKey != nil, next.items[i].data != nil else { return nil }
             next.items[i].deletedAt = nil
             next.items[i].revision = revision
+            next.items[i].dataSha256 = nil
         case .purge(let id):
             guard next.items.contains(where: { $0.id == id && $0.vaultId == vaultId }) else { return nil }
             next.items.removeAll { $0.id == id && $0.vaultId == vaultId }

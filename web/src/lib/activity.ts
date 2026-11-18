@@ -478,6 +478,11 @@ export function describeEvent(e: ActivityEvent, ctx: DescribeContext): EventText
       return { text: `${S} deleted ${VV(e.vault_id, "a vault")}` };
     case "vault.key_rotated":
       return { text: `${S} replaced the key of ${VV()}`, detail: "Every item in it was encrypted again." };
+    // Vault manifests: a vault's first record of changes, and a new baseline ("Use the server's copy").
+    case "vault.manifest_started":
+      return { text: `Change tracking turned on for ${VV()}`, detail: "PassAuth apps now notice when the server's copy of this vault doesn't match what its members saved." };
+    case "vault.manifest_reset":
+      return { text: `${S} reset the record of ${VV()} to the server's copy`, detail: "The vault was accepted as the server had it then.", tone: "warn" };
 
     // ----------------------------------------------------------- members
     case "member.invited":
@@ -612,6 +617,8 @@ export const EVENT_TYPES: { category: string; label: string; types: [type: strin
       ["vault.renamed", "Vault renamed"],
       ["vault.deleted", "Vault deleted"],
       ["vault.key_rotated", "Vault key replaced"],
+      ["vault.manifest_started", "Change tracking turned on"],
+      ["vault.manifest_reset", "Vault record reset to the server's copy"],
     ],
   },
   {
@@ -640,7 +647,7 @@ export const EVENT_TYPES: { category: string; label: string; types: [type: strin
       ["item.imported", "Items imported"],
     ],
   },
-  { category: "trash", label: "Trash", types: [["trash.emptied", "Emptied by the server"]] },
+  { category: "trash", label: "Trash", types: [["trash.emptied", "Old items deleted"]] },
   {
     category: "send",
     label: "Sends",

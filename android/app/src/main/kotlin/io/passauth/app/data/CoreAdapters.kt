@@ -85,5 +85,7 @@ private class CoreEmergencyKey(private val key: EmergencyKey, private val vaultK
 private class CoreOpenedVaultKey(private val key: VaultKey) : OpenedVaultKey {
     override fun decryptMeta(vaultId: String, meta: String): String = key.decryptMeta(vaultId, meta)
     override fun decryptItem(id: String, vaultId: String, key: String, data: String): String = this.key.decryptItem(EncryptedItem(id, vaultId, key, data))
+    override fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, sealed: String?, itemsJson: String): Boolean =
+        this.key.manifestVerify(vaultId, keyEpoch.toULong(), manifestSeq.toULong(), sealed, null, itemsJson).status == "ok"
     override fun close() = key.close()
 }

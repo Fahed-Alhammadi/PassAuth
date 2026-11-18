@@ -135,6 +135,13 @@ export interface ItemList {
   sharing?: SharingNotice;
   /** Items the server sent in an older version than this browser had seen (background/item-revs.ts); `key`: for dismissing. */
   rollback?: { text: string; key: string };
+  /**
+   * Vaults whose items don't match the vault's manifest (background/manifests.ts): the warning, what to do about it
+   * (the extension can't resolve it), and the vaults. They stay readable; nothing is written into them meanwhile.
+   */
+  manifest?: { text: string; review: string; vaults: { id: string; name: string }[]; key: string };
+  /** The server is one this version refuses ("Update your PassAuth server to keep using this app."): the list is the offline copy. */
+  serverProblem?: string;
 }
 
 /**
@@ -303,6 +310,8 @@ export interface ItemData {
   regexErrors?: Record<number, string>;
   /** The server sent an older version of this item than this browser had seen: the warning to show. */
   olderVersion?: string;
+  /** The item's vault doesn't match its manifest (background/manifests.ts): the warning and what to do. Nothing in it can be changed meanwhile. */
+  vaultWarning?: string;
 }
 
 /** A verification code as the background made it; `expires`: when it changes (ms, see totp.ts). */

@@ -210,7 +210,16 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                     }
                 }
                 if (v?.offline == true) {
-                    item { Alert("You're offline. Showing the copy of your vault saved on this device.", modifier = Modifier.padding(top = 8.dp)) }
+                    // A server this app can't use (it doesn't sign shares): said as it is; the copy on this phone stays readable.
+                    val problem = v.syncProblem
+                    item {
+                        if (problem != null) Alert("$problem Showing the copy of your vault saved on this device.", AlertKind.Error, modifier = Modifier.padding(top = 8.dp))
+                        else Alert("You're offline. Showing the copy of your vault saved on this device.", modifier = Modifier.padding(top = 8.dp))
+                    }
+                }
+                // Vaults whose items aren't what the vault's record of changes says (vault manifests): shown, not changed.
+                v?.unresolved.orEmpty().forEach { u ->
+                    item(key = "manifest:${u.id}") { ManifestWarning(ctx, u, named = (v?.vaults?.size ?: 0) > 1) }
                 }
                 // The server sent older versions of items than this phone saw (item edit counters).
                 v?.rollbackNotice?.let { notice ->
@@ -404,6 +413,57 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
                 )
             }
         }
+    }
+}
+
+/**
+ * The warning of a vault whose items don't match its manifest, with the deliberate way out for
+ * people who can edit the vault ("Use the server's copy", confirmed in a sheet). Never dismissible:
+ * the vault isn't changed while it shows.
+ */
+@Composable
+private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, named: Boolean) {
+    var confirm by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    val canEdit = vault.role != io.passauth.app.data.Role.Read
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = RoundedCornerShape(Radius.control),
+        modifier = Modifier.fillMaxWidth().padding(top = Space.s),
+    ) {
+        Column(Modifier.padding(start = Space.m, end = Space.m, top = Space.m, bottom = if (canEdit) Space.xs else Space.m)) {
+            if (named) Text(vault.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+            Text(io.passauth.app.data.Manifests.WARNING, style = MaterialTheme.typography.bodyMedium)
+            if (canEdit) {
+                TextButton(onClick = { confirm = true }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(io.passauth.app.data.Manifests.USE_SERVER_COPY, color = MaterialTheme.colorScheme.onErrorContainer)
+                }
+            } else {
+                Text(io.passauth.app.data.Manifests.READERS, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = Space.s))
+            }
+        }
+    }
+    if (confirm) {
+        io.passauth.app.ui.components.DecisionSheet(
+            onDismiss = { confirm = false },
+            title = io.passauth.app.data.Manifests.CONFIRM_TITLE,
+            subtitle = vault.name,
+            actions = {
+                io.passauth.app.ui.components.PrimaryButton(io.passauth.app.data.Manifests.USE_SERVER_COPY, {
+                    confirm = false
+                    busy = true
+                    ctx.launch {
+                        try {
+                            ctx.repo.useServerCopy(vault.id)
+                        } finally {
+                            busy = false
+                        }
+                    }
+                }, danger = true)
+                io.passauth.app.ui.components.QuietActions { io.passauth.app.ui.components.QuietButton("Cancel", { confirm = false }) }
+            },
+        ) { io.passauth.app.ui.components.PromptText(io.passauth.app.data.Manifests.CONFIRM_BODY) }
     }
 }
 

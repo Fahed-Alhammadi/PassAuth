@@ -18,7 +18,7 @@
  */
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { getTokens, knownPublicConfig, loadPublicConfig, onPublicConfig } from "@web/lib/api";
+import { SERVER_UPDATE_NEEDED, getTokens, knownPublicConfig, loadPublicConfig, onPublicConfig } from "@web/lib/api";
 import { secretStore, type TimeoutSettings, type VaultTimeout, type VaultTimeoutHook } from "@web/lib/platform";
 import { clampTimeout, readPolicies } from "@web/lib/policies";
 import { server } from "@web/lib/server";
@@ -183,8 +183,8 @@ let restoring: Promise<void> | null = null;
 let retry: number | undefined;
 
 /**
- * "Never" and the session is locked: open the vault with the saved keys. A server that can't be reached
- * keeps the keys and tries again later (and after each `boot()`); anything else removes them.
+ * "Never" and the session is locked: open the vault with the saved keys. A server that can't be reached (or is
+ * refused as too old for this app) keeps the keys and tries again later (and after each `boot()`); anything else removes them.
  */
 function maybeRestore(): Promise<void> {
   if (restoring) return restoring;
@@ -197,7 +197,8 @@ function maybeRestore(): Promise<void> {
       const saved = JSON.parse(raw) as { accountId: string; keys: string };
       await restoreUnlocked(saved.accountId, unb64(saved.keys));
     } catch (e) {
-      if (e instanceof UnreachableError) retry = window.setTimeout(() => void maybeRestore(), RETRY_MS);
+      // A server this app refuses as too old (until it is updated) keeps the keys too, like one that can't be reached.
+      if (e instanceof UnreachableError || (e instanceof Error && e.message === SERVER_UPDATE_NEEDED)) retry = window.setTimeout(() => void maybeRestore(), RETRY_MS);
       else await clearPersistedKeys();
     } finally {
       restoring = null;

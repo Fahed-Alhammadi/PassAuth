@@ -102,10 +102,32 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
         if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
     }.getOrNull()
 
-    /** Deletes account [id]'s offline copy (with its item edit counters) and its profile picture (log out, account removed). */
+    private fun manifestsFile(id: String) = File(File(context.noBackupFilesDir, "vault"), "$id.manifests")
+
+    /**
+     * The highest manifest version this phone saw of each vault of account [id] ([Manifests]), kept
+     * with the offline copy. A write merges with what the file holds ([merge]: never lowered).
+     */
+    @Synchronized
+    fun writeManifests(id: String, merge: (String?) -> String) {
+        val f = manifestsFile(id)
+        f.parentFile?.mkdirs()
+        val json = merge(readManifests(id))
+        val tmp = File(f.parentFile, "${f.name}.tmp")
+        tmp.writeBytes(Keystore.encrypt(Keystore.storeKey(), json.encodeToByteArray()))
+        tmp.renameTo(f)
+    }
+
+    fun readManifests(id: String): String? = runCatching {
+        val f = manifestsFile(id)
+        if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
+    }.getOrNull()
+
+    /** Deletes account [id]'s offline copy (with its item edit counters and manifest versions) and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
         cacheFile(id).delete()
         revsFile(id).delete()
+        manifestsFile(id).delete()
         avatars.delete(id)
     }
 

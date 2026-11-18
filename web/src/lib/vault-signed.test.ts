@@ -44,7 +44,7 @@ vi.stubGlobal("localStorage", {
   removeItem: (k: string) => void storage.delete(k),
 });
 
-import { ApiError } from "./api";
+import { ApiError, SERVER_UPDATE_NEEDED, serverTooOld } from "./api";
 import { emptyItem } from "./types";
 import {
   ReviewNeededError,
@@ -57,7 +57,11 @@ import {
   boot,
   getState,
   lock,
+  login,
+  logout,
+  register,
   removeMember,
+  requireCurrentServer,
   resignVault,
   restoreUnlocked,
   rotateVaultKey,
@@ -500,12 +504,10 @@ describe("signed sharing in the vault", () => {
   it("labels a grandfathered share from before 'not yet signed', and the owner re-signs it after the review", async () => {
     legacyShare("bob", "write");
     w.identity.set(id("bob"), null);
-    // An earlier session on Bob's device, before the server signed: the vault was here then.
-    h.config = { features: ["vault_invitations"] };
-    await signIn("bob");
-    expect(getState().vaults[0].trust).toBeUndefined();
+    // An earlier session on Bob's device, with an app from before signed sharing: the vault was here then (this app
+    // refuses a server that doesn't sign, so that session's memory is written as that app left it).
+    storage.set(`pa.vault-seen.https://vault.example.test|${id("bob")}`, JSON.stringify([vid()]));
     // Bob's first signed sync: this unlock makes his identity, and the vault from before stays usable.
-    h.config = { features: ["vault_invitations", "signed_sharing"] };
     await signIn("bob");
     expect(getState().vaults[0].trust).toEqual({ kind: "unsigned" });
 
@@ -761,10 +763,10 @@ describe("sticky checks (H2)", () => {
     expect(getState().vaults[0].trust).toEqual({ kind: "own" });
   });
 
-  it("keep running once the account has signed state here, even if the server stops listing the feature", async () => {
+  it("keep running once the account has signed state here, while the server's features can't be read", async () => {
     await signIn("alice");
     await confirming((c) => shareVault(vid(), found("bob"), "write", { confirmed: c }));
-    h.config = { features: ["vault_invitations"] };
+    h.config = null;
     await signIn("alice");
     expect(getState().vaults[0].trust).toEqual({ kind: "own" });
     // Still signed: an unsigned share would be refused by the server and isn't sent.
@@ -774,66 +776,94 @@ describe("sticky checks (H2)", () => {
   });
 });
 
-describe("servers without signed sharing", () => {
+describe("servers without signed sharing are refused", () => {
   beforeEach(() => {
     newWorld(["vault_invitations"]);
     for (const k of [...w.identity.keys()]) w.identity.set(k, null);
   });
 
-  it("share and key replacement send the requests from before", async () => {
-    await signIn("alice");
-    expect(getState().vaults[0].trust).toBeUndefined();
-    await shareVault(vid(), found("bob"), "write");
-    const post = lastCall((c) => c.method === "POST" && c.path.endsWith("/members"))!.body as Record<string, unknown>;
-    expect(post.signature).toBeUndefined();
-    expect(post.roster).toBeUndefined();
-    await rotateVaultKey(vid());
-    const rot = lastCall((c) => c.path.endsWith("/rotate"))!.body as { items: Record<string, unknown>[]; roster?: string };
-    expect(rot.roster).toBeUndefined();
-    expect(rot.items[0].revision).toBeUndefined();
-    expect(w.calls.some((c) => c.path.startsWith("/account/identity") || c.path.startsWith("/account/key-pins"))).toBe(false);
+  it("a server that doesn't list the feature is asked for no vault: start-up says so and unlocking fails with the message", async () => {
+    lock();
+    await logout();
+    w.calls = [];
+    await boot();
+    expect(getState().status).toBe("unreachable");
+    expect(getState().serverOutdated).toBe(true);
+    const a = v.accounts.find((x) => x.name === "alice")!;
+    await expect(restoreUnlocked(a.id, unb64(a.sessionBytes))).rejects.toThrow();
+    expect(getState().vaults).toEqual([]);
+    expect(w.calls.some((c) => c.path.startsWith("/sync"))).toBe(false);
   });
 
-  it("config unknown once, then known: shared vaults keep working and nothing makes the checks sticky (M-A)", async () => {
+  it("the server stops listing the feature while this app holds the account's bundle: the sync is refused, nothing is asked for or used", async () => {
+    h.config = { features: ["vault_invitations", "signed_sharing"] };
+    w.identity = new Map(v.accounts.map((x) => [x.id, x.record]));
+    await signIn("alice");
+    expect(getState().vaults).toHaveLength(1);
+    h.config = { features: ["vault_invitations"] };
+    w.calls = [];
+    await expect(signIn("alice")).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    expect(getState().serverOutdated).toBe(true);
+    expect(getState().vaults).toEqual([]);
+    expect(getState().items).toEqual([]);
+    expect(w.calls).toEqual([]);
+    // Unlocked again once the server is updated.
+    h.config = { features: ["vault_invitations", "signed_sharing"] };
+    await signIn("alice");
+    // An open vault whose server stops listing the feature: it stays as shown, nothing more is written or synced.
+    h.config = { features: ["vault_invitations"] };
+    w.calls = [];
+    await expect(updateItem(getState().items[0], { ...getState().items[0].item, name: "Changed" })).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    await expect(rotateVaultKey(vid())).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    await expect(shareVault(vid(), found("bob"), "read")).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    await expect(syncNow()).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    expect(w.calls).toEqual([]);
+    expect(getState().serverOutdated).toBe(true);
+    expect(getState().items.map((i) => i.item.name)).toEqual(["Mail"]);
+    h.config = { features: ["vault_invitations", "signed_sharing"] };
+    await signIn("alice");
+    expect(getState().serverOutdated).toBe(false);
+    expect(getState().vaults).toHaveLength(1);
+  });
+
+  it("features unknown and the server answers that it doesn't sign (404 on the identity): refused, nothing used or made sticky", async () => {
     w.noSigning = true;
     legacyShare("bob", "write");
     h.config = null;
-    await signIn("bob");
-    let s = getState();
-    expect(s.vaults).toHaveLength(1);
-    expect(s.vaults[0].trust).toBeUndefined();
+    await expect(signIn("bob")).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    const s = getState();
+    expect(s.vaults).toEqual([]);
+    expect(s.items).toEqual([]);
     expect(s.consents).toEqual([]);
-    expect(s.blockedVaults).toEqual([]);
     expect([...storage.keys()].some((k) => k.startsWith("pa.key-pins."))).toBe(false);
     expect([...storage.entries()].some(([k, val]) => k.startsWith("pa.vault-trust.") && JSON.parse(val).on === true)).toBe(false);
-    h.config = { features: ["vault_invitations"] };
-    w.calls = [];
-    await signIn("bob");
-    s = getState();
-    expect(s.vaults).toHaveLength(1);
-    expect(s.consents).toEqual([]);
-    expect(w.calls.some((c) => c.path.startsWith("/account/identity") || c.path.startsWith("/account/key-pins"))).toBe(false);
-    // The share and key replacement go out as before.
-    await signIn("alice");
-    await rotateVaultKey(vid());
-    expect((lastCall((c) => c.path.endsWith("/rotate"))!.body as { roster?: string }).roster).toBeUndefined();
+    // Nothing is written to such a server either.
+    await expect(shareVault(vid(), found("carol"), "read")).rejects.toThrow();
+    expect(w.calls.some((c) => c.method === "POST" && c.path.endsWith("/members"))).toBe(false);
   });
 
-  it("a server from before key epochs never gets own vaults refused while its config is unknown", async () => {
+  it("features unknown and vault rows without a key epoch (a server from before signing): the checks still run, nothing opens unchecked", async () => {
     w.noEpoch = true;
+    w.noSigning = true;
     h.config = null;
-    await signIn("alice");
-    expect(getState().vaults).toHaveLength(1);
-    expect(getState().blockedVaults).toEqual([]);
-    expect(getState().items.map((i) => i.item.name)).toEqual(["Mail"]);
+    await expect(signIn("alice")).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    expect(getState().vaults).toEqual([]);
+    expect(getState().items).toEqual([]);
   });
 
-  it("an unsigned invitation is accepted as before", async () => {
-    legacyShare("bob", "write", "invited");
-    await signIn("bob");
-    expect(getState().invitations[0].trust).toBeUndefined();
-    await acceptInvitation(vid(), shownInvitation());
-    expect(getState().vaults).toHaveLength(1);
+  it("signing in and creating an account are refused before anything is sent", async () => {
+    w.calls = [];
+    await expect(login("alice@example.com", "pw", null)).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    await expect(register("new@example.com", "New", "pw", false)).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    await expect(requireCurrentServer()).rejects.toThrow(SERVER_UPDATE_NEEDED);
+    expect(w.calls).toEqual([]);
+    // A config that can't be fetched decides nothing.
+    h.config = null;
+    await expect(requireCurrentServer()).resolves.toBeUndefined();
+    expect(serverTooOld(null)).toBe(false);
+    expect(serverTooOld({ api: 2, features: [] } as never)).toBe(true);
+    expect(serverTooOld({} as never)).toBe(true);
+    expect(serverTooOld({ api: 2, features: ["signed_sharing"] } as never)).toBe(false);
   });
 });
 

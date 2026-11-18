@@ -199,6 +199,13 @@ export interface SyncVaultRow {
   member_roster_seq?: number;
   /** Signed sharing: the share signature of a sealed key and its signer, or null (unsigned); read with `readShare`. */
   share?: unknown;
+  /**
+   * Vault manifests (`vault_manifest`, `manifest.ts`): the sealed record of what the vault holds (null: none) and its
+   * version (0: none). `manifest_ok`, while the vault has none: its first one may be started now.
+   */
+  manifest?: string | null;
+  manifest_seq?: number;
+  manifest_ok?: boolean;
 }
 
 export interface SyncItemRow {
@@ -206,6 +213,8 @@ export interface SyncItemRow {
   vault_id: string;
   item_key: string;
   data: string;
+  /** Vault manifests: base64url SHA-256 of `data`, on rows a `trash=summary` sync sends without it (the extension). */
+  data_sha256?: string;
   revision: number;
   deleted_at: number | null;
   created_at: number;
@@ -249,6 +258,9 @@ export interface SyncResponse {
   reset?: string[];
   /** True only on a delta answer; anything else is the whole account. */
   delta?: boolean;
+  /** Vault manifests: the server's clock (Unix seconds) when the answer was read, and its trash retention (0: forever). */
+  server_time?: number;
+  trash_days?: number;
 }
 
 export interface PreloginResponse {
@@ -317,7 +329,9 @@ export const isSyncVaultRow = (v: unknown): v is SyncVaultRow =>
   optNumber(v.key_epoch) &&
   optNumber(v.seq) &&
   optString(v.member_roster) &&
-  optNumber(v.member_roster_seq);
+  optNumber(v.member_roster_seq) &&
+  optString(v.manifest) &&
+  optNumber(v.manifest_seq);
 
 /**
  * Runtime check of the /sync shape, so a server/client mismatch fails loudly instead of half-loading: the revision,

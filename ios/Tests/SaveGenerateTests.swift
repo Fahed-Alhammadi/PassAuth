@@ -530,7 +530,7 @@ final class SaveLoginRepoTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [RecordingServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [RecordingServer.self] }).allowingOlderServers()
         try await repo.unlock(password: password, secretKey: nil)
         func decrypt(_ body: [String: Any], id: String) throws -> Item {
             try ItemCodec.decode(try ka.key.decryptItem(encrypted: EncryptedItem(id: id, vaultId: a, key: body["key"] as! String, data: body["data"] as! String)))

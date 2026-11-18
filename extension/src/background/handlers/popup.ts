@@ -9,6 +9,7 @@ import type { PasskeyWindowApi, PopupApi } from "../../shared/protocol";
 import type { Settings } from "../../shared/types";
 import { touch } from "../activity";
 import { addSite, addSiteTargets } from "../add-site";
+import { SERVER_UPDATE_TEXT } from "../api";
 import { fileAccess, keptFiles, missingFiles, withoutFiles } from "../attachments";
 import { fromBase64 } from "../avatar";
 import { copy } from "../clipboard";
@@ -19,6 +20,7 @@ import { fillProblem } from "../fill-problems";
 import { ROLLBACK_ITEM_TEXT } from "../item-revs";
 import { markUsed } from "../last-used";
 import { ensureLive } from "../live-sync";
+import { MANIFEST_REVIEW_TEXT, MANIFEST_WARNING_TEXT } from "../manifests";
 import { decide, pendingRequest } from "../passkey-handler";
 import { removePin, setPin, unlockWithPin } from "../pin";
 import { accountNotices, allowedTimeout, enforceTimeoutPolicy, TIMEOUT_LOWERED_KEY } from "../policies";
@@ -88,6 +90,8 @@ export const popupHandlers = {
       const invitations = vault.invitations();
       const sharing = vault.sharingNotice();
       const rollback = vault.rollbackSummary();
+      const manifest = vault.manifestSummary();
+      const outdated = await vault.serverNeedsUpdate();
       const problem = url && tabId !== undefined ? await fillProblem(tabId, url) : undefined;
       return {
         suggested: suggested.map(vault.summarize),
@@ -95,6 +99,8 @@ export const popupHandlers = {
         ...(invitations.count ? { invitations } : {}),
         ...(sharing ? { sharing } : {}),
         ...(rollback ? { rollback } : {}),
+        ...(manifest ? { manifest } : {}),
+        ...(outdated ? { serverProblem: SERVER_UPDATE_TEXT } : {}),
         ...(problem ? { fillProblem: problem } : {}),
       };
     },
@@ -114,6 +120,7 @@ export const popupHandlers = {
         weakPassword: vault.weakPassword(e.item.login?.password ?? ""),
         ...(Object.keys(errors).length ? { regexErrors: errors } : {}),
         ...(vault.rolledBack(e.id) ? { olderVersion: ROLLBACK_ITEM_TEXT } : {}),
+        ...(vault.manifestWarned(e.vaultId) ? { vaultWarning: `${MANIFEST_WARNING_TEXT} ${MANIFEST_REVIEW_TEXT}` } : {}),
       };
     },
   },

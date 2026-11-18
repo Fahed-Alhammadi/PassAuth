@@ -226,10 +226,19 @@ private struct ListScreen: View {
         .paList()
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search logins")
         .overlay(alignment: .bottom) {
-            if model.repo.vault?.offline == true {
-                Text("Showing the copy on this device.").font(.caption).foregroundStyle(Color.paMuted).padding(.bottom, PA.Space.s)
-                    .accessibilityIdentifier("autofillOffline")
+            VStack(spacing: 2) {
+                // Vault manifests: logins still fill; nothing is saved into such a vault.
+                if let v = model.repo.vault?.manifestWarnings.first {
+                    Text("\(v.name): \(ManifestText.warning)").font(.caption).foregroundStyle(Color.paDanger)
+                        .multilineTextAlignment(.center).padding(.horizontal, PA.Space.l)
+                        .accessibilityIdentifier("autofillManifestWarning")
+                }
+                if model.repo.vault?.offline == true {
+                    Text("Showing the copy on this device.").font(.caption).foregroundStyle(Color.paMuted)
+                        .accessibilityIdentifier("autofillOffline")
+                }
             }
+            .padding(.bottom, PA.Space.s)
         }
     }
 

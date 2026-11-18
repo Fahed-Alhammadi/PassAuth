@@ -1,6 +1,6 @@
 /** The saved server address, the check that an address really is a PassAuth server, and requests to it. */
 import { invoke } from "@tauri-apps/api/core";
-import type { PublicConfig } from "@web/lib/api";
+import { SERVER_UPDATE_NEEDED, serverTooOld, type PublicConfig } from "@web/lib/api";
 import { clientId } from "@web/lib/platform";
 import { configureServer } from "@web/lib/server";
 import { transfers } from "./transfers";
@@ -87,5 +87,7 @@ export async function probeServer(base: string): Promise<PublicConfig> {
   }
   if (!res.ok || typeof config?.version !== "string" || typeof config.signups_allowed !== "boolean")
     throw new ConnectError(`${host} answered, but it isn't a PassAuth server. Check the address.`);
+  // A server too old for this app (it doesn't sign shared vaults) is never connected to.
+  if (serverTooOld(config as PublicConfig)) throw new ConnectError(SERVER_UPDATE_NEEDED);
   return config as PublicConfig;
 }

@@ -926,7 +926,8 @@ extension VaultRepository {
                 && !memory.signed.contains(vid) && !KeyPinsReader.signedSince(pins, vid)
             guard personal else { return .shared(info.name) }
         }
-        if trusted == nil && onlyMe { return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows) }
+        let manifestSeq = row.manifestVersion
+        if trusted == nil && onlyMe { return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows, manifestSeq: manifestSeq) }
         guard let signing = session.signing else { throw UserError(session.signingPaused ? SharingText.paused : SharingText.needsIdentity) }
         let myPub = try signing.publicIdentityJson()
         let inputs = members.compactMap { SharingIdentity.memberJson($0.identity, role: $0.role, email: $0.email) }
@@ -971,7 +972,7 @@ extension VaultRepository {
         let account = session.account
         let name = info.name
         let digest = review.digest
-        let made: (keys: [JSON], items: [JSON], meta: String, roster: String, epochPin: String)
+        let made: (keys: [JSON], items: [JSON], meta: String, roster: String, epochPin: String, manifest: ManifestEntry?)
         do {
             made = try await core {
                 let nv = bound ? try account.newVaultKeyBound(vaultId: vid, keyEpoch: next) : try account.newVaultKey(vaultId: vid)
@@ -989,14 +990,17 @@ extension VaultRepository {
                 let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
                 let roster = try signing.signRoster(vaultKey: nv.key, vaultId: vid, previous: trusted, keyEpoch: next, membersJson: membersJson,
                                                     reviewed: digest)
-                return (keys, items, meta, roster, epochPin)
+                // Vault manifests: the vault's next manifest, new under the new key and epoch.
+                let manifest = try Self.rotationManifest(vid, newKey: nv.key, nextEpoch: next, manifestSeq: manifestSeq, rows: rows, items: items)
+                return (keys, items, meta, roster, epochPin, manifest)
             }
         } catch let e as CoreError {
             if case .ReviewMismatch = e { throw moved }
             throw e
         }
-        let body: [String: JSON] = ["keys": .array(made.keys), "items": .array(made.items), "meta": .string(made.meta),
+        var body: [String: JSON] = ["keys": .array(made.keys), "items": .array(made.items), "meta": .string(made.meta),
                                     "key_epoch": .int(epoch), "roster": .string(made.roster)]
+        if let m = made.manifest { body["manifests"] = [m.json] }
         // The pinned email first (the server's listing only for people not pinned).
         let emailOf: (String) -> String = { uid in
             KeyPinsReader.email(pins, uid)

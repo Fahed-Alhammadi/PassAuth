@@ -68,14 +68,6 @@ test("writes carry the vault's key_epoch from /sync (servers listing the key_epo
   expect([updated.method, updated.body.key_epoch]).toStrictEqual(["PUT", 1]);
 });
 
-test("an older server (no features) gets no key_epoch", async () => {
-  await signedIn([]);
-  const id = await vault.createItem(login("Example"));
-  expect("key_epoch" in writes().at(-1)!.body).toBe(false);
-  await vault.updateItem(vault.getEntry(id)!, { ...vault.getEntry(id)!.item, notes: "changed" });
-  expect("key_epoch" in writes().at(-1)!.body).toBe(false);
-});
-
 test("create after the vault key was replaced: 409 vault_key_changed → sync → re-encrypted with the new key, same id, once", async () => {
   await signedIn();
   await vault.createItem(login("First"));
@@ -142,7 +134,7 @@ test("a create that timed out but reached the server isn't saved twice when trie
 });
 
 test("retrying with the same id after the item was changed: the earlier copy is brought up to date", async () => {
-  await signedIn([]); // an older server: says "item id already exists"
+  await signedIn(["key_epoch"]); // a server without error codes: says "item id already exists"
   const id = crypto.randomUUID();
   server.dropReply.add("POST /items");
   await expectReject(vault.createItem(login("Example", "first"), undefined, id), () => true);
@@ -159,7 +151,7 @@ test("ids from the popup must be UUIDs", async () => {
 });
 
 test("a stale revision is reported as revision_conflict and the vault is synced", async () => {
-  await signedIn([]);
+  await signedIn(["key_epoch"]);
   const id = await vault.createItem(login("Example"));
   const stale = vault.getEntry(id)!;
   server.editElsewhere(id, { notes: "elsewhere" });

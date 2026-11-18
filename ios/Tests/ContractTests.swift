@@ -19,6 +19,8 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var syncBodies: [Data] = []
     nonisolated(unsafe) static var answers: [String: [(status: Int, body: String, headers: [String: String])]] = [:]
     nonisolated(unsafe) static var requests: [Request] = []
+    /// What `GET /api/config` answers when nothing is queued for it (nil: `{}`, as before).
+    nonisolated(unsafe) static var config: String?
     private static let lock = NSLock()
 
     static func reset() {
@@ -26,6 +28,7 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
         syncBodies = []
         answers = [:]
         requests = []
+        config = nil
         lock.unlock()
     }
 
@@ -62,6 +65,8 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
             headers.merge(a.headers) { _, new in new }
         } else if path.hasPrefix("/api/items") {
             body = Data(#"{"revision":7}"#.utf8)
+        } else if path == "/api/config", let config = Self.config {
+            body = Data(config.utf8)
         }
         Self.lock.unlock()
         let res = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
@@ -157,7 +162,7 @@ final class ContractTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] }).allowingOlderServers()
         try await repo.unlock(password: password, secretKey: nil)
         return repo
     }

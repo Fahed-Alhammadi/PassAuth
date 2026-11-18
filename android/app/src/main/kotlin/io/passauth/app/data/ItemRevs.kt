@@ -69,6 +69,15 @@ object ItemRevs {
         return out
     }
 
+    /**
+     * The row kept when a newer copy this phone had ([prior]) stays in place of the older version the
+     * server sent ([served]): the newer copy's key and data, under the served row's `revision` (so
+     * editing it saves over the version the server has, instead of a conflict), with [servedHash],
+     * the hash of the data the server holds, which is what the vault's manifest records ([Manifests]).
+     */
+    fun keptRow(prior: SyncItem, served: SyncItem, servedHash: String?): SyncItem =
+        prior.copy(revision = served.revision, servedSha256 = servedHash, dataSha256 = null)
+
     /** [snap] with the rows in [kept] (by item id) in place of the ones served. */
     fun keepRows(snap: SyncSnapshot, kept: Map<String, SyncItem>): SyncSnapshot {
         if (kept.isEmpty()) return snap

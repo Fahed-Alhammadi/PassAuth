@@ -2,7 +2,21 @@
 // a lost session reported with a code, and feature detection from /api/config.
 
 import { beforeEach, expect, test, vi } from "vitest";
-import { ApiError, api, apiError, errorCode, forgetServerFeatures, logoutRemote, retryAfterSeconds, serverConfig, serverFeatures } from "../src/background/api";
+import {
+  ApiError,
+  api,
+  apiError,
+  errorCode,
+  forgetServerFeatures,
+  logoutRemote,
+  refuseOutdated,
+  retryAfterSeconds,
+  SERVER_OUTDATED,
+  SERVER_UPDATE_TEXT,
+  serverConfig,
+  serverFeatures,
+  serverOutdated,
+} from "../src/background/api";
 import { codeOf, SIGNED_OUT } from "../src/shared/errors";
 import { type FakeChrome, installChrome } from "./chrome";
 import { accountRecord, type FakeServer, fakeServer } from "./fake-server";
@@ -89,7 +103,7 @@ test("X-PassAuth-Client on API calls, the refresh, a remote sign-out and the con
   expect(await api("/account")).toStrictEqual({ ok: true });
   await logoutRemote(server.base, { access: "access-2" });
   await serverConfig(server.base);
-  expect(server.requests.map((r) => r.path)).toStrictEqual(["/account", "/auth/refresh", "/account", "/auth/logout", "/config"]);
+  expect(server.requests.map((r) => r.path)).toStrictEqual(["/config", "/account", "/auth/refresh", "/account", "/auth/logout", "/config"]);
   for (const r of server.requests) expect(r.headers["x-passauth-client"], r.path).toBe("extension/9.8.7");
 });
 
@@ -110,7 +124,7 @@ test("serverFeatures: from /api/config, cached per server; an older server has n
   expect(server.requests.filter((r) => r.path === "/config")).toHaveLength(1);
 
   const old = fakeServer("https://old.test");
-  old.features = [];
+  old.outdated = "old";
   vi.stubGlobal("fetch", old.fetch);
   expect([...(await serverFeatures(old.base))]).toStrictEqual([]);
 
@@ -119,4 +133,39 @@ test("serverFeatures: from /api/config, cached per server; an older server has n
   const later = fakeServer("https://down.test");
   vi.stubGlobal("fetch", later.fetch);
   expect([...(await serverFeatures("https://down.test"))]).toContain("key_epoch");
+});
+
+test("servers this app refuses: a config that doesn't list signed_sharing (API 2 without it, or from before API 2); unknown is never a refusal", async () => {
+  expect(SERVER_UPDATE_TEXT).toBe("Update your PassAuth server to keep using this app.");
+  expect(serverOutdated(null), "the server can't be reached: decided at the next answer").toBe(false);
+  expect(serverOutdated({ features: new Set(["signed_sharing", "delta_sync"]) })).toBe(false);
+  expect(serverOutdated({ features: new Set(["delta_sync", "key_epoch"]) })).toBe(true);
+  expect(serverOutdated({ features: new Set() })).toBe(true);
+
+  // Every request is refused before it is sent, except the sign-out (the session there still ends).
+  for (const kind of ["unsigned", "old"] as const) {
+    server = fakeServer();
+    server.outdated = kind;
+    vi.stubGlobal("fetch", server.fetch);
+    forgetServerFeatures();
+    await expectReject(api("/sync"), (e) => codeOf(e) === SERVER_OUTDATED && e.message === SERVER_UPDATE_TEXT && e.pageSafe === true);
+    await expectReject(api("/auth/prelogin", { body: { email: "alex@example.com" }, auth: false }), (e) => codeOf(e) === SERVER_OUTDATED);
+    await expectReject(api("/items", { body: {} }), (e) => codeOf(e) === SERVER_OUTDATED);
+    await expectReject(refuseOutdated(server.base), (e) => codeOf(e) === SERVER_OUTDATED);
+    await api("/auth/logout", { method: "POST" });
+    expect(
+      server.requests.map((r) => r.path),
+      kind,
+    ).toStrictEqual(["/config", "/auth/logout"]);
+  }
+  // Unreachable: the request itself says so, as always; an up-to-date server is used as before.
+  vi.stubGlobal("fetch", () => Promise.reject(new TypeError("Failed to fetch")));
+  forgetServerFeatures();
+  await expectReject(api("/sync"), (e) => codeOf(e) === "unreachable");
+  await refuseOutdated("https://vault.test");
+  server = fakeServer();
+  vi.stubGlobal("fetch", server.fetch);
+  forgetServerFeatures();
+  await refuseOutdated(server.base);
+  expect(await api("/sync/revision")).toMatchObject({ revision: 1 });
 });

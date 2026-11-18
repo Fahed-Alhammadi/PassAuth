@@ -287,6 +287,80 @@ class GoldenVectorsTest {
         }
     }
 
+    /**
+     * Vault manifests: every verdict of `manifestVerify` and every kind of write through
+     * `manifestNext`, with the fixture's account and wrapped vault key. Each row list also goes
+     * through the app's own row builder ([io.passauth.app.data.Manifests.rows] over its sync rows)
+     * where the app can hold it, and must come out the same.
+     */
+    @Test
+    fun vaultManifests() {
+        val failures = mutableListOf<String>()
+        val v = vectors["vaultManifest"]!!.jsonObject
+        val vaultId = v.s("vaultId")
+        val epoch = v.s("keyEpoch").toULong()
+        val account = io.passauth.core.accountFromSessionBytes(v.s("accountId"), java.util.Base64.getUrlDecoder().decode(v.s("sessionBytes")))
+        val key = account.openVaultKey(vaultId, v.s("wrappedKey"), "account", epoch, false)
+        val items = v["items"]!!.jsonObject
+        val sealed = v["sealed"]!!.jsonObject
+        fun long(o: JsonObject, k: String): Long? = (o[k] as? JsonPrimitive)?.takeIf { !it.isString }?.contentOrNull?.toLong()
+
+        /** The rows as this app holds them (its sync rows), when every row has what the app's model needs. */
+        fun appRows(rows: JsonArray): String? {
+            val list = rows.map { it.jsonObject }.map { r ->
+                if (r["trashed"] != null) return null // an explicit state the app's rows never carry
+                io.passauth.app.data.SyncItem(
+                    r.s("id"), r.sOrNull("vault_id") ?: vaultId, null, r.sOrNull("data"), long(r, "revision"), long(r, "deleted_at"),
+                    dataSha256 = r.sOrNull("data_sha256"),
+                )
+            }
+            return io.passauth.app.data.Manifests.rows(list)
+        }
+        fun same(a: io.passauth.core.ManifestCheck, e: JsonObject) =
+            a.status == e.s("status") && a.version == e.s("version").toULong() && a.live == e.s("live").toULong() && a.trashed == e.s("trashed").toULong()
+
+        val checks = v["checks"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(checks.size >= 20)
+        val seen = mutableSetOf<String>()
+        for ((n, c) in checks.withIndex()) {
+            val rows = items[c.s("items")]!!.jsonArray
+            val text = c.sOrNull("sealed")?.let { sealed.s(it) }
+            val remembered = long(c, "remembered")?.toULong()
+            val expected = c["expected"]!!.jsonObject
+            seen += expected.s("status")
+            val got = key.manifestVerify(vaultId, epoch, c.s("manifestSeq").toULong(), text, remembered, rows.toString())
+            if (!same(got, expected)) failures += "check $n (${c.s("items")}): got $got, want $expected"
+            appRows(rows)?.let { mine ->
+                val through = key.manifestVerify(vaultId, epoch, c.s("manifestSeq").toULong(), text, remembered, mine)
+                if (!same(through, expected)) failures += "check $n through the app's rows: got $through, want $expected"
+            }
+        }
+        assertEquals(setOf("none", "ok", "rollback", "mismatch", "incomplete"), seen)
+
+        val writes = v["writes"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(writes.size >= 7)
+        val version = v.s("version").toULong()
+        for (w in writes) {
+            val expected = w["expected"]!!.jsonObject
+            for (mine in listOf(false, true)) {
+                val removed = if (mine) appRows(w["removed"]!!.jsonArray) ?: continue else w["removed"].toString()
+                val added = if (mine) appRows(w["added"]!!.jsonArray) ?: continue else w["added"].toString()
+                val next = key.manifestNext(vaultId, epoch, version, sealed.s("current"), removed, added)
+                check(failures, "write ${w.s("name")} seq (app rows: $mine)", expected.s("seq").toULong(), next.seq)
+                val after = key.manifestVerify(vaultId, epoch, next.seq, next.sealed, version, w["after"].toString())
+                check(failures, "write ${w.s("name")} verifies (app rows: $mine)", "ok", after.status)
+                check(failures, "write ${w.s("name")} live", expected.s("live").toULong(), after.live)
+                check(failures, "write ${w.s("name")} trashed", expected.s("trashed").toULong(), after.trashed)
+            }
+        }
+        // The data hash the app keeps for rows without data is the core's.
+        for (t in v["terms"]!!.jsonArray.map { it.jsonObject }) {
+            val row = items["full"]!!.jsonArray.map { it.jsonObject }.first { it.s("id") == t.s("id") }
+            check(failures, "data hash of ${t.s("id")}", t.s("dataSha256"), io.passauth.core.manifestDataHash(row.s("data")))
+        }
+        assertTrue(failures.joinToString("\n"), failures.isEmpty())
+    }
+
     /** The vectors' account "alice" (signed sharing section), opened from its session bytes. */
     private fun alice(): io.passauth.core.Account {
         val a = vectors["signedSharing"]!!.jsonObject["accounts"]!!.jsonArray.map { it.jsonObject }.first { it.s("name") == "alice" }

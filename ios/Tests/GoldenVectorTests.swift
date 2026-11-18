@@ -211,4 +211,72 @@ final class GoldenVectorTests: XCTestCase {
             }
         }
     }
+
+    // MARK: Vault manifests
+
+    /// `vaultManifest`: every verdict of a check and every kind of write, through the binding
+    /// with the fixture's vault key, and through the app's own wrapper (`VaultManifest`) where it
+    /// builds the rows itself.
+    func testVaultManifestThroughTheBinding() throws {
+        let m = try XCTUnwrap(Self.vectors["vaultManifest"] as? Object, "no vaultManifest vectors")
+        let vaultId = m["vaultId"] as? String ?? ""
+        let epoch = UInt64(m["keyEpoch"] as? Int ?? 0)
+        var b64 = (m["sessionBytes"] as? String ?? "").replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        let bytes = try XCTUnwrap(Data(base64Encoded: b64))
+        let account = try accountFromSessionBytes(accountId: m["accountId"] as? String ?? "", bytes: bytes)
+        let key = try account.openVaultKey(vaultId: vaultId, wrapped: m["wrappedKey"] as? String ?? "", kind: "account", keyEpoch: epoch, legacyAllowed: false)
+        let items = m["items"] as? Object ?? [:]
+        let sealed = m["sealed"] as? Object ?? [:]
+        func text(_ any: Any?) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: any ?? [], options: [.withoutEscapingSlashes]), as: UTF8.self)
+        }
+        func number(_ any: Any?) -> UInt64? { (any as? NSNumber)?.uint64Value }
+
+        let checks = m["checks"] as? [Object] ?? []
+        XCTAssertGreaterThan(checks.count, 20)
+        for (i, c) in checks.enumerated() {
+            let name = "check \(i) (\(c["items"] ?? ""), \(c["sealed"] ?? "no manifest"))"
+            let seq = number(c["manifestSeq"]) ?? 0
+            let text0 = (c["sealed"] as? String).flatMap { sealed[$0] as? String }
+            let remembered = number(c["remembered"])
+            let rows = items[c["items"] as? String ?? ""]
+            let expected = c["expected"] as? Object ?? [:]
+            let got = try key.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: seq, sealed: text0, remembered: remembered, itemsJson: try text(rows))
+            XCTAssertEqual(got.status, expected["status"] as? String, name)
+            XCTAssertEqual(got.version, number(expected["version"]), name)
+            XCTAssertEqual(got.live, number(expected["live"]), name)
+            XCTAssertEqual(got.trashed, number(expected["trashed"]), name)
+            // The app's wrapper, from rows as it holds them (the copy's `SyncItem`).
+            if let decoded = try? JSONDecoder().decode([SyncItem].self, from: JSONSerialization.data(withJSONObject: rows ?? [])) {
+                let row = SyncVault(id: vaultId, keyEpoch: Int64(epoch), manifest: text0, manifestSeq: Int64(seq))
+                let mine = VaultManifest.verify(row, key: key, remembered: remembered, rows: decoded)
+                XCTAssertEqual(mine.status.rawValue, expected["status"] as? String, "\(name) through VaultManifest")
+                XCTAssertEqual(mine.version, number(expected["version"]), "\(name) through VaultManifest")
+            }
+        }
+
+        let version = number(m["version"]) ?? 0
+        let current = try XCTUnwrap(sealed["current"] as? String)
+        let writes = m["writes"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(writes.count, 8)
+        for w in writes {
+            let name = w["name"] as? String ?? ""
+            let expected = w["expected"] as? Object ?? [:]
+            let next = try key.manifestNext(vaultId: vaultId, keyEpoch: epoch, manifestSeq: version, sealed: current,
+                                            removedJson: try text(w["removed"]), addedJson: try text(w["added"]))
+            XCTAssertEqual(next.seq, number(expected["seq"]), name)
+            let after = try key.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: next.seq, sealed: next.sealed, remembered: version,
+                                               itemsJson: try text(w["after"]))
+            XCTAssertEqual(after.status, "ok", name)
+            XCTAssertEqual(after.live, number(expected["live"]), name)
+            XCTAssertEqual(after.trashed, number(expected["trashed"]), name)
+        }
+        // The hash of a row's data, as the server sends it for rows without data.
+        for t in m["terms"] as? [Object] ?? [] {
+            guard let id = t["id"] as? String, let row = (items["full"] as? [Object])?.first(where: { $0["id"] as? String == id }),
+                  let data = row["data"] as? String else { continue }
+            XCTAssertEqual(manifestDataHash(data: data), t["dataSha256"] as? String, id)
+        }
+    }
 }

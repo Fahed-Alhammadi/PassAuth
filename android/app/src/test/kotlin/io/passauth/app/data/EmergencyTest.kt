@@ -289,7 +289,13 @@ class EmergencyTest {
         )!!
         assertEquals("sealed", data.sealedKey)
         assertEquals(2L, data.keyVersion)
-        assertEquals(listOf(GrantorVaultRow("v1", "m", "w")), data.vaults)
+        assertEquals(listOf(GrantorVaultRow("v1", "m", "w", keyEpoch = 2)), data.vaults)
+        // Every row as sent stays for the vault's manifest check, also one this app can't read.
+        assertEquals(3, data.rawItems.size)
+        val withManifest = Emergency.readGrantorVault(
+            j(mapOf("sealed_key" to "s", "vaults" to listOf(j(mapOf("id" to "v1", "meta" to "m", "wrapped_key" to "w", "key_epoch" to 2, "manifest" to "sealed-text", "manifest_seq" to 5))), "items" to emptyList<Any>())),
+        )!!
+        assertEquals(GrantorVaultRow("v1", "m", "w", 2, "sealed-text", 5), withManifest.vaults.single())
         assertEquals(
             listOf(GrantorItemRow("i1", "v1", "ik", "d", null, 2), GrantorItemRow("i2", "v1", "ik2", "d2", 50, 3)),
             data.items,

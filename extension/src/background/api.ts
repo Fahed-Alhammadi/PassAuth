@@ -200,6 +200,8 @@ export async function api<T = unknown>(path: string, opts: Options = {}): Promis
   const { method = opts.body === undefined ? "GET" : "POST", body, auth = true, headers = {} } = opts;
   // Pin the account for this request, so switching accounts mid-request can't mix them up.
   const accountId = opts.accountId ?? (await local.account()).id;
+  // A server too old for this app is never asked for anything (signing out here still ends the session there).
+  if (path !== "/auth/logout") await refuseOutdated((await local.account(accountId)).data?.server ?? "");
   const send = async () => {
     const { server, tokens } = (await local.account(accountId)).data ?? { server: "", tokens: null };
     if (!server) throw new AppError(NO_SERVER, "Set your PassAuth server address first.", true);
@@ -265,6 +267,8 @@ export interface ServerConfig {
   features?: unknown;
   /** Servers with the `policies` feature: the admin's account policies (web `readPolicies` reads them). */
   policies?: unknown;
+  /** The admin's limits (`max_import_items`, …). */
+  limits?: unknown;
 }
 
 /** `GET /api/config` of a server (unauthenticated), or null when no PassAuth server answers. */
@@ -282,12 +286,41 @@ export interface ServerInfo {
   features: ReadonlySet<string>;
   api: number | null;
   policies: unknown;
+  /** The admin's limits, raw (`max_import_items` for the old-trash batches: manifests.ts `purgeBatch`). */
+  limits?: unknown;
+}
+
+/** Signed sharing: every server from 0.12.0 lists it, and this app needs it. */
+const REQUIRED_FEATURE = "signed_sharing";
+
+export const SERVER_OUTDATED = "server_outdated";
+export const SERVER_UPDATE_TEXT = "Update your PassAuth server to keep using this app.";
+
+/**
+ * Whether this app refuses the server: its `/api/config` was read and doesn't list `signed_sharing` (a server from
+ * before signed sharing, or one that leaves the feature out so that a new browser would skip the checks). Unknown
+ * (`null`: the server can't be reached) is never a refusal: the offline copy is used as always, and the next answer
+ * decides.
+ */
+export const serverOutdated = (info: Pick<ServerInfo, "features"> | null): boolean => !!info && !info.features.has(REQUIRED_FEATURE);
+
+export const outdatedError = () => new AppError(SERVER_OUTDATED, SERVER_UPDATE_TEXT, true);
+
+/** Fails with "Update your PassAuth server…" when `server` is one this app refuses (`serverOutdated`). */
+export async function refuseOutdated(server: string): Promise<void> {
+  if (server && serverOutdated(await serverInfo(server))) throw outdatedError();
+}
+
+/** Whether the active account's server is one this app refuses, as far as known (for the popup's notice). */
+export async function outdatedServer(server: string): Promise<boolean> {
+  return !!server && serverOutdated(await serverInfo(server).catch(() => null));
 }
 
 const readInfo = (cfg: ServerConfig): ServerInfo => ({
   features: new Set(Array.isArray(cfg.features) ? cfg.features.filter((f): f is string => typeof f === "string") : []),
   api: typeof cfg.api === "number" && Number.isFinite(cfg.api) ? cfg.api : null,
   policies: cfg.policies ?? null,
+  limits: cfg.limits ?? null,
 });
 
 // Feature detection (API contract v2): what a server supports comes from its `features` list, never from its version

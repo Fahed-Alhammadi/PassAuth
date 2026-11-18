@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
 import { LogoMark } from "./components/Logo";
 import { SheetActions, ToastHost } from "./components/ui";
-import { usePolicies } from "./lib/api";
+import { SERVER_UPDATE_NEEDED, usePolicies } from "./lib/api";
 import { getDesktop } from "./lib/platform";
 import { webLockMinutes } from "./lib/policies";
 import { server } from "./lib/server";
@@ -45,18 +45,34 @@ function RequireUnlocked() {
   return <Outlet />;
 }
 
-/** The server couldn't be reached at startup: keep the session and offer a retry. */
+/**
+ * The server couldn't be reached at startup, or it answered but is too old for this app (`serverOutdated`): keep the
+ * session and offer a retry.
+ */
 function Unreachable() {
   const [busy, setBusy] = useState(false);
+  const { serverOutdated } = useVault();
   return (
     <main className="auth">
       <div className="auth-card">
         <div className="auth-head">
           <LogoMark size={56} />
-          <h1>Can't reach your PassAuth server</h1>
-          <p className="muted">
-            {server.host()} isn't answering. Check your connection or VPN, or wait for the server to finish restarting. You're still signed in.
-          </p>
+          {serverOutdated ? (
+            <>
+              <h1>{SERVER_UPDATE_NEEDED}</h1>
+              <p className="muted">
+                {server.host()} runs a version of PassAuth that is too old for this app, so your vault wasn't loaded. Ask the server's admin to update it, then try
+                again. You're still signed in.
+              </p>
+            </>
+          ) : (
+            <>
+              <h1>Can't reach your PassAuth server</h1>
+              <p className="muted">
+                {server.host()} isn't answering. Check your connection or VPN, or wait for the server to finish restarting. You're still signed in.
+              </p>
+            </>
+          )}
         </div>
         <div className="auth-panel stack">
           <SheetActions

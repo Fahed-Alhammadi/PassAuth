@@ -68,6 +68,10 @@ data class ServerConfig(
     /** `/api/config` `limits` as sent (Send and attachment sizes are read from it). */
     val limits: JsonObject? = null,
 ) {
+    /** `limits.max_import_items`: how many items one batch request may name; null when the server doesn't say. */
+    val maxImportItems: Int?
+        get() = (limits?.get("max_import_items") as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() && it >= 1 }?.toInt()
+
     companion object {
         fun parse(o: JsonObject): ServerConfig {
             val features = (o["features"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()

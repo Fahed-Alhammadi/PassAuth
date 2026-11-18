@@ -16,7 +16,7 @@ import { fromB64u } from "./helpers";
 
 const vault = await import("../src/background/vault");
 const storage = await import("../src/background/storage");
-const { forgetServerFeatures } = await import("../src/background/api");
+const { forgetServerFeatures, SERVER_UPDATE_TEXT } = await import("../src/background/api");
 const ss = await import("../src/background/signed-sharing");
 
 // ------------------------------------------------------------------ vectors
@@ -868,6 +868,8 @@ interface Setup {
   pins?: (w: World) => core.KeyPins | null;
   /** Runs just before the first unlock (handlers set by then, e.g. to make an upload fail). */
   beforeUnlock?: (w: World) => void;
+  /** Only set the server and the account up: nothing is unlocked or synced. */
+  noUnlock?: boolean;
 }
 
 const putItem = (vaultId: string, key: core.VaultKey, id: string, item: unknown) => {
@@ -933,7 +935,7 @@ async function bobSignedIn(setup: Setup = {}) {
   await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1" });
   await fake.session.set({ "unlocked:a1": sessionFor("bob") });
   setup.beforeUnlock?.(w);
-  expect(await vault.ensureUnlocked()).toBe(true);
+  if (!setup.noUnlock) expect(await vault.ensureUnlocked()).toBe(true);
   return { w, ownKey, stored, bob: accountOf("bob") };
 }
 
@@ -1156,34 +1158,87 @@ test("worker: verdicts survive an offline reopen: a refused vault stays out, a v
   expect(names()).toStrictEqual(["Own", "Team login"]);
 });
 
-test("worker: a server that drops signed sharing can't bring back an unsigned share of a vault seen signed", async () => {
+test("worker: a server that drops signed sharing is refused: its unsigned share of a vault seen signed is never fetched", async () => {
   await bobSignedIn();
-  server.features = ["key_epoch", "idempotent_create", "error_codes", "delta_sync", "vault_invitations"];
+  server.outdated = "unsigned";
   forgetServerFeatures();
   const row = server.vaults[1] as unknown as Record<string, unknown>;
   row.share = null;
   row.member_roster = null;
   row.member_roster_seq = 0;
   server.revision++;
-  await vault.sync();
-  expect(names()).toStrictEqual(["Own"]);
-});
-
-test("worker: older servers without signed sharing keep working (shares from before used as before, nothing extra asked)", async () => {
-  await bobSignedIn({
-    pins: () => null,
-    features: ["key_epoch", "idempotent_create", "error_codes", "delta_sync", "vault_invitations"],
-    identity: null,
-    shared: (w) => ({ wrapped_key: w.key.shareTo(VID, who("bob").public_key), share: undefined, member_roster: undefined, member_roster_seq: undefined }),
-  });
-  userField("key_pins_seq", undefined);
-  await vault.sync();
+  const before = server.requests.length;
+  await expect(vault.sync()).rejects.toThrow(SERVER_UPDATE_TEXT);
+  expect(server.requests.slice(before).map((r) => r.path)).toStrictEqual(["/config"]);
+  // What was checked before stays as it was.
   expect(names()).toStrictEqual(["Own", "Team login"]);
-  expect(server.requests.filter((r) => r.path.startsWith("/account/") || r.path.includes("/rosters"))).toStrictEqual([]);
-  expect(vault.sharingNotice()).toBe(null);
 });
 
-const OLD_FEATURES = ["key_epoch", "idempotent_create", "error_codes", "delta_sync", "vault_invitations"];
+test("worker: a server whose features can't be read gets no benefit of the doubt: rows without key epochs are checked (and refused), never used unchecked", async () => {
+  // A new browser, `/api/config` failing, and rows made to look like an old server's (no key epochs, nothing signed).
+  await bobSignedIn({
+    identity: null,
+    pins: () => null,
+    shared: (w) => ({ wrapped_key: w.key.shareTo(VID, who("bob").public_key), share: undefined, member_roster: undefined, member_roster_seq: undefined, key_epoch: undefined }),
+    beforeUnlock: () => {
+      server.handlers["GET /config"] = () => ({ status: 500, body: {} });
+      userField("key_pins_seq", undefined);
+    },
+  });
+  expect(names()).toStrictEqual(["Own"]);
+  expect((await storage.syncCache.get("a1"))?.checks).toBeUndefined();
+});
+
+test("worker: servers without signed sharing are refused (API 2 without the feature, and servers from before API 2): no sign-in, no sync, nothing written", async () => {
+  for (const kind of ["unsigned", "old"] as const) {
+    await bobSignedIn({ noUnlock: true, beforeUnlock: () => (server.outdated = kind) });
+    // Restoring the keys works (nothing is asked for that); the first sync is refused before `/sync` is asked.
+    await expect(vault.ensureUnlocked()).rejects.toThrow(SERVER_UPDATE_TEXT);
+    await expect(vault.sync()).rejects.toThrow(SERVER_UPDATE_TEXT);
+    await expect(vault.login("bob@example.com", "pw")).rejects.toThrow(SERVER_UPDATE_TEXT);
+    expect(
+      server.requests.map((r) => r.path),
+      kind,
+    ).toStrictEqual(["/config"]);
+    expect(names(), kind).toStrictEqual([]);
+    expect(await vault.serverNeedsUpdate(), kind).toBe(true);
+    // Setting that address as the server is refused too; an address where nothing answers isn't "outdated".
+    await expect(vault.setServer("https://vault.test"), kind).rejects.toThrow(SERVER_UPDATE_TEXT);
+  }
+});
+
+test("worker: a refused server leaves the offline copy usable (read only), as when the server can't be reached; an upgraded server syncs again", async () => {
+  await bobSignedIn();
+  expect(names()).toStrictEqual(["Own", "Team login"]);
+  // The server is downgraded (or starts leaving the feature out); the browser unlocks again later.
+  await vault.lockAll();
+  server.outdated = "unsigned";
+  forgetServerFeatures();
+  await fake.session.set({ "unlocked:a1": sessionFor("bob") });
+  const before = server.requests.length;
+  expect(await vault.ensureUnlocked()).toBe(true);
+  expect(names()).toStrictEqual(["Own", "Team login"]);
+  await expect(vault.sync()).rejects.toThrow(SERVER_UPDATE_TEXT);
+  const own = vault.allEntries().find((e) => e.item.name === "Own")!;
+  await expect(vault.updateItem(own, { ...own.item, notes: "changed" })).rejects.toThrow(SERVER_UPDATE_TEXT);
+  await expect(vault.createItem(own.item)).rejects.toThrow(SERVER_UPDATE_TEXT);
+  await expect(vault.trashItem(own)).rejects.toThrow(SERVER_UPDATE_TEXT);
+  expect(await vault.checkForChanges()).toBe("unsupported");
+  expect([...new Set(server.requests.slice(before).map((r) => r.path))]).toStrictEqual(["/config"]);
+  expect(await vault.serverNeedsUpdate()).toBe(true);
+  // Unreachable is not a refusal.
+  vi.stubGlobal("fetch", async () => Promise.reject(new TypeError("Failed to fetch")));
+  forgetServerFeatures();
+  expect(await vault.serverNeedsUpdate()).toBe(false);
+  // Updated: everything works again.
+  vi.stubGlobal("fetch", server.fetch);
+  server.outdated = null;
+  forgetServerFeatures();
+  await vault.sync();
+  expect(await vault.serverNeedsUpdate()).toBe(false);
+  expect(names()).toStrictEqual(["Own", "Team login"]);
+});
+
 const unsignedShare = (w: World) => ({ wrapped_key: w.key.shareTo(VID, who("bob").public_key), share: null, member_roster: null, member_roster_seq: 0 });
 const identityPuts = () => server.requests.filter((r) => r.method === "PUT" && r.path === "/account/identity");
 /**
@@ -1198,24 +1253,21 @@ async function unlockFromDisk() {
 /** Unlock again in a new session (the offline copy kept), with what the server answers now. */
 async function unlockAgain() {
   await vault.lockAll();
+  await fake.session.clear();
   await unlockFromDisk();
   server.revision++;
   await vault.sync();
 }
-/** Bob used the extension with the server before it signed (an offline copy with the shared vault), then it signs. */
+/**
+ * Bob used an earlier version of the extension with the server before it signed: this browser holds an offline copy
+ * with the shared vault, written without checks. (This version never syncs with such a server, so the copy is put
+ * there as that version stored it: a full `/sync` answer.) Versions from before signed sharing left no mark
+ * (`oldExtension`); later ones marked a copy written with the checks off (round 5 H). Then the server signs.
+ */
 async function beforeSigning(oldExtension = true) {
-  const ctx = await bobSignedIn({ identity: null, pins: () => null, features: OLD_FEATURES, shared: unsignedShare });
-  expect(names()).toStrictEqual(["Own", "Team login"]);
-  // This extension marks a copy written with the checks off (round 5 H); one from an extension from before signed
-  // sharing (`oldExtension`) has no mark.
-  const copy = await storage.syncCache.get("a1");
-  expect(copy?.checks).toBe("off");
-  if (oldExtension && copy) {
-    delete copy.checks;
-    await storage.syncCache.set("a1", copy);
-  }
-  server.features = SIGNED_FEATURES;
-  forgetServerFeatures();
+  const ctx = await bobSignedIn({ identity: null, pins: () => null, shared: unsignedShare, noUnlock: true });
+  const answer = server.syncAnswer({ trash: "summary" }) as never as NonNullable<Awaited<ReturnType<typeof storage.syncCache.get>>>;
+  await storage.syncCache.set("a1", oldExtension ? answer : { ...answer, checks: "off" });
   return ctx;
 }
 const serverPins = (stored: { pins: string | null; seq: number }) => accountOf("bob").openKeyPins(stored.pins!, stored.seq);
@@ -1318,23 +1370,27 @@ test("B: an upload whose answer was lost still counts as made here once the serv
   expect(memory?.candidates).toBeUndefined();
 });
 
-test("A: while the server's features are unknown the checks run, but nothing turns them on for good; known again (no signing): as before", async () => {
-  await bobSignedIn({ identity: null, pins: () => null, features: OLD_FEATURES, shared: unsignedShare });
-  userField("key_pins_seq", undefined);
-  server.handlers["GET /config"] = () => ({ status: 500, body: {} });
-  forgetServerFeatures();
-  await vault.sync();
-  // Checked (unknown is never "off"): the share from before waits for this sync…
+test("A: while the server's features are unknown the checks run, but nothing turns them on for good; known again as a server that doesn't sign: refused", async () => {
+  await bobSignedIn({
+    identity: null,
+    pins: () => null,
+    shared: unsignedShare,
+    beforeUnlock: () => {
+      server.handlers["GET /config"] = () => ({ status: 500, body: {} });
+      userField("key_pins_seq", undefined);
+    },
+  });
+  // Checked (unknown is never "off"): the unsigned share waits…
   expect(names()).toStrictEqual(["Own"]);
-  // …but nothing was kept that would keep the checks on.
+  // …but nothing was kept that would keep the checks on, and no identity was made for a server that may not sign.
   expect(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id)).toBeUndefined();
   expect(server.requests.filter((r) => r.path.startsWith("/account/"))).toStrictEqual([]);
   delete server.handlers["GET /config"];
+  server.outdated = "unsigned";
   forgetServerFeatures();
   server.revision++;
-  await vault.sync();
-  expect(names()).toStrictEqual(["Own", "Team login"]);
-  expect(vault.sharingNotice()).toBe(null);
+  await expect(vault.sync()).rejects.toThrow(SERVER_UPDATE_TEXT);
+  expect(names()).toStrictEqual(["Own"]);
   expect(await storage.trustMemory.get("https://vault.test", V.accounts[1]!.id)).toBeUndefined();
 });
 

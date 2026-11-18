@@ -1,3 +1,4 @@
+import { VAULT_WARNING } from "../lib/manifest";
 import { useCallback, useDeferredValue, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { ReadOnlyFiles } from "../components/Attachments";
@@ -710,6 +711,15 @@ export function EmergencyVaultPage() {
         )}
         {view && (
           <>
+            {view.vaults
+              .filter((v) => v.warning)
+              .map((v) => (
+                <div key={v.id} className="alert alert-warn small" role="alert" data-manifest-warning={v.id}>
+                  <span>
+                    <strong>{v.name}:</strong> {VAULT_WARNING}
+                  </span>
+                </div>
+              ))}
             {view.failed > 0 && (
               <div className="alert alert-warn small" role="note">
                 {view.failed === 1 ? "One item couldn't be opened and is" : `${view.failed} items couldn't be opened and are`} left out.

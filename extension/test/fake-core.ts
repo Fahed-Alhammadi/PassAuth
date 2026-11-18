@@ -4,7 +4,10 @@
  * wrapped the item key, so an item encrypted under a replaced vault key fails
  * to open, as with the real core. The site logic (host names, matching, the save
  * rule, passkey targets, RP IDs, sign-in phrases, the item edit counter check) is the real core's; item writes raise
- * the item's edit counter `rev` like the core's. Used through
+ * the item's edit counter `rev` like the core's. Vault manifests are the real core's too (test/manifest-key.ts).
+ * Signed sharing (which every server this app talks to has) is a stand-in that finds nothing wrong: the account opens
+ * or makes a signing identity, every vault row passes its check, nothing is pinned. Its rules are tested with the real
+ * core in signed-sharing.test.ts. Used through
  *   vi.mock("../src/wasm/passauth_core", async () => (await import("./fake-core")).module())
  */
 import { readFileSync } from "node:fs";
@@ -12,6 +15,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { vi } from "vitest";
 import type * as Core from "../src/wasm/passauth_core";
+import { defaults } from "./fake-server";
+import { loadManifests, manifestKey } from "./manifest-key";
 
 /** Knobs a test turns: hold `init` open, count calls. */
 export const control = {
@@ -35,6 +40,26 @@ const revOf = (item: unknown): number => {
 export class FakeVaultKey {
   constructor(public tag: string) {}
   free() {}
+  /** Signed sharing: the key's id is its name; any roster matches. */
+  keyId() {
+    return this.tag;
+  }
+  epochPin(_vaultId: string, epoch: number) {
+    return { key_id: this.tag, epoch };
+  }
+  matchesRoster() {
+    return true;
+  }
+  /** Vault manifests: the real core's, bound to this key's name. */
+  manifestVerify(vaultId: string, epoch: number, seq: number, sealed: string | null | undefined, remembered: number | null | undefined, items: unknown) {
+    return manifestKey(this.tag).manifestVerify(vaultId, epoch, seq, sealed, remembered, items);
+  }
+  manifestStart(vaultId: string, epoch: number, version: number, items: unknown) {
+    return manifestKey(this.tag).manifestStart(vaultId, epoch, version, items);
+  }
+  manifestNext(vaultId: string, epoch: number, seq: number, sealed: string, removed: unknown, added: unknown) {
+    return manifestKey(this.tag).manifestNext(vaultId, epoch, seq, sealed, removed, added);
+  }
   private check(enc: { key: string }) {
     if (!enc.key.startsWith(`${this.tag}:`)) throw new Error("decrypt_failed");
   }
@@ -57,8 +82,35 @@ export class FakeVaultKey {
   }
 }
 
+/** A signing identity that is simply this account's. */
+class FakeSigning {
+  free() {}
+  identityHash() {
+    return `identity-of-${control.userId}`;
+  }
+  publicIdentity() {
+    return { user_id: control.userId, public_key: "fake-public-key", signing_key: "fake-signing-key", identity_signature: "sig", x25519_signature: "sig" };
+  }
+  fingerprint() {
+    return "AAAA BBBB CCCC DDDD";
+  }
+}
+
 export class FakeAccount {
   free() {}
+  /** Signed sharing: any listed identity record opens; a new one is a record naming the account. Key pins are JSON. */
+  openSigningIdentity(_record: unknown) {
+    return new FakeSigning();
+  }
+  newSigningIdentity() {
+    return { record: { user_id: control.userId, fake_identity: true }, takeIdentity: () => new FakeSigning(), free() {} };
+  }
+  openKeyPins(sealed: string) {
+    return JSON.parse(sealed);
+  }
+  sealKeyPins(pins: unknown) {
+    return JSON.stringify(pins);
+  }
   toSessionBytes() {
     return new Uint8Array([1, 2, 3]);
   }
@@ -120,6 +172,7 @@ let realLoginPhrase: (publicKey: string) => string = () => "";
 
 /** The real core's functions that don't touch keys: the worker's site logic runs on them, as in the extension. */
 async function realSiteLogic() {
+  await loadManifests();
   const real = await vi.importActual<typeof Core>("../src/wasm/passauth_core");
   real.initSync({ module: readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/wasm/passauth_core_bg.wasm")) });
   realLoginPhrase = real.loginPhrase;
@@ -142,6 +195,8 @@ async function realSiteLogic() {
     loginPhrase,
     loginPhraseChoices,
     itemRevCheck,
+    manifestDataHash,
+    normalizeEmail,
   } = real;
   return {
     normalizeHost,
@@ -162,12 +217,30 @@ async function realSiteLogic() {
     loginPhrase,
     loginPhraseChoices,
     itemRevCheck,
+    manifestDataHash,
+    normalizeEmail,
   };
 }
 
+/** Signed sharing that finds nothing wrong and pins nothing (see the file comment). */
+const signedSharingStandIn = {
+  verifyIdentity: (identity: { user_id?: string }) => ({ hash: `identity-of-${identity?.user_id ?? ""}`, fingerprint: "AAAA BBBB CCCC DDDD" }),
+  pinsCheckOwnIdentity: () => "same",
+  pinsSetOwnIdentity: (pins: unknown) => pins,
+  pinsGrandfather: (pins: unknown) => pins,
+  pinsLeave: (pins: unknown) => pins,
+  pinsLegacyWrapAllowed: () => true,
+  accountWrapIsBound: () => false,
+  rosterHead: () => ({ status: "none" }),
+  pinsObserve: (pins: unknown) => ({ admission: { status: "ok", trust: "signed" }, pins }),
+};
+
 export async function module() {
+  // Every fake server of this test file lists a signing identity the stand-in account opens.
+  defaults.identity = { user_id: control.userId, fake_identity: true };
   return {
     ...(await realSiteLogic()),
+    ...signedSharingStandIn,
     default: vi.fn(() => control.init()),
     accountFromSessionBytes: vi.fn(() => {
       control.restored++;

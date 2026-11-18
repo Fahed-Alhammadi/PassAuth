@@ -744,6 +744,14 @@ private struct GrantorVaultPage: View {
                     Text(o.failed == 1 ? "One item couldn't be opened and is left out." : "\(o.failed) items couldn't be opened and are left out.")
                         .font(.footnote).foregroundStyle(Color.paDanger)
                 }
+                // Vault manifests: the items sent aren't the ones the vault's record of changes names.
+                if let o = opened {
+                    ForEach(o.vaults.filter { o.unverified.contains($0.id) }, id: \.id) { v in
+                        Text("\(v.name): \(ManifestText.warning)")
+                            .font(.footnote).foregroundStyle(Color.paDanger)
+                            .accessibilityIdentifier("emergency.manifestWarning")
+                    }
+                }
             }
             .paRow()
             if let o = opened {

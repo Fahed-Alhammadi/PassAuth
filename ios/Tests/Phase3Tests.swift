@@ -229,7 +229,7 @@ final class MoveItemTests: XCTestCase {
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
         let api = ApiClient(store: store) { $0.protocolClasses = [RecordingServer.self] }
-        let repo = VaultRepository(store: store, api: api)
+        let repo = VaultRepository(store: store, api: api).allowingOlderServers()
         try await repo.unlock(password: password, secretKey: nil)
         let entry = try XCTUnwrap(repo.vault?.get(itemId))
         XCTAssertEqual(repo.moveTargets(entry).map(\.name), ["Team"])
@@ -277,7 +277,7 @@ final class MoveItemTests: XCTestCase {
             s.file.activeId = "acc"
             s.secrets.tokens["acc"] = Tokens(access: "A", refresh: "R")
         }
-        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [RecordingServer.self] })
+        let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [RecordingServer.self] }).allowingOlderServers()
         try await repo.unlock(password: password, secretKey: nil)
         let entry = try XCTUnwrap(repo.vault?.get(itemId))
         var next = entry.item

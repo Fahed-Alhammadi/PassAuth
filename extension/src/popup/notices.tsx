@@ -8,6 +8,8 @@
  *   sharing there;
  * - sign-ins on other devices put off with "Not now" (sign-in-requests.tsx), with "Review";
  * - items the server sent in an older version than this browser had seen (background/item-revs.ts);
+ * - vaults whose items don't match the vault's manifest (background/manifests.ts; not dismissible: nothing is saved
+ *   into them until it is resolved in the web vault or the desktop app), and a server this version refuses;
  * - signed sharing (background/signed-sharing.ts): shared vaults that failed a check and aren't used, a person whose
  *   keys changed (with their new fingerprint and "Trust the new key" once the user compared it), account-wide warnings,
  *   and invitations that can't be accepted as they are.
@@ -199,7 +201,9 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
   const sharingShown = sharing && dismissed.sharing !== sharing.key ? sharing : null;
   const rollback = data?.rollback;
   const rollbackShown = rollback && dismissed.rollback !== rollback.key ? rollback : null;
-  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown) return null;
+  const manifest = data?.manifest;
+  const serverProblem = data?.serverProblem;
+  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !serverProblem) return null;
   return (
     <div className="notices">
       {signIns && (
@@ -210,6 +214,30 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
               {signIns.putOff === 1 ? "A sign-in on another device is waiting for your approval." : `${signIns.putOff} sign-ins on other devices are waiting for your approval.`}{" "}
               <button type="button" className="link" onClick={signIns.review}>
                 Review
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
+      {serverProblem && (
+        // Not dismissible: nothing syncs until the server is updated; what is shown is this browser's offline copy.
+        <div className="alert alert-warn small notice" role="note">
+          <div className="grow">
+            <span>{serverProblem}</span>
+          </div>
+        </div>
+      )}
+      {manifest && (
+        // Not dismissible: nothing can be saved into these vaults until the warning is resolved (elsewhere).
+        <div className="alert alert-warn small notice" role="note">
+          <div className="grow">
+            <span>
+              <strong>{manifest.vaults.map((v) => v.name).join(", ")}</strong>: {manifest.text}
+            </span>
+            <span>
+              {manifest.review}{" "}
+              <button type="button" className="link" onClick={() => openTab(ctx.state.server)}>
+                Open the web vault
               </button>
             </span>
           </div>

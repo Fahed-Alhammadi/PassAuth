@@ -518,6 +518,14 @@ struct MacList: View {
                 }
             }
             .listStyle(.inset)
+            // Vault manifests: logins still fill; nothing is saved into such a vault from here.
+            if let v = model.repo.vault?.manifestWarnings.first {
+                Divider()
+                Text("\(v.name): \(ManifestText.warning)").font(.caption).foregroundStyle(Color.paDanger)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
+            }
             if model.repo.vault?.offline == true {
                 Divider()
                 Text("Showing the copy on this Mac.").font(.caption).foregroundStyle(.secondary)

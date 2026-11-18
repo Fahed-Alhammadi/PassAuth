@@ -15,6 +15,7 @@ import { useMemo, useSyncExternalStore } from "react";
 import * as core from "../wasm/passauth_core";
 import { toast } from "../components/ui";
 import { ApiError, UnreachableError, api, friendlyError, getTokens, hasErrorCode, isOutOfStorage, renewSession } from "./api";
+import { MANIFEST_HELD, manifestRaced } from "./manifest";
 import { addAttachments, cleanFileName, readStoredAttachments, removeAttachment as withoutAttachment, type StoredAttachment } from "./attachments";
 import { clientId, getDesktop, isDesktop } from "./platform";
 import { server, type NativeAnswer, type NativeTransfers } from "./server";
@@ -442,7 +443,8 @@ function currentEntry(itemId: string) {
 }
 
 /** Worth trying the save again after a sync: not an answer that will stay the same (a full storage, a gone item). */
-const retrySave = (e: unknown) => !(e instanceof ApiError) || e.status === 409 || e.status === 429 || (e.status >= 500 && !isOutOfStorage(e));
+const retrySave = (e: unknown) =>
+  e instanceof ApiError ? e.status === 409 || e.status === 429 || (e.status >= 500 && !isOutOfStorage(e)) || manifestRaced(e) : !(e instanceof Error && e.message === MANIFEST_HELD);
 
 /** Save the item with `att` added to its list, starting from the item as last synced each try. */
 async function listInItem(itemId: string, att: Attachment): Promise<void> {

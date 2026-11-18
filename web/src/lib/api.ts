@@ -346,6 +346,10 @@ const CODE_TEXT = new Map<string, string>([
   ["identity_exists", "Your account already has a signing key. Reload the page, then try again."],
   ["login_with_device_disabled", "Signing in with another device's approval is turned off on this server. Sign in with your master password."],
   ["upload_in_progress", "This file is being uploaded already. Wait a moment, then try again."],
+  // Vault manifests (servers with `vault_manifest`; wording as in `manifest.ts`).
+  ["manifest_conflict", "This vault changed on another device. Try again."],
+  ["manifest_required", "This vault changed on another device. Try again."],
+  ["manifest_not_ready", "This can't be done until every member's apps are up to date."],
 ]);
 
 /**
@@ -503,6 +507,19 @@ export function onPublicConfig(fn: () => void) {
 /** Whether the server announced `feature` in GET /api/config (servers before API 2 announce none). */
 export function hasFeature(config: PublicConfig | null, feature: string): boolean {
   return Array.isArray(config?.features) && config.features.includes(feature);
+}
+
+/** Shown on the sign-in screen and as the sync error for a server this app refuses (`serverTooOld`). */
+export const SERVER_UPDATE_NEEDED = "Update your PassAuth server to keep using this app.";
+
+/**
+ * Whether this app refuses the server: its /api/config was fetched and doesn't list `signed_sharing` (every server
+ * since 0.12.0 does; one from before API 2 lists no features at all). Such a server could otherwise switch the signed
+ * sharing checks off on a device that never saw it sign, so the app doesn't sign in to it, asks for no vault and uses
+ * none. A config that couldn't be fetched (null) is not a refusal: the next answer decides.
+ */
+export function serverTooOld(config: PublicConfig | null): boolean {
+  return config !== null && !hasFeature(config, "signed_sharing");
 }
 
 /** Server's public settings (cached per server, refreshed at sign-in and unlock). Null while loading or if unreachable. */

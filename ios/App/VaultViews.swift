@@ -120,10 +120,18 @@ private struct VaultList: View {
         List {
             if v?.offline == true {
                 Section {
-                    Notice(text: "You're offline. Showing the copy of your vault saved on this device.")
-                        .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                    // A server this app no longer uses (no signed sharing) is said as such.
+                    if let problem = model.repo.serverProblem {
+                        Notice(text: problem + " Showing the copy of your vault saved on this device.", kind: .error)
+                            .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                            .accessibilityIdentifier("vault.serverProblem")
+                    } else {
+                        Notice(text: "You're offline. Showing the copy of your vault saved on this device.")
+                            .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                    }
                 }
             }
+            ManifestWarnings()
             if let r = v?.rollback {
                 Section {
                     Notice(text: r.notice, kind: .error)

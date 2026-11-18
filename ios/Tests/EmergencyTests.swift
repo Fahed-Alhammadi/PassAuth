@@ -238,7 +238,7 @@ final class EmergencyTests: XCTestCase {
         ]))
         XCTAssertEqual(data.sealedKey, "sealed")
         XCTAssertEqual(data.keyVersion, 2)
-        XCTAssertEqual(data.vaults, [.init(id: "v1", meta: "m", wrappedKey: "w")])
+        XCTAssertEqual(data.vaults, [.init(id: "v1", meta: "m", wrappedKey: "w", keyEpoch: 2)])
         XCTAssertEqual(data.items, [
             .init(id: "i1", vaultId: "v1", key: "ik", data: "d", deletedAt: nil, updatedAt: 2),
             .init(id: "i2", vaultId: "v1", key: "ik2", data: "d2", deletedAt: 50, updatedAt: 3),

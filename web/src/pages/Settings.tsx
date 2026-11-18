@@ -1,3 +1,4 @@
+import { ManifestNotices } from "./Shell";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { setShowIcons, setTheme, useShowIcons, useTheme, type Theme } from "../lib/prefs";
 import { Link, Navigate, useParams } from "react-router";
@@ -1531,6 +1532,7 @@ function VaultsTab() {
   return (
     <>
       <SigningNotices />
+      <ManifestNotices />
       <InvitationsCard />
       <section className="card" aria-labelledby="newvault-title">
         <h2 id="newvault-title">Create a vault</h2>

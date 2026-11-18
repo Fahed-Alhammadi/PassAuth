@@ -108,6 +108,8 @@ data class AccountData(
     val api: Int? = null,
     /** The server's account policies when last asked (with [features]); null until then or from servers without them. */
     val policies: Policies? = null,
+    /** The server's `limits.max_import_items` asked with [features] (how many items one batch request may name); null until then. */
+    val maxImportItems: Int? = null,
     /**
      * Before [Stored.rosters]: the roster memory kept in the record (so a log out or another account
      * on the record lost or inherited it). Only read to move it there once ([Stored.migrated]).

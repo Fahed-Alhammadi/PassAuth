@@ -252,7 +252,11 @@ describe("the grantor's vault", () => {
     })!;
     expect(data.sealedKey).toBe("sealed");
     expect(data.keyVersion).toBe(2);
-    expect(data.vaults).toEqual([{ id: "v1", meta: "m", wrappedKey: "w" }]);
+    expect(data.vaults).toEqual([{ id: "v1", meta: "m", wrappedKey: "w", keyEpoch: 2, manifest: null, manifestSeq: 0 }]);
+    // A row this app can't read is counted: a vault with a manifest then shows its warning.
+    expect(data.malformed).toBe(1);
+    const withManifest = readGrantorVault({ sealed_key: "s", vaults: [{ id: "v1", meta: "m", wrapped_key: "w", key_epoch: 1, manifest: "abc", manifest_seq: 4 }, { id: "v2", meta: "m", wrapped_key: "w", manifest_seq: "x" }], items: [] })!;
+    expect(withManifest.vaults.map((v) => [v.manifest, v.manifestSeq])).toEqual([["abc", 4], [null, -1]]);
     expect(data.items).toEqual([
       { row: { id: "i1", vault_id: "v1", key: "ik", data: "d" }, deletedAt: null, updatedAt: 2 },
       { row: { id: "i2", vault_id: "v1", key: "ik2", data: "d2" }, deletedAt: 50, updatedAt: 3 },

@@ -576,8 +576,11 @@ export interface GrantorVaultData {
   /** The key scheme; null from servers before emergency keys (whose sealed key this app can't open). */
   keyVersion: number | null;
   sealedKey: string;
-  vaults: { id: string; meta: string; wrappedKey: string }[];
+  /** `manifest` / `manifestSeq` (0: none) / `keyEpoch`: the vault's manifest, from the same snapshot as the items. */
+  vaults: { id: string; meta: string; wrappedKey: string; keyEpoch: number | null; manifest: string | null; manifestSeq: number }[];
   items: { row: EncryptedItem; deletedAt: number | null; updatedAt: number }[];
+  /** Item rows of the answer this app couldn't read (left out of `items`), by vault where the row named one. */
+  malformed: number;
 }
 
 /** The answer as the core takes it (`item_key` becomes `key`, as `VaultKey.decryptItem` expects); null when malformed. */
@@ -589,17 +592,30 @@ export function readGrantorVault(value: unknown): GrantorVaultData | null {
   const vaults: GrantorVaultData["vaults"] = [];
   for (const raw of v.vaults) {
     const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
-    if (r && str(r.id) && str(r.meta) && str(r.wrapped_key)) vaults.push({ id: str(r.id), meta: str(r.meta), wrappedKey: str(r.wrapped_key) });
+    if (r && str(r.id) && str(r.meta) && str(r.wrapped_key))
+      vaults.push({
+        id: str(r.id),
+        meta: str(r.meta),
+        wrappedKey: str(r.wrapped_key),
+        keyEpoch: num(r.key_epoch),
+        manifest: str(r.manifest) || null,
+        // Anything but a whole number above 0 that this app can carry is "none", except a value that isn't one at all.
+        manifestSeq: r.manifest_seq === undefined || r.manifest_seq === null ? 0 : typeof r.manifest_seq === "number" && Number.isSafeInteger(r.manifest_seq) && r.manifest_seq >= 0 ? r.manifest_seq : -1,
+      });
   }
   const items: GrantorVaultData["items"] = [];
+  let malformed = 0;
   for (const raw of v.items) {
     const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
-    if (!r || !str(r.id) || !str(r.vault_id) || !str(r.item_key) || !str(r.data)) continue;
+    if (!r || !str(r.id) || !str(r.vault_id) || !str(r.item_key) || !str(r.data)) {
+      malformed++;
+      continue;
+    }
     items.push({
       row: { id: str(r.id), vault_id: str(r.vault_id), key: str(r.item_key), data: str(r.data) },
       deletedAt: num(r.deleted_at),
       updatedAt: num(r.updated_at) ?? 0,
     });
   }
-  return { keyVersion: num(v.key_version), sealedKey, vaults, items };
+  return { keyVersion: num(v.key_version), sealedKey, vaults, items, malformed };
 }

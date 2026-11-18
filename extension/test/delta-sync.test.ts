@@ -99,7 +99,8 @@ test("deleted elsewhere, a replaced vault key, a vault gone: removed, re-opened 
   const open = vi.spyOn(FakeAccount.prototype, "openVaultKey");
   server.rotate("v-own");
   await vault.sync();
-  expect(open).toHaveBeenCalledTimes(1);
+  // Once for the signed-sharing check of the row, once to use the vault.
+  expect(open).toHaveBeenCalledTimes(2);
   expect(syncs().at(-1)?.query.since).toBeTruthy();
   expect(ids()).toStrictEqual(["i1", "i3"]);
   expect(vault.getEntry("i1")?.item.name).toBe("Item 1");

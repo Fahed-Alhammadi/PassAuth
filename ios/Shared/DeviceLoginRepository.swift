@@ -66,6 +66,8 @@ extension VaultRepository {
         dropDeviceLogin()
         let id = activeId
         let s = store.get()
+        // Part S: no sign-in is started with a server without signed sharing.
+        try await requireSupportedServer(id, ask: true)
         let key = try await core { try LoginRequestKey.generate() }
         let code = try DeviceLogin.accessCode()
         // This device's "remember me" token for the account skips two-step login, as when signing in with the password.
