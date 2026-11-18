@@ -34,6 +34,11 @@ const SEALED_EMERGENCY_KEY: &str = "emergency-key-sealed";
 const EMERGENCY_VAULT_KEY: &str = "emergency-vault-key";
 const EMERGENCY_ROSTER: &str = "emergency-roster";
 
+/// The account's profile picture, sealed by its Account Key (bound to the account).
+const AVATAR_AAD: &str = "passauth/avatar/v1/";
+/// Largest profile picture the apps seal: they send a small square JPEG (≈256 px).
+pub const MAX_AVATAR_BYTES: usize = 256 * 1024;
+
 /// `passauth/<kind>/v2/<id>/<id>…`: every id non-empty and without '/', so two
 /// lists of ids never give the same bytes.
 fn emergency_aad(kind: &str, ids: &[&str]) -> Result<Vec<u8>> {
@@ -444,6 +449,24 @@ impl UnlockedAccount {
         let aad = emergency_aad(EMERGENCY_ROSTER, &[&self.account_id])?;
         let json = self.account_key.decrypt(&unb64(sealed)?, &aad)?;
         String::from_utf8(json).map_err(|_| Error::Malformed("roster is not UTF-8"))
+    }
+
+    /// Seal the account's profile picture (the image file's bytes, at most
+    /// [`MAX_AVATAR_BYTES`]) with the Account Key (base64url): the server keeps it for
+    /// the account's devices but can't see it.
+    pub fn seal_avatar(&self, image: &[u8]) -> Result<String> {
+        if image.is_empty() || image.len() > MAX_AVATAR_BYTES {
+            return Err(Error::Malformed("profile picture size"));
+        }
+        let aad = format!("{AVATAR_AAD}{}", self.account_id);
+        Ok(b64(&self.account_key.encrypt(image, aad.as_bytes())?))
+    }
+
+    /// The image bytes from what [`seal_avatar`](Self::seal_avatar) made: this
+    /// account's, unchanged, or an error.
+    pub fn open_avatar(&self, sealed: &str) -> Result<Vec<u8>> {
+        let aad = format!("{AVATAR_AAD}{}", self.account_id);
+        self.account_key.decrypt(&unb64(sealed)?, aad.as_bytes())
     }
 }
 
@@ -982,6 +1005,21 @@ mod tests {
             );
         }
         assert!(key.open_vault_key("v1", "not base64!").is_err());
+    }
+
+    #[test]
+    fn avatars_open_only_for_their_account() {
+        let alice = new(false).unlocked;
+        let image = b"\xFF\xD8\xFFjpeg bytes";
+        let sealed = alice.seal_avatar(image).unwrap();
+        assert_eq!(alice.open_avatar(&sealed).unwrap(), image);
+        let bob = new(false).unlocked;
+        assert!(matches!(bob.open_avatar(&sealed), Err(Error::Decrypt)));
+        assert!(alice.seal_avatar(b"").is_err());
+        assert!(alice.seal_avatar(&vec![0; MAX_AVATAR_BYTES + 1]).is_err());
+        // Not interchangeable with the roster (same key, other AAD).
+        let roster = alice.seal_emergency_roster("{}").unwrap();
+        assert!(alice.open_avatar(&roster).is_err());
     }
 
     #[test]

@@ -155,6 +155,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (12, SCHEMA_V12),
     (13, SCHEMA_V13),
     (14, SCHEMA_V14),
+    (15, SCHEMA_V15),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -432,6 +433,14 @@ const SCHEMA_V14: &[&str] = &[
         signer_id TEXT NOT NULL,
         created_at BIGINT NOT NULL,
         PRIMARY KEY (vault_id, version))",
+];
+
+/// Profile pictures: the account's picture sealed by its Account Key (`users.avatar`,
+/// NULL = none; the server can't see it) and its version (`avatar_seq`, in `/sync`,
+/// so the account's devices fetch it only when it changed).
+const SCHEMA_V15: &[&str] = &[
+    "ALTER TABLE users ADD COLUMN avatar TEXT",
+    "ALTER TABLE users ADD COLUMN avatar_seq BIGINT NOT NULL DEFAULT 0",
 ];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still

@@ -279,6 +279,18 @@ impl Account {
         Ok(self.0.open_emergency_roster(&sealed)?)
     }
 
+    /// Seal the account's profile picture (image bytes, ≤ 256 KiB; the apps send a
+    /// small square JPEG) with its key, for `PUT /api/account/avatar`.
+    pub fn seal_avatar(&self, image: Vec<u8>) -> R<String> {
+        Ok(self.0.seal_avatar(&image)?)
+    }
+
+    /// The image bytes from what `seal_avatar` made. `DecryptFailed` for another
+    /// account's picture or a changed one.
+    pub fn open_avatar(&self, sealed: String) -> R<Vec<u8>> {
+        Ok(self.0.open_avatar(&sealed)?)
+    }
+
     /// Emergency access, the contact's side: open the `sealed_key` that account
     /// `grantor_id` (the access's `grantor.id`) sealed to this account for access
     /// `grant_id`. `DecryptFailed` if it isn't for this account, that grantor or that

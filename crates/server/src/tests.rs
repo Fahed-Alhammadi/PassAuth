@@ -23,8 +23,12 @@ mod emergency;
 mod hardening;
 mod signing;
 
-/// Undoes migration 14 (signed sharing), for tests that go back to an older schema.
+/// Undoes migrations 15 (profile pictures) and 14 (signed sharing), for tests that go
+/// back to an older schema.
 const UNDO_MIGRATION_14: &[&str] = &[
+    "ALTER TABLE users DROP COLUMN avatar",
+    "ALTER TABLE users DROP COLUMN avatar_seq",
+    "DELETE FROM schema_version WHERE version = 15",
     "DROP TABLE vault_rosters",
     "ALTER TABLE vaults DROP COLUMN member_roster",
     "ALTER TABLE vaults DROP COLUMN member_roster_seq",
@@ -2476,6 +2480,7 @@ async fn config_lists_the_api_version_and_features() {
             "forget_device",
             "emergency_vault_keys",
             "signed_sharing",
+            "avatar",
             "breach_check",
             "item_history",
             "sends",
@@ -3677,6 +3682,85 @@ fn new_device_alert_links_to_the_session_list() {
 }
 
 #[tokio::test]
+async fn avatar_is_stored_sealed_and_versioned_in_sync() {
+    let app = app().await;
+    register(&app, "me@example.com", "pw-me-12345").await;
+    let t = token(&app, "me@example.com", "pw-me-12345").await;
+    assert_eq!(synced(&app, &t).await["user"]["avatar_seq"], 0);
+    let (s, v) = call(
+        &app,
+        Method::GET,
+        "/api/account/avatar",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(v["avatar"].is_null());
+    let r0 = rev_of(&app, &t).await;
+    let (s, v) = call(
+        &app,
+        Method::PUT,
+        "/api/account/avatar",
+        Some(&t),
+        json!({ "avatar": "c2VhbGVk" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["avatar_seq"], 1);
+    let sync = synced(&app, &t).await;
+    assert!(sync["revision"].as_i64().unwrap() > r0);
+    assert_eq!(sync["user"]["avatar_seq"], 1);
+    let (_, v) = call(
+        &app,
+        Method::GET,
+        "/api/account/avatar",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    assert_eq!(v["avatar"], "c2VhbGVk");
+    // Only base64url, not empty, not too large.
+    for bad in ["", "not base64!", &"A".repeat(400_000)] {
+        let (s, _) = call(
+            &app,
+            Method::PUT,
+            "/api/account/avatar",
+            Some(&t),
+            json!({ "avatar": bad }),
+        )
+        .await;
+        assert!(
+            matches!(s, StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE),
+            "{}",
+            bad.len()
+        );
+    }
+    let (s, v) = call(
+        &app,
+        Method::DELETE,
+        "/api/account/avatar",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["avatar_seq"], 2);
+    let (_, v) = call(
+        &app,
+        Method::GET,
+        "/api/account/avatar",
+        Some(&t),
+        json!({}),
+    )
+    .await;
+    assert!(v["avatar"].is_null());
+    assert_eq!(v["avatar_seq"], 2);
+    let (s, _) = call(&app, Method::GET, "/api/account/avatar", None, json!({})).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn profile_and_email_changes_reach_other_devices() {
     let (app, state) = app_with_state().await;
     register(&app, "me@example.com", "pw-me-12345").await;
@@ -4321,6 +4405,7 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
     assert_eq!(
         keys(&full["user"]),
         [
+            "avatar_seq",
             "email",
             "email_verified",
             "id",

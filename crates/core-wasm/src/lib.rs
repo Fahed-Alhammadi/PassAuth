@@ -292,6 +292,23 @@ impl Account {
             .map_err(js_err)
     }
 
+    /// Seal the account's profile picture (image bytes, ≤ 256 KiB; the apps send a
+    /// small square JPEG) with its key, for `PUT /api/account/avatar`.
+    #[wasm_bindgen(js_name = sealAvatar)]
+    pub fn seal_avatar(&self, image: &[u8]) -> R<String> {
+        self.0.seal_avatar(image).map_err(js_err)
+    }
+
+    /// The image bytes from what `sealAvatar` made. Throws `decrypt_failed` for
+    /// another account's picture or a changed one.
+    #[wasm_bindgen(js_name = openAvatar)]
+    pub fn open_avatar(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
+    ) -> R<Vec<u8>> {
+        self.0.open_avatar(&string(sealed)?).map_err(js_err)
+    }
+
     /// Emergency access, the contact's side: open the `sealed_key` that account
     /// `grantorId` (the access's `grantor.id`) sealed to this account for access
     /// `grantId`. Throws `decrypt_failed` if it isn't for this account, that grantor

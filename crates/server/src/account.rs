@@ -29,6 +29,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(get_account).delete(delete_account))
         .route("/profile", put(update_profile))
+        .route(
+            "/avatar",
+            get(get_avatar).put(put_avatar).delete(delete_avatar),
+        )
         .route("/keys/start", post(keys_start))
         .route("/keys/finish", post(keys_finish))
         .route("/2fa/totp/setup", post(totp_setup))
@@ -152,6 +156,77 @@ async fn update_profile(
         )]);
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// A sealed picture is base64url of ≤ 256 KiB (core `MAX_AVATAR_BYTES`) plus the
+/// nonce and tag.
+const MAX_SEALED_AVATAR: usize = 350_000;
+
+#[derive(Deserialize)]
+struct AvatarBody {
+    avatar: String,
+}
+
+/// The account's profile picture, sealed by its Account Key (`null` = none), and its
+/// version (`/sync` carries the version as `user.avatar_seq`).
+async fn get_avatar(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Value>> {
+    let (avatar, seq): (Option<String>, i64) =
+        sqlx::query_as("SELECT avatar, avatar_seq FROM users WHERE id = $1")
+            .bind(&user.user_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(Json(json!({ "avatar": avatar, "avatar_seq": seq })))
+}
+
+async fn put_avatar(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(b): Json<AvatarBody>,
+) -> ApiResult<Json<Value>> {
+    let ok = !b.avatar.is_empty()
+        && b.avatar.len() <= MAX_SEALED_AVATAR
+        && b.avatar
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+    if !ok {
+        return Err(ApiError::bad("bad avatar"));
+    }
+    set_avatar(&state, &user, Some(&b.avatar)).await
+}
+
+async fn delete_avatar(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json<Value>> {
+    set_avatar(&state, &user, None).await
+}
+
+async fn set_avatar(
+    state: &AppState,
+    user: &AuthUser,
+    avatar: Option<&str>,
+) -> ApiResult<Json<Value>> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE users SET avatar = $1, avatar_seq = avatar_seq + 1, updated_at = $2 WHERE id = $3",
+    )
+    .bind(avatar)
+    .bind(now())
+    .bind(&user.user_id)
+    .execute(&mut *tx)
+    .await?;
+    let seq: i64 = sqlx::query_scalar("SELECT avatar_seq FROM users WHERE id = $1")
+        .bind(&user.user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    // `/sync` carries the version: the account's other devices fetch the new picture.
+    let revision = crate::vault::bump_user(&mut tx, &user.user_id).await?;
+    tx.commit().await?;
+    if let Some(revision) = revision {
+        let origin = state.origin(&user.session_id);
+        state.notify_sync(vec![(
+            user.user_id.clone(),
+            SyncNotice::new(revision, Some(origin)),
+        )]);
+    }
+    Ok(Json(json!({ "ok": true, "avatar_seq": seq })))
 }
 
 // ------------------------------------------------- password / Secret Key change

@@ -586,6 +586,7 @@ const FEATURES: &[&str] = &[
     "forget_device",
     "emergency_vault_keys",
     "signed_sharing",
+    "avatar",
 ];
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {

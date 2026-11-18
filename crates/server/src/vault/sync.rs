@@ -97,6 +97,9 @@ struct SyncUser {
     /// Signed sharing: the version of the account's key pins (`GET
     /// /account/key-pins` when it differs from the copy the app has; 0 = none).
     key_pins_seq: i64,
+    /// The version of the account's profile picture (`GET /account/avatar` when it
+    /// differs from the copy the app has; 0 = never set).
+    avatar_seq: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -324,6 +327,7 @@ pub(super) async fn sync(
         Option<String>,
         Option<String>,
         i64,
+        i64,
     );
     let (
         revision,
@@ -335,9 +339,10 @@ pub(super) async fn sync(
         x25519,
         wrapped,
         pins_seq,
+        avatar_seq,
     ): UserRow = sqlx::query_as(
         "SELECT revision, name, email_verified, bundle, signing_key, identity_signature,
-                    x25519_signature, wrapped_signing_key, key_pins_seq
+                    x25519_signature, wrapped_signing_key, key_pins_seq, avatar_seq
              FROM users WHERE id = $1",
     )
     .bind(&user.user_id)
@@ -395,6 +400,7 @@ pub(super) async fn sync(
             email_verified: verified != 0,
             identity,
             key_pins_seq: pins_seq,
+            avatar_seq,
         },
         bundle: RawValue::from_string(bundle).map_err(anyhow::Error::from)?,
         vaults,
