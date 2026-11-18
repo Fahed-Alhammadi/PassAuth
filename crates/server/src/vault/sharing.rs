@@ -685,6 +685,11 @@ pub(super) struct Rotate {
     /// the members who remain; every sealed key then carries its `signature`.
     #[serde(default)]
     roster: Option<String>,
+    /// A vault with a manifest: its next one, computed afresh over the re-encrypted
+    /// items with the new key (the manifest's keys come from the vault key) and
+    /// sealed for the new key epoch.
+    #[serde(default)]
+    manifests: Vec<super::ManifestIn>,
 }
 
 /// Replace the vault key for every member and re-encrypted items atomically.
@@ -708,8 +713,15 @@ pub(super) async fn rotate_vault(
     // Counted only once every check passed (review round 5 L), before the commit: a
     // refused request costs nothing, an over-limit one rolls back.
     limit_key_replacements(&state, &id)?;
+    let manifest_seq = w.manifest_seq(&id);
     let revision = w.commit(&state).await?;
-    Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
+    Ok(Json(rotated(
+        revision,
+        key_epoch,
+        seq,
+        roster_seq,
+        manifest_seq,
+    )))
 }
 
 /// Remove a member and replace the vault key in one transaction, so a removal
@@ -762,8 +774,15 @@ pub(super) async fn remove_member_and_rotate(
     let seq = w.seq(&id);
     let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
     limit_key_replacements(&state, &id)?;
+    let manifest_seq = w.manifest_seq(&id);
     let revision = w.commit(&state).await?;
-    Ok(Json(rotated(revision, key_epoch, seq, roster_seq)))
+    Ok(Json(rotated(
+        revision,
+        key_epoch,
+        seq,
+        roster_seq,
+        manifest_seq,
+    )))
 }
 
 /// Count a key replacement of vault `id` ([`KEY_REPLACEMENTS_PER_HOUR`]). Called only
@@ -781,10 +800,21 @@ fn limit_key_replacements(state: &AppState, id: &str) -> ApiResult<()> {
     )
 }
 
-/// A rotation's answer: `{"revision", "key_epoch", "vault_seq"}`, plus
-/// `"member_roster_seq"` when a roster was stored.
-fn rotated(revision: i64, key_epoch: i64, seq: i64, roster_seq: Option<i64>) -> Value {
-    let mut answer = json!({ "revision": revision, "key_epoch": key_epoch, "vault_seq": seq });
+/// A rotation's answer: `{"revision", "key_epoch", "vault_seq", "manifest_seq"}`,
+/// plus `"member_roster_seq"` when a roster was stored.
+fn rotated(
+    revision: i64,
+    key_epoch: i64,
+    seq: i64,
+    roster_seq: Option<i64>,
+    manifest_seq: i64,
+) -> Value {
+    let mut answer = json!({
+        "revision": revision,
+        "key_epoch": key_epoch,
+        "vault_seq": seq,
+        "manifest_seq": manifest_seq,
+    });
     if let Some(r) = roster_seq {
         answer["member_roster_seq"] = r.into();
     }
@@ -837,6 +867,7 @@ fn check_rotation(b: &Rotate, id: &str, me: &str) -> ApiResult<()> {
     if let Some(meta) = &b.meta {
         check_blob(meta)?;
     }
+    super::ManifestIn::check_all(&b.manifests)?;
     Ok(())
 }
 
@@ -864,6 +895,7 @@ async fn apply_rotation(
         super::signed::signer_for_change(w.conn(), id, &caller, b.roster.is_some()).await?;
     let new_epoch = w.locked(id).key_epoch + 1;
     let key_epoch = rotate_rows(w.conn(), id, b, seq, signer.as_ref(), new_epoch).await?;
+    w.manifests(&b.manifests, &[id]).await?;
     let roster_seq = match (&signer, &b.roster) {
         (Some(signer), Some(roster)) => {
             Some(super::signed::store_roster(w.conn(), id, roster, signer, key_epoch).await?)

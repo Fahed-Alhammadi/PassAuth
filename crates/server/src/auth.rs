@@ -80,10 +80,35 @@ const READS_BOUND_WRAPS: &[(&str, (u64, u64, u64))] = &[
 /// Missing, unknown or unparseable = no (an app from before API 2 sent nothing).
 /// Version: `X[.Y[.Z]]`, anything from the first `-` or `+` on ignored.
 pub fn reads_bound_wraps(client: Option<&str>) -> bool {
+    client_at_least(client, READS_BOUND_WRAPS)
+}
+
+/// The first release of each app that keeps vault manifests (2026-11-18): it sends
+/// the next manifest with every write into a vault that has one, so a vault's first
+/// manifest waits until every signed-in app of every member is one of these
+/// (`manifest_ok` in `/sync`).
+const KEEPS_MANIFESTS: &[(&str, (u64, u64, u64))] = &[
+    ("web", (0, 15, 0)),
+    ("desktop", (0, 13, 0)),
+    ("macos-autofill", (0, 13, 0)),
+    ("extension", (0, 12, 0)),
+    ("ios", (0, 12, 0)),
+    ("android", (0, 12, 0)),
+];
+
+/// Whether the app of a session keeps vault manifests ([`KEEPS_MANIFESTS`]; missing,
+/// unknown or unparseable = no).
+pub fn keeps_manifests(client: Option<&str>) -> bool {
+    client_at_least(client, KEEPS_MANIFESTS)
+}
+
+/// Whether `client` (`<name>/<version>`) is a known app at or above its version in
+/// `table`. Version: `X[.Y[.Z]]`, anything from the first `-` or `+` on ignored.
+fn client_at_least(client: Option<&str>, table: &[(&str, (u64, u64, u64))]) -> bool {
     let Some((name, version)) = client.and_then(|c| c.split_once('/')) else {
         return false;
     };
-    let Some(&(_, min)) = READS_BOUND_WRAPS.iter().find(|(n, _)| *n == name) else {
+    let Some(&(_, min)) = table.iter().find(|(n, _)| *n == name) else {
         return false;
     };
     let core = version.split(['-', '+']).next().unwrap_or_default();

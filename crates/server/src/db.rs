@@ -157,6 +157,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (14, SCHEMA_V14),
     (15, SCHEMA_V15),
     (16, SCHEMA_V16),
+    (17, SCHEMA_V17),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -448,6 +449,15 @@ const SCHEMA_V15: &[&str] = &[
 /// made from the link's key and the password; its owner keeps that key wrapped by
 /// their account key (`owner_content_key`, NULL = a v1 Send).
 const SCHEMA_V16: &[&str] = &["ALTER TABLE sends ADD COLUMN owner_content_key TEXT"];
+
+/// Vault manifests: a small record of what the vault holds, sealed by the apps with a
+/// key made from the vault key (`manifest`, opaque here) and its version
+/// (`manifest_seq`, 0 = the vault has none). Once a vault has one, every write that
+/// changes its items replaces both in the same transaction (`vault/manifest.rs`).
+const SCHEMA_V17: &[&str] = &[
+    "ALTER TABLE vaults ADD COLUMN manifest TEXT",
+    "ALTER TABLE vaults ADD COLUMN manifest_seq BIGINT NOT NULL DEFAULT 0",
+];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still
 /// names them (their activity log above all), go into `vault_ids` too.

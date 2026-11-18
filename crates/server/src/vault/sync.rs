@@ -82,6 +82,12 @@ pub(super) struct SyncResponse {
     /// Present (true) only on a delta response.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     delta: bool,
+    /// The server's clock (Unix seconds) and the admin's `trash_days` when this was
+    /// read: an item is due for deletion from the trash when `trash_days > 0` and
+    /// `deleted_at < server_time - trash_days * 86400`. The server deletes those
+    /// itself, except in vaults with a manifest, where the members' apps do.
+    server_time: i64,
+    trash_days: i64,
 }
 
 #[derive(Serialize)]
@@ -134,6 +140,15 @@ struct VaultRow {
     share_signer_identity: Option<String>,
     #[serde(skip)]
     signer_gone: i64,
+    /// Vault manifest (`manifest.rs`): the sealed record of the vault's items and its
+    /// version (0 = none), read in the same snapshot as the items.
+    manifest: Option<String>,
+    manifest_seq: i64,
+    /// A vault without a manifest: whether its first one may be started now (every
+    /// signed-in app of every member keeps manifests). True once it has one. A
+    /// compatibility hint: a server saying false only delays the start.
+    #[sqlx(skip)]
+    manifest_ok: bool,
     /// Signed sharing: `{signature, signer, signer_deleted}` of a sealed key, or
     /// `null` (not signed; always for `key_kind` `account`).
     #[sqlx(skip)]
@@ -159,6 +174,14 @@ struct ItemRow {
     item_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<String>,
+    /// base64url SHA-256 of `data` (the text as stored), for a row sent without it
+    /// (`trash=summary`): what the vault's manifest counts the item by.
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_sha256: Option<String>,
+    /// `data` of a row sent without it, only to make `data_sha256` from.
+    #[serde(skip)]
+    hidden_data: Option<String>,
     revision: i64,
     deleted_at: Option<i64>,
     created_at: i64,
@@ -377,7 +400,8 @@ pub(super) async fn sync(
         "SELECT v.id, v.meta, m.role, m.wrapped_key, m.key_kind, v.rotation_pending, v.key_epoch,
                 v.seq, v.horizon, v.member_roster, v.member_roster_seq, m.share_signature,
                 m.share_signer_identity,
-                CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone
+                CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone,
+                v.manifest, v.manifest_seq
          FROM vaults v JOIN vault_members m ON m.vault_id = v.id
          LEFT JOIN users s ON s.id = m.share_signer
          WHERE m.user_id = $1 AND m.status = 'active' ORDER BY v.created_at",
@@ -385,11 +409,13 @@ pub(super) async fn sync(
     .bind(&user.user_id)
     .fetch_all(&mut *tx)
     .await?;
+    let waiting = super::manifest::not_ready(&mut tx, &user.user_id).await?;
     for v in &mut vaults {
         v.fill_share();
+        v.manifest_ok = !waiting.contains(&v.id);
     }
     let invitations = invitations(&mut tx, &user.user_id).await?;
-    let (items, deleted, reset) = match &since {
+    let (mut items, deleted, reset) = match &since {
         None => (
             all_items(&mut tx, &user.user_id, summary).await?,
             None,
@@ -402,6 +428,11 @@ pub(super) async fn sync(
         }
     };
     tx.commit().await?;
+    for i in &mut items {
+        if let Some(data) = i.hidden_data.take() {
+            i.data_sha256 = Some(b64(&passauth_core::manifest::data_hash(&data)));
+        }
+    }
     let cursor = Cursor::new(
         &state.sync_generation,
         vaults.iter().map(|v| (v.id.as_str(), v.seq, v.key_epoch)),
@@ -426,6 +457,8 @@ pub(super) async fn sync(
         deleted,
         reset,
         delta: since.is_some(),
+        server_time: now(),
+        trash_days: state.trash_days(),
     }))
 }
 
@@ -509,6 +542,7 @@ async fn all_items(
         "SELECT i.id, i.vault_id,
                 CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.item_key END AS item_key,
                 CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.data END AS data,
+                CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN i.data ELSE NULL END AS hidden_data,
                 i.revision, i.deleted_at, i.created_at, i.updated_at
          FROM items i JOIN vault_members m ON m.vault_id = i.vault_id
          WHERE m.user_id = $1 AND m.status = 'active'",
@@ -557,6 +591,7 @@ async fn changes(
             "SELECT i.id, i.vault_id,
                     CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.item_key END AS item_key,
                     CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.data END AS data,
+                    CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN i.data ELSE NULL END AS hidden_data,
                     i.revision, i.deleted_at, i.created_at, i.updated_at
              FROM json_to_recordset($1::json) AS c(vault_id TEXT, since BIGINT)
              CROSS JOIN LATERAL (SELECT * FROM items
@@ -566,6 +601,7 @@ async fn changes(
             "SELECT i.id, i.vault_id,
                     CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.item_key END AS item_key,
                     CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN NULL ELSE i.data END AS data,
+                    CASE WHEN $2 = 1 AND i.deleted_at IS NOT NULL THEN i.data ELSE NULL END AS hidden_data,
                     i.revision, i.deleted_at, i.created_at, i.updated_at
              FROM json_each($1) AS c
              JOIN items i ON i.vault_id = json_extract(c.value, '$.vault_id')

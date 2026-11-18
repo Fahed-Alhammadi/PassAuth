@@ -21,12 +21,16 @@ mod attachments;
 mod device_login;
 mod emergency;
 mod hardening;
+mod manifest;
 mod sec789;
 mod signing;
 
-/// Undoes migrations 16 (Send v2), 15 (profile pictures) and 14 (signed sharing), for
-/// tests that go back to an older schema.
+/// Undoes migrations 17 (vault manifests), 16 (Send v2), 15 (profile pictures) and 14
+/// (signed sharing), for tests that go back to an older schema.
 const UNDO_MIGRATION_14: &[&str] = &[
+    "ALTER TABLE vaults DROP COLUMN manifest",
+    "ALTER TABLE vaults DROP COLUMN manifest_seq",
+    "DELETE FROM schema_version WHERE version = 17",
     "ALTER TABLE sends DROP COLUMN owner_content_key",
     "DELETE FROM schema_version WHERE version = 16",
     "ALTER TABLE users DROP COLUMN avatar",
@@ -2486,6 +2490,7 @@ async fn config_lists_the_api_version_and_features() {
             "avatar",
             "account_wraps_v2",
             "send_v2",
+            "vault_manifest",
             "breach_check",
             "item_history",
             "sends",
@@ -4364,7 +4369,10 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
     let created = ok(&app, Method::POST, "/api/items", &t, body).await;
     let keys =
         |v: &Value| -> Vec<String> { sorted(v.as_object().unwrap().keys().cloned().collect()) };
-    assert_eq!(keys(&created), ["id", "revision", "vault_seq"]);
+    assert_eq!(
+        keys(&created),
+        ["id", "manifest_seq", "revision", "vault_seq"]
+    );
     let full = synced(&app, &t).await;
     assert_eq!(
         keys(&full),
@@ -4374,6 +4382,8 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
             "invitations",
             "items",
             "revision",
+            "server_time",
+            "trash_days",
             "user",
             "vaults"
         ]
@@ -4384,6 +4394,9 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
             "id",
             "key_epoch",
             "key_kind",
+            "manifest",
+            "manifest_ok",
+            "manifest_seq",
             "member_roster",
             "member_roster_seq",
             "meta",

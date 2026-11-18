@@ -22,7 +22,7 @@ use passauth_core::keys::{
     self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
 use passauth_core::send::{self, SendContentKey, SendField, SendKey};
-use passauth_core::{Error, device_login, export, generator, import, opaque, totp};
+use passauth_core::{Error, device_login, export, generator, import, manifest, opaque, totp};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -723,6 +723,96 @@ impl VaultKey {
         to_js(&enc.decrypt(&self.0).map_err(js_err)?)
     }
 
+    /// Check this vault against its manifest after applying a sync answer:
+    /// `{status, version, live, trashed}` with `status` "none" (no manifest, none seen
+    /// before), "ok" (remember `version`), "rollback" (a lower version than `remembered`,
+    /// or none after one was seen), "mismatch" (the manifest doesn't open or the items
+    /// aren't what it records) or "incomplete" (an item has neither `data` nor
+    /// `data_sha256`: fetch the vault in full once). `manifest_seq` and `sealed` are the
+    /// vault row's `manifest_seq` and `manifest` (0 / null = none), `remembered` the
+    /// highest version this device saw for the vault (null = none), `items` every item
+    /// row of the vault as synced (`id`, `deleted_at`, `data` or `data_sha256`; other
+    /// fields are ignored). `version` is what to remember from now on.
+    #[wasm_bindgen(js_name = manifestVerify)]
+    pub fn manifest_verify(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
+        key_epoch: f64,
+        manifest_seq: f64,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] sealed: JsValue,
+        remembered: Option<f64>,
+        items: JsValue,
+    ) -> R<JsValue> {
+        let (vault_id, sealed) = (string(vault_id)?, opt_string(sealed)?);
+        let items: Vec<manifest::Entry> = from_js(items)?;
+        let check = manifest::verify(
+            &self.0,
+            &vault_id,
+            manifest_number(key_epoch)?,
+            manifest_number(manifest_seq)?,
+            sealed.as_deref(),
+            remembered.map(manifest_number).transpose()?,
+            &items,
+        )
+        .map_err(js_err)?;
+        to_js(&check)
+    }
+
+    /// The sealed manifest of `version` for exactly `items` (every item row of the
+    /// vault, each with `data` or `data_sha256`): a vault's first manifest, a new
+    /// baseline, or the one a key replacement carries (called on the new key with the
+    /// new `key_epoch` and the re-encrypted items).
+    #[wasm_bindgen(js_name = manifestStart)]
+    pub fn manifest_start(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
+        key_epoch: f64,
+        version: f64,
+        items: JsValue,
+    ) -> R<String> {
+        let vault_id = string(vault_id)?;
+        let items: Vec<manifest::Entry> = from_js(items)?;
+        manifest::start(
+            &self.0,
+            &vault_id,
+            manifest_number(key_epoch)?,
+            manifest_number(version)?,
+            &items,
+        )
+        .map_err(js_err)
+    }
+
+    /// `{seq, sealed}` to send with a write into this vault: the manifest after it, one
+    /// version above the row's `manifest_seq` / `manifest` (`sealed`). `removed`: the
+    /// items as they were before the write (edited, trashed, restored, deleted, moved
+    /// out); `added`: as they are after it (new, edited, trashed, restored, moved in).
+    /// Only for a vault whose last `manifestVerify` was "ok".
+    #[wasm_bindgen(js_name = manifestNext)]
+    pub fn manifest_next(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
+        key_epoch: f64,
+        manifest_seq: f64,
+        #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
+        removed: JsValue,
+        added: JsValue,
+    ) -> R<JsValue> {
+        let (vault_id, sealed) = (string(vault_id)?, string(sealed)?);
+        let removed: Vec<manifest::Entry> = from_js(removed)?;
+        let added: Vec<manifest::Entry> = from_js(added)?;
+        let (seq, sealed) = manifest::advance(
+            &self.0,
+            &vault_id,
+            manifest_number(key_epoch)?,
+            manifest_number(manifest_seq)?,
+            &sealed,
+            &removed,
+            &added,
+        )
+        .map_err(js_err)?;
+        to_js(&serde_json::json!({ "seq": seq, "sealed": sealed }))
+    }
+
     #[wasm_bindgen(js_name = encryptMeta)]
     pub fn encrypt_meta(
         &self,
@@ -958,6 +1048,21 @@ pub fn create_account_with_kdf(
     AccountBundle::create_with_kdf(&account_id, &password, with_secret_key, kdf)
         .map(NewAccount::from)
         .map_err(js_err)
+}
+
+fn manifest_number(n: f64) -> R<u64> {
+    sharing::whole(n).ok_or_else(|| JsError::new("invalid manifest number"))
+}
+
+/// base64url SHA-256 of an item's `data` string as stored: what the server sends as
+/// `data_sha256` for a row without `data`. Keep it when dropping a trashed row's data.
+#[wasm_bindgen(js_name = manifestDataHash)]
+pub fn manifest_data_hash(
+    #[wasm_bindgen(unchecked_param_type = "string")] data: JsValue,
+) -> R<String> {
+    Ok(passauth_core::item::b64(&manifest::data_hash(&string(
+        data,
+    )?)))
 }
 
 /// Compare an item's edit counter (`rev` of the decrypted item the server sent now) with

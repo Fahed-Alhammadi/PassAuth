@@ -681,7 +681,14 @@ async fn emergency_access_goes_step_by_step_and_each_side_takes_its_own_steps() 
         let fields: BTreeSet<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(
             fields,
-            BTreeSet::from(["id", "key_epoch", "meta", "wrapped_key"])
+            BTreeSet::from([
+                "id",
+                "key_epoch",
+                "manifest",
+                "manifest_seq",
+                "meta",
+                "wrapped_key"
+            ])
         );
     }
     let items = view["items"].as_array().unwrap();

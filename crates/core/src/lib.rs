@@ -18,6 +18,7 @@ pub mod import;
 pub mod item;
 pub mod kdf;
 pub mod keys;
+pub mod manifest;
 pub mod opaque;
 pub mod passkey;
 pub mod send;

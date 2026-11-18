@@ -17,7 +17,9 @@ use passauth_core::keys::{
     self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
 use passauth_core::send::{self, SendContentKey, SendField, SendKey};
-use passauth_core::{Error, device_login, export, generator, import, opaque, passkey, site, totp};
+use passauth_core::{
+    Error, device_login, export, generator, import, manifest, opaque, passkey, site, totp,
+};
 
 uniffi::setup_scaffolding!();
 
@@ -614,6 +616,113 @@ impl VaultKey {
         String::from_utf8(bytes)
             .map_err(|_| CoreError::Invalid("vault metadata is not UTF-8".into()))
     }
+
+    /// Check this vault against its manifest after applying a sync answer. `status`:
+    /// "none" (no manifest, none seen before), "ok" (remember `version`), "rollback" (a
+    /// lower version than `remembered`, or none after one was seen), "mismatch" (the
+    /// manifest doesn't open or the items aren't what it records) or "incomplete" (an
+    /// item has neither `data` nor `data_sha256`: fetch the vault in full once).
+    /// `manifest_seq` and `sealed` are the vault row's `manifest_seq` and `manifest` (0 /
+    /// nil = none), `remembered` the highest version this device saw for the vault,
+    /// `items_json` a JSON array of every item row of the vault as synced (`id`,
+    /// `deleted_at`, `data` or `data_sha256`; other fields are ignored).
+    pub fn manifest_verify(
+        &self,
+        vault_id: String,
+        key_epoch: u64,
+        manifest_seq: u64,
+        sealed: Option<String>,
+        remembered: Option<u64>,
+        items_json: String,
+    ) -> R<ManifestCheck> {
+        let items: Vec<manifest::Entry> = json_in(&items_json)?;
+        let check = manifest::verify(
+            &self.0,
+            &vault_id,
+            key_epoch,
+            manifest_seq,
+            sealed.as_deref(),
+            remembered,
+            &items,
+        )?;
+        Ok(ManifestCheck {
+            status: sharing::enum_name(&check.status)?,
+            version: check.version,
+            live: check.live,
+            trashed: check.trashed,
+        })
+    }
+
+    /// The sealed manifest of `version` for exactly the items in `items_json` (every
+    /// item row of the vault, each with `data` or `data_sha256`): a vault's first
+    /// manifest, a new baseline, or the one a key replacement carries (called on the new
+    /// key with the new `key_epoch` and the re-encrypted items).
+    pub fn manifest_start(
+        &self,
+        vault_id: String,
+        key_epoch: u64,
+        version: u64,
+        items_json: String,
+    ) -> R<String> {
+        let items: Vec<manifest::Entry> = json_in(&items_json)?;
+        Ok(manifest::start(
+            &self.0, &vault_id, key_epoch, version, &items,
+        )?)
+    }
+
+    /// What to send with a write into this vault: the manifest after it, one version
+    /// above the row's `manifest_seq` / `manifest` (`sealed`). `removed_json`: the items
+    /// as they were before the write (edited, trashed, restored, deleted, moved out);
+    /// `added_json`: as they are after it (new, edited, trashed, restored, moved in).
+    /// Only for a vault whose last `manifest_verify` was "ok".
+    pub fn manifest_next(
+        &self,
+        vault_id: String,
+        key_epoch: u64,
+        manifest_seq: u64,
+        sealed: String,
+        removed_json: String,
+        added_json: String,
+    ) -> R<ManifestWrite> {
+        let removed: Vec<manifest::Entry> = json_in(&removed_json)?;
+        let added: Vec<manifest::Entry> = json_in(&added_json)?;
+        let (seq, sealed) = manifest::advance(
+            &self.0,
+            &vault_id,
+            key_epoch,
+            manifest_seq,
+            &sealed,
+            &removed,
+            &added,
+        )?;
+        Ok(ManifestWrite { seq, sealed })
+    }
+}
+
+/// `VaultKey::manifest_verify`'s verdict.
+#[derive(uniffi::Record)]
+pub struct ManifestCheck {
+    /// "none" | "ok" | "rollback" | "mismatch" | "incomplete".
+    pub status: String,
+    /// The version to remember from now on (0 = none).
+    pub version: u64,
+    /// The manifest's counts when it opened (0 otherwise).
+    pub live: u64,
+    pub trashed: u64,
+}
+
+/// `VaultKey::manifest_next`'s result: `{seq, sealed}` for the request.
+#[derive(uniffi::Record)]
+pub struct ManifestWrite {
+    pub seq: u64,
+    pub sealed: String,
+}
+
+/// base64url SHA-256 of an item's `data` string as stored: what the server sends as
+/// `data_sha256` for a row without `data`. Keep it when dropping a trashed row's data.
+#[uniffi::export]
+pub fn manifest_data_hash(data: String) -> String {
+    b64(&manifest::data_hash(&data))
 }
 
 /// An encrypted item as the server API sends and receives it.
@@ -1706,6 +1815,43 @@ mod tests {
             .update_item(item, r#"{"name":"y","rev":0}"#.into())
             .unwrap();
         assert_eq!(rev(&edited), 2);
+        // Vault manifests through the binding: start, verify, advance.
+        let rows = |data: &str| format!(r#"[{{"id":"i1","deleted_at":null,"data":"{data}"}}]"#);
+        let first = made
+            .key
+            .manifest_start("v".into(), 0, 1, rows("one"))
+            .unwrap();
+        let check = |seq: u64, sealed: &str, remembered: Option<u64>, data: &str| {
+            made.key
+                .manifest_verify(
+                    "v".into(),
+                    0,
+                    seq,
+                    Some(sealed.into()),
+                    remembered,
+                    rows(data),
+                )
+                .unwrap()
+        };
+        let ok = check(1, &first, None, "one");
+        assert_eq!((ok.status.as_str(), ok.version, ok.live), ("ok", 1, 1));
+        assert_eq!(check(1, &first, None, "two").status, "mismatch");
+        assert_eq!(check(1, &first, Some(2), "one").status, "rollback");
+        let next = made
+            .key
+            .manifest_next("v".into(), 0, 1, first.clone(), rows("one"), rows("two"))
+            .unwrap();
+        assert_eq!(next.seq, 2);
+        assert_eq!(check(2, &next.sealed, Some(1), "two").status, "ok");
+        let hashed = format!(
+            r#"[{{"id":"i1","data_sha256":"{}"}}]"#,
+            manifest_data_hash("two".into())
+        );
+        let by_hash = made
+            .key
+            .manifest_verify("v".into(), 0, 2, Some(next.sealed), None, hashed)
+            .unwrap();
+        assert_eq!(by_hash.status, "ok");
         assert_eq!(item_rev_check(None, 2).unwrap(), "new");
         assert_eq!(item_rev_check(Some(2), 2).unwrap(), "same");
         assert_eq!(item_rev_check(Some(2), 3).unwrap(), "newer");

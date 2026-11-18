@@ -20,10 +20,15 @@
 //! activity-log events of the change (`crate::events`) and, for edits and
 //! trashing, the item's previous version (`history.rs`). Attachments
 //! (`attachments.rs`) are vault writes too.
+//!
+//! A vault may have a manifest (`manifest.rs`): a record of its items sealed by the
+//! apps. Every write that changes such a vault's items carries the next manifest
+//! and stores it in the same transaction ([`VaultWrite::manifests`]).
 
 mod attachments;
 mod history;
 mod items;
+mod manifest;
 mod sharing;
 mod signed;
 mod sync;
@@ -48,6 +53,7 @@ pub use attachments::sweep as sweep_attachments;
 pub(crate) use attachments::{detach_vault, file_response, remove_files};
 pub use history::trim_versions;
 pub use items::purge_trash;
+use manifest::ManifestIn;
 #[cfg(test)]
 pub(crate) use sharing::KEY_REPLACEMENTS_PER_HOUR;
 pub use sharing::insert_vault;
@@ -105,6 +111,11 @@ pub fn routes() -> Router<AppState> {
             post(sharing::accept_invitation),
         )
         .route("/vaults/{id}/events", get(vault_events))
+        .route("/vaults/{id}/manifest", put(manifest::put_manifest))
+        .route(
+            "/vaults/{id}/trash/purge",
+            post(items::purge_items).layer(bulk()),
+        )
         .route("/vaults/{id}/rosters", get(signed::rosters))
         .route("/vaults/{id}/resign", post(signed::resign).layer(bulk()))
         .route("/users/lookup", get(sharing::lookup_user))
@@ -271,6 +282,9 @@ struct Locked {
     key_epoch: i64,
     /// The vault's sequence number taken by this write.
     seq: i64,
+    /// The version of the vault's manifest (0 = none), kept current through
+    /// [`VaultWrite::manifests`].
+    manifest_seq: i64,
 }
 
 /// One write into one or more vaults; see the module docs. Dropping it without
@@ -333,7 +347,7 @@ impl VaultWrite {
     /// invitation (404 when there is none).
     async fn invitation(state: &AppState, me: &AuthUser, vault: &str) -> ApiResult<(Self, bool)> {
         let mut w = Self::start(state, Some(me)).await?;
-        let (seq, epoch) = w.lock_row(vault).await?;
+        let (seq, epoch, manifest_seq) = w.lock_row(vault).await?;
         let (role, invited) = membership(&mut w.tx, &me.user_id, vault)
             .await?
             .ok_or(ApiError::NotFound)?;
@@ -342,6 +356,7 @@ impl VaultWrite {
             role: Some(role),
             key_epoch: epoch,
             seq,
+            manifest_seq,
         });
         Ok((w, invited))
     }
@@ -372,7 +387,7 @@ impl VaultWrite {
         if let Some(l) = self.locked.iter().find(|l| l.id == vault) {
             return Ok(l.key_epoch);
         }
-        let (seq, epoch) = self.lock_row(vault).await?;
+        let (seq, epoch, manifest_seq) = self.lock_row(vault).await?;
         let role = match &self.me {
             Some(me) => Some(
                 member_role(&mut self.tx, &me.user_id, vault)
@@ -386,14 +401,17 @@ impl VaultWrite {
             role,
             key_epoch: epoch,
             seq,
+            manifest_seq,
         });
         Ok(epoch)
     }
 
-    /// The row lock and the next sequence number: (seq, key epoch); 404 for no vault.
-    async fn lock_row(&mut self, vault: &str) -> ApiResult<(i64, i64)> {
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            "UPDATE vaults SET updated_at = $1, seq = seq + 1 WHERE id = $2 RETURNING seq, key_epoch",
+    /// The row lock and the next sequence number: (seq, key epoch, manifest version);
+    /// 404 for no vault.
+    async fn lock_row(&mut self, vault: &str) -> ApiResult<(i64, i64, i64)> {
+        let row: Option<(i64, i64, i64)> = sqlx::query_as(
+            "UPDATE vaults SET updated_at = $1, seq = seq + 1 WHERE id = $2
+             RETURNING seq, key_epoch, manifest_seq",
         )
         .bind(now())
         .bind(vault)
@@ -449,6 +467,65 @@ impl VaultWrite {
 
     fn conn(&mut self) -> &mut AnyConnection {
         &mut self.tx
+    }
+
+    /// The version of the manifest of a vault this write has locked, after what
+    /// [`Self::manifests`] stored (0 = the vault has none).
+    fn manifest_seq(&self, vault: &str) -> i64 {
+        self.locked(vault).manifest_seq
+    }
+
+    /// This write changed the items of `changed` (vaults it has locked): each of them
+    /// that has a manifest gets its next one from `sent`, in this transaction. Without
+    /// it the write is refused (400 `manifest_required`); one that isn't exactly the
+    /// next version, or one for a vault that has none yet (only `PUT
+    /// /vaults/{id}/manifest` starts one), is a 409 `manifest_conflict`. Entries for
+    /// vaults the write didn't change (a retried create or import that found its
+    /// items) are ignored. Call it after the item statements, so an item's own
+    /// `revision_conflict` is reported first.
+    async fn manifests(&mut self, sent: &[ManifestIn], changed: &[&str]) -> ApiResult<()> {
+        let changed: BTreeSet<&str> = changed.iter().copied().collect();
+        for vault in changed {
+            let current = self.manifest_seq(vault);
+            let next = match (current, sent.iter().find(|m| m.vault_id == vault)) {
+                (0, None) => continue,
+                (_, None) => return Err(ApiError::manifest_required()),
+                (0, Some(_)) => return Err(ApiError::manifest_conflict()),
+                (n, Some(m)) if m.seq == n + 1 => m,
+                _ => return Err(ApiError::manifest_conflict()),
+            };
+            self.store_manifest(vault, current, next.seq, &next.sealed)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Replace the manifest of a locked vault whose version is `current`.
+    async fn store_manifest(
+        &mut self,
+        vault: &str,
+        current: i64,
+        seq: i64,
+        sealed: &str,
+    ) -> ApiResult<()> {
+        let done = sqlx::query(
+            "UPDATE vaults SET manifest = $1, manifest_seq = $2 WHERE id = $3 AND manifest_seq = $4",
+        )
+        .bind(sealed)
+        .bind(seq)
+        .bind(vault)
+        .bind(current)
+        .execute(&mut *self.tx)
+        .await?;
+        if done.rows_affected() != 1 {
+            return Err(ApiError::manifest_conflict());
+        }
+        self.locked
+            .iter_mut()
+            .find(|l| l.id == vault)
+            .expect("a vault locked by this write")
+            .manifest_seq = seq;
+        Ok(())
     }
 
     /// The members of `vault` (created in this write) get a new revision too.

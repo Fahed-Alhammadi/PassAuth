@@ -570,7 +570,8 @@ const API_VERSION: u32 = 2;
 /// personal vaults, not the account key; `account_wraps_v2`: `/sync` `user` says
 /// whether every app signed in to the account reads epoch-bound account wraps;
 /// `send_v2`: Sends keep `owner_content_key`, so apps may encrypt a Send with its
-/// password), plus
+/// password; `vault_manifest`: vaults may carry a manifest, see `vault/manifest.rs`),
+/// plus
 /// `breach_check` while the admin allows it, `item_history` while the admin
 /// keeps item versions (`item_versions_kept` above 0), `sends` while Send is on,
 /// `attachments` while attachments are on and have a folder, `emergency_access`
@@ -592,6 +593,7 @@ const FEATURES: &[&str] = &[
     "avatar",
     "account_wraps_v2",
     "send_v2",
+    "vault_manifest",
 ];
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {

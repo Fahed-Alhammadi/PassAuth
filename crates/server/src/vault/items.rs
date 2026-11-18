@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 use sqlx::AnyConnection;
 
 use super::{
-    MAX_ITEM_BLOB, Need, Role, VaultWrite, attachment_quota, check_id, check_item_blob, check_size,
-    item_bytes, quota,
+    MAX_ITEM_BLOB, ManifestIn, Need, Role, VaultWrite, attachment_quota, check_id, check_item_blob,
+    check_size, item_bytes, quota,
 };
-use super::{attachments, history};
+use super::{attachments, history, manifest};
 use crate::auth::AuthUser;
 use crate::db::{now, now_ms};
 use crate::error::{ApiError, ApiResult, code};
@@ -35,6 +35,11 @@ pub(super) struct ItemBody {
     /// Key epoch of the vault key the item was encrypted with (of the target
     /// vault when moving); a replaced key gets 409 `vault_key_changed`.
     pub key_epoch: Option<i64>,
+    /// The next manifest of each vault the write changes that has one (`manifest.rs`;
+    /// a move: of both vaults). Not read on the items of an import or a rotation,
+    /// whose bodies carry `manifests` themselves.
+    #[serde(default)]
+    pub manifests: Vec<ManifestIn>,
 }
 
 impl ItemBody {
@@ -109,46 +114,59 @@ async fn insert_item(
     }
 }
 
-/// `{"id", "revision", "vault_seq"}`: `vault_seq` is the vault's sequence number
-/// after the write (for a retried create that found its item, the current one).
+/// `{"id", "revision", "vault_seq", "manifest_seq"}`: `vault_seq` is the vault's
+/// sequence number after the write and `manifest_seq` its manifest's version (for a
+/// retried create that found its item, the current ones: such a repeat neither needs
+/// nor stores a manifest).
 pub(super) async fn create_item(
     State(state): State<AppState>,
     user: AuthUser,
     Json(i): Json<ItemBody>,
 ) -> ApiResult<Json<Value>> {
     i.check(&state)?;
+    ManifestIn::check_all(&i.manifests)?;
     crate::disk::ensure_room(&state, i.bytes() as u64).await?;
     let need = Need::new(&i.vault_id, Role::Write, i.key_epoch);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
     let seq = w.seq(&i.vault_id);
     let rev = now_ms();
-    let (revision, vault_seq) =
+    let (revision, vault_seq, manifest_seq) =
         match insert_item(w.conn(), &i, rev, seq, Some(&user.user_id)).await? {
             None => {
                 w.untombstone(&i.vault_id).await?;
+                w.manifests(&i.manifests, &[&i.vault_id]).await?;
                 w.charge(&i.vault_id, 1, i.bytes());
                 w.log(Event::new("item.created").vault(&i.vault_id).item(&i.id))
                     .await?;
+                let manifest_seq = w.manifest_seq(&i.vault_id);
                 w.commit(&state).await?;
-                (rev, seq)
+                (rev, seq, manifest_seq)
             }
             // Nothing to write: dropping `w` rolls back the lock and the number it took.
-            Some(stored) => (stored, seq - 1),
+            Some(stored) => (stored, seq - 1, w.manifest_seq(&i.vault_id)),
         };
-    Ok(Json(
-        json!({ "id": i.id, "revision": revision, "vault_seq": vault_seq }),
-    ))
+    Ok(Json(json!({
+        "id": i.id,
+        "revision": revision,
+        "vault_seq": vault_seq,
+        "manifest_seq": manifest_seq,
+    })))
 }
 
 #[derive(Deserialize)]
 pub(super) struct Import {
     items: Vec<ItemBody>,
+    /// The next manifest of each vault the import adds items to that has one.
+    #[serde(default)]
+    manifests: Vec<ManifestIn>,
 }
 
 /// Up to the admin's `max_import_items` new items, all or nothing. Items
-/// already stored exactly like this (a retried import) count as imported.
-/// Answers `{"imported", "vault_seqs": {vault: seq}}`, plus `vault_seq` when
-/// every item went into one vault (the usual case).
+/// already stored exactly like this (a retried import) count as imported; a
+/// vault that got nothing new neither needs nor stores a manifest.
+/// Answers `{"imported", "vault_seqs": {vault: seq}, "manifest_seqs": {vault:
+/// seq}}`, plus `vault_seq` and `manifest_seq` when every item went into one vault
+/// (the usual case).
 pub(super) async fn import_items(
     State(state): State<AppState>,
     user: AuthUser,
@@ -163,6 +181,7 @@ pub(super) async fn import_items(
     for i in &b.items {
         i.check(&state)?;
     }
+    ManifestIn::check_all(&b.manifests)?;
     let bytes: i64 = b.items.iter().map(ItemBody::bytes).sum();
     crate::disk::ensure_room(&state, bytes as u64).await?;
     let needs: Vec<Need> = b
@@ -188,9 +207,19 @@ pub(super) async fn import_items(
         }
     }
     let created: i64 = counts.values().sum();
+    let mut manifest_seqs: BTreeMap<String, i64> = BTreeMap::new();
     if created > 0 {
         for vault in seqs.keys() {
             w.untombstone(vault).await?;
+        }
+        let grown: Vec<&str> = counts
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(vault, _)| vault.as_str())
+            .collect();
+        w.manifests(&b.manifests, &grown).await?;
+        for vault in seqs.keys() {
+            manifest_seqs.insert(vault.clone(), w.manifest_seq(vault));
         }
         for (vault, count) in counts.into_iter().filter(|(_, n)| *n > 0) {
             w.log(
@@ -204,10 +233,18 @@ pub(super) async fn import_items(
     } else {
         // Nothing written: every vault keeps its current number.
         seqs.values_mut().for_each(|s| *s -= 1);
+        for vault in seqs.keys() {
+            manifest_seqs.insert(vault.clone(), w.manifest_seq(vault));
+        }
     }
-    let mut out = json!({ "imported": b.items.len(), "vault_seqs": seqs });
-    if let [(_, seq)] = seqs.iter().collect::<Vec<_>>()[..] {
+    let mut out = json!({
+        "imported": b.items.len(),
+        "vault_seqs": seqs,
+        "manifest_seqs": manifest_seqs,
+    });
+    if let [(vault, seq)] = seqs.iter().collect::<Vec<_>>()[..] {
         out["vault_seq"] = (*seq).into();
+        out["manifest_seq"] = manifest_seqs[vault].into();
     }
     Ok(Json(out))
 }
@@ -222,7 +259,8 @@ async fn item_vault(state: &AppState, id: &str) -> ApiResult<(String, i64)> {
 
 /// Edit an item, or move it to another vault (write access to both). A move
 /// takes a sequence number in both vaults and leaves a tombstone in the old one;
-/// `vault_seq` in the answer is the item's (new) vault's.
+/// `vault_seq` and `manifest_seq` in the answer are the item's (new) vault's. A move
+/// carries the next manifest of each of the two vaults that has one.
 pub(super) async fn update_item(
     State(state): State<AppState>,
     user: AuthUser,
@@ -234,6 +272,7 @@ pub(super) async fn update_item(
     }
     check_item_blob(&state, &i.key)?;
     check_item_blob(&state, &i.data)?;
+    ManifestIn::check_all(&i.manifests)?;
     crate::disk::ensure_room(&state, i.bytes() as u64).await?;
     let (old_vault, current) = item_vault(&state, &id).await?;
     let needs = [
@@ -296,6 +335,8 @@ pub(super) async fn update_item(
     if done.rows_affected() != 1 {
         return Err(changed_elsewhere());
     }
+    w.manifests(&i.manifests, &[&old_vault, &i.vault_id])
+        .await?;
     if moved {
         attachments::follow_item(w.conn(), &id, &i.vault_id).await?;
         w.tombstone(&old_vault, &id).await?;
@@ -324,27 +365,37 @@ pub(super) async fn update_item(
         w.charge_files(&old_vault, -attached);
         w.charge_files(&i.vault_id, attached);
     }
+    let manifest_seq = w.manifest_seq(&i.vault_id);
     w.commit(&state).await?;
-    Ok(Json(json!({ "id": id, "revision": rev, "vault_seq": seq })))
+    Ok(Json(json!({
+        "id": id,
+        "revision": rev,
+        "vault_seq": seq,
+        "manifest_seq": manifest_seq,
+    })))
 }
 
-/// Optional optimistic-concurrency check for trash / restore / purge.
+/// Optional optimistic-concurrency check for trash / restore / purge, and the next
+/// manifest of the item's vault when it has one (these requests have no body).
 #[derive(Deserialize)]
 pub(super) struct RevisionQuery {
     revision: Option<i64>,
+    manifest_seq: Option<i64>,
+    manifest: Option<String>,
 }
 
 async fn set_deleted(
     state: &AppState,
     user: &AuthUser,
     id: &str,
-    expected: Option<i64>,
+    q: RevisionQuery,
     deleted_at: Option<i64>,
 ) -> ApiResult<Json<Value>> {
     let (vault, current) = item_vault(state, id).await?;
+    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest)?;
     let need = Need::new(&vault, Role::Write, None);
     let mut w = VaultWrite::begin(state, user, &[need]).await?;
-    if expected.is_some_and(|r| r != current) {
+    if q.revision.is_some_and(|r| r != current) {
         return Err(changed_elsewhere());
     }
     let seq = w.seq(&vault);
@@ -369,14 +420,21 @@ async fn set_deleted(
     if done.rows_affected() != 1 {
         return Err(changed_elsewhere());
     }
+    w.manifests(&sent, &[&vault]).await?;
     let kind = if deleted_at.is_some() {
         "item.trashed"
     } else {
         "item.restored"
     };
     w.log(Event::new(kind).vault(&vault).item(id)).await?;
+    let manifest_seq = w.manifest_seq(&vault);
     w.commit(state).await?;
-    Ok(Json(json!({ "id": id, "revision": rev, "vault_seq": seq })))
+    Ok(Json(json!({
+        "id": id,
+        "revision": rev,
+        "vault_seq": seq,
+        "manifest_seq": manifest_seq,
+    })))
 }
 
 pub(super) async fn trash_item(
@@ -385,7 +443,7 @@ pub(super) async fn trash_item(
     Path(id): Path<String>,
     Query(q): Query<RevisionQuery>,
 ) -> ApiResult<Json<Value>> {
-    set_deleted(&state, &user, &id, q.revision, Some(now())).await
+    set_deleted(&state, &user, &id, q, Some(now())).await
 }
 
 pub(super) async fn restore_item(
@@ -394,7 +452,7 @@ pub(super) async fn restore_item(
     Path(id): Path<String>,
     Query(q): Query<RevisionQuery>,
 ) -> ApiResult<Json<Value>> {
-    set_deleted(&state, &user, &id, q.revision, None).await
+    set_deleted(&state, &user, &id, q, None).await
 }
 
 pub(super) async fn purge_item(
@@ -404,6 +462,7 @@ pub(super) async fn purge_item(
     Query(q): Query<RevisionQuery>,
 ) -> ApiResult<Json<Value>> {
     let (vault, current) = item_vault(&state, &id).await?;
+    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest)?;
     let need = Need::new(&vault, Role::Write, None);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
     if q.revision.is_some_and(|r| r != current) {
@@ -426,23 +485,116 @@ pub(super) async fn purge_item(
             ApiError::NotFound
         });
     }
+    w.manifests(&sent, &[&vault]).await?;
     w.tombstone(&vault, &id).await?;
     history::forget(w.conn(), &id).await?;
     let files = attachments::detach_item(w.conn(), &id).await?;
     w.log(Event::new("item.deleted").vault(&vault).item(&id))
         .await?;
     let vault_seq = w.seq(&vault);
+    let manifest_seq = w.manifest_seq(&vault);
     let revision = w.commit(&state).await?;
     attachments::remove_files(&state, &files).await;
-    Ok(Json(
-        json!({ "revision": revision, "vault_seq": vault_seq }),
-    ))
+    Ok(Json(json!({
+        "revision": revision,
+        "vault_seq": vault_seq,
+        "manifest_seq": manifest_seq,
+    })))
+}
+
+#[derive(Deserialize)]
+pub(super) struct PurgeItem {
+    id: String,
+    /// Optional: refuse when the item was written since.
+    revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct PurgeItems {
+    items: Vec<PurgeItem>,
+    #[serde(default)]
+    manifests: Vec<ManifestIn>,
+}
+
+/// `POST /vaults/{id}/trash/purge` `{items: [{id, revision?}], manifests?}` (write
+/// access): delete these items of the vault's trash for good, all or nothing, as one
+/// write (one sequence number, one manifest). How apps empty the trash, and how they
+/// delete what has been in it longer than the admin's `trash_days` in a vault with a
+/// manifest, which the server's sweeper leaves alone. An item that isn't in this
+/// vault's trash (any more), or whose `revision` differs, is a 409
+/// `revision_conflict`. Answers `{purged, revision, vault_seq, manifest_seq}`.
+pub(super) async fn purge_items(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(vault): Path<String>,
+    Json(b): Json<PurgeItems>,
+) -> ApiResult<Json<Value>> {
+    let max = state.num(Num::MaxImportItems);
+    if b.items.is_empty() || b.items.len() as i64 > max {
+        return Err(ApiError::bad(format!(
+            "delete between 1 and {max} items at a time"
+        )));
+    }
+    for i in &b.items {
+        check_id(&i.id)?;
+    }
+    ManifestIn::check_all(&b.manifests)?;
+    let need = Need::new(&vault, Role::Write, None);
+    let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
+    let mut files = Vec::new();
+    for i in &b.items {
+        let done =
+            match i.revision {
+                Some(r) => sqlx::query(
+                    "DELETE FROM items WHERE id = $1 AND vault_id = $2 AND deleted_at IS NOT NULL
+                     AND revision = $3",
+                )
+                .bind(&i.id)
+                .bind(&vault)
+                .bind(r)
+                .execute(w.conn())
+                .await?,
+                None => sqlx::query(
+                    "DELETE FROM items WHERE id = $1 AND vault_id = $2 AND deleted_at IS NOT NULL",
+                )
+                .bind(&i.id)
+                .bind(&vault)
+                .execute(w.conn())
+                .await?,
+            };
+        // Also an id listed twice.
+        if done.rows_affected() != 1 {
+            return Err(changed_elsewhere());
+        }
+        w.tombstone(&vault, &i.id).await?;
+        history::forget(w.conn(), &i.id).await?;
+        files.extend(attachments::detach_item(w.conn(), &i.id).await?);
+    }
+    w.manifests(&b.manifests, &[&vault]).await?;
+    w.log(
+        Event::new("trash.emptied")
+            .vault(&vault)
+            .data(json!({ "count": b.items.len() })),
+    )
+    .await?;
+    let vault_seq = w.seq(&vault);
+    let manifest_seq = w.manifest_seq(&vault);
+    let revision = w.commit(&state).await?;
+    attachments::remove_files(&state, &files).await;
+    Ok(Json(json!({
+        "purged": b.items.len(),
+        "revision": revision,
+        "vault_seq": vault_seq,
+        "manifest_seq": manifest_seq,
+    })))
 }
 
 /// Permanently delete items that have been in the trash longer than the
 /// admin's `trash_days` (0 = keep them). Each vault is locked like any other
-/// write, so a restore in progress wins, and its members re-sync. Returns how
-/// many items were deleted.
+/// write, so a restore in progress wins, and its members re-sync. Vaults with a
+/// manifest are left alone: only their members' apps can write the manifest that
+/// goes with a deletion, so they delete old trash themselves (`purge_items`).
+/// Returns how many items were deleted.
 pub async fn purge_trash(state: &AppState) -> ApiResult<u64> {
     let days = state.trash_days();
     if days <= 0 {
@@ -450,8 +602,9 @@ pub async fn purge_trash(state: &AppState) -> ApiResult<u64> {
     }
     let cutoff = now() - days * 86_400;
     let vaults: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT vault_id FROM items WHERE deleted_at IS NOT NULL AND deleted_at < $1
-         ORDER BY vault_id",
+        "SELECT DISTINCT i.vault_id FROM items i JOIN vaults v ON v.id = i.vault_id
+         WHERE i.deleted_at IS NOT NULL AND i.deleted_at < $1 AND v.manifest_seq = 0
+         ORDER BY i.vault_id",
     )
     .bind(cutoff)
     .fetch_all(&state.db)
@@ -463,6 +616,10 @@ pub async fn purge_trash(state: &AppState) -> ApiResult<u64> {
             Err(ApiError::NotFound) => continue,
             Err(e) => return Err(e),
         };
+        // It got a manifest in between: dropping `w` rolls the lock back.
+        if w.manifest_seq(&vault) > 0 {
+            continue;
+        }
         // Tombstones first, for apps that sync changes only.
         let seq = w.seq(&vault);
         sqlx::query(

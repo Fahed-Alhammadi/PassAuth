@@ -110,6 +110,9 @@ pub mod code {
     /// (signed by someone who may not make the change, or the hierarchy broken: only
     /// the owner changes the owner entry and admins).
     pub const ROSTER_UNAUTHORIZED: &str = "roster_unauthorized";
+    pub const MANIFEST_CONFLICT: &str = "manifest_conflict";
+    pub const MANIFEST_REQUIRED: &str = "manifest_required";
+    pub const MANIFEST_NOT_READY: &str = "manifest_not_ready";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -223,6 +226,27 @@ impl ApiError {
             StatusCode::INSUFFICIENT_STORAGE,
             code::INSUFFICIENT_STORAGE,
             "the server is almost out of disk space, so nothing new can be saved right now; deleting still works. Ask the server's admin to free up space",
+        )
+    }
+
+    /// The manifest sent with a write isn't the next one for its vault (another write
+    /// came first, or the vault has none yet): sync, check, compute again, retry.
+    pub fn manifest_conflict() -> Self {
+        Self::coded(
+            StatusCode::CONFLICT,
+            code::MANIFEST_CONFLICT,
+            "this vault changed on another device; sync and try again",
+        )
+    }
+
+    /// A write into a vault that has a manifest came without the next one. 400, not
+    /// 409: apps from before manifests show the message instead of offering to
+    /// overwrite (as with `update_required`); apps that know manifests go by the code.
+    pub fn manifest_required() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            code::MANIFEST_REQUIRED,
+            "Update PassAuth to change this vault.",
         )
     }
 

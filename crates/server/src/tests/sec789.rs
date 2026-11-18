@@ -54,7 +54,12 @@ async fn wraps_v2(app: &Router, token: &str) -> Value {
     synced(app, token).await["user"]["account_wraps_v2"].clone()
 }
 
-async fn session_as(app: &Router, email: &str, pw: &str, client: Option<&str>) -> String {
+pub(super) async fn session_as(
+    app: &Router,
+    email: &str,
+    pw: &str,
+    client: Option<&str>,
+) -> String {
     let headers: Vec<(&str, &str)> = client
         .map(|c| vec![("x-passauth-client", c)])
         .unwrap_or_default();
@@ -63,7 +68,7 @@ async fn session_as(app: &Router, email: &str, pw: &str, client: Option<&str>) -
     v["access_token"].as_str().unwrap().to_owned()
 }
 
-async fn expire_sessions_of(state: &AppState, client: Option<&str>) {
+pub(super) async fn expire_sessions_of(state: &AppState, client: Option<&str>) {
     let q = match client {
         Some(_) => "UPDATE sessions SET refresh_expires = 0, access_expires = 0 WHERE client = $1",
         None => "UPDATE sessions SET refresh_expires = 0, access_expires = 0 WHERE client IS NULL",

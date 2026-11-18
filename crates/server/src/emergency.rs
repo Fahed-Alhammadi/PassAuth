@@ -1343,6 +1343,10 @@ struct VaultRow {
     meta: String,
     wrapped_key: String,
     key_epoch: i64,
+    /// The vault's manifest and its version (0 = none), from the same snapshot as
+    /// the items: the contact's app checks the items against it.
+    manifest: Option<String>,
+    manifest_seq: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -1359,7 +1363,7 @@ struct ItemRow {
 
 /// `GET /emergency-access/{id}/vault` (the contact, once approved):
 /// `{"grant", "key_version", "sealed_key", "vaults": [{id, meta, wrapped_key,
-/// key_epoch}], "items": [{id, vault_id, item_key, data, revision, deleted_at,
+/// key_epoch, manifest, manifest_seq}], "items": [{id, vault_id, item_key, data, revision, deleted_at,
 /// created_at, updated_at}]}` — the grantor's personal vaults (owned, key wrapped by
 /// their account key, nobody else a member or invited) that have a wrap for this
 /// access (`wrapped_key` is that wrap), with every item, trash included, read in one
@@ -1386,7 +1390,7 @@ async fn vault(
     )?;
     let sealed_key = released_key(&mut tx, &g).await?;
     let vaults: Vec<VaultRow> = sqlx::query_as(
-        "SELECT v.id, v.meta, k.wrapped_key, v.key_epoch
+        "SELECT v.id, v.meta, k.wrapped_key, v.key_epoch, v.manifest, v.manifest_seq
          FROM vaults v JOIN vault_members m ON m.vault_id = v.id
          JOIN emergency_vault_keys k ON k.vault_id = v.id AND k.access_id = $2
          WHERE m.user_id = $1 AND m.role = 'owner' AND m.key_kind = 'account' AND m.status = 'active'

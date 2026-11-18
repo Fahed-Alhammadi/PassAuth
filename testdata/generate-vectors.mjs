@@ -7,8 +7,10 @@
 // sharing (`signedSharing`: identities and their XEdDSA cross-signatures, share signatures, member
 // rosters, reviews and chains, key ids, key pins, key epoch pins and vault admission; byte-exact,
 // cross-checked here independently of the core with node:crypto and BigInt arithmetic), the item
-// edit counter rule (`itemRev`) and Send v2's password-derived content key (`sendV2`, cross-checked
-// with node:crypto's Argon2id and HKDF).
+// edit counter rule (`itemRev`), Send v2's password-derived content key (`sendV2`, cross-checked
+// with node:crypto's Argon2id and HKDF) and vault manifests (`vaultManifest`: item terms, sums,
+// sealed manifests and every verdict of the check, cross-checked with node:crypto's HKDF, HMAC and
+// SHA-256, BigInt sums and ChaCha20-Poly1305).
 //
 // The expected values come from the Rust core (crates/core/src/site) through its WASM build: the
 // one implementation every client calls (the web vault and the extension through WASM, the iOS,
@@ -562,6 +564,7 @@ function vectors(core) {
     signedSharing: signedSharingVectors(core),
     itemRev: itemRevVectors(core),
     sendV2: sendV2Vectors(core),
+    vaultManifest: vaultManifestVectors(core),
   };
 }
 
@@ -1570,6 +1573,222 @@ function sendV2Vectors(core) {
   owner.free();
   keys.free();
   return { ...fixtures, verifier, contentKey: contentKey.toString("base64url"), data };
+}
+
+// ------------------------------------------------------------ vault manifests
+
+/**
+ * Vault manifests (crates/core/src/manifest.rs). A fixed account (session bytes) and a fixed vault
+ * key, wrapped here for that account with a fixed nonce (the v2 account wrap), so every client's
+ * tests open the same key through their binding. Independently of the core this computes each
+ * item's term (HMAC-SHA256 under the HKDF mac key of `id ‖ 0 ‖ state ‖ 0 ‖ SHA-256(data)`), the
+ * sum mod 2^256 and the counts, seals the manifest with a fixed nonce, and opens what the core
+ * seals. `checks` lists every verdict of `manifestVerify`; `writes` what `manifestNext` must add
+ * up to.
+ */
+function vaultManifestVectors(core) {
+  const must = (cond, what) => {
+    if (!cond) throw new Error(`vault manifest: ${what}`);
+  };
+  const b64 = (b) => Buffer.from(b).toString("base64url");
+  const sha256 = (text) => createHash("sha256").update(Buffer.from(text, "utf8")).digest();
+  const hk = (ikm, info) => Buffer.from(hkdfSync("sha256", ikm, Buffer.alloc(0), Buffer.from(info), 32));
+  const seal = (key, nonce, plaintext, aad) => {
+    const c = createCipheriv("chacha20-poly1305", hchacha(key, nonce.subarray(0, 16)), Buffer.concat([Buffer.alloc(4), nonce.subarray(16)]), { authTagLength: 16 });
+    c.setAAD(Buffer.from(aad, "utf8"));
+    const body = Buffer.concat([c.update(plaintext), c.final()]);
+    return Buffer.concat([Buffer.from([1]), nonce, body, c.getAuthTag()]);
+  };
+  const open = (key, blob, aad) => {
+    must(blob[0] === 1, "unknown ciphertext version");
+    const nonce = blob.subarray(1, 25);
+    const d = createDecipheriv("chacha20-poly1305", hchacha(key, nonce.subarray(0, 16)), Buffer.concat([Buffer.alloc(4), nonce.subarray(16)]), { authTagLength: 16 });
+    d.setAAD(Buffer.from(aad, "utf8"));
+    d.setAuthTag(blob.subarray(blob.length - 16));
+    return Buffer.concat([d.update(blob.subarray(25, blob.length - 16)), d.final()]);
+  };
+
+  const accountId = "00000000-0000-4000-8000-0000000000e1";
+  const vaultId = "00000000-0000-4000-8000-0000000000e2";
+  const keyEpoch = 2;
+  const sessionBytes = Buffer.alloc(64, 0x33);
+  const rawKey = Buffer.from([...Array(32).keys()].map((i) => 0xa0 + i));
+  const wrappedKey = b64(Buffer.concat([Buffer.from([2]), seal(sessionBytes.subarray(0, 32), Buffer.alloc(24, 0x71), rawKey, `passauth/vault-key/v2/${vaultId}/${keyEpoch}`)]));
+  const account = core.accountFromSessionBytes(accountId, new Uint8Array(sessionBytes));
+  const key = account.openVaultKey(vaultId, wrappedKey, "account", keyEpoch, false);
+  const macKey = hk(rawKey, "passauth/vault-manifest-mac/v1");
+  const sealKey = hk(rawKey, "passauth/vault-manifest-key/v1");
+  const aadOf = (version, epoch = keyEpoch, vault = vaultId) => `passauth/vault-manifest/v1/${vault}/${epoch}/${version}`;
+
+  const term = (id, trashed, data) => createHmac("sha256", macKey).update(Buffer.concat([Buffer.from(id, "utf8"), Buffer.from([0, trashed ? 1 : 0, 0]), sha256(data)])).digest();
+  const M = 1n << 256n;
+  const num = (buf) => BigInt(`0x${buf.toString("hex")}`);
+  const bytes32 = (n) => Buffer.from((((n % M) + M) % M).toString(16).padStart(64, "0"), "hex");
+  const trashedOf = (row) => row.deleted_at != null;
+  const summary = (rows) => ({
+    live: rows.filter((r) => !trashedOf(r)).length,
+    trashed: rows.filter(trashedOf).length,
+    acc: bytes32(rows.reduce((sum, r) => sum + num(term(r.id, trashedOf(r), r.data)), 0n)),
+  });
+  const sealedOf = (version, rows, nonceByte, epoch = keyEpoch, vault = vaultId) => {
+    const s = summary(rows);
+    const json = JSON.stringify({ version, live: s.live, trashed: s.trashed, acc: b64(s.acc) });
+    return b64(seal(sealKey, Buffer.alloc(24, nonceByte), Buffer.from(json, "utf8"), aadOf(version, epoch, vault)));
+  };
+  const opened = (sealed, version, epoch = keyEpoch) => JSON.parse(open(sealKey, Buffer.from(sealed, "base64url"), aadOf(version, epoch)).toString("utf8"));
+
+  // Rows as `/sync` sends them (the fields a manifest reads, plus one it ignores). `data` is any
+  // text: only its bytes count.
+  const id = (n) => `00000000-0000-4000-8000-00000000010${n}`;
+  const items = [
+    { id: id(1), vault_id: vaultId, deleted_at: null, data: "AbCdEf0123456789-_first", revision: 11 },
+    { id: id(2), vault_id: vaultId, deleted_at: null, data: "AbCdEf0123456789-_second", revision: 12 },
+    { id: id(3), vault_id: vaultId, deleted_at: 1763400000, data: "AbCdEf0123456789-_third", revision: 13 },
+  ];
+  const hashOf = (row) => b64(sha256(row.data));
+  // `trash=summary`: the trashed row without its data, with the server's hash of it.
+  const summaryItems = items.map((r) => (trashedOf(r) ? { id: r.id, vault_id: r.vault_id, deleted_at: r.deleted_at, data_sha256: hashOf(r), revision: r.revision } : r));
+  const variants = {
+    full: items,
+    summary: summaryItems,
+    reordered: [...items].reverse(),
+    hidden: items.slice(0, 2),
+    resurrected: [...items, { id: id(4), deleted_at: null, data: "AbCdEf0123456789-_fourth" }],
+    older: [{ ...items[0], data: "AbCdEf0123456789-_first-before" }, items[1], items[2]],
+    restored: [items[0], items[1], { ...items[2], deleted_at: null }],
+    trashed: [{ ...items[0], deleted_at: 1763400001 }, items[1], items[2]],
+    wrongHash: [items[0], items[1], { ...summaryItems[2], data_sha256: b64(sha256("something else")) }],
+    noHash: [items[0], items[1], { id: items[2].id, deleted_at: items[2].deleted_at }],
+    empty: [],
+  };
+
+  const version = 3;
+  const sealed = sealedOf(version, items, 0x51);
+  const total = summary(items);
+  const terms = items.map((r) => ({ id: r.id, trashed: trashedOf(r), dataSha256: hashOf(r), term: term(r.id, trashedOf(r), r.data).toString("hex") }));
+  for (const r of items) must(core.manifestDataHash(r.data) === hashOf(r), "manifestDataHash differs from SHA-256");
+
+  // What the core seals for the same items opens here to the same record.
+  const own = opened(key.manifestStart(vaultId, keyEpoch, version, items), version);
+  must(own.version === version && own.live === total.live && own.trashed === total.trashed && own.acc === b64(total.acc), "manifestStart differs from the sum computed here");
+  must(JSON.stringify(opened(key.manifestStart(vaultId, keyEpoch, version, summaryItems), version)) === JSON.stringify(own), "a row counted by its hash differs");
+
+  const others = {
+    current: sealed,
+    otherVersion: sealedOf(version + 1, items, 0x52),
+    otherEpoch: sealedOf(version, items, 0x53, keyEpoch + 1),
+    otherVault: sealedOf(version, items, 0x54, keyEpoch, id(9)),
+    // Sealed for version 3 but saying 4 inside.
+    lyingVersion: b64(seal(sealKey, Buffer.alloc(24, 0x55), Buffer.from(JSON.stringify({ version: 4, live: 2, trashed: 1, acc: b64(total.acc) })), aadOf(version))),
+    emptyVault: sealedOf(1, [], 0x56),
+    garbage: "AAAA",
+  };
+  // [manifest_seq, sealed (a name in `sealed`, or null), remembered, items (a name in `items`)]
+  const checks = [
+    [3, "current", null, "full"],
+    [3, "current", 3, "full"],
+    [3, "current", 2, "summary"],
+    [3, "current", null, "reordered"],
+    [3, "current", 4, "full"],
+    [0, null, 1, "full"],
+    [0, null, null, "full"],
+    [0, "current", null, "full"],
+    [0, null, null, "empty"],
+    [3, null, null, "full"],
+    [3, "current", null, "hidden"],
+    [3, "current", null, "resurrected"],
+    [3, "current", 2, "older"],
+    [3, "current", null, "restored"],
+    [3, "current", null, "trashed"],
+    [3, "current", null, "wrongHash"],
+    [3, "current", null, "noHash"],
+    [3, "current", 5, "noHash"],
+    [4, "current", null, "full"],
+    [3, "otherVersion", null, "full"],
+    [4, "otherVersion", 3, "full"],
+    [3, "otherEpoch", null, "full"],
+    [3, "otherVault", null, "full"],
+    [3, "lyingVersion", null, "full"],
+    [3, "garbage", null, "full"],
+    [1, "emptyVault", null, "empty"],
+    [1, "emptyVault", null, "full"],
+  ].map(([manifestSeq, name, remembered, rows]) => ({
+    manifestSeq,
+    sealed: name,
+    remembered,
+    items: rows,
+    expected: key.manifestVerify(vaultId, keyEpoch, manifestSeq, name ? others[name] : null, remembered, variants[rows]),
+  }));
+  const statusOf = (i) => checks[i].expected.status;
+  must(JSON.stringify(checks[0].expected) === JSON.stringify({ status: "ok", version: 3, live: 2, trashed: 1 }), `the first check isn't ok: ${JSON.stringify(checks[0].expected)}`);
+  const expectedStatuses = ["ok", "ok", "ok", "ok", "rollback", "rollback", "none", "none", "none", "mismatch", "mismatch", "mismatch", "mismatch", "mismatch", "mismatch", "mismatch", "incomplete", "rollback", "mismatch", "mismatch", "ok", "mismatch", "mismatch", "mismatch", "mismatch", "ok", "mismatch"];
+  checks.forEach((c, i) => must(statusOf(i) === expectedStatuses[i], `check ${i} (${JSON.stringify(c)}) should be ${expectedStatuses[i]}`));
+  must(checks[2].expected.version === 3 && checks[4].expected.version === 4 && checks[12].expected.version === 2, "the version to remember differs");
+  // The same key at another epoch, and another key, don't open it.
+  must(key.manifestVerify(vaultId, keyEpoch + 1, 3, sealed, null, items).status === "mismatch", "another epoch opened the manifest");
+  const otherKey = account.newVaultKey(vaultId).takeKey();
+  must(otherKey.manifestVerify(vaultId, keyEpoch, 3, sealed, null, items).status === "mismatch", "another key opened the manifest");
+  otherKey.free();
+
+  // Writes: `removed` as the items were, `added` as they are afterwards.
+  const edited = { ...items[0], data: "AbCdEf0123456789-_first-edited" };
+  const created = { id: id(5), deleted_at: null, data: "AbCdEf0123456789-_fifth" };
+  const writes = [
+    { name: "create", removed: [], added: [created] },
+    { name: "edit", removed: [items[0]], added: [edited] },
+    { name: "trash", removed: [items[1]], added: [{ ...items[1], deleted_at: 1763400002 }] },
+    { name: "restore", removed: [summaryItems[2]], added: [{ ...summaryItems[2], deleted_at: null }] },
+    { name: "delete for good", removed: [summaryItems[2]], added: [] },
+    { name: "move out", removed: [items[0]], added: [] },
+    { name: "import", removed: [], added: [created, { id: id(6), deleted_at: null, data: "AbCdEf0123456789-_sixth" }] },
+    { name: "nothing", removed: [], added: [] },
+  ].map((w) => {
+    const gone = new Set(w.removed.map((r) => r.id));
+    const full = (r) => (r.data === undefined ? { ...r, data: items.find((i) => i.id === r.id).data } : r);
+    const after = [...items.filter((r) => !gone.has(r.id)), ...w.added.map(full)];
+    const next = key.manifestNext(vaultId, keyEpoch, version, sealed, w.removed, w.added);
+    must(next.seq === version + 1, `${w.name}: not one version up`);
+    const expected = summary(after);
+    const got = opened(next.sealed, version + 1);
+    must(got.version === version + 1 && got.live === expected.live && got.trashed === expected.trashed && got.acc === b64(expected.acc), `${w.name}: manifestNext differs from the sum computed here`);
+    must(key.manifestVerify(vaultId, keyEpoch, next.seq, next.sealed, version, after).status === "ok", `${w.name}: the next manifest doesn't check out`);
+    return { ...w, after, expected: { seq: next.seq, live: expected.live, trashed: expected.trashed, acc: expected.acc.toString("hex") } };
+  });
+  const fails = (f) => {
+    try {
+      f();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  must(fails(() => key.manifestNext(vaultId, keyEpoch, 1, others.emptyVault, [items[0]], [])), "removing from an empty vault was accepted");
+  must(fails(() => key.manifestNext(vaultId, keyEpoch, version + 1, sealed, [], [])), "manifestNext opened another version");
+  must(fails(() => key.manifestNext(vaultId, keyEpoch, version, sealed, [], [variants.noHash[2]])), "an added item without data was accepted");
+  must(fails(() => key.manifestStart(vaultId, keyEpoch, 1, variants.noHash)), "manifestStart accepted an item without data");
+  must(fails(() => key.manifestStart(vaultId, keyEpoch, 0, items)), "version 0 was sealed");
+  must(fails(() => key.manifestVerify(vaultId, keyEpoch, version, sealed, null, [...items, items[0]])), "an item listed twice was accepted");
+  key.free();
+  account.free();
+
+  return {
+    about: "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>. Open the vault key with accountFromSessionBytes(accountId, sessionBytes) and openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false).",
+    accountId,
+    sessionBytes: b64(sessionBytes),
+    vaultId,
+    keyEpoch,
+    wrappedKey,
+    vaultKey: rawKey.toString("hex"),
+    version,
+    live: total.live,
+    trashed: total.trashed,
+    acc: total.acc.toString("hex"),
+    terms,
+    items: variants,
+    sealed: others,
+    checks,
+    writes,
+  };
 }
 
 /** HChaCha20 (the XChaCha20 subkey) of a 32-byte key and a 16-byte nonce. */

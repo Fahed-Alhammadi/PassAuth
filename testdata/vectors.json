@@ -9497,5 +9497,958 @@
     "verifier": "yYJK6m4z3yQyjqzhexV16R2qriF1KgytGMmz9Y5mlWI",
     "contentKey": "Xf-NN8eCTvkwdD44LM8zUYlFSWNfxGBbI2PebNyt154",
     "data": "AgFgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGC6_cxzj5F59c-YPuZLJqYvImwYxRfFw1Vje5sVsh5So_ip0lX6KaV4WfQQB6RXHQ"
+  },
+  "vaultManifest": {
+    "about": "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>. Open the vault key with accountFromSessionBytes(accountId, sessionBytes) and openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false).",
+    "accountId": "00000000-0000-4000-8000-0000000000e1",
+    "sessionBytes": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw",
+    "vaultId": "00000000-0000-4000-8000-0000000000e2",
+    "keyEpoch": 2,
+    "wrappedKey": "AgFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXH5hZ7DlgIp7AvcX086cWDTJHj9Ixfkx4FLq1TjVNJqL2PO1fTdrNCp2ZSaQPI6xt4",
+    "vaultKey": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "version": 3,
+    "live": 2,
+    "trashed": 1,
+    "acc": "dcaf12ccb40b35bb2f185926f99892729f462d73f6d54021d095552d911d02e8",
+    "terms": [
+      {
+        "id": "00000000-0000-4000-8000-000000000101",
+        "trashed": false,
+        "dataSha256": "sNsU1OE4qSxfyg8RbHZZLh17u9zXlquMeLwSuzlF_y4",
+        "term": "8e807c2b0c6e17459f3c60e1f57a98766d17efee31abd370f797db54fa02df20"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000102",
+        "trashed": false,
+        "dataSha256": "G0K7JjJsmwc23eoxXqGS5bhyhMCbgt-Vu0bxc1niFnY",
+        "term": "35be0173a9a31eee070217100db1ae39e4b29a3ab75dcdb720b3cb859086bf9d"
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000103",
+        "trashed": true,
+        "dataSha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+        "term": "1870952dfdf9ff8788d9e134f66c4bc24d7ba34b0dcb9ef9b849ae530693642b"
+      }
+    ],
+    "items": {
+      "full": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        }
+      ],
+      "summary": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data_sha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+          "revision": 13
+        }
+      ],
+      "reordered": [
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        }
+      ],
+      "hidden": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        }
+      ],
+      "resurrected": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000104",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_fourth"
+        }
+      ],
+      "older": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first-before",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        }
+      ],
+      "restored": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        }
+      ],
+      "trashed": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400001,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13
+        }
+      ],
+      "wrongHash": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data_sha256": "9B8_piX_Eg3cp-9Fa_ZjcezqI8Ep9OTDI2cQHttRbPg",
+          "revision": 13
+        }
+      ],
+      "noHash": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "deleted_at": 1763400000
+        }
+      ],
+      "empty": []
+    },
+    "sealed": {
+      "current": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-IlmxPdYSFPZjgjvYFkdjECg",
+      "otherVersion": "AVJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUu4ZDYukUyKf11AWHx1Qx53S2y3qYCOWPBZ3wRoH-bXFQzsqhrcwu1oUafzZv8I5gg01oGsuNseH_6lyqm3mYlRZFen9V1CxcMaI45J5gf3-2nwxIQMYAixfzOKCeSdb6yt8XyRmmA",
+      "otherEpoch": "AVNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU41ZcN6RiLOx58mt0hQXKqjFhgICvmAn2VmqrrV52AHKPEbNISmO0zzeS40nm9upjTEJzekpu_RhyLEMz6eyZ-gFaYYeeM8wmK6FWS-Mmh0xqfzRqMCd06vefekUz6YpQzdE9g26ag",
+      "otherVault": "AVRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVPTcqmG8A6dy6pZpPAODqb-eYbb9g1i-JBc5IM2jZVTWavVKqGfoM3l9d_1MicRJz57RstDpqQZv9vO_T7JaYYUrLvgukKo_N0Swf__PSR1EsatMeEd6Jrbr-L9LyBYMQBYwu0gMbw",
+      "lyingVersion": "AVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVfGnksXDTUFg_lr2AoPDn12s8NXQ8IUHlJKYi-_MtGJN3E-0r7-vovPBLGmWDz7nOwhXhNX3luP6VfM6Jo6kc_R1l8QvsDeejLzlw845jzJVF1gAXgBC1oaUgi8hHHzu-N7V1n_sOw",
+      "emptyVault": "AVZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVscTp1rRen7VbYuvVHwe76LhOKVz41CNUbWkIh_LUPdu1IVHR9zB-h9pLlMUkJcobJDaTldvUdpu-9sizsTvJkA7fbxG14LqID2TiP6I7fwuWteDW3PiLECQwPYESCWCQWni5gxu5w",
+      "garbage": "AAAA"
+    },
+    "checks": [
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": 3,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": 2,
+        "items": "summary",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "reordered",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": 4,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 4,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 0,
+        "sealed": null,
+        "remembered": 1,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 1,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 0,
+        "sealed": null,
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "none",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 0,
+        "sealed": "current",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "none",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 0,
+        "sealed": null,
+        "remembered": null,
+        "items": "empty",
+        "expected": {
+          "status": "none",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": null,
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "hidden",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "resurrected",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": 2,
+        "items": "older",
+        "expected": {
+          "status": "mismatch",
+          "version": 2,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "restored",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "trashed",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "wrongHash",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": null,
+        "items": "noHash",
+        "expected": {
+          "status": "incomplete",
+          "version": 0,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "current",
+        "remembered": 5,
+        "items": "noHash",
+        "expected": {
+          "status": "rollback",
+          "version": 5,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 4,
+        "sealed": "current",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "otherVersion",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 4,
+        "sealed": "otherVersion",
+        "remembered": 3,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 4,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "otherEpoch",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "otherVault",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "lyingVersion",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 3,
+        "sealed": "garbage",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 1,
+        "sealed": "emptyVault",
+        "remembered": null,
+        "items": "empty",
+        "expected": {
+          "status": "ok",
+          "version": 1,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "manifestSeq": 1,
+        "sealed": "emptyVault",
+        "remembered": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "live": 0,
+          "trashed": 0
+        }
+      }
+    ],
+    "writes": [
+      {
+        "name": "create",
+        "removed": [],
+        "added": [
+          {
+            "id": "00000000-0000-4000-8000-000000000105",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_fifth"
+          }
+        ],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000105",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_fifth"
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 3,
+          "trashed": 1,
+          "acc": "9bab26427323bbd46f218cc60e50e7fa7ae09ddca38a009db164fcd589c9b5bd"
+        }
+      },
+      {
+        "name": "edit",
+        "removed": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          }
+        ],
+        "added": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first-edited",
+            "revision": 11
+          }
+        ],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first-edited",
+            "revision": 11
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 2,
+          "trashed": 1,
+          "acc": "b8da96487ff90689f3538a82f5730fd23364f551bf5102fdf82bc9139f6fdde0"
+        }
+      },
+      {
+        "name": "trash",
+        "removed": [
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          }
+        ],
+        "added": [
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400002,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          }
+        ],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400002,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 1,
+          "trashed": 2,
+          "acc": "606fab41eef7a39b6bdc071865cdad81ae3535555ba76f38753651df79115c32"
+        }
+      },
+      {
+        "name": "restore",
+        "removed": [
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data_sha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+            "revision": 13
+          }
+        ],
+        "added": [
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data_sha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+            "revision": 13
+          }
+        ],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data_sha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+            "revision": 13,
+            "data": "AbCdEf0123456789-_third"
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 3,
+          "trashed": 0,
+          "acc": "c63ec1d121eb18e0501576dd8b672ae7bd4ca20e5dc9ea8906c0de2673701119"
+        }
+      },
+      {
+        "name": "delete for good",
+        "removed": [
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data_sha256": "xafPM38t2W1lXeazBEGiUGISOzW5e2qdmHZg_f7e8_A",
+            "revision": 13
+          }
+        ],
+        "added": [],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 2,
+          "trashed": 0,
+          "acc": "c43e7d9eb6113633a63e77f2032c46b051ca8a28e909a128184ba6da8a899ebd"
+        }
+      },
+      {
+        "name": "move out",
+        "removed": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          }
+        ],
+        "added": [],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 1,
+          "trashed": 1,
+          "acc": "4e2e96a1a79d1e758fdbf845041df9fc322e3d85c5296cb0d8fd79d8971a23c8"
+        }
+      },
+      {
+        "name": "import",
+        "removed": [],
+        "added": [
+          {
+            "id": "00000000-0000-4000-8000-000000000105",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_fifth"
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000106",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_sixth"
+          }
+        ],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000105",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_fifth"
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000106",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_sixth"
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 4,
+          "trashed": 1,
+          "acc": "16463d7bfb7e7cead94795981a97a4d353d81a109f6840df8d848df21357ef8c"
+        }
+      },
+      {
+        "name": "nothing",
+        "removed": [],
+        "added": [],
+        "after": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ],
+        "expected": {
+          "seq": 4,
+          "live": 2,
+          "trashed": 1,
+          "acc": "dcaf12ccb40b35bb2f185926f99892729f462d73f6d54021d095552d911d02e8"
+        }
+      }
+    ]
   }
 }
