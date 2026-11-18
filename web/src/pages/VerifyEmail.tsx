@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { LogoMark } from "../components/Logo";
 import { api, friendlyError } from "../lib/api";
+import { SIGN_IN_PATH } from "../lib/routes";
 
 const requests = new Map<string, Promise<unknown>>();
 function verifyOnce(token: string) {
@@ -39,7 +40,7 @@ export function VerifyEmailPage() {
                 {state}
               </div>
             )}
-            <Link className="btn btn-accent btn-block" to="/login">
+            <Link className="btn btn-accent btn-block" to={SIGN_IN_PATH}>
               Go to sign in
             </Link>
           </div>

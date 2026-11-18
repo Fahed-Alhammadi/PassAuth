@@ -163,7 +163,7 @@ To restore: stop the container, replace `data/passauth.db` with the backup and `
 docker compose run --rm passauth reset-sync
 ```
 
-After any restore, apps that had synced something newer than the backup show a warning on the vaults concerned ("Your server's copy of this vault doesn't match its record of changes."). That is the check working: the server now holds an older state than those devices saw. Each user confirms "Use the server's copy" once on each device (every member can, also with view-only access; nothing is sent to the server for it). Tell your users before you restore.
+After any restore, apps that had synced something newer than the backup show a warning on the vaults concerned ("Your server's copy of this vault doesn't match its record of changes."). That is the check working: the server now holds an older state than those devices saw. Each user confirms "Use the server's copy" once for each of those vaults on each of their devices (every member can, also with view-only access; nothing is sent to the server for it). Tell your users before you restore.
 
 ### Vaults that don't start keeping a record of changes
 

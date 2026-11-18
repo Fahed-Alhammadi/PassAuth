@@ -135,6 +135,31 @@ public struct SyncDeleted: Codable, Equatable, Sendable {
     }
 }
 
+/// What this device keeps with its stored copy about the answer the copy came from (never part
+/// of a server's answer; dropped from one like `servedSha256`): the vaults a whole server answer
+/// left with a warning (rollback or mismatch) and the items it marked as older than this device
+/// saw without having a newer copy to keep. Whoever opens the copy later (the app after a lock or
+/// a restart, its AutoFill extension) keeps those warnings until a server answer clears them.
+public struct LocalWarnings: Codable, Equatable, Sendable {
+    public var vaults: [String]
+    public var items: [String]
+
+    public init(vaults: [String] = [], items: [String] = []) {
+        self.vaults = vaults
+        self.items = items
+    }
+
+    public var isEmpty: Bool { vaults.isEmpty && items.isEmpty }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        vaults = (try? c.decodeIfPresent([String].self, forKey: .vaults)) ?? []
+        items = (try? c.decodeIfPresent([String].self, forKey: .items)) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey { case vaults, items }
+}
+
 /// A `/sync` answer: everything, or (`delta == true`) what changed since the cursor sent.
 public struct SyncResponse: Decodable, Sendable {
     public var revision: Int64?
@@ -154,10 +179,12 @@ public struct SyncResponse: Decodable, Sendable {
     /// (0: kept forever); servers with `vault_manifest` (old trash is then deleted by the apps).
     public var serverTime: Int64?
     public var trashDays: Int64?
+    /// Only in this device's own stored copy (`LocalWarnings`); a server's is never used.
+    public var localWarned: JSON?
 
     enum CodingKeys: String, CodingKey {
         case revision, cursor, user, bundle, vaults, items, deleted, reset, delta, invitations
-        case serverTime = "server_time", trashDays = "trash_days"
+        case serverTime = "server_time", trashDays = "trash_days", localWarned = "local_warned"
     }
 }
 
@@ -194,6 +221,9 @@ public struct SyncSnapshot: Codable, Equatable, Sendable {
     /// (`SyncResponse`); not stored with the copy (nil in one read from the device).
     public var serverTime: Int64?
     public var trashDays: Int64?
+    /// The warnings the answer this copy came from was left with (`LocalWarnings`; nil: none).
+    /// Written by this device only, kept only when its own stored copy is read back.
+    public var warned: LocalWarnings?
 
     public init(revision: Int64, cursor: String?, user: JSON?, bundle: JSON?, vaults: [SyncVault], items: [SyncItem], invitations: [SyncInvitation] = []) {
         self.revision = revision
@@ -207,6 +237,7 @@ public struct SyncSnapshot: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case revision, cursor, user, bundle, vaults, items, invitations
+        case warned = "local_warned"
     }
 
     /// Copies are read through `decode` (as a `/sync` answer); this keeps a direct decode of an
@@ -220,6 +251,7 @@ public struct SyncSnapshot: Codable, Equatable, Sendable {
         vaults = try c.decode([SyncVault].self, forKey: .vaults)
         items = try c.decode([SyncItem].self, forKey: .items)
         invitations = SyncInvitation.read(try c.decodeIfPresent(JSON.self, forKey: .invitations))
+        warned = (try? c.decodeIfPresent(LocalWarnings.self, forKey: .warned)).flatMap { $0 }.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     public var position: SyncPosition {
@@ -272,7 +304,8 @@ public enum SyncMerge {
     /// to 2^53 − 1, else the answer isn't one either.
     ///
     /// `local`: `r` is this device's own stored copy. Only then do rows keep what the device
-    /// itself put on them (`servedSha256`); in a server's answer it is dropped.
+    /// itself put on them (`servedSha256`) and the copy its kept warnings (`local_warned`); in a
+    /// server's answer both are dropped.
     public static func apply(_ r: SyncResponse, to base: SyncSnapshot?, local: Bool = false) -> SyncSnapshot? {
         guard let revision = r.revision, revision >= 0, let vaults = r.vaults, var items = r.items else { return nil }
         let top = Int64(VaultManifest.maxNumber)
@@ -290,6 +323,10 @@ public enum SyncMerge {
             var full = SyncSnapshot(revision: revision, cursor: r.cursor, user: r.user, bundle: bundle, vaults: vaults, items: items, invitations: invitations)
             full.serverTime = r.serverTime
             full.trashDays = r.trashDays
+            if local, let kept = r.localWarned, let data = try? JSONEncoder().encode(kept),
+               let w = try? JSONDecoder().decode(LocalWarnings.self, from: data), !w.isEmpty {
+                full.warned = w
+            }
             return full
         }
         guard let base else { return nil }

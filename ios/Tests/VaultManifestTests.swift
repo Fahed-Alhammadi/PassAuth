@@ -266,13 +266,13 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(VaultManifest.merged(["a": accepted], ["a": ManifestMark(version: 3, link: other, accepts: 1)])["a"], accepted, "never another link at the same version")
         // Forgetting (the server shows no manifest) keeps the count and nothing else.
         let forgotten = VaultManifest.replaced(accepted, with: nil)
-        XCTAssertEqual(forgotten, ManifestMark.forgotten(accepts: 2))
+        XCTAssertEqual(forgotten, ManifestMark.forgotten(accepts: 2, noRecord: true))
         XCTAssertFalse(forgotten.valid)
         XCTAssertEqual(VaultManifest.merged(["a": forgotten], ["a": ManifestMark(version: 9, link: l7, accepts: 1)])["a"], forgotten)
         XCTAssertEqual(VaultManifest.merged(["a": forgotten], ["a": ManifestMark(version: 1, link: l7, accepts: 2)])["a"], ManifestMark(version: 1, link: l7, accepts: 2),
                        "a first manifest started after it")
         XCTAssertEqual(VaultManifest.replaced(nil, with: ManifestMark(version: 2, link: l2)), ManifestMark(version: 2, link: l2, accepts: 1))
-        XCTAssertEqual(VaultManifest.replaced(forgotten, with: ManifestMark(version: 2, link: "half")), ManifestMark.forgotten(accepts: 3), "never half an entry")
+        XCTAssertEqual(VaultManifest.replaced(forgotten, with: ManifestMark(version: 2, link: "half")), ManifestMark.forgotten(accepts: 3, noRecord: true), "never half an entry")
         // An ordinary `ok` after an acceptance raises the version and keeps the count.
         var later = ["a": accepted, "f": forgotten]
         VaultManifest.remember(&later, vault: "a", status: .ok, mark: ManifestMark(version: 4, link: l5))
@@ -353,9 +353,12 @@ final class VaultManifestTests: XCTestCase {
         var hashed = w.rows
         hashed[2] = summary(hashed[2])
         XCTAssertEqual(open(w, try w.header(m3), hashed, [:]).data.vaults.first?.manifest, .ok)
-        // An app that asks for every row whole (iOS) never accepts a row without its data:
-        // the item would be counted and not shown.
-        XCTAssertEqual(open(w, try w.header(m3), hashed, [:], fullRows: true).data.vaults.first?.manifest, .mismatch)
+        // An app that asks for every row whole (iOS) lists a row without its data as one that
+        // can't be opened (counted by its hash; the vault gets the notice, nothing is held).
+        let whole = open(w, try w.header(m3), hashed, [:], fullRows: true)
+        XCTAssertEqual(whole.data.vaults.first?.manifest, .ok)
+        XCTAssertEqual(whole.data.vaults.first?.unopenable, true)
+        XCTAssertEqual(whole.data.unopenable.map(\.id), [hashed[2].id])
         // More than a step ahead of what is remembered: not a verdict yet, the log is needed.
         let m1 = try w.start(1)
         o = open(w, try w.header(m3), w.rows, [w.vaultId: mark(m1)])
@@ -364,39 +367,51 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(o.manifests, [w.vaultId: mark(m1)], "nothing is remembered before the log decided")
     }
 
-    /// A row that doesn't open with its vault's key is a hidden item: with a matching hash the
-    /// manifest alone would add up, so its vault is a mismatch.
-    func testARowThatDoesNotOpenIsAMismatch() throws {
+    /// T1 (c): a row that doesn't decrypt with its vault's key is listed and its vault gets the
+    /// notice. The manifest's verdict is its own (the row is counted by its data), so nothing
+    /// is warned or held for the row alone.
+    func testARowThatDoesNotOpenIsListedNotWarnedAbout() throws {
         let w = try world()
         var rows = w.rows
         // The right data (so the manifest's sum is right) under a wrong item key.
         let stray = try w.key.encryptItem(itemJson: ItemCodec.encode(Item(name: "Other")), id: rows[0].id, vaultId: w.vaultId)
         rows[0].itemKey = stray.key
         let m = try w.start(3)
-        XCTAssertEqual(VaultManifest.verify(try w.header(m), key: w.key, remembered: nil, rows: rows).status, .ok, "the sum alone can't tell")
         let o = open(w, try w.header(m), rows, [:])
         XCTAssertEqual(o.unreadable, [w.vaultId])
         XCTAssertEqual(o.data.entries.count, 1, "the item isn't shown")
-        XCTAssertEqual(o.data.vaults.first?.manifest, .mismatch)
-        // The manifest itself matches: it is remembered, the item is the vault's one problem,
-        // and it is listed so it can be deleted. "Use the server's copy" has nothing to accept.
+        XCTAssertEqual(o.data.vaults.first?.manifest, .ok)
         XCTAssertEqual(o.manifests, [w.vaultId: mark(m)])
         XCTAssertEqual(o.data.vaults.first?.unopenable, true)
-        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, false)
+        XCTAssertEqual(o.data.manifestWarnings.count, 0)
         XCTAssertEqual(o.data.unopenable, [UnopenableItem(id: rows[0].id, vaultId: w.vaultId, revision: 3, deletedAt: nil)])
-        // Also after this device wrote a manifest over it: the manifest is this device's
-        // (remembered), the item is still hidden, the warning stays.
+        // Also after this device wrote a manifest over it: ok at that manifest, the notice stays.
         let mine = ManifestMark(version: 4, link: String(repeating: "m", count: 43))
         let after = open(w, try w.header(m), rows, [:], source: .local(wrote: [w.vaultId: mine], gone: []), previous: o)
-        XCTAssertEqual(after.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(after.data.vaults.first?.manifest, .ok)
         XCTAssertEqual(after.data.vaults.first?.unopenable, true)
         XCTAssertEqual(after.manifests, [w.vaultId: mine])
-        // A row that has its data but came without its key can't be opened either (it used to be
-        // skipped, with no warning and nothing in the trash).
+        // T1 (a): a device that opened the row before goes on with the key it has.
+        let good = open(w, try w.header(m), w.rows, [:])
+        let kept = open(w, try w.header(m), rows, [:], previous: good)
+        XCTAssertEqual(kept.data.entries.count, 2, "still shown")
+        XCTAssertEqual(kept.data.unopenable, [])
+        XCTAssertEqual(kept.data.vaults.first?.unopenable, false)
+        XCTAssertEqual(kept.data.vaults.first?.manifest, .ok)
+        XCTAssertEqual(kept.rekeyed[rows[0].id]?.itemKey, w.rows[0].itemKey, "the copy keeps the key that opens it")
+        XCTAssertEqual(VaultRepository.keeping(kept.rekeyed, in: SyncSnapshot(revision: 1, cursor: nil, user: nil, bundle: nil, vaults: [], items: rows)).items[0], w.rows[0])
+        // …but not when the data changed too (then it isn't the row the device has).
+        var changed = rows
+        changed[0].data = stray.data
+        changed[0].itemKey = w.rows[1].itemKey
+        let other = open(w, try w.header(m), changed, [:], previous: good)
+        XCTAssertEqual(other.data.unopenable.map(\.id), [rows[0].id])
+        XCTAssertEqual(other.data.unopenable.first?.name, good.data.entries.first { $0.id == rows[0].id }?.item.name, "its last known name")
+        // A row that has its data but came without its key can't be opened either.
         var keyless = w.rows
         keyless[2].itemKey = nil
         let k = open(w, try w.header(m), keyless, [:], fullRows: true)
-        XCTAssertEqual(k.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(k.data.vaults.first?.manifest, .ok)
         XCTAssertEqual(k.data.vaults.first?.unopenable, true)
         XCTAssertEqual(k.data.unopenable.map(\.id), [keyless[2].id])
         XCTAssertEqual(k.data.unopenable.first?.deletedAt, keyless[2].deletedAt)
@@ -405,11 +420,12 @@ final class VaultManifestTests: XCTestCase {
         let s = open(w, try w.header(m), [w.rows[0], w.rows[1], summary(w.rows[2])], [:])
         XCTAssertEqual(s.data.vaults.first?.manifest, .ok)
         XCTAssertTrue(s.data.unopenable.isEmpty)
-        // The manifest is wrong as well (an item is missing): an ordinary warning; the item is
-        // still listed, and the record has to be settled first.
+        XCTAssertEqual(s.data.vaults.first?.unopenable, false)
+        // The manifest is wrong as well (an item is missing): the ordinary warning; the item is
+        // still listed with its notice, and the record has to be settled first.
         let both = open(w, try w.header(m), Array(rows.dropLast()), [:])
         XCTAssertEqual(both.data.vaults.first?.manifest, .mismatch)
-        XCTAssertEqual(both.data.vaults.first?.unopenable, false)
+        XCTAssertEqual(both.data.vaults.first?.unopenable, true)
         XCTAssertEqual(both.data.unopenable.count, 1)
         // A vault without a manifest stays as it was (writable); the item is listed, and no
         // first manifest is started over it.
@@ -963,6 +979,129 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(VaultRepository.open(created.account, snap, previous: nil).keys.count, 1)
     }
 
+    // MARK: Round 3
+
+    /// T1: the three kinds of rows that don't open. A row that decrypts but that this app can't
+    /// read is "from a newer version": listed, no notice, no warning, counted by the manifest
+    /// like any row, and it doesn't stand in the way of a first manifest. A row that can't be
+    /// decrypted is listed with the vault's notice, and the verdict stays the manifest's own.
+    func testRowsThatDoNotOpenAreToldApart() throws {
+        let created = try createAccount(accountId: try newId(), password: "correct horse battery staple", withSecretKey: false)
+        let vid = try newId()
+        let made = try created.account.newVaultKeyBound(vaultId: vid, keyEpoch: 1)
+        func row(_ name: String) throws -> SyncItem {
+            var item = Item.empty(.login, now: 1_700_000_000)
+            item.name = name
+            let id = try newId()
+            let enc = try made.key.encryptItem(itemJson: ItemCodec.encode(item), id: id, vaultId: vid)
+            return SyncItem(id: id, vaultId: vid, itemKey: enc.key, data: enc.data, revision: 3)
+        }
+        let fine = try row("Fine"), future = try row("Future"), shape = try row("Shape"), broken = try row("Broken")
+        let rows = [fine, future, shape, broken]
+        let m = try made.key.manifestStart(vaultId: vid, keyEpoch: 1, version: 1, prev: nil, itemsJson: VaultManifest.rowsJson(rows))
+        var vault = SyncVault(id: vid, wrappedKey: made.wrapped, keyEpoch: 1)
+        vault.seq = 3
+        vault.manifest = m.sealed
+        vault.manifestSeq = 1
+        vault.manifestPrev = m.prev
+        vault.manifestOk = true
+        let snap = SyncSnapshot(revision: 1, cursor: nil, user: nil, bundle: nil, vaults: [vault], items: rows)
+        let opened = VaultRepository.open(created.account, snap, previous: nil, fullRows: true) { key, enc in
+            switch enc.id {
+            case future.id: throw CoreError.Invalid(message: "json: unknown variant `passport`")
+            case shape.id: return "[1, 2]"
+            case broken.id: throw CoreError.DecryptFailed(message: "decrypt_failed")
+            default: return try key.decryptItem(encrypted: enc)
+            }
+        }
+        XCTAssertEqual(opened.data.entries.map(\.item.name), ["Fine"])
+        XCTAssertEqual(Set(opened.data.newer.map(\.id)), [future.id, shape.id], "decrypted, not readable here")
+        XCTAssertEqual(opened.data.unopenable.map(\.id), [broken.id])
+        let info = try XCTUnwrap(opened.data.vaults.first)
+        XCTAssertEqual(info.manifest, .ok, "every row is counted by its data; nothing is warned or held")
+        XCTAssertTrue(info.unopenable, "the notice for the row that can't be decrypted")
+        XCTAssertEqual(opened.data.manifestWarnings.count, 0)
+        XCTAssertEqual(opened.data.unopenableNotices.map(\.id), [vid])
+        XCTAssertEqual(opened.manifests?[vid], ManifestMark(version: 1, link: m.link))
+        // Only newer items: no notice at all, and a first manifest may be started over them.
+        let quiet = VaultRepository.open(created.account, SyncSnapshot(revision: 1, cursor: nil, user: nil, bundle: nil, vaults: [vault], items: [fine, future]),
+                                         previous: nil, manifests: [:], fullRows: true) { key, enc in
+            if enc.id == future.id { throw CoreError.Invalid(message: "json: missing field") }
+            return try key.decryptItem(encrypted: enc)
+        }
+        XCTAssertEqual(quiet.data.vaults.first?.unopenable, false)
+        XCTAssertEqual(quiet.data.unopenable, [])
+        var bare = vault
+        bare.manifest = nil
+        bare.manifestSeq = 0
+        bare.manifestPrev = nil
+        XCTAssertTrue(VaultManifest.mayStart(bare, role: .owner, status: .none, remembered: nil, rows: [fine, future], features: [vaultManifestFeature],
+                                             unopenable: !quiet.data.unopenable.isEmpty))
+        // The core's errors: only its JSON error means "decrypted but not read".
+        XCTAssertTrue(VaultRepository.decryptedButUnread(CoreError.Invalid(message: "json: expected value")))
+        XCTAssertFalse(VaultRepository.decryptedButUnread(CoreError.Invalid(message: "malformed data: base64")))
+        XCTAssertFalse(VaultRepository.decryptedButUnread(CoreError.Invalid(message: "unsupported ciphertext version 9")))
+        XCTAssertFalse(VaultRepository.decryptedButUnread(CoreError.DecryptFailed(message: "decrypt_failed")))
+    }
+
+    /// N1: what the device keeps with its stored copy about the answer it came from is its own.
+    /// It is read back from the copy and never taken from a server's answer (full or delta).
+    func testKeptWarningsAreLocalOnly() throws {
+        var snap = SyncSnapshot(revision: 4, cursor: "c4", user: nil, bundle: nil, vaults: [], items: [])
+        snap.warned = LocalWarnings(vaults: ["v1"], items: ["i1"])
+        let stored = try snap.encoded()
+        XCTAssertEqual(SyncSnapshot.decode(stored)?.warned, LocalWarnings(vaults: ["v1"], items: ["i1"]), "read back from the device")
+        let answer = try JSONDecoder().decode(SyncResponse.self, from: stored)
+        XCTAssertNil(SyncMerge.apply(answer, to: nil)?.warned, "dropped from a server's answer")
+        let delta = try JSONDecoder().decode(SyncResponse.self, from: Data(#"{"delta":true,"revision":5,"cursor":"c5","vaults":[],"items":[],"local_warned":{"vaults":["v9"],"items":[]}}"#.utf8))
+        XCTAssertNil(SyncMerge.apply(delta, to: snap)?.warned, "a delta starts without them (the check of its answer decides)")
+        // Nothing to keep is nothing stored, and anything else in its place is nothing.
+        snap.warned = nil
+        XCTAssertFalse(String(decoding: try snap.encoded(), as: UTF8.self).contains("local_warned"))
+        let odd = try JSONDecoder().decode(SyncResponse.self, from: Data(#"{"revision":5,"vaults":[],"items":[],"local_warned":"yes"}"#.utf8))
+        XCTAssertNil(SyncMerge.apply(odd, to: nil, local: true)?.warned)
+    }
+
+    /// T3: forgetting a vault's manifest by an acceptance leaves a marker, kept through the
+    /// stored form and the merge, gone as soon as a manifest is remembered again.
+    func testAForgottenManifestSaysTheVaultIsNotChecked() throws {
+        let link = String(repeating: "k", count: 43)
+        let forgotten = VaultManifest.replaced(ManifestMark(version: 4, link: link), with: nil)
+        XCTAssertEqual(forgotten, .forgotten(accepts: 1, noRecord: true))
+        let stored = try JSONEncoder().encode(["v": forgotten])
+        XCTAssertEqual(VaultManifest.readMemory(stored)?["v"], forgotten)
+        XCTAssertEqual(try JSONDecoder().decode([String: ManifestMark].self, from: stored)["v"], forgotten)
+        XCTAssertEqual(VaultManifest.merged(["v": ManifestMark(version: 4, link: link)], ["v": forgotten])["v"], forgotten, "the acceptance wins")
+        var memory = ["v": forgotten]
+        VaultManifest.remember(&memory, vault: "v", status: .ok, mark: ManifestMark(version: 1, link: link))
+        XCTAssertEqual(memory["v"], ManifestMark(version: 1, link: link, accepts: 1), "a manifest again: checked again")
+        XCTAssertEqual(memory["v"]?.noRecord, false)
+        // An accepted manifest (the server shows one) carries no marker.
+        XCTAssertEqual(VaultManifest.replaced(forgotten, with: ManifestMark(version: 2, link: link)).noRecord, false)
+    }
+
+    /// AutoFill: a login whose vault is warned, or that the server sent an older version of with
+    /// no newer copy on the device, is never handed over without the warning being seen.
+    func testAutoFillLooksBeforeFillingFromAWarnedCopy() {
+        var item = Item.empty(.login, now: 1)
+        item.name = "Shop"
+        func entry(_ id: String, vault: String, rolledBack: Bool = false) -> Entry {
+            Entry(id: id, item: item, vaultId: vault, revision: 1, enc: EncryptedItem(id: id, vaultId: vault, key: "", data: ""), deletedAt: nil, rolledBack: rolledBack)
+        }
+        var v = VaultData()
+        v.vaults = [VaultInfo(id: "ok", name: "Personal", role: .owner, manifest: .ok), VaultInfo(id: "bad", name: "Work", role: .owner, manifest: .mismatch)]
+        XCTAssertFalse(v.fillNeedsReview(entry("a", vault: "ok")))
+        XCTAssertTrue(v.fillNeedsReview(entry("b", vault: "bad")))
+        XCTAssertEqual(v.fillWarning, "Work: " + ManifestText.warning)
+        v.vaults[1].manifest = .unchecked
+        XCTAssertFalse(v.fillNeedsReview(entry("b", vault: "bad")), "the quiet two-process case fills as before")
+        XCTAssertNil(v.fillWarning)
+        v.rollback = ItemRollback(items: ["c", "d"], kept: ["d"])
+        XCTAssertTrue(v.fillNeedsReview(entry("c", vault: "ok", rolledBack: true)), "an older version with nothing newer to fill instead")
+        XCTAssertFalse(v.fillNeedsReview(entry("d", vault: "ok", rolledBack: true)), "the newer copy this device kept is what is filled")
+        XCTAssertEqual(v.fillWarning, "Your server sent older versions of some items.")
+    }
+
     func testTheWordingIsTheSameInEveryApp() {
         XCTAssertEqual(ManifestText.warning, "Your server's copy of this vault doesn't match its record of changes. Items may be missing, restored or out of date.")
         XCTAssertEqual(ManifestText.action, "Use the server's copy")
@@ -976,11 +1115,14 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(ManifestText.unchecked, "PassAuth couldn't check this vault with your server yet. Try again in a moment.")
         XCTAssertEqual(ManifestText.viewUnchecked, "This vault has no record of changes yet, so PassAuth couldn't check that nothing is missing or out of date.")
         XCTAssertEqual(ManifestText.reviewElsewhere, "Open the web vault or the desktop app to review this vault.")
-        XCTAssertEqual(ManifestText.unopenable, "An item in this vault can't be opened. Delete it to keep using the vault.")
-        XCTAssertEqual(ManifestText.unopenableReader, "An item in this vault can't be opened. Someone who can edit this vault can delete it.")
+        XCTAssertEqual(ManifestText.unopenable, "An item in this vault can't be opened.")
         XCTAssertEqual(ManifestText.unopenableItem, "Item that can't be opened")
         XCTAssertEqual(ManifestText.deleteForGood, "Delete for good")
-        XCTAssertEqual(ManifestText.deleteConfirm, "This item can't be opened on this device. Deleting it removes it for everyone.")
+        XCTAssertEqual(ManifestText.deleteConfirm, "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone.")
+        XCTAssertEqual(ManifestText.newerItem, "Item from a newer version of PassAuth")
+        XCTAssertEqual(ManifestText.newerItemNote, "Update PassAuth to see this item.")
+        XCTAssertEqual(ManifestText.confirmNoRecord, "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.")
+        XCTAssertEqual(ManifestText.notChecked, "This vault isn't being checked for missing or restored items.")
         XCTAssertEqual(ManifestText.memoryUnreadable, "PassAuth can't read this device's record of your vaults.")
         XCTAssertEqual(ManifestText.memoryReset, "Reset on this device")
         XCTAssertEqual(ManifestText.memoryResetConfirm, "PassAuth will trust what your server shows now and start a new record on this device.")

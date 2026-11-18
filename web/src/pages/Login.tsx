@@ -7,6 +7,7 @@ import { SERVER_UPDATE_NEEDED, errorMessage, friendlyError, hasErrorCode, hasFea
 import { CODE_FORMAT, CODE_STOPPED, DEVICE_LOGIN_FEATURE, codeDigits, countdown, wrongCodeText, type DeviceLoginRun, type DeviceLoginState } from "../lib/device-login";
 import { startDeviceLogin } from "../lib/device-login-client";
 import { getDesktop } from "../lib/platform";
+import { afterSignIn } from "../lib/routes";
 import { server } from "../lib/server";
 import {
   cancelPendingSignIn,
@@ -55,8 +56,7 @@ export function LoginPage() {
   const { status } = useVault();
   const nav = useNavigate();
   // Go back to the page that sent us here (e.g. a link to /settings/two-step), only within the app.
-  const from = (useLocation().state as { from?: string } | null)?.from;
-  const next = from && from.startsWith("/") && !from.startsWith("//") && from !== "/login" ? from : "/vault";
+  const next = afterSignIn(useLocation().state);
   const [email, setEmail] = useState(lastEmail());
   const [password, setPassword] = useState("");
   const [secretKey, setSecretKey] = useState("");

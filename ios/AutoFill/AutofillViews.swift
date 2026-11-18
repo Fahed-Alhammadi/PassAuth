@@ -227,12 +227,18 @@ private struct ListScreen: View {
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search logins")
         .overlay(alignment: .bottom) {
             VStack(spacing: 2) {
-                // Vault manifests: logins still fill; nothing is saved into such a vault.
-                if let v = model.repo.vault?.manifestWarnings.first {
-                    Text("\(v.name): \(v.unopenable ? (v.role == .read ? ManifestText.unopenableReader : ManifestText.unopenable) : ManifestText.warning)")
+                // Vault manifests and older items: logins still fill, from this list where the
+                // warning is seen; nothing is saved into a warned vault.
+                if let warning = model.repo.vault?.fillWarning {
+                    Text(warning)
                         .font(.caption).foregroundStyle(Color.paDanger)
                         .multilineTextAlignment(.center).padding(.horizontal, PA.Space.l)
                         .accessibilityIdentifier("autofillManifestWarning")
+                } else if let v = model.repo.vault?.notCheckedVaults.first {
+                    Text("\(v.name): \(ManifestText.notChecked)")
+                        .font(.caption).foregroundStyle(Color.paMuted)
+                        .multilineTextAlignment(.center).padding(.horizontal, PA.Space.l)
+                        .accessibilityIdentifier("autofillNotChecked")
                 }
                 if model.repo.vault?.offline == true {
                     Text("Showing the copy on this device.").font(.caption).foregroundStyle(Color.paMuted)

@@ -146,6 +146,18 @@ object ItemRevs {
      */
     fun isKept(row: SyncItem): Boolean = row.servedSha256 != null
 
+    /**
+     * "Use the server's copy" of the vaults [accepting] (contract 4.6 step 7; review round 3, rule
+     * T4): the items whose kept newer copies and remembered edit counters go with it. They are the
+     * vault's items as this phone's own copy had them ([prior]: its rows and the versions that wait)
+     * and nothing else: never the ids the answer fetched for the acceptance places in that vault
+     * (final review N7: a server could list another vault's item there to have its counter forgotten).
+     */
+    fun acceptedIds(prior: SyncSnapshot?, accepting: Set<String>): Set<String> {
+        if (prior == null || accepting.isEmpty()) return emptySet()
+        return (prior.items + prior.held).filter { it.vaultId in accepting }.map { it.id }.toSet()
+    }
+
     /** [snap] with the rows in [kept] (by item id) in place of the ones served. */
     fun keepRows(snap: SyncSnapshot, kept: Map<String, SyncItem>): SyncSnapshot {
         if (kept.isEmpty()) return snap

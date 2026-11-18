@@ -123,6 +123,18 @@ export interface ItemSummary {
   tags?: string[];
 }
 
+/**
+ * A row of the list for an item that isn't shown: one from a newer version of PassAuth (`note`: "Update PassAuth to
+ * see this item."), or one that can't be opened (`name`: its last known name, when this browser has one).
+ */
+export interface OtherItem {
+  id: string;
+  title: string;
+  note?: string;
+  name?: string;
+  vaultName: string;
+}
+
 /** The popup's item list: logins for the current page, and everything. */
 export interface ItemList {
   suggested: ItemSummary[];
@@ -138,14 +150,19 @@ export interface ItemList {
   /**
    * Vaults that show the manifest warning (background/manifests.ts `ManifestNotice`): per vault what is wrong (`text`),
    * where it is resolved when not here (`hint`; `open`: in the web vault), and whether "Use the server's copy" is
-   * offered (`accept`: the served copy checks out on its own; `confirm`: its confirmation). They stay readable; nothing
-   * is written into them meanwhile.
+   * offered (`accept`: the served copy checks out on its own; `confirm`: its confirmation; `forget`: the server shows
+   * no record, so the confirmation is `confirm.forgetBody`). They stay readable; nothing is written into them
+   * meanwhile. Also the vaults that hold an item that can't be opened (their notice; nothing is held for those).
    */
   manifest?: {
-    vaults: { id: string; name: string; text: string; hint?: string; accept?: boolean; open?: boolean }[];
+    vaults: { id: string; name: string; text: string; hint?: string; accept?: boolean; forget?: boolean; open?: boolean }[];
     key: string;
-    confirm: { action: string; title: string; body: string };
+    confirm: { action: string; title: string; body: string; forgetBody: string };
   };
+  /** Vaults that aren't checked since "no record" was accepted for them: the quiet note (`key`: for dismissing). */
+  notChecked?: { text: string; vaults: { id: string; name: string }[]; key: string };
+  /** Items that aren't shown: from a newer version of PassAuth, or that can't be opened. */
+  others?: OtherItem[];
   /** What this browser remembers of the account's vaults can't be read: the notice, with "Reset on this device" and its confirmation. */
   memory?: { text: string; action: string; body: string };
   /** The server is one this version refuses ("Update your PassAuth server to keep using this app."): the list is the offline copy. */

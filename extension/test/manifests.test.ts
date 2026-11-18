@@ -25,18 +25,23 @@ import {
   collectLog,
   dueTrash,
   entryOf,
+  ITEM_LOCKED_TITLE,
+  ITEM_NEWER_NOTE,
+  ITEM_NEWER_TITLE,
   isLink,
   isLogEntry,
   isTrashed,
+  itemNoticeOf,
   LOG_REQUESTS,
   MANIFEST_ACCEPT_ACTION,
   MANIFEST_ACCEPT_BODY,
   MANIFEST_ACCEPT_TITLE,
   MANIFEST_BUSY_TEXT,
+  MANIFEST_FORGET_BODY,
   MANIFEST_HELD_TEXT,
-  MANIFEST_ITEM_READER_TEXT,
   MANIFEST_ITEM_TEXT,
   MANIFEST_ITEM_WHERE_TEXT,
+  MANIFEST_NOT_CHECKED_TEXT,
   MANIFEST_READER_TEXT,
   MANIFEST_REVIEW_TEXT,
   MANIFEST_UNCHECKED_TEXT,
@@ -55,7 +60,10 @@ import {
   manifestTextOf,
   mayStart,
   mergeManifestMemory,
+  notChecked,
+  notCheckedNotice,
   noteTrash,
+  openFailure,
   purgeBatch,
   type Remembered,
   readManifestMemory,
@@ -279,7 +287,7 @@ test("ROUND 2 vectors: memories the core refuses (`badMemories`: the all-zero li
     const m: ManifestMemory = new Map();
     rememberManifest(m, "v", b.version, b.link);
     expect(m.size, name).toBe(0);
-    expect(acceptedEntry(b as Remembered, 0), name).toStrictEqual({ accepts: 1 });
+    expect(acceptedEntry(b as Remembered, 0), name).toStrictEqual({ accepts: 1, unchecked: true });
     // The wrapper reads it as nothing remembered (first sight), never as a memory.
     expect(verifyVault(k, rowOf("current"), b as Remembered, mapped("full")).status, name).toBe("ok");
   }
@@ -493,7 +501,8 @@ test("ROUND 2 memory: `accepts` counts acceptances; replace (also downwards) and
   expect(acceptedEntry({ version: 2, link: LINK_A }, 0)).toStrictEqual({ version: 2, link: LINK_A, accepts: 1 });
   expect(acceptedEntry({ version: 2, link: LINK_A }, 4)).toStrictEqual({ version: 2, link: LINK_A, accepts: 5 });
   // Forget (the server shows no manifest): no version or link, and the counter stays to outrank older copies.
-  expect(acceptedEntry(null, 2)).toStrictEqual({ accepts: 3 });
+  // ROUND 3 (T3): the forgotten entry carries the "not checked" marker.
+  expect(acceptedEntry(null, 2)).toStrictEqual({ accepts: 3, unchecked: true });
   const m: ManifestMemory = new Map([
     ["down", { version: 9, link: LINK_A }],
     ["gone", { version: 4, link: LINK_A, accepts: 1 }],
@@ -559,9 +568,9 @@ test("ROUND 2 memory: `accepts` counts acceptances; replace (also downwards) and
 
 test("ROUND 2 (S7) standing warnings: only a warning with a cause and the row it was judged on is read from the offline copy; the row's stamp moves with any write into the vault", () => {
   const ok = { status: "mismatch", cause: "accept", stamp: "s" };
-  expect([...readStanding({ a: ok, b: { status: "rollback", cause: "unopenable", stamp: "t" }, c: { status: "rollback", cause: "review", stamp: "" } })]).toStrictEqual([
+  expect([...readStanding({ a: ok, b: { status: "rollback", cause: "forget", stamp: "t" }, c: { status: "rollback", cause: "review", stamp: "" } })]).toStrictEqual([
     ["a", ok],
-    ["b", { status: "rollback", cause: "unopenable", stamp: "t" }],
+    ["b", { status: "rollback", cause: "forget", stamp: "t" }],
     ["c", { status: "rollback", cause: "review", stamp: "" }],
   ]);
   // Never an "ok" (or anything else) from the copy.
@@ -569,6 +578,8 @@ test("ROUND 2 (S7) standing warnings: only a warning with a cause and the row it
     { status: "ok", cause: "accept", stamp: "s" },
     { status: "none", stamp: "s" },
     { status: "mismatch", cause: "x", stamp: "s" },
+    // ROUND 3 (T1): an item that can't be opened is no warning any more; one stored by an earlier build is dropped.
+    { status: "mismatch", cause: "unopenable", stamp: "s" },
     { status: "mismatch", cause: "accept" },
     { status: "unchecked", cause: "accept", stamp: "s" },
     null,
@@ -802,8 +813,14 @@ test("the warning: the contract's words, for rollback and mismatch alike, naming
   expect(MANIFEST_ACCEPT_BODY).toBe(
     "PassAuth will accept this vault as the server has it now, including anything that is missing, restored or out of date. Do this only if you know why it changed, for example after the server was restored from a backup.",
   );
-  expect(MANIFEST_ITEM_TEXT).toBe("An item in this vault can't be opened. Delete it to keep using the vault.");
-  expect(MANIFEST_ITEM_READER_TEXT).toBe("An item in this vault can't be opened. Someone who can edit this vault can delete it.");
+  // ROUND 3 (T1, T3, T5): no instruction to delete; the rows' titles; the "no record" confirmation and its note.
+  expect(MANIFEST_ITEM_TEXT).toBe("An item in this vault can't be opened.");
+  expect(MANIFEST_ITEM_WHERE_TEXT).toBe("It can be deleted for good in the web vault or the desktop app.");
+  expect([ITEM_LOCKED_TITLE, ITEM_NEWER_TITLE, ITEM_NEWER_NOTE]).toStrictEqual(["Item that can't be opened", "Item from a newer version of PassAuth", "Update PassAuth to see this item."]);
+  expect(MANIFEST_FORGET_BODY).toBe(
+    "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.",
+  );
+  expect(MANIFEST_NOT_CHECKED_TEXT).toBe("This vault isn't being checked for missing or restored items.");
   expect(MANIFEST_UNCHECKED_TEXT).toBe("PassAuth couldn't check this vault with your server yet. Try again in a moment.");
   expect(MEMORY_UNREADABLE_TEXT).toBe("PassAuth can't read this device's record of your vaults.");
   expect(MEMORY_RESET_ACTION).toBe("Reset on this device");
@@ -817,6 +834,7 @@ test("the warning: the contract's words, for rollback and mismatch alike, naming
     { id: "f", name: "Read item", role: "read" },
     { id: "g", name: "Item", role: "admin" },
     { id: "h", name: "Read accept", role: "read" },
+    { id: "i", name: "No record", role: "read" },
   ];
   expect(
     manifestNotice(
@@ -835,31 +853,96 @@ test("the warning: the contract's words, for rollback and mismatch alike, naming
       ["c", "ok"],
       ["d", "unchecked"],
       ["e", "mismatch"],
-      ["f", "mismatch"],
-      ["g", "mismatch"],
+      ["f", "ok"],
+      ["g", "none"],
       ["h", "rollback"],
+      ["i", "rollback"],
     ]),
     new Map([
       ["a", { cause: "accept" as const }],
       ["b", { cause: "review" as const }],
       ["e", { cause: "review" as const }],
-      ["f", { cause: "unopenable" as const }],
-      ["g", { cause: "unopenable" as const }],
       ["h", { cause: "accept" as const }],
+      ["i", { cause: "forget" as const }],
     ]),
+    // ROUND 3 (T1): vaults with an item that can't be opened ("a" also shows the warning: one line, the warning).
+    new Set(["a", "f", "g"]),
   );
   // ROUND 2 (S1, S2): "Use the server's copy" whenever the served copy checks out on its own, whatever the role;
-  // else where to go (writers) or who can (readers); an item that can't be opened says so, and is never "accepted".
+  // else where to go (writers) or who can (readers). ROUND 3: an item that can't be opened is a notice of its own
+  // (no state, nothing to accept, no instruction to delete; writers are told where it can be deleted), and a vault
+  // the server shows no record of is accepted under the other confirmation (`forget`).
   expect(n?.vaults).toStrictEqual([
     { id: "b", name: "Team", text: MANIFEST_WARNING_TEXT, hint: MANIFEST_REVIEW_TEXT, open: true },
     { id: "a", name: "Personal", text: MANIFEST_WARNING_TEXT, accept: true },
     { id: "e", name: "Read only", text: MANIFEST_WARNING_TEXT, hint: MANIFEST_READER_TEXT },
-    { id: "f", name: "Read item", text: MANIFEST_ITEM_READER_TEXT },
+    { id: "f", name: "Read item", text: MANIFEST_ITEM_TEXT },
     { id: "g", name: "Item", text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true },
     { id: "h", name: "Read accept", text: MANIFEST_WARNING_TEXT, accept: true },
+    { id: "i", name: "No record", text: MANIFEST_WARNING_TEXT, accept: true, forget: true },
   ]);
-  expect(n?.confirm).toStrictEqual({ action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY });
+  expect(itemNoticeOf(false)).toStrictEqual({ text: MANIFEST_ITEM_TEXT });
+  expect(n?.confirm).toStrictEqual({ action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY, forgetBody: MANIFEST_FORGET_BODY });
+  // Only the item notice: still a notice, with another key than a warning for the same vault.
+  const onlyItem = manifestNotice(vaults, new Map([["g", "ok"]]), new Map(), new Set(["g"]));
+  expect(onlyItem?.vaults).toStrictEqual([{ id: "g", name: "Item", text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true }]);
+  expect(onlyItem?.key).not.toBe(manifestNotice(vaults, new Map([["g", "mismatch"]]))?.key);
+  expect(manifestNotice(vaults, new Map([["i", "rollback"]]), new Map([["i", { cause: "forget" as const }]]))?.key).not.toBe(
+    manifestNotice(vaults, new Map([["i", "rollback"]]), new Map([["i", { cause: "accept" as const }]]))?.key,
+  );
   // A cause nobody recorded is the careful one: reviewed elsewhere, nothing offered here.
   expect(warningOf(undefined, true)).toStrictEqual({ text: MANIFEST_WARNING_TEXT, hint: MANIFEST_REVIEW_TEXT, open: true });
   expect(manifestNotice([{ id: "a", name: "P" }], new Map([["a", "mismatch"]]))?.vaults[0]).toStrictEqual({ id: "a", name: "P", text: MANIFEST_WARNING_TEXT, hint: MANIFEST_READER_TEXT });
+});
+
+test("ROUND 3 (T1): why a row didn't open: only the core's `json: …` error (the data decrypted, its content isn't an item this version reads) is 'newer'; everything else is 'locked'", () => {
+  expect(openFailure(new Error("json: unknown variant `passport`, expected one of `login`, `note` at line 1 column 20"))).toBe("newer");
+  for (const e of [
+    new Error("decrypt_failed"),
+    new Error("malformed data: base64"),
+    new Error("unsupported ciphertext version 9"),
+    new Error("a json: inside"),
+    new Error(""),
+    "json: text",
+    null,
+    undefined,
+    7,
+  ])
+    expect(openFailure(e), String(e)).toBe("locked");
+});
+
+test("ROUND 3 (T3): the 'not checked' marker lives only on an entry with nothing remembered, survives storing and merging, and goes with the next version remembered", () => {
+  const m: ManifestMemory = new Map([["v", { version: 4, link: LINK_A, accepts: 1 }]]);
+  expect(notChecked(m, "v")).toBe(false);
+  m.set("v", acceptedEntry(null, acceptsIn(m, "v")));
+  expect(m.get("v")).toStrictEqual({ accepts: 2, unchecked: true });
+  expect([notChecked(m, "v"), notChecked(m, "other")]).toStrictEqual([true, false]);
+  // As stored and read back; a marker on an entry that remembers something is not one.
+  const read = readManifestMemory({ ...storedManifestMemory(m), odd: { version: 2, link: LINK_A, unchecked: true }, bare: { unchecked: true }, no: { unchecked: "yes", accepts: 1 } });
+  expect([notChecked(read, "v"), notChecked(read, "odd"), notChecked(read, "bare"), notChecked(read, "no")]).toStrictEqual([true, false, true, false]);
+  expect(read.get("odd")).toStrictEqual({ version: 2, link: LINK_A });
+  // An older copy of the memory (the version from before the acceptance) doesn't bring the check back by merging…
+  const merged = mergeManifestMemory(new Map([["v", { version: 4, link: LINK_A, accepts: 1 }]]), m);
+  expect(notChecked(merged, "v")).toBe(true);
+  expect(mergeManifestMemory(m, new Map([["v", { version: 9, link: LINK_A, accepts: 1 }]])).get("v")).toStrictEqual({ accepts: 2, unchecked: true });
+  // …and the note shows only for a vault without a record now.
+  const vaults = [
+    { id: "v", name: "Personal" },
+    { id: "w", name: "Other" },
+  ];
+  expect(
+    notCheckedNotice(
+      vaults,
+      new Map([
+        ["v", "none"],
+        ["w", "none"],
+      ]),
+      m,
+    ),
+  ).toStrictEqual({ text: MANIFEST_NOT_CHECKED_TEXT, vaults: [{ id: "v", name: "Personal" }], key: '["v"]' });
+  for (const status of ["ok", "rollback", "mismatch", "unchecked", "incomplete"] as const) expect(notCheckedNotice(vaults, new Map([["v", status]]), m), status).toBe(null);
+  // A record started again: remembered, the marker gone, the acceptance counter kept.
+  rememberManifest(m, "v", 1, LINK_B);
+  expect(m.get("v")).toStrictEqual({ version: 1, link: LINK_B, accepts: 2 });
+  expect(notCheckedNotice(vaults, new Map([["v", "ok"]]), m)).toBe(null);
 });

@@ -9,7 +9,7 @@ import { Icon, type IconName, SiteIcon } from "@web/components/ui";
 import { type ItemKind, KIND_LABEL } from "@web/lib/types";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { callPopup } from "../shared/protocol";
-import type { ItemList, ItemSummary } from "../shared/types";
+import type { ItemList, ItemSummary, OtherItem } from "../shared/types";
 import { activeTab, type Ctx, hostOf, msg } from "./ctx";
 import { Notices } from "./notices";
 import { searchItems } from "./search";
@@ -376,8 +376,40 @@ export function VaultList({
             )}
           </section>
         ))}
+        {data?.others?.length && !searching ? <OtherItems items={data.others} /> : null}
       </div>
     </Page>
+  );
+}
+
+/**
+ * The rows for items that aren't shown, at the end of the list: an item from a newer version of PassAuth ("Update
+ * PassAuth to see this item."), and an item that can't be opened (with its last known name, when this browser has one,
+ * and its vault). Text only: nothing can be done with them here.
+ */
+export function OtherItems({ items }: { items: OtherItem[] }) {
+  return (
+    <section className="group">
+      <h2 className="group-title">
+        <span>Other items</span>
+        <span className="count">{items.length}</span>
+      </h2>
+      <div className="list">
+        {items.map((o) => (
+          <div key={o.id} className="item-row other-row">
+            <span className="avatar glyph" aria-hidden="true">
+              <Icon name="shield" size={18} />
+            </span>
+            <div className="txt">
+              <span className="title">
+                <span>{o.title}</span>
+              </span>
+              <span className="sub">{o.note ?? [o.name, o.vaultName].filter(Boolean).join(" · ")}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

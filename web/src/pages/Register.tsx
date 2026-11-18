@@ -5,6 +5,7 @@ import { KitActions } from "../components/KitActions";
 import { CopyButton, ErrorText, Icon, PasswordField, SheetActions, StrengthMeter, WEAK_BITS } from "../components/ui";
 import { friendlyError, usePublicConfig } from "../lib/api";
 import { MIN_MASTER_PASSWORD, minPasswordLength, readPolicies } from "../lib/policies";
+import { SIGN_IN_PATH } from "../lib/routes";
 import { estimateBits, login, register } from "../lib/vault";
 
 export function RegisterPage() {
@@ -50,7 +51,7 @@ export function RegisterPage() {
   }
 
   async function continueToVault() {
-    if (done?.verify) return nav("/login");
+    if (done?.verify) return nav(SIGN_IN_PATH);
     setBusy(true);
     try {
       await login(email, password, done?.secretKey ?? null);
@@ -174,7 +175,7 @@ export function RegisterPage() {
           <ErrorText error={error} />
           <SheetActions
             quiet={
-              <Link className="btn btn-text" to="/login">
+              <Link className="btn btn-text" to={SIGN_IN_PATH}>
                 Sign in to an existing account
               </Link>
             }

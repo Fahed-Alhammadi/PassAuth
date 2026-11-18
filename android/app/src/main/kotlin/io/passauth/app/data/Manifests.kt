@@ -41,8 +41,10 @@ enum class ManifestState {
 
     /**
      * The items are exactly what the manifest records, but one of them doesn't open on this phone
-     * (its key or data doesn't decrypt): warned ([Manifests.UNOPENABLE]); nothing is written into the
-     * vault except deleting such items for good, which is the way out.
+     * (its key or data doesn't decrypt, [ItemOpening] case c): a notice ([Manifests.UNOPENABLE]) and
+     * the item listed so it can be deleted for good. The manifest itself passed, so the vault is
+     * written to like one that is [Ok] (review round 3, rule T1: holding it only pushed people to
+     * delete the item).
      */
     Unopenable,
 
@@ -65,7 +67,16 @@ data class ManifestMark(val version: Long, val link: String)
  * two copies of the memory before the version does, so a copy from before an acceptance (a higher
  * version) never brings the old mark back.
  */
-data class Remembered(val mark: ManifestMark?, val accepts: Long = 0)
+data class Remembered(
+    val mark: ManifestMark?,
+    val accepts: Long = 0,
+    /**
+     * The user accepted that the server shows no manifest for this vault any more
+     * ([Manifests.CONFIRM_NO_RECORD]): nothing is checked for it until one exists again, and the
+     * vault says so ([Manifests.NOT_CHECKED]). Only on an entry without a [mark]; gone with the next mark.
+     */
+    val notChecked: Boolean = false,
+)
 
 /**
  * The next manifest of a vault, as a write carries it (`manifests: [{vault_id, seq, prev, sealed}]`,
@@ -104,12 +115,22 @@ object Manifests {
     /** The emergency access view of a vault that has no manifest: nothing could be checked. */
     const val VIEW_UNCHECKED = "This vault has no record of changes yet, so PassAuth couldn't check that nothing is missing or out of date."
 
-    // Items that don't open (rule S2).
+    /** "Use the server's copy" when the server shows no manifest for a vault this phone remembers one of (rule T3). */
+    const val CONFIRM_NO_RECORD = "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking " +
+        "this vault for missing, restored or out-of-date items until a new record is started."
+
+    /** The quiet note of a vault after that, until it has a manifest again. */
+    const val NOT_CHECKED = "This vault isn't being checked for missing or restored items."
+
+    // Items that don't open (rule S2; review round 3, rule T1: a notice, no hold, no instruction to delete).
     const val UNOPENABLE_ITEM = "Item that can't be opened"
-    const val UNOPENABLE = "An item in this vault can't be opened. Delete it to keep using the vault."
-    const val UNOPENABLE_READERS = "An item in this vault can't be opened. Someone who can edit this vault can delete it."
+    const val UNOPENABLE = "An item in this vault can't be opened."
     const val DELETE_FOR_GOOD = "Delete for good"
-    const val DELETE_FOR_GOOD_CONFIRM = "This item can't be opened on this device. Deleting it removes it for everyone."
+    const val DELETE_FOR_GOOD_CONFIRM = "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. " +
+        "Deleting it removes it for everyone."
+
+    /** A new vault key needs every item encrypted again: not while one of them doesn't open here. */
+    const val UNOPENABLE_NO_NEW_KEY = "This vault's key can't be replaced on this device while an item in it can't be opened."
 
     // This phone's memory can't be read (rule S4).
     const val MEMORY_UNREADABLE = "PassAuth can't read this device's record of your vaults."
@@ -245,6 +266,8 @@ object Manifests {
         val acceptable: Set<String> = emptySet(),
         /** Vaults whose manifest passed but that hold a row that doesn't open ([ManifestState.Unopenable]). */
         val unopenable: Set<String> = emptySet(),
+        /** Of [acceptable]: the server shows no manifest ([accept] gave "none"), so accepting forgets this phone's memory of the vault ([CONFIRM_NO_RECORD]). */
+        val noRecord: Set<String> = emptySet(),
     ) {
         /** Vaults whose verdict needs the server's whole answer before it counts. */
         val undecided: Set<String> get() = incomplete + failed
@@ -262,9 +285,10 @@ object Manifests {
      * delta on this phone's copy, or the copy itself) such a vault is only [ManifestState.Unchecked]:
      * a warning is raised from the server's whole answer alone.
      *
-     * [hidden]: vaults with a live row that doesn't open. With a manifest that passes, the vault is
-     * [ManifestState.Unopenable] whatever the copy is (the row doesn't open in any answer): warned,
-     * and only deleting such rows is written; what the core checked is still remembered.
+     * [hidden]: vaults with a row that doesn't open ([ItemOpening] case c). With a manifest that
+     * passes, the vault is [ManifestState.Unopenable] whatever the copy is (the row doesn't open in
+     * any answer): a notice, the row listed; what the core checked is remembered and the vault is
+     * written to as usual.
      *
      * [log]: asks the server for a vault's manifest log after the version given (the entries as a
      * JSON array; null: the server refused, or the log doesn't connect: a mismatch). Called for a
@@ -289,6 +313,7 @@ object Manifests {
         val unlogged = mutableSetOf<String>()
         val acceptable = mutableSetOf<String>()
         val unopenable = mutableSetOf<String>()
+        val noRecord = mutableSetOf<String>()
         val undecided = if (whole) ManifestState.Unresolved else ManifestState.Unchecked
         for (v in vaults) {
             val key = keys[v.id] ?: continue
@@ -328,12 +353,18 @@ object Manifests {
                 else -> {
                     failed += v.id
                     // What the warning offers: an acceptance on this phone alone, or (writers) a new baseline.
-                    if (accept(key, v, rows).status.let { it == "ok" || it == "none" }) acceptable += v.id
+                    when (accept(key, v, rows).status) {
+                        "ok" -> acceptable += v.id
+                        "none" -> {
+                            acceptable += v.id
+                            noRecord += v.id
+                        }
+                    }
                     undecided
                 }
             }
         }
-        return Judged(states, remember, incomplete, failed, unlogged, acceptable, unopenable)
+        return Judged(states, remember, incomplete, failed, unlogged, acceptable, unopenable, noRecord)
     }
 
     /**
@@ -394,18 +425,16 @@ object Manifests {
     /**
      * The manifest entry a write into [v] carries: null when the vault has none (the write goes as
      * before). [removed]: the affected rows as the copy holds them before the write; [added]: as
-     * they are after it (with the exact `data` sent). Only for a vault whose state is [ManifestState.Ok];
-     * [UserException] ([HELD]) otherwise. [deleting]: the write only deletes rows that don't open,
-     * which is also taken for a vault that is [ManifestState.Unopenable] (its manifest passed; such
-     * rows are the one reason for its warning, and deleting them is the way out).
+     * they are after it (with the exact `data` sent). Only for a vault whose manifest passed
+     * ([writable]: [ManifestState.Ok], and [ManifestState.Unopenable], whose manifest passed too:
+     * a row that doesn't open holds nothing back, rule T1); [UserException] ([HELD]) otherwise.
      */
-    fun next(key: VaultKey, v: SyncVault, state: ManifestState?, removed: List<SyncItem>, added: List<SyncItem>, deleting: Boolean = false): ManifestEntry? {
+    fun next(key: VaultKey, v: SyncVault, state: ManifestState?, removed: List<SyncItem>, added: List<SyncItem>): ManifestEntry? {
         val seq = seqOf(v)
         if (seq <= 0 && state != ManifestState.Unresolved && state != ManifestState.Unchecked) return null
         val sealed = v.manifest
         val prev = v.manifestPrev
-        val writable = state == ManifestState.Ok || (deleting && state == ManifestState.Unopenable && added.isEmpty())
-        if (!writable || sealed == null || prev == null || removed.any { !countable(it) }) throw UserException(HELD)
+        if (!writable(state) || sealed == null || prev == null || removed.any { !countable(it) }) throw UserException(HELD)
         val w = try {
             key.manifestNext(v.id, epoch(v), seq.toULong(), prev, sealed, rows(removed), rows(added))
         } catch (_: Exception) {
@@ -413,6 +442,9 @@ object Manifests {
         }
         return ManifestEntry(v.id, w.seq.toLong(), w.prev, w.sealed, w.link)
     }
+
+    /** A vault with a manifest in this state takes writes: the manifest passed for the copy shown. */
+    fun writable(state: ManifestState?): Boolean = state == ManifestState.Ok || state == ManifestState.Unopenable
 
     /** The query of a request without a body (trash): the item's revision and the vault's next manifest (version, the link it replaces, sealed text: all three or none); empty for a vault without one. */
     fun query(entry: ManifestEntry?, revision: Long?): String {
@@ -459,7 +491,10 @@ object Manifests {
      * member's apps do ([SyncVault.manifestOk]), the vault has none and this phone never saw one,
      * the account can write to it, every row can be counted, and none of its items is marked as
      * served in an older version ([marked]: a first record must not be made over a copy the server
-     * rolled back) and none of its rows fails to open ([unopenable]: such rows are deleted first).
+     * rolled back) and none of its rows fails to decrypt ([unopenable]: such rows are deleted first;
+     * live rows always, trashed ones only when the copy has their key and data, which a
+     * `trash=summary` copy doesn't: there this app can't tell. An item of a newer app, [ItemOpening]
+     * case b, doesn't count).
      */
     fun mayStart(
         v: SyncVault, state: ManifestState?, role: Role?, listed: Boolean, remembered: ManifestMark?, rows: List<SyncItem>,
@@ -627,7 +662,8 @@ object Manifests {
             val hash = manifestDataHash(data)
             out += when {
                 c.servedSha256 != null -> if (c.servedSha256 == hash && c.data != null && c.itemKey != null) r.copy(itemKey = c.itemKey, data = c.data) else return null
-                c.data != null -> if (c.data == data && c.itemKey == r.itemKey) r else return null
+                // The same data under another key: the server changed the key alone (rule T1 a). The key this phone holds is the one that opens it.
+                c.data != null -> if (c.data == data) (if (c.itemKey == null || c.itemKey == r.itemKey) r else r.copy(itemKey = c.itemKey)) else return null
                 else -> if (c.dataSha256 == hash) r else return null
             }
         }
@@ -640,10 +676,10 @@ object Manifests {
 
     /**
      * What this phone remembers from its stored JSON
-     * (`{"<vault id>": {"version": n, "link": "…", "accepts": k}}`). An entry that isn't a version ≥ 1
+     * (`{"<vault id>": {"version": n, "link": "…", "accepts": k, "not_checked": true}}`). An entry that isn't a version ≥ 1
      * with a link that isn't all zero (the first version's bare number included) is "nothing
      * remembered": half a memory is never handed to the core. Its `accepts` (missing: 0) is kept
-     * either way.
+     * either way; `not_checked` (rule T3) counts only on an entry without a mark.
      */
     fun decodeMemory(text: String?): Map<String, Remembered> {
         val o = text?.let { runCatching { AppJson.parseToJsonElement(it) as? JsonObject }.getOrNull() } ?: return emptyMap()
@@ -653,7 +689,8 @@ object Manifests {
             val version = wholeNumber(e["version"])
             val link = (e["link"] as? JsonPrimitive)?.takeIf { it.isString }?.content
             val mark = if (version != null && link != null) ManifestMark(version, link).takeIf(::isMark) else null
-            if (mark == null && accepts == 0L) null else id to Remembered(mark, accepts)
+            val notChecked = mark == null && (e["not_checked"] as? JsonPrimitive)?.takeIf { !it.isString }?.content == "true"
+            if (mark == null && accepts == 0L && !notChecked) null else id to Remembered(mark, accepts, notChecked)
         }.toMap()
     }
 
@@ -662,6 +699,7 @@ object Manifests {
             buildJsonObject {
                 r.mark?.let { put("version", it.version); put("link", it.link) }
                 if (r.accepts > 0) put("accepts", r.accepts)
+                if (r.notChecked && r.mark == null) put("not_checked", true)
             }
         },
     ).toString()
@@ -704,10 +742,13 @@ object Manifests {
     /**
      * [memory] after "Use the server's copy" for vault [vaultId] (the only way a mark is replaced or
      * goes down): [mark] takes the place of whatever was remembered (null: forgotten, the server
-     * shows no manifest), and the vault's `accepts` goes up by one.
+     * shows no manifest), and the vault's `accepts` goes up by one. [notChecked]: the user accepted
+     * "no record" ([CONFIRM_NO_RECORD]); kept on the forgotten entry until a mark is remembered again.
      */
-    fun replaced(memory: Map<String, Remembered>, vaultId: String, mark: ManifestMark?): Map<String, Remembered> =
-        memory + (vaultId to Remembered(mark?.takeIf(::isMark), (memory[vaultId]?.accepts ?: 0).coerceAtMost(MAX_NUMBER - 1) + 1))
+    fun replaced(memory: Map<String, Remembered>, vaultId: String, mark: ManifestMark?, notChecked: Boolean = false): Map<String, Remembered> {
+        val m = mark?.takeIf(::isMark)
+        return memory + (vaultId to Remembered(m, (memory[vaultId]?.accepts ?: 0).coerceAtMost(MAX_NUMBER - 1) + 1, notChecked && m == null))
+    }
 }
 
 /**
@@ -723,6 +764,17 @@ data class UnreadableMemory(val attempts: Int = 0, val synced: Boolean = false) 
 
     companion object {
         const val OFFER_AFTER = 3
+
+        /**
+         * This phone's memory of an account reads: its manifest marks, its item edit counters and its
+         * trash times, each in a file of its own. One that doesn't read is enough for "unreadable"
+         * (final review N6: the counters or the trash times alone had no way out).
+         */
+        fun readable(manifests: Boolean, revs: Boolean, trashSeen: Boolean): Boolean = manifests && revs && trashSeen
+
+        /** The count after one more look at the memory ([readable]: null, it starts over; else one more failed read, [synced]: at a finished sync). */
+        fun after(current: UnreadableMemory?, readable: Boolean, synced: Boolean): UnreadableMemory? =
+            if (readable) null else (current ?: UnreadableMemory()).failed(synced)
     }
 }
 

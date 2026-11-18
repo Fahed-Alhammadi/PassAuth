@@ -91,6 +91,19 @@ export interface RowExtras {
 
 export const emptyExtras = (): RowExtras => ({ served: new Map(), stash: new Map() });
 
+/**
+ * What to do with a `/sync` answer whose `revision` is lower than the one shown (final review T2):
+ * - "drop" when it can be a race: something else was shown since its request was sent (`shownSince`: another answer
+ *   adopted, an own write applied), so it is simply late;
+ * - otherwise the server itself went back (a database restored from a backup, or worse), and that is never ignored:
+ *   a delta is of no use then ("full": the whole account is fetched once), and a whole answer is judged like any
+ *   other ("judge"), so the vaults' records report the rollback and "Use the server's copy" works.
+ */
+export function olderAnswer(shownSince: boolean, delta: boolean): "drop" | "full" | "judge" {
+  if (shownSince) return "drop";
+  return delta ? "full" : "judge";
+}
+
 /** The extras an offline copy holds (anything malformed is left out; hashes only for rows the copy has). */
 export function readExtras(v: { served?: unknown; stash?: unknown; items?: unknown } | null | undefined): RowExtras {
   const out = emptyExtras();
@@ -101,7 +114,7 @@ export function readExtras(v: { served?: unknown; stash?: unknown; items?: unkno
   }
   if (Array.isArray(v?.stash)) {
     stripPrivate(v.stash);
-    for (const r of (v.stash as unknown[]).filter(isRow).slice(-STASH_CAP)) if (typeof r.item_key === "string" && typeof r.data === "string" && !ids.has(r.id)) out.stash.set(r.id, r);
+    for (const r of (v.stash as unknown[]).filter(isRow).slice(-STASH_CAP)) if (typeof r.item_key === "string" && typeof r.data === "string") out.stash.set(r.id, r);
   }
   return out;
 }
@@ -190,7 +203,8 @@ function knownNumbers(s: Snapshot): Map<string, number> | null {
 export function isStale(r: RevisionAnswer, s: Snapshot | null): boolean {
   if (!s) return true;
   const mine = s.cursor ? knownNumbers(s) : null;
-  if (!r.vaults || !mine) return r.revision > s.revision;
+  // Any other revision, also a lower one: a server that went back (restored from a backup) is synced and judged too.
+  if (!r.vaults || !mine) return r.revision !== s.revision;
   if (r.revision !== s.revision) return true;
   const theirs = Object.entries(r.vaults);
   if (theirs.length !== mine.size) return true;

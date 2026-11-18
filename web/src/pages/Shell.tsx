@@ -15,9 +15,10 @@ import {
   MEMORY_UNREADABLE,
   USE_SERVER_COPY,
   USE_SERVER_COPY_BODY,
+  USE_SERVER_COPY_NO_RECORD_BODY,
   USE_SERVER_COPY_TITLE,
+  VAULT_NOT_CHECKED,
   VAULT_UNOPENABLE,
-  VAULT_UNOPENABLE_READER,
   VAULT_WARNING,
   VAULT_WARNING_READER,
 } from "../lib/manifest";
@@ -251,18 +252,31 @@ function writeSession(key: string, value: string) {
 /**
  * Vault manifests: one warning for each vault whose items don't match its record of changes (`Vault.manifestWarning`).
  * The vault stays readable and takes no changes. What it offers:
- * - an item that can't be opened is the only problem: the text says to delete it (it is listed in the vault);
  * - the server's copy is consistent in itself: everyone may accept it, on this device alone;
  * - it isn't: someone who can edit may accept it (a new record is stored); a reader is told so.
- * Accepting asks first and says what it means. Also the notice for a device record that can't be read, with its reset.
+ * Accepting asks first and says what it means. When the server shows no record at all, accepting stops the checking
+ * of that vault: the confirmation has its own text for that (also when that only shows after the first confirmation),
+ * and the vault carries a quiet note afterwards (`Vault.manifestNotChecked`).
+ *
+ * A vault with an item that can't be opened gets a notice of its own (`Vault.manifestUnopenable`): no instruction, no
+ * hold; the item is listed in the vault. Also the notice for a device record that can't be read, with its reset.
  */
 export function ManifestNotices() {
   const { vaults, deviceRecordUnreadable } = useVault();
   const [asking, setAsking] = useState<string | null>(null);
+  /** The fresh answer showed no record after the user confirmed the ordinary text: asked again, with the other text. */
+  const [noRecordAsked, setNoRecordAsked] = useState(false);
   const [resetting, setResetting] = useState(false);
   const flagged = vaults.filter((v) => v.manifestWarning);
+  const unopenable = vaults.filter((v) => v.manifestUnopenable);
+  const notChecked = vaults.filter((v) => v.manifestNotChecked && !v.manifestWarning);
   const target = flagged.find((v) => v.id === asking);
-  if (!flagged.length && !deviceRecordUnreadable) return null;
+  const noRecord = !!target && (noRecordAsked || !!target.manifestNoRecord);
+  const close = () => {
+    setAsking(null);
+    setNoRecordAsked(false);
+  };
+  if (!flagged.length && !unopenable.length && !notChecked.length && !deviceRecordUnreadable) return null;
   return (
     <>
       {deviceRecordUnreadable && (
@@ -281,35 +295,51 @@ export function ManifestNotices() {
         <div key={v.id} className="alert alert-warn small notice" role="alert" data-manifest-warning={v.id}>
           <div className="grow">
             <span>
-              <strong>{v.name}:</strong> {v.manifestUnopenable ? (v.role === "read" ? VAULT_UNOPENABLE_READER : VAULT_UNOPENABLE) : VAULT_WARNING}
+              <strong>{v.name}:</strong> {VAULT_WARNING}
             </span>
-            {!v.manifestUnopenable && (
-              <div className="row">
-                {v.manifestAcceptable || v.role !== "read" ? (
-                  <button type="button" className="link" onClick={() => setAsking(v.id)}>
-                    {USE_SERVER_COPY}
-                  </button>
-                ) : (
-                  <span className="muted">{VAULT_WARNING_READER}</span>
-                )}
-              </div>
-            )}
+            <div className="row">
+              {v.manifestAcceptable || v.role !== "read" ? (
+                <button type="button" className="link" onClick={() => setAsking(v.id)}>
+                  {USE_SERVER_COPY}
+                </button>
+              ) : (
+                <span className="muted">{VAULT_WARNING_READER}</span>
+              )}
+            </div>
           </div>
+        </div>
+      ))}
+      {unopenable.map((v) => (
+        <div key={v.id} className="alert alert-warn small notice" role="status" data-manifest-unopenable={v.id}>
+          <span className="grow">
+            <strong>{v.name}:</strong> {VAULT_UNOPENABLE}
+          </span>
+        </div>
+      ))}
+      {notChecked.map((v) => (
+        <div key={v.id} className="alert alert-info small notice" role="status" data-manifest-not-checked={v.id}>
+          <span className="grow">
+            <strong>{v.name}:</strong> {VAULT_NOT_CHECKED}
+          </span>
         </div>
       ))}
       {target && (
         <ConfirmDialog
+          key={noRecord ? "no-record" : "copy"}
           title={USE_SERVER_COPY_TITLE}
           subtitle={target.name}
           icon="shield"
           action={USE_SERVER_COPY}
-          onClose={() => setAsking(null)}
+          onClose={close}
           onConfirm={async () => {
-            await acceptServerCopy(target.id);
-            setAsking(null);
+            // "No record" is only accepted under its own text: when the fresh answer shows that first now, ask again.
+            if ((await acceptServerCopy(target.id, { noRecord })) === "confirm_no_record") setNoRecordAsked(true);
+            else close();
           }}
         >
-          <p className="card-text">{USE_SERVER_COPY_BODY}</p>
+          <p className="card-text" data-accept-body={noRecord ? "no-record" : "copy"}>
+            {noRecord ? USE_SERVER_COPY_NO_RECORD_BODY : USE_SERVER_COPY_BODY}
+          </p>
         </ConfirmDialog>
       )}
       {resetting && (

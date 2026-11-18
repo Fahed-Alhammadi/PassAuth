@@ -45,11 +45,14 @@ public enum ManifestStatus: String, Sendable, Equatable {
 /// checked `ok`, wrote itself or accepted ("Use the server's copy"), and how often it replaced
 /// that memory by an acceptance (`accepts`). An entry without a version and link (`valid` false)
 /// remembers nothing but keeps its `accepts`, so an older copy of the memory can't bring back
-/// what an acceptance gave up.
+/// what an acceptance gave up. `noRecord` (only on such an entry): the memory was forgotten
+/// because the user accepted a vault the server showed without a manifest after this device had
+/// seen one; the vault says "This vault isn't being checked…" until a manifest exists again.
 public struct ManifestMark: Codable, Equatable, Sendable {
     public var version: UInt64
     public var link: String
     public var accepts: UInt64
+    public var noRecord = false
 
     public init(version: UInt64, link: String, accepts: UInt64 = 0) {
         self.version = version
@@ -58,7 +61,11 @@ public struct ManifestMark: Codable, Equatable, Sendable {
     }
 
     /// Nothing remembered, after `accepts` acceptances.
-    public static func forgotten(accepts: UInt64) -> ManifestMark { ManifestMark(version: 0, link: "", accepts: accepts) }
+    public static func forgotten(accepts: UInt64, noRecord: Bool = false) -> ManifestMark {
+        var m = ManifestMark(version: 0, link: "", accepts: accepts)
+        m.noRecord = noRecord
+        return m
+    }
 
     /// A version of 1 or more and a link of 43 base64url characters that isn't the all-zero
     /// link; anything else (a bare number from the first format too) is "nothing remembered".
@@ -79,16 +86,17 @@ public struct ManifestMark: Codable, Equatable, Sendable {
             let m = ManifestMark(version: UInt64(v), link: link, accepts: accepts)
             if m.valid { return m }
         }
-        return accepts > 0 ? .forgotten(accepts: accepts) : nil
+        return accepts > 0 ? .forgotten(accepts: accepts, noRecord: o["no_record"] == .bool(true)) : nil
     }
 
-    enum CodingKeys: String, CodingKey { case version, link, accepts }
+    enum CodingKeys: String, CodingKey { case version, link, accepts, noRecord = "no_record" }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(UInt64.self, forKey: .version) ?? 0
         link = try c.decodeIfPresent(String.self, forKey: .link) ?? ""
         accepts = try c.decodeIfPresent(UInt64.self, forKey: .accepts) ?? 0
+        noRecord = (try c.decodeIfPresent(Bool.self, forKey: .noRecord) ?? false) && !valid
     }
 
     /// `{version, link, accepts}`; version and link only for a manifest that is remembered.
@@ -99,6 +107,7 @@ public struct ManifestMark: Codable, Equatable, Sendable {
             try c.encode(link, forKey: .link)
         }
         if accepts > 0 { try c.encode(accepts, forKey: .accepts) }
+        if noRecord && !valid { try c.encode(true, forKey: .noRecord) }
     }
 }
 
@@ -114,12 +123,19 @@ public enum ManifestText {
     public static let reviewElsewhere = "Open the web vault or the desktop app to review this vault."
     /// After "Use the server's copy" went through.
     public static let accepted = "This vault now follows the server's copy."
-    /// The vault's only problem is an item nobody can open (its manifest matches).
-    public static let unopenable = "An item in this vault can't be opened. Delete it to keep using the vault."
-    public static let unopenableReader = "An item in this vault can't be opened. Someone who can edit this vault can delete it."
+    /// "Use the server's copy" where the server shows no manifest for a vault that had one:
+    /// accepting forgets what this device remembered, so the confirmation says what that means.
+    public static let confirmNoRecord = "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started."
+    /// The quiet note on such a vault afterwards, until it has a manifest again.
+    public static let notChecked = "This vault isn't being checked for missing or restored items."
+    /// The vault holds a row this device can't decrypt (a notice; nothing is held back for it).
+    public static let unopenable = "An item in this vault can't be opened."
     public static let unopenableItem = "Item that can't be opened"
     public static let deleteForGood = "Delete for good"
-    public static let deleteConfirm = "This item can't be opened on this device. Deleting it removes it for everyone."
+    public static let deleteConfirm = "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone."
+    /// A row that decrypts but holds an item type or format this app doesn't know.
+    public static let newerItem = "Item from a newer version of PassAuth"
+    public static let newerItemNote = "Update PassAuth to see this item."
     /// This device's record of the vaults (the memory file) can't be read.
     public static let memoryUnreadable = "PassAuth can't read this device's record of your vaults."
     public static let memoryReset = "Reset on this device"
@@ -305,7 +321,8 @@ public enum VaultManifest {
     /// more acceptance counted than `stored` had.
     public static func replaced(_ stored: ManifestMark?, with mark: ManifestMark?) -> ManifestMark {
         let accepts = (stored?.accepts ?? 0) &+ 1
-        guard let mark, mark.valid else { return .forgotten(accepts: accepts) }
+        // No manifest to remember: the vault isn't checked until one exists again, and says so.
+        guard let mark, mark.valid else { return .forgotten(accepts: accepts, noRecord: true) }
         return ManifestMark(version: mark.version, link: mark.link, accepts: accepts)
     }
 
@@ -331,8 +348,9 @@ public enum VaultManifest {
     /// manifests and says every member's apps know them, the vault has none and this device
     /// never saw one, the account may write, every row can be put in, none of them is a
     /// newer copy this device kept after the server sent an older version (`rolledBack`: the
-    /// vault has items the server sent older versions of), and every one opens (`unopenable`:
-    /// the vault has rows that don't; a manifest over them would warn on every device for good).
+    /// vault has items the server sent older versions of), and every one decrypts (`unopenable`:
+    /// the vault has rows that don't; an item from a newer version of PassAuth, which decrypts
+    /// but this app can't read, doesn't stand in the way).
     public static func mayStart(_ v: SyncVault, role: Role, status: ManifestStatus, remembered: ManifestMark?, rows: [SyncItem], features: [String],
                                 rolledBack: Bool = false, unopenable: Bool = false) -> Bool {
         features.contains(vaultManifestFeature) && v.manifestVersion == 0 && v.manifestOk == true && v.seq != nil && v.keyEpoch != nil

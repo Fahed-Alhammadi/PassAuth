@@ -1056,6 +1056,12 @@ class ManifestsTest {
         var state: ManifestState? = null
         var acceptable = false
 
+        /** The server shows no manifest for the vault this phone remembers one of: the warning's confirmation is [Manifests.CONFIRM_NO_RECORD]. */
+        var noRecord = false
+
+        /** The vault's quiet note ([Manifests.NOT_CHECKED]), as VaultRepository.show derives it. */
+        val notChecked: Boolean get() = state == ManifestState.None && memory[vaultId]?.let { it.notChecked && it.mark == null } == true
+
         fun checkedCopy(): SyncSnapshot? = files.readChecked("acct")?.let { SyncSnapshot.decode(it) }
 
         /** A foreground sync: the server's whole answer judged with the keys, then stored as the checked copy and remembered. */
@@ -1065,6 +1071,7 @@ class ManifestsTest {
             memory = Manifests.merged(memory, j.remember)
             state = j.states.getValue(vaultId)
             acceptable = vaultId in j.acceptable
+            noRecord = vaultId in j.noRecord
             files.writeChecked("acct", snap.copy(unresolved = if (state == ManifestState.Unresolved) listOf(vaultId) else emptyList()).encode())
             return state!!
         }
@@ -1099,12 +1106,13 @@ class ManifestsTest {
         }
 
         /** "Use the server's copy", confirmed: one fresh whole answer, then accept on this phone or write a baseline. Returns what was done. */
-        fun useServerCopy(): Manifests.ServerCopy? {
+        fun useServerCopy(noRecord: Boolean = this.noRecord): Manifests.ServerCopy? {
             if (sync() != ManifestState.Unresolved) return null
             val plan = Manifests.serverCopy(s.key, s.header(), role, s.rows)
             when (plan) {
                 is Manifests.ServerCopy.Accept -> memory = Manifests.replaced(memory, vaultId, plan.mark)
-                Manifests.ServerCopy.Forget -> memory = Manifests.replaced(memory, vaultId, null)
+                // Rule T3: forgotten only on the confirmation that says so; then marked "not checked".
+                Manifests.ServerCopy.Forget -> if (noRecord) memory = Manifests.replaced(memory, vaultId, null, notChecked = true) else throw UserException(Manifests.CHANGED_ELSEWHERE)
                 is Manifests.ServerCopy.Baseline -> {
                     val answer = s.putManifest(plan.body)
                     if (Manifests.stored(plan.entry, answer)) memory = Manifests.replaced(memory, vaultId, plan.entry.mark)
@@ -1172,11 +1180,144 @@ class ManifestsTest {
         assertEquals("rollback", s.status(phone.memory.getValue(vaultId).mark))
         assertEquals(ManifestState.Unresolved, phone.sync())
         assertTrue(phone.acceptable)
+        // Review round 3, rule T3: this acceptance has its own confirmation, and isn't done on the ordinary one.
+        assertTrue("the warning offers the \"no record\" text", phone.noRecord)
+        val before = phone.memory
+        assertEquals(Manifests.CHANGED_ELSEWHERE, assertThrows(UserException::class.java) { phone.useServerCopy(noRecord = false) }.message)
+        assertEquals("nothing was forgotten on the ordinary confirmation", before, phone.memory)
+        assertEquals(ManifestState.Unresolved, phone.state)
         assertEquals(Manifests.ServerCopy.Forget, phone.useServerCopy())
-        assertEquals(Remembered(null, 1), phone.memory[vaultId])
+        assertEquals(Remembered(null, 1, notChecked = true), phone.memory[vaultId])
         assertEquals(ManifestState.None, phone.state)
+        assertTrue("the vault says it isn't being checked", phone.notChecked)
+        // The marker is kept with the memory (a restart still says it)…
+        val stored = Manifests.encodeMemory(phone.memory)
+        assertTrue(stored.contains("\"not_checked\":true"))
+        assertEquals(phone.memory, Manifests.decodeMemory(stored))
+        assertEquals("and an older copy of the memory doesn't bring the mark back", phone.memory, Manifests.joined(phone.memory, before))
         // A first manifest may be started again by the ordinary rule (by someone who can write).
         assertTrue(Manifests.mayStart(s.header(), ManifestState.None, Role.Owner, true, phone.memory[vaultId]?.mark, s.rows))
+        s.putManifest(Manifests.startBody(s.key, s.header(), s.rows)!!.first)
+        // …until a manifest exists again: checked, remembered, and the note is gone for good.
+        assertEquals(ManifestState.Ok, phone.sync())
+        assertFalse(phone.notChecked)
+        assertEquals(Remembered(s.mark(), 1), phone.memory[vaultId])
+        assertFalse(Manifests.encodeMemory(phone.memory).contains("not_checked"))
+        // The marker never rides on an entry that has a mark, and an ordinary acceptance doesn't set it.
+        assertEquals(Remembered(s.mark(), 1), Manifests.decodeMemory("""{"$vaultId":{"version":${s.manifestSeq},"link":"${s.link()}","accepts":1,"not_checked":true}}""")[vaultId])
+        assertEquals(Remembered(s.mark(), 2), Manifests.replaced(phone.memory, vaultId, s.mark(), notChecked = true)[vaultId])
+        assertEquals(Remembered(null, 2), Manifests.replaced(phone.memory, vaultId, null)[vaultId])
+        assertEquals(mapOf(vaultId to Remembered(null, 0, notChecked = true)), Manifests.decodeMemory("""{"$vaultId":{"not_checked":true}}"""))
+    }
+
+    /** Rule T3: an accepted restore whose manifest is there is the ordinary case: no "no record" text, no note afterwards. */
+    @Test
+    fun anAcceptedRestoreWithAManifestIsNotMarkedUnchecked() = withDir { dir ->
+        val s = started()
+        val backup = s.fork()
+        s.otherDevice(emptyList(), listOf(row("n", "data-n")))
+        val phone = Phone(s, dir)
+        assertEquals(ManifestState.Ok, phone.sync())
+        s.restore(backup)
+        assertEquals(ManifestState.Unresolved, phone.sync())
+        assertTrue(phone.acceptable)
+        assertFalse(phone.noRecord)
+        assertTrue(phone.useServerCopy() is Manifests.ServerCopy.Accept)
+        assertFalse(phone.notChecked)
+        assertEquals(Remembered(backup.mark(), 1), phone.memory[vaultId])
+    }
+
+    /**
+     * Review round 3, rule T2: a restored server answers with a lower revision (and lower vault
+     * numbers) than the copy shown. That is never dropped as "stale": the revision check asks for a
+     * sync, the answer is taken as it is, judged (the rollback is reported) and "Use the server's
+     * copy" accepts it without a request.
+     */
+    @Test
+    fun aLowerRevisionAfterARestoreIsFetchedAndJudgedNotDropped() = withDir { dir ->
+        val s = started()
+        s.otherDevice(emptyList(), listOf(row("n1", "data-n1")))
+        val backup = s.fork()
+        repeat(2) { n -> s.otherDevice(emptyList(), listOf(row("later$n", "data-later$n"))) }
+        val phone = Phone(s, dir)
+        assertEquals(ManifestState.Ok, phone.sync())
+        val have = phone.checkedCopy()!!
+        // A real restore: the database file of the backup, so the revision and the vault's number go down with the items.
+        s.restore(backup)
+        assertTrue(s.snapshot().revision < have.revision)
+        assertTrue("the revision check sees a server that is behind", SyncDecision.isStale(s.snapshot().revision, mapOf(vaultId to s.seq), have.position))
+        // The sync that follows: whatever the server sends is applied; a lower revision is no reason to keep the copy.
+        val next = runBlocking { DeltaSync.fetch(have, delta = true, trashSummary = true) { s.snapshot().encode() } }
+        assertEquals(s.snapshot().revision, next.revision)
+        assertEquals(s.rows.map { it.id }.toSet(), next.items.map { it.id }.toSet())
+        assertTrue(next.whole)
+        val delta = SyncMerge.apply(SyncResponse(revision = kotlinx.serialization.json.JsonPrimitive(s.snapshot().revision), vaults = listOf(s.header()), items = emptyList(), delta = true), have)
+        assertEquals("a delta with a lower revision is applied too (and then judged)", s.snapshot().revision, delta!!.revision)
+        // Judged like any whole answer: the rollback is reported, and what the server shows can be accepted.
+        val j = judge(next.vaults, next.items, phone.keys, Manifests.marks(phone.memory), whole = next.whole)
+        assertEquals(ManifestState.Unresolved, j.states[vaultId])
+        assertEquals(setOf(vaultId), j.acceptable)
+        assertTrue(j.noRecord.isEmpty())
+        assertEquals("the same through the phone's sync", ManifestState.Unresolved, phone.sync())
+        val puts = s.manifestPuts
+        val requests = s.requests
+        assertEquals(Manifests.ServerCopy.Accept(backup.mark()), phone.useServerCopy())
+        assertEquals(ManifestState.Ok, phone.state)
+        assertEquals("no PUT …/manifest and no other write", puts to requests, s.manifestPuts to s.requests)
+    }
+
+    /** Final review N6: an item-counter or trash-time file that alone can't be read counts as unreadable memory and gets the reset. */
+    @Test
+    fun anUnreadableCounterOrTrashFileAloneAlsoLeadsToTheReset() {
+        assertTrue(UnreadableMemory.readable(manifests = true, revs = true, trashSeen = true))
+        assertFalse(UnreadableMemory.readable(manifests = false, revs = true, trashSeen = true))
+        assertFalse("the item edit counters alone", UnreadableMemory.readable(manifests = true, revs = false, trashSeen = true))
+        assertFalse("the trash times alone", UnreadableMemory.readable(manifests = true, revs = true, trashSeen = false))
+        for (file in listOf("revs", "trashseen")) {
+            val readable = UnreadableMemory.readable(manifests = true, revs = file != "revs", trashSeen = file != "trashseen")
+            // Shown from the copy, synced, synced again: three failed reads across a finished sync.
+            var t = UnreadableMemory.after(null, readable, synced = false)
+            assertFalse(t!!.offerReset)
+            t = UnreadableMemory.after(t, readable, synced = true)
+            assertFalse(t!!.offerReset)
+            t = UnreadableMemory.after(t, readable, synced = true)
+            assertTrue("$file alone: \"Reset on this device\" is offered", t!!.offerReset)
+            // One read that works (after the reset moved the file aside) starts over.
+            assertNull(UnreadableMemory.after(t, readable = true, synced = true))
+        }
+        assertNull(UnreadableMemory.after(null, readable = true, synced = false))
+    }
+
+    /**
+     * Review round 3, rule T4 and final review N7: "Use the server's copy" drops the kept newer copies
+     * and the edit counters of the vault's items as this phone's own copy has them, and of no id that
+     * only the answer fetched for the acceptance places in that vault.
+     */
+    @Test
+    fun acceptingForgetsOnlyTheItemsThisPhonesCopyHasInThatVault() {
+        val mine = SyncSnapshot(
+            7,
+            vaults = listOf(SyncVault("v1", role = "owner", keyKind = "account"), SyncVault("v2", role = "owner", keyKind = "account")),
+            items = listOf(row("a", "d-a", vault = "v1"), row("b", "d-b", vault = "v1"), row("x", "d-x", vault = "v2")),
+            held = listOf(row("w", "d-w", vault = "v1"), row("y", "d-y", vault = "v2")),
+        )
+        assertEquals(setOf("a", "b", "w"), ItemRevs.acceptedIds(mine, setOf("v1")))
+        assertEquals(emptySet<String>(), ItemRevs.acceptedIds(mine, emptySet()))
+        assertEquals(emptySet<String>(), ItemRevs.acceptedIds(null, setOf("v1")))
+        // The answer fetched for the acceptance lists v2's item "x" under v1: its counter is not among the forgotten ones.
+        val served = mine.copy(items = listOf(row("a", "d-a", vault = "v1"), row("x", "old-x", vault = "v1")), held = emptyList())
+        val accepted = ItemRevs.acceptedIds(mine, setOf("v1"))
+        assertFalse("x" in accepted)
+        val revs = mapOf("a" to 5L, "b" to 3L, "x" to 9L, "w" to 2L)
+        assertEquals("what is checked against at that sync", mapOf("x" to 9L), revs - accepted)
+        // …so the older "x" served there is still a rollback for the core's check, whatever vault it is listed under.
+        assertTrue(ItemRevs.judge((revs - accepted)["x"], 1, null) { r, n -> io.passauth.core.itemRevCheck(r?.toULong(), n.toULong()) } is ItemRevs.Verdict.Rollback)
+        assertTrue(ItemRevs.judge((revs - accepted)["a"], 1, null) { r, n -> io.passauth.core.itemRevCheck(r?.toULong(), n.toULong()) } is ItemRevs.Verdict.Accept)
+        // The memory afterwards: the accepted items' old counters are gone (what was served now counts), the others stay.
+        assertEquals(mapOf("x" to 9L, "a" to 1L), ItemRevs.merged(revs - accepted, mapOf("a" to 1L), emptySet(), served.items.map { it.id }.toSet()))
+        // The versions that waited for the accepted vault's items go too; another vault's stay.
+        assertEquals(listOf("y"), ItemRevs.waiting(mine, served, accepted).map { it.id })
+        assertTrue(served.items.any { it.id == "x" })
     }
 
     /**
@@ -1248,8 +1389,9 @@ class ManifestsTest {
     }
 
     /**
-     * Rule S2 (rereview-mobile F2): an item that doesn't open never locks a vault for good. It is listed,
-     * deleted for good with an ordinary manifest write (exempt from the hold), and the vault is fine again.
+     * Rule S2 (rereview-mobile F2) as review round 3 left it (rule T1 c): an item that doesn't open is
+     * listed and can be deleted for good with an ordinary manifest write; meanwhile nothing is held
+     * back in its vault (the manifest passed), and the vault is fine again once the item is gone.
      */
     @Test
     fun anItemThatCannotBeOpenedIsDeletedForGoodAndTheVaultIsFineAgain() = withDir { dir ->
@@ -1264,13 +1406,13 @@ class ManifestsTest {
         // "Use the server's copy" isn't what helps here (and after a baseline the vault would still be warned).
         assertFalse(phone.acceptable)
         val header = s.header()
-        // Every other write stays held…
-        assertEquals(Manifests.HELD, assertThrows(UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unopenable, emptyList(), listOf(row("n", "d"))) }.message)
-        assertThrows(UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unopenable, listOf(bad), emptyList()) }
-        assertThrows(UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unopenable, listOf(bad), listOf(row("n", "d")), deleting = true) }
-        assertThrows("a manifest that doesn't match is reviewed first", UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unresolved, listOf(bad), emptyList(), deleting = true) }
-        // …but deleting the row is taken: the row as synced leaves the manifest, live, in one request.
-        val m = Manifests.next(s.key, header, ManifestState.Unopenable, listOf(bad), emptyList(), deleting = true)!!
+        // Rule T1: no write is held because of the row (the manifest passed): another item can be saved…
+        assertTrue(Manifests.writable(ManifestState.Unopenable))
+        assertNotNull("another item is saved as usual", Manifests.next(s.key, header, ManifestState.Unopenable, emptyList(), listOf(row("n", "d"))))
+        assertEquals("a manifest that doesn't match is reviewed first", Manifests.HELD, assertThrows(UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unresolved, listOf(bad), emptyList()) }.message)
+        assertThrows("nor is a vault written that wasn't checked yet", UserException::class.java) { Manifests.next(s.key, header, ManifestState.Unchecked, emptyList(), listOf(row("n", "d"))) }
+        // …and removing the row is an ordinary write: the row as synced leaves the manifest, live, in one request.
+        val m = Manifests.next(s.key, header, ManifestState.Unopenable, listOf(bad), emptyList())!!
         val path = Manifests.deletePath(bad, m)
         assertTrue(path.startsWith("/items/bad/permanent?revision=4&manifest_seq=${m.seq}&manifest_prev="))
         val answer = s.deletePermanent(path)
@@ -1285,7 +1427,7 @@ class ManifestsTest {
         // Two such rows: after one is gone the vault stays warned until the other is too.
         s.otherDevice(emptyList(), listOf(bad, bad.copy(id = "bad2")))
         assertEquals(ManifestState.Unopenable, phone.sync(hidden))
-        s.deletePermanent(Manifests.deletePath(bad, Manifests.next(s.key, s.header(), phone.state, listOf(bad), emptyList(), deleting = true)))
+        s.deletePermanent(Manifests.deletePath(bad, Manifests.next(s.key, s.header(), phone.state, listOf(bad), emptyList())))
         assertEquals(ManifestState.Unopenable, phone.sync(hidden))
 
         // The manifest is wrong as well: reviewed first. After the baseline the vault is still warned while the row is there
@@ -1297,14 +1439,14 @@ class ManifestsTest {
         phone.memory = Manifests.replaced(phone.memory, vaultId, plan.entry.mark)
         assertEquals(ManifestState.Unopenable, phone.sync(hidden))
         val last = s.rows.first { it.id == "bad2" }
-        s.deletePermanent(Manifests.deletePath(last, Manifests.next(s.key, s.header(), phone.state, listOf(last), emptyList(), deleting = true)))
+        s.deletePermanent(Manifests.deletePath(last, Manifests.next(s.key, s.header(), phone.state, listOf(last), emptyList())))
         assertEquals(ManifestState.Ok, phone.sync())
 
         // A vault without a manifest: no first one is started over such a row; it is deleted with a plain request.
         val plain = Server(key())
         plain.rows = listOf(row("a", "data-a"), bad)
         assertFalse(Manifests.mayStart(plain.header(), ManifestState.None, Role.Owner, true, null, plain.rows, unopenable = true))
-        assertNull(Manifests.next(plain.key, plain.header(), ManifestState.None, listOf(bad), emptyList(), deleting = true))
+        assertNull(Manifests.next(plain.key, plain.header(), ManifestState.None, listOf(bad), emptyList()))
         assertEquals("/items/bad/permanent?revision=4", Manifests.deletePath(bad, null))
         plain.deletePermanent(Manifests.deletePath(bad, null))
         assertTrue(Manifests.mayStart(plain.header(), ManifestState.None, Role.Owner, true, null, plain.rows))
@@ -1545,6 +1687,9 @@ class ManifestsTest {
         assertEquals(full, Manifests.rotationRows(copy, full))
         // A newer copy this phone kept instead of the older version served is what goes on, under the server's revision.
         val kept = ItemRevs.keptRow(row("a", "newer-on-the-phone", revision = 9), full[0], Manifests.serverHash(full[0]))
+        // Review round 3, rule T1 a: the server changed a key alone; the key this phone holds for the same data is the one re-encrypted from.
+        val rekeyed = Manifests.rotationRows(copy, listOf(full[0].copy(itemKey = "a-key-the-server-made-up")) + full.drop(1))!!
+        assertEquals(full, rekeyed)
         val picked = Manifests.rotationRows(listOf(kept) + copy.drop(1), full)!!
         assertEquals("newer-on-the-phone", picked[0].data)
         assertEquals(kept.itemKey, picked[0].itemKey)
@@ -1729,10 +1874,20 @@ class ManifestsTest {
         assertEquals("PassAuth couldn't check this vault with your server yet. Try again in a moment.", Manifests.UNCHECKED)
         assertEquals("This vault has no record of changes yet, so PassAuth couldn't check that nothing is missing or out of date.", Manifests.VIEW_UNCHECKED)
         assertEquals("Item that can't be opened", Manifests.UNOPENABLE_ITEM)
-        assertEquals("An item in this vault can't be opened. Delete it to keep using the vault.", Manifests.UNOPENABLE)
-        assertEquals("An item in this vault can't be opened. Someone who can edit this vault can delete it.", Manifests.UNOPENABLE_READERS)
+        // Review round 3 (T1, T3, T5): the same words in every app.
+        assertEquals("An item in this vault can't be opened.", Manifests.UNOPENABLE)
         assertEquals("Delete for good", Manifests.DELETE_FOR_GOOD)
-        assertEquals("This item can't be opened on this device. Deleting it removes it for everyone.", Manifests.DELETE_FOR_GOOD_CONFIRM)
+        assertEquals(
+            "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone.",
+            Manifests.DELETE_FOR_GOOD_CONFIRM,
+        )
+        assertEquals("Item from a newer version of PassAuth", ItemOpening.NEWER_ITEM)
+        assertEquals("Update PassAuth to see this item.", ItemOpening.NEWER_NOTE)
+        assertEquals(
+            "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.",
+            Manifests.CONFIRM_NO_RECORD,
+        )
+        assertEquals("This vault isn't being checked for missing or restored items.", Manifests.NOT_CHECKED)
         assertEquals("PassAuth couldn't reach your server. Check the connection and try again.", ServerSupport.CANT_CONNECT)
         assertEquals("This can't be done until every member's apps are up to date.", Manifests.NOT_READY)
         assertEquals("vault_manifest", Manifests.FEATURE)

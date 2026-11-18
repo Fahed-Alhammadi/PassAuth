@@ -208,6 +208,13 @@ final class AutofillModel {
         guard model.repo.isUnlocked, let entry = model.entry(request.credentialIdentity.recordIdentifier) else {
             return model.cancel(.userInteractionRequired)
         }
+        // The copy on the device carries a warning for this login (its vault doesn't match its
+        // record, or the server sent an older version of it): never handed over unseen. The
+        // system asks again with the interface, where the warning is shown.
+        if model.repo.vault?.fillNeedsReview(entry) ?? true {
+            Self.log.notice("provideWithoutUserInteraction: the copy is warned, interface required")
+            return model.cancel(.userInteractionRequired)
+        }
         if request.type == .password {
             model.fill(entry)
         } else {
@@ -402,6 +409,15 @@ final class AutofillModel {
             Self.log.notice("provide: record not in the vault, credentialIdentityNotFound")
             return cancel(.credentialIdentityNotFound)
         }
+        if repo.vault?.fillNeedsReview(entry) ?? true {
+            // The copy carries a warning for this login: the list is shown (with the warning)
+            // and the user picks the login there, instead of it being filled straight away.
+            Self.log.notice("provide: the copy is warned, showing the list")
+            reviewing = true
+            screen = .list
+            Task { await repo.refreshIfStale() }
+            return
+        }
         if isOneTimeCode(r) { fillCode(entry) } else { fill(entry) }
     }
 
@@ -412,15 +428,21 @@ final class AutofillModel {
 
     // MARK: List
 
+    /// A suggestion (QuickType) whose login carries a warning: the list is shown for it instead
+    /// of filling at once (`provide`).
+    private(set) var reviewing = false
+
     var pages: [String] {
         switch request {
         case .list(let p, _), .oneTimeCodes(let p): p
+        case .credential(let r) where reviewing: AutofillMatcher.page(r.credentialIdentity.serviceIdentifier).map { [$0] } ?? []
         default: []
         }
     }
 
     var onlyCodes: Bool {
         if case .oneTimeCodes = request { return true }
+        if case .credential(let r) = request, reviewing { return isOneTimeCode(r) }
         return false
     }
 

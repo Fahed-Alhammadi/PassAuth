@@ -9,11 +9,11 @@ import SwiftUI
 ///   the server's copy", which only changes what this device remembers;
 /// - it doesn't: members who can edit get the same button (it writes a new record over the
 ///   server's copy); readers are told who can;
-/// - the only problem is an item that can't be opened (`unopenable`): the warning says so and
-///   the item is listed below with "Delete for good" (`UnopenableItems`).
 ///
 /// Above them, when this device's own record of the vaults can't be read: the notice with
-/// "Reset on this device".
+/// "Reset on this device". Below them, two quieter lines that hold nothing back: a vault with an
+/// item that can't be opened (the item is listed with "Delete for good", `UnopenableItems`), and
+/// a vault the user accepted without a record of changes, which isn't checked until it has one.
 struct ManifestWarnings: View {
     @Environment(AppModel.self) private var model
     @State private var reviewing: VaultInfo?
@@ -29,15 +29,13 @@ struct ManifestWarnings: View {
                             Image(systemName: "exclamationmark.triangle.fill")
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(v.name).fontWeight(.semibold)
-                                Text(v.unopenable ? (v.role == .read ? ManifestText.unopenableReader : ManifestText.unopenable) : ManifestText.warning)
+                                Text(ManifestText.warning)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 0)
                         }
                         .accessibilityElement(children: .combine)
-                        if v.unopenable {
-                            // Deleting the item is the way out (listed below for those who can).
-                        } else if v.role == .read && !v.manifestAcceptable {
+                        if v.role == .read && !v.manifestAcceptable {
                             Text(ManifestText.reader).foregroundStyle(Color.paInk).fixedSize(horizontal: false, vertical: true)
                         } else {
                             Button(ManifestText.action) { reviewing = v }
@@ -58,6 +56,25 @@ struct ManifestWarnings: View {
             .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
             .sheet(item: $reviewing) { v in ServerCopySheet(vault: v) }
         }
+        let unopenable = model.repo.vault?.unopenableNotices ?? []
+        let notChecked = model.repo.vault?.notCheckedVaults ?? []
+        if !unopenable.isEmpty || !notChecked.isEmpty {
+            Section {
+                ForEach(unopenable) { v in
+                    Notice(text: "\(v.name): \(ManifestText.unopenable)")
+                        .accessibilityIdentifier("vault.unopenableNotice.\(v.id)")
+                }
+                ForEach(notChecked) { v in
+                    Text("\(v.name): \(ManifestText.notChecked)")
+                        .font(.footnote).foregroundStyle(Color.paMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, PA.Space.m)
+                        .accessibilityIdentifier("vault.notChecked.\(v.id)")
+                }
+            }
+            .listRowInsets(EdgeInsets()).listRowBackground(Color.clear).listRowSeparator(.hidden)
+        }
     }
 }
 
@@ -77,8 +94,11 @@ private struct ServerCopySheet: View {
                         .promptPlainRow()
                 }
                 Section {
-                    Text(ManifestText.confirmBody).foregroundStyle(Color.paInk)
+                    // The server shows no record for a vault that had one: accepting means the
+                    // vault is no longer checked, and the text says so.
+                    Text(vault.manifestGone ? ManifestText.confirmNoRecord : ManifestText.confirmBody).foregroundStyle(Color.paInk)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("manifest.confirmText")
                 }
                 .paRow()
             } actions: {
@@ -164,10 +184,14 @@ private struct MemoryProblemNotice: View {
     }
 }
 
-/// Items the server sent that this device can't open (`VaultData.unopenable`), in the vault list
-/// (`trashed` false) or the trash: nothing of them can be shown, so each is one row, "Item that
-/// can't be opened", with its vault's name. Members who can edit the vault get "Delete for
-/// good"; a vault that holds such an item is warned about until it is gone.
+/// Items the server sent that this device can't decrypt (`VaultData.unopenable`), in the vault
+/// list (`trashed` false) or the trash: nothing of them can be shown, so each is one row, "Item
+/// that can't be opened", with the name this device last read for it (when it did) and its
+/// vault's name. Members who can edit the vault get "Delete for good". Nothing else in the vault
+/// waits for it.
+///
+/// After them, items that decrypt but that this app can't read (`VaultData.newer`): "Item from a
+/// newer version of PassAuth", with nothing to do but update.
 struct UnopenableItems: View {
     @Environment(AppModel.self) private var model
     let trashed: Bool
@@ -185,7 +209,8 @@ struct UnopenableItems: View {
                         Image(systemName: "questionmark.square.dashed").foregroundStyle(Color.paMuted)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(ManifestText.unopenableItem)
-                            Text(v?.vaultName(item.vaultId) ?? "Vault").font(.footnote).foregroundStyle(Color.paMuted)
+                            Text([item.name, v?.vaultName(item.vaultId) ?? "Vault"].compactMap { $0 }.joined(separator: " · "))
+                                .font(.footnote).foregroundStyle(Color.paMuted).lineLimit(1)
                         }
                         Spacer(minLength: 0)
                         if writable {
@@ -205,6 +230,25 @@ struct UnopenableItems: View {
                 Button("Cancel", role: .cancel) {}
             } message: { _ in
                 Text(ManifestText.deleteConfirm)
+            }
+        }
+        let newer = (v?.newer ?? []).filter { ($0.deletedAt != nil) == trashed }
+        if !newer.isEmpty {
+            Section {
+                ForEach(newer) { item in
+                    HStack(spacing: 12) {
+                        Image(systemName: "arrow.down.app").foregroundStyle(Color.paMuted)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(ManifestText.newerItem)
+                            Text("\(ManifestText.newerItemNote) \(v?.vaultName(item.vaultId) ?? "Vault")")
+                                .font(.footnote).foregroundStyle(Color.paMuted)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .frame(minHeight: 44)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("vault.newerItem.\(item.id)")
+                }
             }
         }
     }

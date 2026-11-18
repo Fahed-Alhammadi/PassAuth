@@ -960,7 +960,7 @@ private struct MacManifestNotice: View {
         if let v = warned {
             Divider()
             row("\(v.name): \(Self.text(v))") {
-                if !v.unopenable && v.manifestAcceptable {
+                if v.manifestAcceptable {
                     Button(ManifestText.action) { accepting = v }.disabled(busy).accessibilityIdentifier("manifestAction")
                 }
             }
@@ -968,9 +968,21 @@ private struct MacManifestNotice: View {
                                 presenting: accepting) { v in
                 Button(ManifestText.action, role: .destructive) { run { try await repo.useServerCopy(v.id) } }
                 Button("Cancel", role: .cancel) {}
-            } message: { _ in
-                Text(ManifestText.confirmBody)
+            } message: { v in
+                Text(v.manifestGone ? ManifestText.confirmNoRecord : ManifestText.confirmBody)
             }
+        } else if let older = repo.vault?.fillWarning {
+            // The server sent older versions of some logins and this Mac has no newer copy.
+            Divider()
+            row(older) { EmptyView() }
+        }
+        if let v = repo.vault?.unopenableNotices.first {
+            Divider()
+            quiet("\(v.name): \(ManifestText.unopenable)")
+        }
+        if let v = repo.vault?.notCheckedVaults.first {
+            Divider()
+            quiet("\(v.name): \(ManifestText.notChecked)")
         }
         if let error {
             Text(error).font(.caption).foregroundStyle(Color.paDanger)
@@ -982,7 +994,6 @@ private struct MacManifestNotice: View {
 
     /// What the warning says and, where nothing can be done from here, who or where can.
     static func text(_ v: VaultInfo) -> String {
-        if v.unopenable { return v.role == .read ? ManifestText.unopenableReader : ManifestText.unopenable }
         if v.manifestAcceptable { return ManifestText.warning }
         return ManifestText.warning + " " + (v.role == .read ? ManifestText.reader : ManifestText.reviewElsewhere)
     }
@@ -995,6 +1006,14 @@ private struct MacManifestNotice: View {
             action().controlSize(.small)
         }
         .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
+    }
+
+    /// A line that asks nothing of the user.
+    private func quiet(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(Color.paMuted)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
     }
 
     private func run(_ work: @escaping @MainActor () async throws -> Void) {

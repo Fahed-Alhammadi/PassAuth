@@ -4,7 +4,7 @@
 import type { Snapshot } from "@web/lib/delta";
 import type { SyncItemRow, SyncVaultRow } from "@web/lib/types";
 import { expect, test } from "vitest";
-import { backoffMs, closedFor, fromStored, isStale, readLiveMessage, readRevision, socketUrl, toStored } from "../src/background/sync-rules";
+import { backoffMs, closedFor, fromStored, isStale, olderAnswer, readExtras, readLiveMessage, readRevision, socketUrl, toStored } from "../src/background/sync-rules";
 
 const vault = (id: string, seq?: number): SyncVaultRow => ({ id, meta: "m", role: "owner", wrapped_key: `${id}-k`, key_kind: "account", key_epoch: 1, ...(seq === undefined ? {} : { seq }) });
 const row = (id: string, vaultId = "v1"): SyncItemRow => ({ id, vault_id: vaultId, item_key: `k-${id}`, data: `d-${id}`, revision: 1, deleted_at: null, created_at: 1, updated_at: 1 });
@@ -73,7 +73,7 @@ test("the offline copy is checked like a server's answer before anything reaches
   }
 });
 
-test("/sync/revision: without vault numbers only a newer revision counts (as before)", () => {
+test("/sync/revision: without vault numbers any other revision counts (ROUND 3: a lower one too, a server that went back)", () => {
   expect(isStale({ revision: 10 }, snapshot())).toBe(false);
   expect(isStale({ revision: 11 }, snapshot())).toBe(true);
   // A copy without a cursor (an older server) is judged by the revision alone, even if the answer has numbers.
@@ -130,4 +130,22 @@ test("two_step_required: the message, and the close (1008, two_step_required) th
     [1000, ""],
   ] as const)
     expect(closedFor(code, reason)).toBe(null);
+});
+
+test("ROUND 3 (T2): an answer with a lower revision than the one shown is dropped only when it can be a race; otherwise the whole account is fetched once and that answer is judged", () => {
+  // Something else was shown since the request was sent (another answer adopted, an own write applied): simply late.
+  expect([olderAnswer(true, true), olderAnswer(true, false)]).toStrictEqual(["drop", "drop"]);
+  // Nothing was: the server itself went back (restored from a backup). Never ignored.
+  expect(olderAnswer(false, true), "a delta is of no use: everything, once").toBe("full");
+  expect(olderAnswer(false, false), "a whole answer is judged like any other").toBe("judge");
+  // The cheap revision check finds a server that went back too (no vault numbers: an older server).
+  expect(isStale({ revision: 9 }, snapshot())).toBe(true);
+  expect(isStale({ revision: 9, vaults: { v1: 99 } }, snapshot({ cursor: null }))).toBe(true);
+});
+
+test("ROUND 3 (T1c): a row kept aside is read from the offline copy also while the copy has a row of that id (the last opened copy of an item that doesn't open now)", () => {
+  const row = (id: string, data: string) => ({ id, vault_id: "v1", item_key: `k-${id}`, data, revision: 1, deleted_at: null });
+  const extras = readExtras({ items: [row("i1", "now")], stash: [row("i1", "before"), row("i2", "gone"), { id: "i3", vault_id: "v1", revision: 1, deleted_at: null }] });
+  expect([...extras.stash.keys()]).toStrictEqual(["i1", "i2"]);
+  expect(extras.stash.get("i1")?.data).toBe("before");
 });

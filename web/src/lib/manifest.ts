@@ -27,13 +27,28 @@ import type { Role, SyncItemRow, SyncVaultRow } from "./types";
 export const VAULT_WARNING = "Your server's copy of this vault doesn't match its record of changes. Items may be missing, restored or out of date.";
 /** Under the warning, for members who can't write, when the server's copy can't be accepted on this device alone. */
 export const VAULT_WARNING_READER = "Someone who can edit this vault can review it.";
-/** The warning of a vault whose record checks out but which holds an item its key can't open. */
-export const VAULT_UNOPENABLE = "An item in this vault can't be opened. Delete it to keep using the vault.";
-export const VAULT_UNOPENABLE_READER = "An item in this vault can't be opened. Someone who can edit this vault can delete it.";
-/** How a row that doesn't open is listed, and its one action. */
+/**
+ * The notice of a vault that holds an item its key can't open (the vault's record itself may check out: such a row is
+ * counted in it). It never says to delete the item: a server can make an item fail to open on one device, and deleting
+ * it removes it for everyone.
+ */
+export const VAULT_UNOPENABLE = "An item in this vault can't be opened.";
+/** The same notice for members who can't write (kept as its own name for callers from before; the text is one). */
+export const VAULT_UNOPENABLE_READER = VAULT_UNOPENABLE;
+/** How a row that doesn't decrypt is listed, and its one action. */
 export const UNOPENABLE_ITEM = "Item that can't be opened";
 export const DELETE_FOR_GOOD = "Delete for good";
-export const DELETE_UNOPENABLE_BODY = "This item can't be opened on this device. Deleting it removes it for everyone.";
+export const DELETE_UNOPENABLE_BODY =
+  "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone.";
+/** How a row is listed that decrypts but holds an item this app can't read (a type or format a later release added). No action. */
+export const NEWER_ITEM = "Item from a newer version of PassAuth";
+export const NEWER_ITEM_NOTE = "Update PassAuth to see this item.";
+/**
+ * Whether the core's error for an item row says it decrypted but holds an item this app can't read (its JSON is no
+ * item of this release: a type or format a later one added). The core names a failed decryption `decrypt_failed`;
+ * what it can't parse after decrypting comes as "json: …". Only someone holding the vault key can make such a row.
+ */
+export const isNewerItemError = (e: unknown): boolean => e instanceof Error && e.message.startsWith("json:");
 /** This device's record of the vaults' manifests can't be read (after `UNREADABLE_READS` tries and a whole sync). */
 export const MEMORY_UNREADABLE = "PassAuth can't read this device's record of your vaults.";
 export const MEMORY_RESET = "Reset on this device";
@@ -44,14 +59,19 @@ export const USE_SERVER_COPY = "Use the server's copy";
 export const USE_SERVER_COPY_TITLE = "Use the server's copy?";
 export const USE_SERVER_COPY_BODY =
   "PassAuth will accept this vault as the server has it now, including anything that is missing, restored or out of date. Do this only if you know why it changed, for example after the server was restored from a backup.";
+/**
+ * The confirmation when accepting would forget the vault's memory: the server shows no record for a vault that had
+ * one, so from then on nothing is checked for it until a new record is started.
+ */
+export const USE_SERVER_COPY_NO_RECORD_BODY =
+  "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.";
+/** The quiet note on a vault after such an acceptance, until it has a record again. */
+export const VAULT_NOT_CHECKED = "This vault isn't being checked for missing or restored items.";
 /** A write refused here because the vault's warning is unresolved. */
 export const MANIFEST_HELD = "This vault can't be changed until its warning is resolved.";
 /** A write into a vault whose check couldn't be finished (its record couldn't be fetched, or this device's memory can't be read). */
 export const MANIFEST_UNCHECKED = "PassAuth couldn't check this vault with your server yet. Try again in a moment.";
-/**
- * "Use the server's copy" for a vault whose only problem is an item its key can't open: accepting wouldn't change
- * that, deleting the item does (`VAULT_UNOPENABLE`).
- */
+/** No longer thrown (an item that can't be opened doesn't make a vault unresolved any more); kept for callers from before. */
 export const MANIFEST_HIDDEN = VAULT_UNOPENABLE;
 /** A write that met other writes three times in a row. */
 export const MANIFEST_BUSY = "This vault changed on another device. Try again.";
@@ -286,14 +306,16 @@ export function startEntry(key: core.VaultKey, vaultId: string, keyEpoch: number
 
 /** What a read-only view of someone else's vault (emergency access) found. */
 export interface ViewCheck<T> {
-  /** The vault doesn't match its manifest, or holds a row that can't be read or opened: `VAULT_WARNING` is shown. */
+  /** The vault doesn't match its manifest, or holds a row that can't be read or decrypted: `VAULT_WARNING` is shown. */
   warning: boolean;
   /** The vault has no manifest: nothing could be checked (`VIEW_UNCHECKED` is shown). */
   unchecked: boolean;
   /** The rows that opened, with what `open` made of them. */
   opened: { row: T; value: unknown }[];
-  /** Rows that didn't open. */
+  /** Rows that aren't shown: those that didn't decrypt, and those of `newer`. */
   failed: number;
+  /** Of `failed`: rows that decrypted but hold an item from a newer app (`isNewerItemError`). No warning for these. */
+  newer: number;
 }
 
 /** Shown in a read-only view for a vault that has no manifest to check it against. */
@@ -303,8 +325,9 @@ export const VIEW_UNCHECKED = "This vault has no record of changes yet, so PassA
  * Check a vault shown read-only from one answer (the emergency access view): no device memory, no log, nothing
  * written, so first-sight trust only. The rows the core gets are built from parsed fields alone (id, trash time,
  * data), never the server's objects. A vault with a manifest gets the warning when the manifest doesn't check out,
- * when the answer held rows this app couldn't read (`malformed`), or when a row doesn't open with the vault's key
- * (review 4 / R5: an item can't be hidden behind a manifest that checks out).
+ * when the answer held rows this app couldn't read (`malformed`), or when a row doesn't decrypt with the vault's key
+ * (review 4 / R5: an item can't be hidden behind a manifest that checks out; the view is read-only, so the warning
+ * costs nothing here). A row that decrypts but holds an item from a newer app is the vault's own: no warning for it.
  */
 export function checkView<T extends { id: string; deletedAt: number | null; data: string }>(
   key: core.VaultKey,
@@ -315,21 +338,23 @@ export function checkView<T extends { id: string; deletedAt: number | null; data
 ): ViewCheck<T> {
   const opened: ViewCheck<T>["opened"] = [];
   let failed = 0;
+  let newer = 0;
   for (const row of rows) {
     try {
       opened.push({ row, value: open(row) });
-    } catch {
+    } catch (e) {
       failed++;
+      if (isNewerItemError(e)) newer++;
     }
   }
-  if (vault.manifestSeq === 0) return { warning: false, unchecked: true, opened, failed };
+  if (vault.manifestSeq === 0) return { warning: false, unchecked: true, opened, failed, newer };
   const verdict = verifyVault(
     key,
     { id: vault.id, key_epoch: vault.keyEpoch ?? undefined, manifest: vault.manifest, manifest_seq: vault.manifestSeq, manifest_prev: vault.manifestPrev },
     undefined,
     rows.map((r) => ({ id: r.id, deleted_at: r.deletedAt, data: r.data })),
   );
-  return { warning: malformed > 0 || failed > 0 || verdict.status !== "ok", unchecked: false, opened, failed };
+  return { warning: malformed > 0 || failed > newer || verdict.status !== "ok", unchecked: false, opened, failed, newer };
 }
 
 /** The three query parameters of a write without a body (trash, restore, delete for good): all of them or none. */
@@ -426,14 +451,23 @@ interface MemoryEntry {
   link: string | null;
   /** How often this device replaced the vault's memory by an acceptance: orders entries before their versions. */
   accepts: number;
+  /**
+   * The memory was forgotten by an acceptance of "no record" (`forget`): the vault isn't checked until it has a
+   * manifest again (`VAULT_NOT_CHECKED` is shown). Gone as soon as a manifest is remembered.
+   */
+  forgotten?: true;
 }
 
 const entryOf = (v: unknown): MemoryEntry => {
   const r = asRemembered(v);
-  return { version: r?.version ?? 0, link: r?.link ?? null, accepts: acceptsOf(v) };
+  const forgotten = !r && (v as { forgotten?: unknown } | null)?.forgotten === true;
+  return { version: r?.version ?? 0, link: r?.link ?? null, accepts: acceptsOf(v), ...(forgotten ? { forgotten: true as const } : {}) };
 };
 
-const storedForm = (e: MemoryEntry) => ({ ...(e.version > 0 && e.link ? { version: e.version, link: e.link } : {}), ...(e.accepts ? { accepts: e.accepts } : {}) });
+const storedForm = (e: MemoryEntry) => {
+  const remembers = e.version > 0 && !!e.link;
+  return { ...(remembers ? { version: e.version, link: e.link } : {}), ...(e.accepts ? { accepts: e.accepts } : {}), ...(!remembers && e.forgotten ? { forgotten: true } : {}) };
+};
 
 /** Whether `a` replaces `b` in a merge: more acceptances, or as many and a higher version. At equal versions `b` stays. */
 const outranks = (a: MemoryEntry, b: MemoryEntry | undefined): boolean => !b || a.accepts > b.accepts || (a.accepts === b.accepts && a.version > b.version);
@@ -530,12 +564,21 @@ export class ManifestMemory {
     return this.accept(vaultId, { version, link });
   }
 
-  /** An acceptance of a vault the server shows without a manifest: nothing is remembered for it any more. */
+  /**
+   * An acceptance of a vault the server shows without a manifest: nothing is remembered for it any more, and the entry
+   * says so (`notChecked`) until a manifest is remembered again.
+   */
   forget(vaultId: string): boolean {
-    return this.accept(vaultId, { version: 0, link: null });
+    return this.accept(vaultId, { version: 0, link: null, forgotten: true });
   }
 
-  private accept(vaultId: string, to: { version: number; link: string | null }): boolean {
+  /** Whether the vault's memory was given up by an acceptance of "no record" and nothing was remembered since. */
+  notChecked(vaultId: string): boolean {
+    const e = this.seen.get(vaultId);
+    return !!e && e.forgotten === true && !(e.version > 0 && e.link);
+  }
+
+  private accept(vaultId: string, to: { version: number; link: string | null; forgotten?: true }): boolean {
     this.refresh();
     if (this.unreadable) return false;
     this.seen.set(vaultId, { ...to, accepts: (this.seen.get(vaultId)?.accepts ?? 0) + 1 });

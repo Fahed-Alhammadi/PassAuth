@@ -502,19 +502,44 @@ describe("device memory", () => {
     one.raise("v", 6, L("a"));
     one.flush();
     stale.refresh();
+    expect(one.notChecked("v")).toBe(false);
     expect(one.forget("v")).toBe(true);
-    expect(stored(m)).toEqual({ v: { accepts: 1 } });
+    // The entry says the memory was given up (T3: the vault shows "not checked" until it has a record again).
+    expect(stored(m)).toEqual({ v: { accepts: 1, forgotten: true } });
     expect(one.get("v")).toBeUndefined();
+    expect(one.notChecked("v")).toBe(true);
     expect([...readManifestMemory(store, scope)!]).toEqual([]);
     stale.raise("x", 1, L("x"));
     stale.flush();
-    expect(stored(m).v).toEqual({ accepts: 1 });
+    expect(stored(m).v).toEqual({ accepts: 1, forgotten: true });
     expect(stale.get("v")).toBeUndefined();
-    // A first manifest later is remembered as usual.
+    // Another tab and a reload see the marker too.
+    expect(stale.notChecked("v")).toBe(true);
+    expect(new ManifestMemory(store, scope).notChecked("v")).toBe(true);
+    // A first manifest later is remembered as usual, and the marker goes with it.
     one.raise("v", 1, L("n"));
     one.flush();
     expect(stored(m).v).toEqual({ version: 1, link: L("n"), accepts: 1 });
+    expect(one.notChecked("v")).toBe(false);
     expect(new ManifestMemory(store, scope).get("v")).toEqual({ version: 1, link: L("n") });
+    expect(new ManifestMemory(store, scope).notChecked("v")).toBe(false);
+    stale.refresh();
+    expect(stale.notChecked("v")).toBe(false);
+  });
+
+  it("the 'not checked' marker: only from a forget, never read off an entry that remembers a manifest, gone after an accepted record", () => {
+    const { m, store } = mapStore();
+    // A stored entry claiming both: the memory counts, the marker doesn't.
+    m.set(manifestsKey(scope), JSON.stringify({ v: { version: 2, link: L("a"), accepts: 1, forgotten: true }, w: { accepts: 2, forgotten: "yes" }, x: { accepts: 1, forgotten: true } }));
+    const mem = new ManifestMemory(store, scope);
+    expect(mem.get("v")).toEqual({ version: 2, link: L("a") });
+    expect(mem.notChecked("v")).toBe(false);
+    expect(mem.notChecked("w")).toBe(false);
+    expect(mem.notChecked("x")).toBe(true);
+    expect(mem.notChecked("unknown")).toBe(false);
+    expect(mem.replace("x", 3, L("b"))).toBe(true);
+    expect(mem.notChecked("x")).toBe(false);
+    expect(stored(m).x).toEqual({ version: 3, link: L("b"), accepts: 2 });
   });
 
   it("the all-zero link is never remembered (the core refuses it as a memory)", () => {
@@ -783,6 +808,20 @@ describe("a read-only view of someone else's vault (emergency access)", () => {
     const trashed = rows().find((r) => r.deletedAt !== null)!;
     expect(checkView(key, vault(), rows().map((r) => (r.id === trashed.id ? { ...r, deletedAt: 0 } : r)), 0, open).warning).toBe(true);
     expect(checkView(key, { ...vault(), manifestSeq: -1 }, rows(), 0, open).warning).toBe(true);
+  });
+
+  it("a row that decrypts but holds an item from a newer app is left out without a warning (T1b); together with a row that doesn't decrypt, the warning stays", () => {
+    const openNewer = (r: R & { newer?: boolean }) => {
+      if (r.newer) throw new Error("json: unknown variant `passport`, expected one of `text`, `hidden`, `boolean` at line 1 column 277");
+      return open(r);
+    };
+    const newer = checkView(key, vault(), rows().map((r, i) => (i ? r : { ...r, newer: true })), 0, openNewer);
+    expect(newer).toMatchObject({ warning: false, unchecked: false, failed: 1, newer: 1 });
+    expect(newer.opened).toHaveLength(rows().length - 1);
+    const both = checkView(key, vault(), rows().map((r, i) => (i === 0 ? { ...r, newer: true } : i === 1 ? { ...r, fails: true } : r)), 0, openNewer);
+    expect(both).toMatchObject({ warning: true, failed: 2, newer: 1 });
+    // The manifest still decides: a newer row whose data isn't what the record counts is a warning like any other.
+    expect(checkView(key, vault(), rows().map((r, i) => (i ? r : { ...r, newer: true, data: `${r.data}x` })), 0, openNewer).warning).toBe(true);
   });
 
   it("a vault without a manifest is 'not checked', not 'fine'", () => {

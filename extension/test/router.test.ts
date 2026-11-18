@@ -32,6 +32,8 @@ const v = vi.hoisted(() => {
     manifestWarned: () => false,
     manifestWarning: () => null,
     memoryNotice: () => null,
+    notCheckedSummary: () => null,
+    otherItems: () => [],
     acceptServerCopy: nothing,
     resetDeviceMemory: nothing,
     serverNeedsUpdate: async () => false,

@@ -38,11 +38,38 @@ export const MANIFEST_ACCEPT_BODY =
   "PassAuth will accept this vault as the server has it now, including anything that is missing, restored or out of date. Do this only if you know why it changed, for example after the server was restored from a backup.";
 /** The served copy still can't be accepted after a fresh fetch (it changed meanwhile, or never could). */
 export const MANIFEST_NOT_ACCEPTABLE_TEXT = "The server's copy of this vault can't be accepted as it is.";
-/** A vault whose record checks out, but which holds an item this account's key doesn't open. */
-export const MANIFEST_ITEM_TEXT = "An item in this vault can't be opened. Delete it to keep using the vault.";
-export const MANIFEST_ITEM_READER_TEXT = "An item in this vault can't be opened. Someone who can edit this vault can delete it.";
-/** Under it, for an account with write access: the extension has no such delete. */
-export const MANIFEST_ITEM_WHERE_TEXT = "Open the web vault or the desktop app to delete it.";
+/**
+ * "Use the server's copy" when the server shows no record for a vault that had one: accepting forgets what this browser
+ * remembered, so the confirmation says what that means (the same text in every client).
+ */
+export const MANIFEST_FORGET_BODY =
+  "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.";
+/** The quiet note such a vault carries afterwards, until it has a record again. */
+export const MANIFEST_NOT_CHECKED_TEXT = "This vault isn't being checked for missing or restored items.";
+/** The fresh fetch after the confirmation needs the other confirmation (a record where none was shown, or none where one was): nothing is accepted under a text that didn't say so. */
+export const MANIFEST_CHANGED_TEXT = "The server's copy of this vault changed just now, so it wasn't accepted. Check what the popup shows now.";
+/**
+ * A vault that holds an item this account's keys don't open (the same text in every client; no instruction to delete:
+ * the item may open on another device or in a newer version). Nothing is held for it: the vault's record itself
+ * checked out.
+ */
+export const MANIFEST_ITEM_TEXT = "An item in this vault can't be opened.";
+/** Under it, for an account with write access: where such an item can be deleted (the extension has no such delete). */
+export const MANIFEST_ITEM_WHERE_TEXT = "It can be deleted for good in the web vault or the desktop app.";
+/** The list's rows for items that aren't shown (the same texts in every client). */
+export const ITEM_LOCKED_TITLE = "Item that can't be opened";
+export const ITEM_NEWER_TITLE = "Item from a newer version of PassAuth";
+export const ITEM_NEWER_NOTE = "Update PassAuth to see this item.";
+
+/**
+ * Why a row didn't open, from what the core threw: "newer" when the row decrypted (its key and data are authentic)
+ * but its content isn't an item this version reads (an item type or format a later version added: the core's
+ * `json: …` error, which only comes after the data was decrypted); "locked" for everything else (a key or data that
+ * doesn't decrypt, or isn't there).
+ */
+export function openFailure(e: unknown): "newer" | "locked" {
+  return e instanceof Error && e.message.startsWith("json: ") ? "newer" : "locked";
+}
 /** A write into a vault no server's answer was checked for yet. */
 export const MANIFEST_UNCHECKED_TEXT = "PassAuth couldn't check this vault with your server yet. Try again in a moment.";
 /** What this browser remembers can't be read (after three tries and a whole sync), with the way out. */
@@ -184,6 +211,11 @@ export interface MemoryEntry {
   version?: number;
   link?: string;
   accepts?: number;
+  /**
+   * Only on an entry with nothing remembered: the user accepted "no record" for a vault that had one, so the vault
+   * isn't checked until it has a record again (the popup says so). Gone with the next version remembered.
+   */
+  unchecked?: true;
 }
 
 export type ManifestMemory = Map<string, MemoryEntry>;
@@ -205,7 +237,17 @@ const acceptsOf = (v: unknown): number => {
   return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : 0;
 };
 
-const entryWith = (r: Remembered | null, accepts: number): MemoryEntry => ({ ...(r ? { version: r.version, link: r.link } : {}), ...(accepts ? { accepts } : {}) });
+const entryWith = (r: Remembered | null, accepts: number, unchecked = false): MemoryEntry => ({
+  ...(r ? { version: r.version, link: r.link } : {}),
+  ...(accepts ? { accepts } : {}),
+  ...(!r && unchecked ? { unchecked: true as const } : {}),
+});
+
+/** Whether the vault's entry says its check was given up with "Use the server's copy" (nothing remembered, marked). */
+export const notChecked = (m: ManifestMemory, vaultId: string): boolean => {
+  const e = m.get(vaultId);
+  return !!e && !isRemembered(e) && e.unchecked === true;
+};
 
 /** What is remembered of the vault, or undefined: no entry, or one without a version and link (forgotten by an acceptance). */
 export function rememberedOf(m: ManifestMemory, vaultId: string): Remembered | undefined {
@@ -223,8 +265,9 @@ export function readManifestMemory(stored: unknown): ManifestMemory {
   if (stored && typeof stored === "object" && !Array.isArray(stored)) {
     for (const [id, entry] of Object.entries(stored)) {
       const accepts = acceptsOf(entry);
+      const unchecked = (entry as { unchecked?: unknown } | null)?.unchecked === true;
       if (isRemembered(entry)) m.set(id, entryWith(entry, accepts));
-      else if (accepts) m.set(id, { accepts });
+      else if (accepts || unchecked) m.set(id, entryWith(null, accepts, unchecked));
     }
   }
   return m;
@@ -249,10 +292,11 @@ export function rememberManifest(m: ManifestMemory, vaultId: string, version: nu
 /**
  * "Use the server's copy" (`acceptServerCopy` in vault.ts, nothing else): the vault's entry becomes the accepted
  * manifest's version and link, whatever was there (the version may go down), or nothing remembered (`accepted` null:
- * the server shows no manifest), with `accepts` one above `floor` (the higher of the stored and the loaded counter).
+ * the server shows no manifest; the entry then carries the "not checked" marker), with `accepts` one above `floor`
+ * (the higher of the stored and the loaded counter).
  */
 export function acceptedEntry(accepted: Remembered | null, floor: number): MemoryEntry {
-  return entryWith(accepted && isRemembered(accepted) ? accepted : null, floor + 1);
+  return entryWith(accepted && isRemembered(accepted) ? accepted : null, floor + 1, true);
 }
 
 /** An entry's `accepts` (0 when it has none). */
@@ -439,8 +483,8 @@ export function readServed(answer: unknown): Served {
  * can (`manifest_ok`), the account may write, the vault has none and none was ever seen here, its verdict is "none",
  * every row has its data or its hash, no row is a kept newer copy (`kept`: the server sent an older version of an
  * item of this vault; this browser never seals that into a first manifest), and no row of the vault fails to open
- * (`unopenable`: a first manifest over such a row would make the vault a mismatch for every member at once; the row is
- * deleted first, in the web vault or the desktop app). (The caller checks that the vault is open and passed signed
+ * (`unopenable`: this browser can't vouch for a row it can't open; an item from a newer version of PassAuth, which
+ * decrypts, doesn't count as one). (The caller checks that the vault is open and passed signed
  * sharing, and that what this browser remembers could be read.)
  */
 export function mayStart(o: {
@@ -556,13 +600,14 @@ export function behindOwn(own: Readonly<Record<string, number>>, vaults: readonl
 
 /**
  * Why a vault shows its warning, which decides what the popup offers:
- * - "accept": the served copy checks out on its own (the core's `manifestAccept`: "ok" or "none"), so "Use the
- *   server's copy" can accept it here, whatever the account's role;
- * - "review": it doesn't, so someone with write access has to write a new record in the web vault or the desktop app;
- * - "unopenable": the vault's record checks out, but an item of it doesn't open with the vault's key: it has to be
- *   deleted (web vault or desktop app); accepting changes nothing.
+ * - "accept": the served record describes the served items (the core's `manifestAccept`: "ok"), so "Use the server's
+ *   copy" can accept it here, whatever the account's role;
+ * - "forget": the server shows no record at all for a vault that had one (`manifestAccept`: "none"): accepting forgets
+ *   what was remembered, under a confirmation of its own that says the vault is no longer checked;
+ * - "review": neither, so someone with write access has to write a new record in the web vault or the desktop app.
+ * (An item that doesn't open is no cause: such a vault shows its own notice and takes writes.)
  */
-export type WarningCause = "accept" | "review" | "unopenable";
+export type WarningCause = "accept" | "forget" | "review";
 
 /**
  * A vault's standing warning: the verdict, its cause and the vault row it was judged on (`stamp`: `rowStampOf`). Kept
@@ -587,7 +632,7 @@ export function readStanding(stored: unknown): Map<string, Standing> {
   if (stored && typeof stored === "object" && !Array.isArray(stored)) {
     for (const [id, v] of Object.entries(stored as Record<string, Partial<Standing> | null>)) {
       if (!v || typeof v !== "object" || typeof v.stamp !== "string") continue;
-      if ((v.status === "rollback" || v.status === "mismatch") && (v.cause === "accept" || v.cause === "review" || v.cause === "unopenable"))
+      if ((v.status === "rollback" || v.status === "mismatch") && (v.cause === "accept" || v.cause === "forget" || v.cause === "review"))
         out.set(id, { status: v.status, cause: v.cause, stamp: v.stamp });
     }
   }
@@ -604,35 +649,67 @@ export interface NoticeVault {
   hint?: string;
   /** "Use the server's copy" is offered (after the confirmation). */
   accept?: boolean;
+  /** With `accept`: the server shows no record, so the confirmation is the one that says checking stops (`confirm.forgetBody`). */
+  forget?: boolean;
   /** `hint` points to the web vault: its link is shown. */
   open?: boolean;
 }
 
-/** The popup's notice: the vaults that show a warning (`key`: it changes with the set). */
+/**
+ * The popup's notice: the vaults that show a warning, and the vaults that hold an item that can't be opened (`key`: it
+ * changes with the set).
+ */
 export interface ManifestNotice {
   vaults: NoticeVault[];
   key: string;
-  /** The confirmation of "Use the server's copy". */
-  confirm: { action: string; title: string; body: string };
+  /** The confirmation of "Use the server's copy" (`forgetBody`: for a vault the server shows no record of). */
+  confirm: { action: string; title: string; body: string; forgetBody: string };
 }
 
+type Shown = Omit<NoticeVault, "id" | "name">;
+
 /** What one warned vault shows, by its cause and whether the account may write into it. */
-export function warningOf(cause: WarningCause | undefined, canWrite: boolean): { text: string; hint?: string; accept?: boolean; open?: boolean } {
-  if (cause === "unopenable") return canWrite ? { text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true } : { text: MANIFEST_ITEM_READER_TEXT };
+export function warningOf(cause: WarningCause | undefined, canWrite: boolean): Shown {
   if (cause === "accept") return { text: MANIFEST_WARNING_TEXT, accept: true };
+  if (cause === "forget") return { text: MANIFEST_WARNING_TEXT, accept: true, forget: true };
   return canWrite ? { text: MANIFEST_WARNING_TEXT, hint: MANIFEST_REVIEW_TEXT, open: true } : { text: MANIFEST_WARNING_TEXT, hint: MANIFEST_READER_TEXT };
 }
 
+/** What a vault with an item that can't be opened shows: the notice, and for an account that may write where the item can be deleted. */
+export function itemNoticeOf(canWrite: boolean): Shown {
+  return canWrite ? { text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true } : { text: MANIFEST_ITEM_TEXT };
+}
+
+/**
+ * `unopenable`: the open vaults that hold an item that can't be opened. Such a vault shows its notice unless it shows
+ * the warning (one line per vault; the item notice is there again once the warning is gone, while the row remains).
+ */
 export function manifestNotice(
   vaults: { id: string; name: string; role?: string }[],
   states: ReadonlyMap<string, ManifestStatus>,
   causes?: ReadonlyMap<string, { cause: WarningCause }>,
+  unopenable?: ReadonlySet<string>,
 ): ManifestNotice | null {
-  const list = vaults.filter((v) => unresolved(states.get(v.id))).map((v) => ({ id: v.id, name: v.name, ...warningOf(causes?.get(v.id)?.cause, v.role !== undefined && v.role !== "read") }));
+  const list: NoticeVault[] = [];
+  for (const v of vaults) {
+    const canWrite = v.role !== undefined && v.role !== "read";
+    if (unresolved(states.get(v.id))) list.push({ id: v.id, name: v.name, ...warningOf(causes?.get(v.id)?.cause, canWrite) });
+    else if (unopenable?.has(v.id)) list.push({ id: v.id, name: v.name, ...itemNoticeOf(canWrite) });
+  }
   if (!list.length) return null;
   return {
     vaults: list,
-    key: JSON.stringify(list.map((v) => [v.id, v.accept ? 1 : 0]).sort()),
-    confirm: { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY },
+    key: JSON.stringify(list.map((v) => [v.id, v.accept ? (v.forget ? 2 : 1) : 0, v.text === MANIFEST_ITEM_TEXT ? 1 : 0]).sort()),
+    confirm: { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY, forgetBody: MANIFEST_FORGET_BODY },
   };
+}
+
+/** The quiet note: the vaults that aren't checked since "no record" was accepted for them (`key`: for dismissing), or null. */
+export function notCheckedNotice(
+  vaults: { id: string; name: string }[],
+  states: ReadonlyMap<string, ManifestStatus>,
+  memory: ManifestMemory,
+): { text: string; vaults: { id: string; name: string }[]; key: string } | null {
+  const list = vaults.filter((v) => states.get(v.id) === "none" && notChecked(memory, v.id)).map((v) => ({ id: v.id, name: v.name }));
+  return list.length ? { text: MANIFEST_NOT_CHECKED_TEXT, vaults: list, key: JSON.stringify(list.map((v) => v.id).sort()) } : null;
 }

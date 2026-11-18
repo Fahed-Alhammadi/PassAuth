@@ -123,9 +123,11 @@ export interface PopupApi {
   "sharing:accept": Rpc<{ vaultId: string; token: string }, void>;
   /**
    * "Use the server's copy" for a vault that shows the manifest warning: this browser accepts the vault as the server
-   * has it now (after one fresh whole fetch, and only if that copy checks out on its own). Nothing is sent.
+   * has it now (after one fresh whole fetch, and only if that copy checks out on its own). Nothing is sent. `forget`:
+   * the user confirmed the text for a vault the server shows no record of (checking stops); the fresh answer must need
+   * the confirmation that was given, else nothing is accepted.
    */
-  "manifest:accept": Rpc<{ vaultId: string }, void>;
+  "manifest:accept": Rpc<{ vaultId: string; forget?: boolean }, void>;
   /** "Reset on this device": what this browser remembers of the account's vaults can't be read; it is put aside and started anew. */
   "memory:reset": Rpc<None, void>;
   /** What the server's policies still ask of the active account (`GET /account` `policy_violations`), as notices linking to the web vault. */

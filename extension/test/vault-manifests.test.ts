@@ -30,9 +30,14 @@ const {
   MANIFEST_ACCEPT_BODY,
   MANIFEST_ACCEPT_TITLE,
   MANIFEST_BUSY_TEXT,
+  ITEM_LOCKED_TITLE,
+  ITEM_NEWER_NOTE,
+  ITEM_NEWER_TITLE,
+  MANIFEST_CHANGED_TEXT,
+  MANIFEST_FORGET_BODY,
   MANIFEST_HELD_TEXT,
-  MANIFEST_ITEM_READER_TEXT,
   MANIFEST_ITEM_TEXT,
+  MANIFEST_NOT_CHECKED_TEXT,
   MANIFEST_ITEM_WHERE_TEXT,
   MANIFEST_NOT_ACCEPTABLE_TEXT,
   MANIFEST_READER_TEXT,
@@ -134,7 +139,11 @@ const ids = () =>
     .allEntries()
     .map((e) => e.id)
     .sort();
-const warned = () => vault.manifestSummary()?.vaults.map((v) => v.id) ?? [];
+const warned = () =>
+  vault
+    .manifestSummary()
+    ?.vaults.filter((v) => v.text === MANIFEST_WARNING_TEXT)
+    .map((v) => v.id) ?? [];
 /** The popup's line for the vault (what is wrong, and what is offered), without its id and name. */
 const offered = () => {
   const v = vault.manifestSummary()?.vaults.find((x) => x.id === V);
@@ -145,7 +154,16 @@ const offered = () => {
 /** What each kind of warning shows for an account that may write. */
 const REVIEW = { text: MANIFEST_WARNING_TEXT, hint: MANIFEST_REVIEW_TEXT, open: true };
 const ACCEPT = { text: MANIFEST_WARNING_TEXT, accept: true };
+/** ROUND 3: accepting forgets (the server shows no record); a vault with an item that can't be opened (a notice, not a warning). */
+const FORGET = { text: MANIFEST_WARNING_TEXT, accept: true, forget: true };
 const ITEM = { text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true };
+const CONFIRM = { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY, forgetBody: MANIFEST_FORGET_BODY };
+/** The vaults that show the warning (not those that only show the item notice). */
+const itemNoticed = () =>
+  vault
+    .manifestSummary()
+    ?.vaults.filter((v) => v.text === MANIFEST_ITEM_TEXT)
+    .map((v) => v.id) ?? [];
 /** A change on the server that the vault's manifest doesn't know of (what a dishonest server does): `fn`, served as a change. */
 function tamper(fn: () => void) {
   fn();
@@ -493,8 +511,8 @@ test("a server that hides a change, brings an item back or serves other data: th
     const notice = vault.manifestSummary();
     expect(notice, name).toStrictEqual({
       vaults: [{ id: V, name: "Personal", ...REVIEW }],
-      key: `[["${V}",0]]`,
-      confirm: { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY },
+      key: `[["${V}",0,0]]`,
+      confirm: CONFIRM,
     });
     expect(vault.manifestWarned(V), name).toBe(true);
     expect(vault.manifestWarning(V), name).toBe(`${MANIFEST_WARNING_TEXT} ${MANIFEST_REVIEW_TEXT}`);
@@ -891,12 +909,14 @@ test("a newer copy this browser kept instead of an older version the server sent
 // ------------------------------------------------------------ review fixes
 
 /** The server's whole state, to go back to: a server that forks answers from an older state and lets another device write on from there. */
-const saveServer = () => structuredClone({ items: server.items, vaults: server.vaults, tombstones: server.tombstones, logs: server.logs });
-/** The server answers from `saved` again (served as a change, so this browser asks and gets it). */
+const saveServer = () => structuredClone({ items: server.items, vaults: server.vaults, tombstones: server.tombstones, logs: server.logs, revision: server.revision });
+/**
+ * The server answers from `saved` again, like a real database put back: its rows, records, logs AND the account's
+ * sync revision are the old ones (ROUND 3, T2: the earlier helper raised the revision, "served as a change", which no
+ * restored server does, and so hid that a lower revision was dropped unseen).
+ */
 function restoreServer(saved: ReturnType<typeof saveServer>) {
-  const revision = server.revision;
   Object.assign(server, structuredClone(saved));
-  server.revision = revision + 10;
 }
 const logRequests = () => sent("GET", `/vaults/${V}/manifest-log`);
 const failing = () => ({ status: 500, body: { error: "internal", message: "no" } });
@@ -1095,43 +1115,156 @@ test("REVIEW (the chain): when the log can't be fetched the answer isn't used: t
   expect(server.manifestErrors).toStrictEqual([]);
 });
 
-test("REVIEW (a hidden item): a live item the server makes unreadable (a wrong item_key) or sends without data is a mismatch: the popup's summary names the vault and writes are held", async () => {
-  const hides: Record<string, () => void> = {
-    "a wrong item_key (which the manifest doesn't cover)": () => {
-      Object.assign(serverItem("i1"), { item_key: "not-the-key", seq: (row().seq ?? 0) + 1, revision: server.revision + 1 });
+test("ROUND 3 PoC 1 (T1a; was: the user is told to delete it): a server that sends an item this browser shows with another item_key (the record doesn't cover the key) changes nothing here: the item stays shown and writable with this browser's own key, nothing is warned, listed or held", async () => {
+  await signedIn();
+  const mine = (await storedItem("i1")).item_key;
+  // Only the key is replaced; the data, which the vault's record covers, is the same.
+  tamper(() => Object.assign(serverItem("i1"), { item_key: "not-the-key", seq: (row().seq ?? 0) + 1, revision: server.revision + 1 }));
+  await vault.sync();
+  expect(ids()).toStrictEqual(["i1", "i2"]);
+  expect(vault.getEntry("i1")?.item.name).toBe("Item 1");
+  expect(vault.manifestSummary(), "no warning, no notice").toBe(null);
+  expect(vault.otherItems()).toStrictEqual([]);
+  // The copy keeps this browser's key for the row (with the server's revision), also across a whole answer and a restart.
+  expect(await storedItem("i1")).toMatchObject({ item_key: mine, data: serverItem("i1").data, revision: serverItem("i1").revision });
+  await reopen();
+  await vault.sync();
+  expect(ids()).toStrictEqual(["i1", "i2"]);
+  expect(vault.manifestSummary()).toBe(null);
+  expect((await storedItem("i1")).item_key).toBe(mine);
+  // Nothing is held: other writes into the vault go through, and so does an edit of the item itself, which puts
+  // this browser's key back on the server (the row every other device gets).
+  await vault.createItem(login("New"));
+  const entry = vault.getEntry("i1")!;
+  await vault.updateItem(entry, { ...entry.item, notes: "still mine" });
+  expect(serverItem("i1").item_key).toBe(mine);
+  expect(JSON.parse(serverItem("i1").data).notes).toBe("still mine");
+  expect(vault.manifestSummary()).toBe(null);
+  expect(server.manifestErrors).toStrictEqual([]);
+  // The same in the trash, on a server that sends the trash whole: no notice for a row this browser opened before.
+  await signedIn({ features: FEATURES.filter((f) => f !== "delta_sync"), before: () => server.trashElsewhere("i2") });
+  expect(vault.manifestSummary()).toBe(null);
+  tamper(() => Object.assign(serverItem("i2"), { item_key: "not-the-key", revision: server.revision + 1 }));
+  await vault.sync();
+  expect(vault.manifestSummary()).toBe(null);
+});
+
+test("ROUND 3 (T1c; was: a mismatch that held every write): an item that can't be decrypted and that this browser has no copy to go on with is listed as 'Item that can't be opened' (with its last known name), its vault shows the notice without an instruction to delete, and every write still goes through", async () => {
+  const hides: Record<string, { hide: () => void; known: boolean }> = {
+    "a wrong item_key and other data (the item was changed and its key damaged)": {
+      hide: () => {
+        server.editElsewhere("i1", { notes: "changed" });
+        Object.assign(serverItem("i1"), { item_key: "not-the-key" });
+      },
+      known: true,
     },
-    "a live row without data, with its right hash": () => {
-      server.handlers["GET /sync"] = (req) => {
-        const answer = server.syncAnswer(req.query) as { items: Record<string, unknown>[] };
-        for (const r of answer.items) if (r.id === "i1") Object.assign(r, { data: undefined, item_key: undefined, data_sha256: dataHash(serverItem("i1").data) });
-        return { body: answer };
-      };
-      serverItem("i1").seq = (row().seq ?? 0) + 1;
+    "a live row without data, with its right hash": {
+      hide: () => {
+        server.handlers["GET /sync"] = (req) => {
+          const answer = server.syncAnswer(req.query) as { items: Record<string, unknown>[] };
+          for (const r of answer.items) if (r.id === "i1") Object.assign(r, { data: undefined, item_key: undefined, data_sha256: dataHash(serverItem("i1").data) });
+          return { body: answer };
+        };
+        serverItem("i1").seq = (row().seq ?? 0) + 1;
+        server.revision++;
+        server.bump(V);
+      },
+      known: true,
     },
   };
-  for (const [name, hide] of Object.entries(hides)) {
+  for (const [name, { hide }] of Object.entries(hides)) {
     await signedIn();
     expect(ids()).toStrictEqual(["i1", "i2"]);
-    tamper(hide);
+    hide();
     await vault.sync();
     expect(ids(), name).toStrictEqual(["i2"]);
-    // ROUND 2 (S2): the warning says what is wrong and what to do; "Use the server's copy" isn't offered (and changes
-    // nothing if asked for): the item has to be deleted, in the web vault or the desktop app.
+    // Listed, with the name the copy this browser opened before had.
+    const listed = [{ id: "i1", title: ITEM_LOCKED_TITLE, name: "Item 1", vaultName: "Personal" }];
+    expect(vault.otherItems(), name).toStrictEqual(listed);
+    // The notice: what is wrong, and for an account that may write where the item can be deleted. Not a warning:
+    // nothing to accept, the item pages of the vault say nothing, and the vault's record is remembered as checked.
     expect(vault.manifestSummary()?.vaults, name).toStrictEqual([{ id: V, name: "Personal", ...ITEM }]);
-    expect(vault.manifestWarning(V), name).toBe(`${MANIFEST_ITEM_TEXT} ${MANIFEST_ITEM_WHERE_TEXT}`);
-    await expectReject(vault.acceptServerCopy(V), (e) => e.message === `${MANIFEST_ITEM_TEXT} ${MANIFEST_ITEM_WHERE_TEXT}`);
-    expect(offered(), name).toStrictEqual(ITEM);
-    await expectReject(vault.createItem(login("New")), (e) => e.message === MANIFEST_HELD_TEXT);
-    expect(await versions(), `${name}: nothing new is remembered`).toStrictEqual({ [V]: 1 });
-    // The same for a browser that sees the vault for the first time.
+    expect(MANIFEST_ITEM_TEXT, "no instruction to delete").not.toMatch(/[Dd]elete/);
+    expect([warned(), itemNoticed()], name).toStrictEqual([[], [V]]);
+    expect([vault.manifestWarned(V), vault.manifestWarning(V)], name).toStrictEqual([false, null]);
+    await vault.acceptServerCopy(V);
+    expect(itemNoticed(), `${name}: "Use the server's copy" has nothing to do`).toStrictEqual([V]);
+    expect((await versions())?.[V], name).toBe(row().manifest_seq);
+    // Writes are not held.
+    const id = await vault.createItem(login("New"));
+    const entry = vault.getEntry(id)!;
+    await vault.updateItem(entry, { ...entry.item, notes: "x" });
+    await vault.trashItem(vault.getEntry(id)!);
+    expect(server.manifestErrors, name).toStrictEqual([]);
+    expect(itemNoticed(), name).toStrictEqual([V]);
+    // A worker restart (also without the server): still listed with its name (the last opened copy stays aside,
+    // encrypted, in the offline copy), still the notice, still writable.
+    await reopen(false);
+    expect(vault.otherItems(), name).toStrictEqual(listed);
+    expect(itemNoticed(), name).toStrictEqual([V]);
+    await reopen();
+    await vault.sync();
+    expect(vault.otherItems(), name).toStrictEqual(listed);
+    await vault.createItem(login("Another"));
+    // A browser that sees the vault for the first time has no name for it; the same notice, the same freedom.
     await vault.lockAll();
     fake = installChrome();
     await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1" });
     await fake.session.set({ "unlocked:a1": sessionKeys() });
     expect(await vault.ensureUnlocked()).toBe(true);
-    expect(warned(), `${name}: first sight`).toStrictEqual([V]);
-    expect(await versions(), name).toBeUndefined();
+    expect(vault.otherItems(), `${name}: first sight`).toStrictEqual([{ id: "i1", title: ITEM_LOCKED_TITLE, vaultName: "Personal" }]);
+    expect([warned(), itemNoticed()], `${name}: first sight`).toStrictEqual([[], [V]]);
+    expect((await versions())?.[V], name).toBe(row().manifest_seq);
+    await vault.createItem(login("From the new browser"));
+    expect(server.manifestErrors, name).toStrictEqual([]);
+    // A reader gets the notice alone.
+    delete server.handlers["GET /sync"];
   }
+  await signedIn({
+    before: () => {
+      Object.assign(serverItem("i1"), { item_key: "not-the-key" });
+      row().role = "read";
+    },
+  });
+  expect(offered()).toStrictEqual({ text: MANIFEST_ITEM_TEXT });
+  // The item opens again (its key was put right elsewhere): the row and the notice go by themselves.
+  await signedIn({ before: () => Object.assign(serverItem("i1"), { item_key: "not-the-key" }) });
+  expect(itemNoticed()).toStrictEqual([V]);
+  tamper(() => Object.assign(serverItem("i1"), { item_key: `${row().wrapped_key}:i1`, seq: (row().seq ?? 0) + 1, revision: server.revision + 1 }));
+  await vault.sync();
+  expect([ids(), vault.otherItems(), vault.manifestSummary()]).toStrictEqual([["i1", "i2"], [], null]);
+  expect((await stored())?.stash).toBeUndefined();
+});
+
+test("ROUND 3 (T1b): an item that decrypts but isn't one this version reads (a type or format from a newer app) is listed as 'Item from a newer version of PassAuth' with 'Update PassAuth to see this item.': no notice, nothing held, it counts in the vault's record like any row, and it doesn't block a first manifest", async () => {
+  const NEWER = "{ an item of a kind this version doesn't read";
+  const listed = [{ id: "i3", title: ITEM_NEWER_TITLE, note: ITEM_NEWER_NOTE, vaultName: "Personal" }];
+  await signedIn();
+  server.addElsewhere("i3", V, NEWER);
+  await vault.sync();
+  expect(ids()).toStrictEqual(["i1", "i2"]);
+  expect(vault.otherItems()).toStrictEqual(listed);
+  expect(vault.manifestSummary(), "no warning and no notice").toBe(null);
+  expect(await versions()).toStrictEqual({ [V]: 2 });
+  // Writes go on, each with a manifest that counts the row (the fake server checks them with the real core).
+  const id = await vault.createItem(login("New"));
+  await vault.trashItem(vault.getEntry(id)!);
+  expect(server.manifestErrors).toStrictEqual([]);
+  await reopen(false);
+  expect([vault.otherItems(), vault.manifestSummary()]).toStrictEqual([listed, null]);
+  // No manifest yet: the first one is started over it (the row is counted by its data, which is authentic).
+  await signedIn({
+    manifest: false,
+    before: () => {
+      row().manifest_ok = true;
+      server.addElsewhere("i3", V, NEWER);
+    },
+  });
+  await vault.sync();
+  expect(sent("PUT", `/vaults/${V}/manifest`)).toHaveLength(1);
+  expect(row().manifest_seq).toBe(1);
+  expect([vault.otherItems(), vault.manifestSummary()]).toStrictEqual([listed, null]);
+  expect(server.manifestErrors).toStrictEqual([]);
 });
 
 test("REVIEW (deleted_at): in the trash is exactly 'deleted_at is not null'; a row with deleted_at 0 is never shown as live and makes the vault a mismatch", async () => {
@@ -1355,7 +1488,7 @@ test("ROUND 2 the popup: each warned vault with what it offers ('Use the server'
   const { createElement } = await import("react");
   const { Notices } = await import("../src/popup/notices");
   const ctx = { signIns: null, state: { server: "https://vault.test" }, go: () => {}, notify: () => {} } as never;
-  const confirm = { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY };
+  const confirm = CONFIRM;
   const render = (data: unknown) => renderToStaticMarkup(createElement(Notices, { ctx, data: data as never, tabId: undefined }));
   const WARNING = "Your server&#x27;s copy of this vault doesn&#x27;t match its record of changes. Items may be missing, restored or out of date.";
   // Not acceptable, with write access: reviewed elsewhere.
@@ -1378,15 +1511,25 @@ test("ROUND 2 the popup: each warned vault with what it offers ('Use the server'
       vaults: [
         { id: "a", name: "Read", text: MANIFEST_WARNING_TEXT, hint: MANIFEST_READER_TEXT },
         { id: "b", name: "Broken", ...ITEM },
-        { id: "c", name: "Broken too", text: MANIFEST_ITEM_READER_TEXT },
+        { id: "c", name: "Broken too", text: MANIFEST_ITEM_TEXT },
       ],
       key: "k",
       confirm,
     },
   });
   expect(others).toContain("Someone who can edit this vault can review it.");
-  expect(others).toContain("An item in this vault can&#x27;t be opened. Delete it to keep using the vault. Open the web vault or the desktop app to delete it.");
-  expect(others).toContain("An item in this vault can&#x27;t be opened. Someone who can edit this vault can delete it.");
+  // ROUND 3 (T1): the notice gives no instruction to delete; a writer is told where the item can be deleted.
+  expect(others).toContain("</strong>: An item in this vault can&#x27;t be opened. It can be deleted for good in the web vault or the desktop app. ");
+  expect(others).toContain("Broken too</strong>: An item in this vault can&#x27;t be opened. <");
+  expect(others).not.toContain("Delete it");
+  // ROUND 3 (T3): a vault the server shows no record of is offered like any acceptable one (its confirmation differs:
+  // `ManifestLines` shows `confirm.forgetBody` for it and sends `forget`); afterwards the quiet note, which stays.
+  const forget = render({ manifest: { vaults: [{ id: V, name: "Personal", ...FORGET }], key: "k", confirm } });
+  expect(forget).toContain("Use the server&#x27;s copy…");
+  const note = render({ notChecked: { text: MANIFEST_NOT_CHECKED_TEXT, vaults: [{ id: V, name: "Personal" }], key: "k" } });
+  expect(note).toContain("Personal</strong>: This vault isn&#x27;t being checked for missing or restored items.");
+  expect(note).toContain("alert-info");
+  expect(note).not.toContain("Dismiss");
   expect(others).not.toContain("Use the server");
   expect(others.match(/>Open the web vault</g)).toHaveLength(1);
   // What this browser remembers can't be read: the notice with its way out.
@@ -1394,6 +1537,21 @@ test("ROUND 2 the popup: each warned vault with what it offers ('Use the server'
   expect(memoryHtml).toContain("PassAuth can&#x27;t read this device&#x27;s record of your vaults.");
   expect(memoryHtml).toContain("Reset on this device…");
   expect(memoryHtml).not.toContain("Dismiss");
+  // ROUND 3 (T1): the list's rows for items that aren't shown (text only, nothing to press).
+  const { OtherItems } = await import("../src/popup/vault");
+  const rows = renderToStaticMarkup(
+    createElement(OtherItems, {
+      items: [
+        { id: "i1", title: ITEM_LOCKED_TITLE, name: "Mail", vaultName: "Personal" },
+        { id: "i2", title: ITEM_LOCKED_TITLE, vaultName: "Team" },
+        { id: "i3", title: ITEM_NEWER_TITLE, note: ITEM_NEWER_NOTE, vaultName: "Personal" },
+      ],
+    }),
+  );
+  expect(rows).toContain('Item that can&#x27;t be opened</span></span><span class="sub">Mail · Personal<');
+  expect(rows).toContain('Item that can&#x27;t be opened</span></span><span class="sub">Team<');
+  expect(rows).toContain('Item from a newer version of PassAuth</span></span><span class="sub">Update PassAuth to see this item.<');
+  expect(rows).not.toContain("<button");
   const outdated = render({ serverProblem: SERVER_UPDATE_TEXT });
   expect(outdated).toContain("Update your PassAuth server to keep using this app.");
   expect(render({})).toBe("");
@@ -1574,18 +1732,33 @@ test("ROUND 2 (S1, no manifest served): a backup from before the vault's first m
   restoreBackup(saved);
   await vault.sync();
   expect(warned()).toStrictEqual([V]);
-  expect(offered()).toStrictEqual(ACCEPT);
-  await vault.acceptServerCopy(V);
+  // ROUND 3 (T3): accepting "no record" says what it means, under a confirmation of its own…
+  expect(offered()).toStrictEqual(FORGET);
+  expect(vault.manifestSummary()?.confirm.forgetBody).toBe(
+    "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.",
+  );
+  expect(vault.notCheckedSummary()).toBe(null);
+  // …and is never done under the ordinary one (the popup sends which text the user confirmed).
+  await expectReject(vault.acceptServerCopy(V), (e) => e.message === MANIFEST_CHANGED_TEXT);
+  expect(warned()).toStrictEqual([V]);
+  expect((await memory()).manifests?.[V]?.version, "nothing was forgotten").toBe(2);
+  await vault.acceptServerCopy(V, true);
   expect(warned()).toStrictEqual([]);
-  expect((await memory()).manifests, "forgotten, with the acceptance counted").toStrictEqual({ [V]: { accepts: 1 } });
+  expect((await memory()).manifests, "forgotten, with the acceptance counted and the marker").toStrictEqual({ [V]: { accepts: 1, unchecked: true } });
+  // The quiet note, until the vault has a record again.
+  const NOTE = { text: MANIFEST_NOT_CHECKED_TEXT, vaults: [{ id: V, name: "Personal" }], key: `["${V}"]` };
+  expect(vault.notCheckedSummary()).toStrictEqual(NOTE);
   // The gate is closed (some member's app is too old): written as a vault without a manifest.
   const id = await vault.createItem(login("New"));
   expect(sent("POST", "/items").at(-1)!.body).not.toHaveProperty("manifests");
   expect(vault.getEntry(id)).toBeDefined();
-  // A restart doesn't bring the old memory back.
+  // A restart doesn't bring the old memory back, and the note is still there (also without the server).
+  await reopen(false);
+  expect(vault.notCheckedSummary()).toStrictEqual(NOTE);
   await reopen();
   await vault.sync();
   expect(warned()).toStrictEqual([]);
+  expect(vault.notCheckedSummary()).toStrictEqual(NOTE);
   // The gate opens: this browser starts the first manifest (nothing is remembered any more), version 1.
   row().manifest_ok = true;
   server.revision++;
@@ -1593,6 +1766,7 @@ test("ROUND 2 (S1, no manifest served): a backup from before the vault's first m
   await vault.sync();
   expect(sent("PUT", `/vaults/${V}/manifest`).map((r) => [r.body.base_seq, r.body.seq])).toStrictEqual([[0, 1]]);
   expect((await memory()).manifests).toStrictEqual({ [V]: { version: 1, link: link(), accepts: 1 } });
+  expect(vault.notCheckedSummary(), "checked again").toBe(null);
   expect(server.manifestErrors).toStrictEqual([]);
 });
 
@@ -1612,8 +1786,9 @@ test("ROUND 2 PoC 6 (was: the extension locks the vault itself): a vault without
   await reopen();
   await vault.sync();
   expect(sent("PUT", `/vaults/${V}/manifest`)).toStrictEqual([]);
-  // As before the update: the item is hidden, no warning, and the vault takes writes.
-  expect(warned()).toStrictEqual([]);
+  // The item is listed as one that can't be opened (ROUND 3: with the vault's notice), no warning, and the vault takes writes.
+  expect([warned(), itemNoticed()]).toStrictEqual([[], [V]]);
+  expect(vault.otherItems()).toStrictEqual([{ id: "i1", title: ITEM_LOCKED_TITLE, vaultName: "Personal" }]);
   expect(ids()).toStrictEqual(["i2"]);
   const id = await vault.createItem(login("New"));
   const entry = vault.getEntry(id)!;
@@ -1626,11 +1801,11 @@ test("ROUND 2 PoC 6 (was: the extension locks the vault itself): a vault without
   await vault.sync();
   expect(sent("PUT", `/vaults/${V}/manifest`)).toHaveLength(1);
   expect(row().manifest_seq).toBe(1);
-  expect(warned()).toStrictEqual([]);
+  expect(vault.manifestSummary()).toBe(null);
   expect(server.manifestErrors).toStrictEqual([]);
 });
 
-test("ROUND 2 (S2): a trashed item that came with its data and doesn't open counts like a live one (as in the web vault): no first manifest over it; with a manifest the vault warns, saying what to do; a trash summary can't be told", async () => {
+test("ROUND 2 (S2) + ROUND 3 (T1): a trashed item that came with its data and doesn't open counts like a live one: no first manifest over it; the vault shows the item notice (no warning, writes go on); a trash summary can't be told", async () => {
   const WHOLE = FEATURES.filter((f) => f !== "delta_sync");
   const breakTrashed = () => {
     server.trashElsewhere("i2");
@@ -1647,21 +1822,24 @@ test("ROUND 2 (S2): a trashed item that came with its data and doesn't open coun
   });
   await vault.sync();
   expect(sent("PUT", `/vaults/${V}/manifest`)).toStrictEqual([]);
-  expect(warned()).toStrictEqual([]);
+  expect([warned(), itemNoticed()]).toStrictEqual([[], [V]]);
+  // The trash is never listed.
+  expect(vault.otherItems()).toStrictEqual([]);
   await vault.createItem(login("New"));
-  // With a manifest (made by another app): the record checks out, the trashed item doesn't open: the warning.
+  // With a manifest (made by another app): the record checks out, the trashed item doesn't open: the notice, and
+  // the vault takes writes.
   await signedIn({ features: WHOLE, before: breakTrashed });
-  expect(warned()).toStrictEqual([V]);
+  expect([warned(), itemNoticed()]).toStrictEqual([[], [V]]);
   expect(offered()).toStrictEqual(ITEM);
   expect(ids(), "the vault stays readable").toStrictEqual(["i1"]);
-  await expectReject(vault.createItem(login("New")), (e) => e.message === MANIFEST_HELD_TEXT);
-  // Deleted for good elsewhere: the warning goes by itself.
+  await vault.createItem(login("New"));
+  // Deleted for good elsewhere: the notice goes by itself.
   server.deleteElsewhere("i2");
   await vault.sync();
-  expect(warned()).toStrictEqual([]);
+  expect(vault.manifestSummary()).toBe(null);
   await vault.createItem(login("New"));
   expect(server.manifestErrors).toStrictEqual([]);
-  // A reader is told who can delete it.
+  // A reader gets the notice alone.
   await signedIn({
     features: WHOLE,
     before: () => {
@@ -1669,13 +1847,13 @@ test("ROUND 2 (S2): a trashed item that came with its data and doesn't open coun
       row().role = "read";
     },
   });
-  expect(offered()).toStrictEqual({ text: MANIFEST_ITEM_READER_TEXT });
+  expect(offered()).toStrictEqual({ text: MANIFEST_ITEM_TEXT });
   // With delta sync the trash comes as summaries (no key, no data): nothing to open, so nothing to tell from here.
   await signedIn({ before: breakTrashed });
-  expect(warned()).toStrictEqual([]);
+  expect(vault.manifestSummary()).toBe(null);
 });
 
-test("ROUND 2 (S2): after 'Use the server's copy' a vault that still holds an item that doesn't open keeps its warning, now saying so; no first manifest or old-trash deletion runs for it", async () => {
+test("ROUND 2 (S2) + ROUND 3 (T1): after 'Use the server's copy' a vault that still holds an item that doesn't open shows the item notice (at once, and while the row remains) and takes writes; no first manifest is started over such a row", async () => {
   await signedIn();
   const saved = backup();
   server.editElsewhere("i1", { notes: "new password" });
@@ -1686,24 +1864,28 @@ test("ROUND 2 (S2): after 'Use the server's copy' a vault that still holds an it
   Object.assign(serverItem("i1"), { item_key: "not-the-key" });
   await vault.sync();
   expect(warned()).toStrictEqual([V]);
-  // The record itself is out of date first: that can be accepted…
+  // The record itself is out of date: that can be accepted (one line per vault: the warning comes first)…
   expect(offered()).toStrictEqual(ACCEPT);
   await vault.acceptServerCopy(V);
   expect((await memory()).manifests).toStrictEqual({ [V]: { version: 1, link: link(), accepts: 1 } });
-  // …and the vault stays warned for the item, at once (not only after the next sync), and across a restart.
-  expect(warned()).toStrictEqual([V]);
+  // …and the item notice is there at once (not only after the next sync), and across a restart. The row carries the
+  // name of the copy this browser had.
+  expect([warned(), itemNoticed()]).toStrictEqual([[], [V]]);
   expect(offered()).toStrictEqual(ITEM);
-  await expectReject(vault.createItem(login("New")), (e) => e.message === MANIFEST_HELD_TEXT);
+  expect(vault.otherItems()).toStrictEqual([{ id: "i1", title: ITEM_LOCKED_TITLE, name: "Item 1", vaultName: "Personal" }]);
   await reopen(false);
   expect(offered()).toStrictEqual(ITEM);
   await reopen();
   await vault.sync();
   expect(offered()).toStrictEqual(ITEM);
   expect(server.requests.filter((r) => r.method !== "GET")).toStrictEqual([]);
-  // Deleted in the web vault (an ordinary write with the vault's next manifest): the vault is in order and writable.
+  // Nothing is held for it.
+  await vault.createItem(login("Meanwhile"));
+  // Deleted in the web vault (an ordinary write with the vault's next manifest): the notice goes.
   server.deleteElsewhere("i1");
   await vault.sync();
-  expect(warned()).toStrictEqual([]);
+  expect(vault.manifestSummary()).toBe(null);
+  expect(vault.otherItems()).toStrictEqual([]);
   await vault.createItem(login("New"));
   expect(server.manifestErrors).toStrictEqual([]);
 });
@@ -1849,4 +2031,213 @@ test("ROUND 2 (S5): old trash goes by the strict rule (deleted_at < server_time 
   await vault.sync();
   expect(purges().map((r) => r.body.items.map((i: { id: string }) => i.id))).toStrictEqual([["i1"], ["i2"]]);
   expect(server.manifestErrors).toStrictEqual([]);
+});
+
+// ------------------------------------------------------------ review fixes, round 3 (final)
+
+test("ROUND 3 PoC 3 (T2; was: every answer dropped unseen): a real restore from a backup (the server's sync revision goes back with everything else) is judged: the warning comes, 'Use the server's copy' works, and writes go through again", async () => {
+  await signedIn();
+  const saved = backup();
+  const savedRevision = server.revision;
+  server.editElsewhere("i1", { notes: "new password" });
+  server.addElsewhere("i3", V, JSON.stringify(login("Item 3")));
+  await vault.sync();
+  expect((await memory()).manifests![V]!.version).toBe(3);
+  // The admin restores the backup: items, manifests, logs AND the account's revision are yesterday's.
+  restoreBackup(saved);
+  expect(server.revision).toBe(savedRevision);
+  const before = server.requests.length;
+  await vault.sync();
+  // The delta from a server whose revision went back isn't used; one whole answer is, and it is judged.
+  expect(requestsSince(before)).toStrictEqual(["GET /sync", "GET /sync"]);
+  expect(syncs().at(-1)?.query.since).toBeUndefined();
+  expect(warned()).toStrictEqual([V]);
+  expect(offered()).toStrictEqual(ACCEPT);
+  await expectReject(vault.createItem(login("Held")), (e) => e.message === MANIFEST_HELD_TEXT);
+  // The warning stands without a whole fetch at every sync, and the answers are no longer "older than what is shown".
+  const quiet = server.requests.length;
+  await vault.sync();
+  expect(requestsSince(quiet)).toStrictEqual(["GET /sync"]);
+  expect(warned()).toStrictEqual([V]);
+  await vault.acceptServerCopy(V);
+  expect(vault.manifestSummary()).toBe(null);
+  expect((await memory()).manifests).toStrictEqual({ [V]: { version: 1, link: link(), accepts: 1 } });
+  expect(ids()).toStrictEqual(["i1", "i2"]);
+  const id = await vault.createItem(login("New"));
+  expect(vault.getEntry(id)).toBeDefined();
+  expect(server.revision).toBeGreaterThan(savedRevision);
+  expect(server.manifestErrors).toStrictEqual([]);
+});
+
+test("ROUND 3 (T2): the same after a worker restart (the offline copy carries the newer revision), on a server without delta sync, and for the popup's revision check; an unchanged vault raises nothing", async () => {
+  // A restart between the restore and the first sync.
+  await signedIn();
+  let saved = backup();
+  server.editElsewhere("i1", { notes: "new password" });
+  await vault.sync();
+  restoreBackup(saved);
+  await reopen();
+  await vault.sync();
+  expect(warned()).toStrictEqual([V]);
+  await vault.acceptServerCopy(V);
+  await vault.createItem(login("New"));
+  // Found by the cheap revision check the popup runs when it opens (a lower revision is a difference too).
+  await signedIn();
+  saved = backup();
+  server.editElsewhere("i1", { notes: "new password" });
+  await vault.sync();
+  restoreBackup(saved);
+  await vault.refreshIfStale();
+  expect(warned()).toStrictEqual([V]);
+  // A server without delta sync (every answer is whole): judged at once.
+  await signedIn({ features: FEATURES.filter((f) => f !== "delta_sync") });
+  saved = backup();
+  server.editElsewhere("i1", { notes: "new password" });
+  await vault.sync();
+  restoreBackup(saved);
+  await vault.sync();
+  expect(warned()).toStrictEqual([V]);
+  await vault.refreshIfStale();
+  expect(warned()).toStrictEqual([V]);
+  // Restored to a state in which the vault is what this browser last saw (only the revision is lower): no warning.
+  await signedIn();
+  saved = backup();
+  server.revision += 5;
+  await vault.sync();
+  restoreBackup(saved);
+  await vault.sync();
+  expect(vault.manifestSummary()).toBe(null);
+  await vault.createItem(login("New"));
+  expect(server.manifestErrors).toStrictEqual([]);
+});
+
+test("ROUND 3 (T4): 'Use the server's copy' also drops the vault's item marks: the newer copies this browser kept, the 'older version' marks and the counters of items the server no longer lists, for that vault only; no 'older versions' notice remains", async () => {
+  const OTHER = "v-team";
+  await signedIn({
+    before: () => {
+      server.vaults.push({ id: OTHER, wrapped_key: "team-1", key_kind: "sealed", role: "write", meta: JSON.stringify({ name: "Team" }), key_epoch: 1 });
+      server.addElsewhere("t1", OTHER, JSON.stringify({ ...login("Team item"), rev: 1 }));
+    },
+  });
+  const saved = backup();
+  // Since the backup: both items of the vault edited (their counters go up), one added; one edited in the other vault.
+  server.editElsewhere("i1", { notes: "new password", rev: 5 });
+  server.editElsewhere("i2", { notes: "newer", rev: 3 });
+  server.addElsewhere("i3", V, JSON.stringify({ ...login("Item 3"), rev: 1 }));
+  server.editElsewhere("t1", { notes: "team newer", rev: 4 });
+  await vault.sync();
+  expect((await memory()).itemRevs).toStrictEqual({ i1: 5, i2: 3, i3: 1, t1: 4 });
+  // The admin restores the backup.
+  restoreBackup(saved);
+  await vault.sync();
+  expect(warned()).toStrictEqual([V]);
+  // This browser kept its newer copies and marked them; the item the server no longer lists is kept aside.
+  expect(["i1", "i2", "t1"].map((id) => [vault.rolledBack(id), vault.getEntry(id)?.item.notes])).toStrictEqual([
+    [true, "new password"],
+    [true, "newer"],
+    [true, "team newer"],
+  ]);
+  expect(vault.rollbackSummary()).not.toBe(null);
+  expect(Object.keys((await stored())?.served ?? {}).sort()).toStrictEqual(["i1", "i2", "t1"]);
+  expect((await stored())?.stash?.map((r) => r.id)).toStrictEqual(["i3"]);
+  await vault.acceptServerCopy(V);
+  expect(vault.manifestSummary()).toBe(null);
+  // The accepted vault: the server's rows are shown and stored, unmarked; counters are the served ones; i3 is forgotten.
+  expect(["i1", "i2"].map((id) => [vault.rolledBack(id), vault.getEntry(id)?.item.notes])).toStrictEqual([
+    [false, ""],
+    [false, ""],
+  ]);
+  for (const id of ["i1", "i2"]) expect(await storedItem(id)).toMatchObject({ item_key: serverItem(id).item_key, data: serverItem(id).data });
+  expect((await stored())?.stash).toBeUndefined();
+  // The other vault (no record, not accepted): its kept copy and its mark stay, and so does the notice, for it alone.
+  expect([vault.rolledBack("t1"), vault.getEntry("t1")?.item.notes]).toStrictEqual([true, "team newer"]);
+  expect(Object.keys((await stored())?.served ?? {})).toStrictEqual(["t1"]);
+  const mem = (await memory()) as { itemRevs?: Record<string, number>; rolledBack?: Record<string, string> };
+  expect(mem.itemRevs).toStrictEqual({ t1: 4, i1: 0, i2: 0 });
+  expect(mem.rolledBack).toStrictEqual({ t1: "kept" });
+  expect(JSON.parse(vault.rollbackSummary()!.key)).toStrictEqual([["t1", "kept"]]);
+  // It stays so: after a sync, a restart, and an edit made from the accepted copy.
+  await vault.sync();
+  await reopen();
+  await vault.sync();
+  expect(["i1", "i2"].map((id) => vault.rolledBack(id))).toStrictEqual([false, false]);
+  const entry = vault.getEntry("i1")!;
+  await vault.updateItem(entry, { ...entry.item, notes: "after the restore" });
+  expect(JSON.parse(serverItem("i1").data)).toMatchObject({ notes: "after the restore", rev: 1 });
+  expect(vault.manifestSummary()).toBe(null);
+  expect(server.manifestErrors).toStrictEqual([]);
+});
+
+test("ROUND 3 (T4): the marks go only with an acceptance: a refused one (the served copy can't be accepted) leaves the kept copies, the marks and the counters as they were", async () => {
+  await signedIn();
+  const saved = backup();
+  server.editElsewhere("i1", { notes: "new password", rev: 5 });
+  await vault.sync();
+  restoreBackup(saved);
+  // Restored, and an item is missing from the restored state too: nothing to accept here.
+  server.items = server.items.filter((i) => i.id !== "i2");
+  await vault.sync();
+  expect(offered()).toStrictEqual(REVIEW);
+  await expectReject(vault.acceptServerCopy(V), (e) => e.message === `${MANIFEST_NOT_ACCEPTABLE_TEXT} ${MANIFEST_REVIEW_TEXT}`);
+  expect([vault.rolledBack("i1"), vault.getEntry("i1")?.item.notes]).toStrictEqual([true, "new password"]);
+  expect(((await memory()) as { itemRevs?: Record<string, number> }).itemRevs).toMatchObject({ i1: 5 });
+  expect(Object.keys((await stored())?.served ?? {})).toStrictEqual(["i1"]);
+});
+
+test("ROUND 3 (finding 4): the copy changes while the acceptance is being stored (a sync took another answer over): its verdict is not overwritten with 'ok'; the states are left and a sync decides", async () => {
+  await signedIn();
+  const saved = backup();
+  server.editElsewhere("i1", { notes: "new password" });
+  await vault.sync();
+  restoreBackup(saved);
+  await vault.sync();
+  expect(offered()).toStrictEqual(ACCEPT);
+  // The second write of the memory record from here on is the acceptance's own (the first: the fresh fetch's copy).
+  // Before it is stored, the server hides an item (no record of that) and a sync takes that answer over.
+  const update = storage.deviceMemory.update.bind(storage.deviceMemory);
+  let calls = 0;
+  const spy = vi.spyOn(storage.deviceMemory, "update").mockImplementation(async (server_, user, fn) => {
+    if (++calls === 2) {
+      tamper(() => {
+        server.tombstones.push({ id: "i2", vault_id: V, seq: (row().seq ?? 0) + 1 });
+        server.items = server.items.filter((i) => i.id !== "i2");
+      });
+      await vault.sync();
+      expect(ids(), "the other answer is shown").toStrictEqual(["i1"]);
+    }
+    return update(server_, user, fn);
+  });
+  await expectReject(vault.acceptServerCopy(V), (e) => e.message === MANIFEST_CHANGED_TEXT);
+  spy.mockRestore();
+  expect(calls).toBeGreaterThanOrEqual(2);
+  // The vault still shows its warning (for the copy shown now, which can't be accepted here), and takes no writes.
+  expect(warned()).toStrictEqual([V]);
+  expect(offered()).toStrictEqual(REVIEW);
+  await expectReject(vault.createItem(login("Held")), (e) => e.message === MANIFEST_HELD_TEXT);
+  await reopen(false);
+  expect(warned()).toStrictEqual([V]);
+});
+
+test("ROUND 3 (T3): the confirmation given must be the one the fresh answer needs: 'no record' was confirmed, but the server shows a record again: nothing is accepted until the user confirms what is shown now", async () => {
+  await signedIn({ manifest: false });
+  const none = backup();
+  server.startManifestElsewhere(V);
+  const first = backup();
+  await vault.sync();
+  server.editElsewhere("i1", { notes: "x" });
+  await vault.sync();
+  expect(await versions()).toStrictEqual({ [V]: 2 });
+  restoreBackup(none);
+  await vault.sync();
+  expect(offered()).toStrictEqual(FORGET);
+  // Between the popup's notice and the confirmation the server shows another state: its first record again.
+  restoreBackup(first);
+  await expectReject(vault.acceptServerCopy(V, true), (e) => e.message === MANIFEST_CHANGED_TEXT);
+  expect((await memory()).manifests?.[V]).toStrictEqual({ version: 2, link: expect.any(String) });
+  expect(vault.notCheckedSummary()).toBe(null);
+  // The popup now shows the vault as that answer has it, with the ordinary confirmation, which then works.
+  expect(offered()).toStrictEqual(ACCEPT);
+  await vault.acceptServerCopy(V);
+  expect((await memory()).manifests).toStrictEqual({ [V]: { version: 1, link: link(), accepts: 1 } });
+  expect([vault.manifestSummary(), vault.notCheckedSummary()]).toStrictEqual([null, null]);
 });

@@ -32,8 +32,11 @@
  * shown or kept unchecked (`doSync`). A vault that doesn't check
  * out stays readable with a warning (`Vault.manifestWarning`) and takes no writes until "Use the server's copy"
  * (`acceptServerCopy`): when the served copy is consistent in itself any member accepts it on this device alone,
- * otherwise a member with write access stores a new record over it. A row that can't be opened is listed and can be
- * deleted for good (`purgeUnopenable`), which is the way out of that warning. Every write into a vault with a manifest carries the next one
+ * otherwise a member with write access stores a new record over it. A row that doesn't open never changes a vault's
+ * verdict or holds its writes: the copy this session already opened is kept when only the served key fails, an item
+ * from a newer app is listed as such, and anything else is listed with a notice and may be deleted for good by
+ * someone who can edit (`purgeUnopenable`); nothing tells the user to. An answer with a lower revision than the one
+ * shown is judged, not ignored, unless it can be a race (`fetchSync`). Every write into a vault with a manifest carries the next one
  * (`manifestFor`); when the vault changed meanwhile (409 `manifest_conflict`) the write syncs, checks and is sent again,
  * at most three times. After a sync this app also starts a vault's first manifest once every member's apps keep them,
  * and deletes trashed items that are due (the server's sweeper leaves vaults with a manifest alone).
@@ -76,10 +79,11 @@ import {
   ACCEPT_NO_ANSWER,
   MANIFEST_BUSY,
   MANIFEST_HELD,
-  MANIFEST_HIDDEN,
   MANIFEST_NOT_READY,
   MANIFEST_TRIES,
   MANIFEST_UNCHECKED,
+  NEWER_ITEM_NOTE,
+  isNewerItemError,
   ManifestMemory,
   TrashSeen,
   UNREADABLE_READS,
@@ -179,13 +183,31 @@ export interface Vault {
    */
   manifestAcceptable?: boolean;
   /**
-   * With `manifestWarning`: the vault's record checks out and the only problem is an item its key can't open
-   * (`State.unopenable`). `VAULT_UNOPENABLE` is shown instead; deleting the item (`purgeUnopenable`) ends it.
+   * With `manifestWarning` and `manifestAcceptable`: the server shows no record for this vault although this device
+   * remembers one. Accepting forgets that memory, so the vault is no longer checked until a new record is started:
+   * the confirmation says so (`USE_SERVER_COPY_NO_RECORD_BODY`, `acceptServerCopy`'s `noRecord`).
+   */
+  manifestNoRecord?: boolean;
+  /**
+   * The vault (checked: it has a record, or a warning) holds an item its key can't open (`State.unopenable`, kind
+   * "unopenable"). `VAULT_UNOPENABLE` is shown as a notice of its own. It is no warning: the vault takes writes when
+   * its record checks out, and nothing says to delete the item. Independent of `manifestWarning`.
    */
   manifestUnopenable?: boolean;
+  /**
+   * The user accepted "no record" for this vault on this device and it has none since: nothing is checked for it
+   * (`VAULT_NOT_CHECKED`, a quiet note) until a record is started again.
+   */
+  manifestNotChecked?: boolean;
 }
 
-/** A row of an opened vault that its key can't open: listed as "Item that can't be opened", with one action. */
+/**
+ * A row of an opened vault that isn't shown as an item:
+ * - "unopenable": it doesn't decrypt (and this device holds no copy of it that it opened before). Listed as "Item
+ *   that can't be opened", with "Delete for good" for members who can edit.
+ * - "newer": it decrypts, but holds an item this app can't read (a type or format from a later release). Listed as
+ *   "Item from a newer version of PassAuth" with "Update PassAuth to see this item."; never deletable here.
+ */
 export interface UnopenableItem {
   id: string;
   vaultId: string;
@@ -193,6 +215,9 @@ export interface UnopenableItem {
   deletedAt: number | null;
   /** Whether this account can delete it now (`purgeUnopenable`): it may edit the vault, and the vault's record checks out. */
   deletable: boolean;
+  kind: "unopenable" | "newer";
+  /** The item's last known name, when this device still holds an earlier copy of it (memory only). */
+  name?: string;
 }
 
 /** A vault signed sharing refused: never opened, filled from, saved to or shown (only this notice). */
@@ -242,7 +267,7 @@ export interface State {
   keyChanges: KeyChange[];
   /** Signed sharing: sharing paused on this device, or the server's list of known keys looked rolled back. */
   signingNotice: string | null;
-  /** Rows of opened vaults that can't be opened (shown in their vault, or in the trash, with "Delete for good"). */
+  /** Rows of opened vaults that aren't shown as items (listed in their vault, or in the trash): they don't decrypt, or hold an item from a newer app. */
   unopenable: UnopenableItem[];
   /**
    * This device's record of the vaults' manifests couldn't be read several times in a row (`MEMORY_UNREADABLE` with
@@ -286,8 +311,12 @@ let socket: WebSocket | null = null;
 let liveOrigin: string | null = null;
 /** Bumped whenever the keys are dropped (lock, sign-out): async work started before that is discarded. */
 let generation = 0;
-/** Items per vault that couldn't be decrypted in the last sync. */
+/** Rows per vault that aren't shown as items in the copy held (they don't decrypt, or hold an item this app can't read): a key replacement needs every item. */
 let undecryptable = new Map<string, number>();
+/** Of those, the rows per vault that don't decrypt at all: a first manifest is never started over them. */
+let unopenableRows = new Map<string, number>();
+/** Ids of the rows held that decrypt but hold an item this app can't read (never deleted from here). */
+let newerRows = new Set<string>();
 /**
  * The encrypted rows of the last /sync answer, with its cursor on servers with delta sync (null otherwise). Memory only,
  * like the rest: kept while locked (the answer `boot()` fetched for the bundle, so unlocking asks only for what changed
@@ -305,10 +334,10 @@ let manifestStatus = new Map<string, ManifestStatus>();
  * read): no warning, and writes into them wait for a sync that checks them.
  */
 let unchecked = new Set<string>();
-/** Vaults whose warning comes from an item the vault's key can't open while the manifest itself checks out. */
-let hiddenItems = new Set<string>();
 /** Unresolved vaults whose served copy is consistent in itself: accepting it needs no write (`acceptVault`). */
 let acceptableVaults = new Set<string>();
+/** Of those, the vaults the server shows without any record: accepting forgets this device's memory of them. */
+let noRecordVaults = new Set<string>();
 /**
  * Counts every own write this app showed without asking the server (the copy moved, and the device memory with it).
  * A sync answer that was on its way meanwhile may be older than that write: it is asked for again, never judged.
@@ -324,8 +353,6 @@ let unreadableWhole = false;
 let manifestMemory: ManifestMemory | null = null;
 /** When this device first saw each trashed item in the trash (`manifest.ts` `TrashSeen`); loaded at the first sync. */
 let trashSeen: TrashSeen | null = null;
-/** Items decrypted while a sync answer was checked, by row: `materialize` takes them over instead of decrypting again. */
-let preOpened = new Map<SyncItemRow, VaultEntry | null>();
 /**
  * The last decrypted copy of items the server stopped sending without proof that they are gone (`materialize`): when
  * such an item comes back older than this device saw it, the newer copy is the one kept. Memory only.
@@ -636,6 +663,8 @@ function dropKeys() {
   account?.free();
   account = null;
   undecryptable = new Map();
+  unopenableRows = new Map();
+  newerRows = new Set();
   decrypted = new Map();
   openedFrom = new Map();
   invitationNames = new Map();
@@ -645,12 +674,11 @@ function dropKeys() {
   revMemory = null;
   manifestStatus = new Map();
   unchecked = new Set();
-  hiddenItems = new Set();
   acceptableVaults = new Set();
+  noRecordVaults = new Set();
   unreadableWhole = false;
   manifestMemory = null;
   trashSeen = null;
-  preOpened = new Map();
   ghosts = new Map();
   fullNext = false;
   avatars.clear();
@@ -1196,6 +1224,9 @@ const SYNC_ROUNDS = 8;
  *   (a delta) gets one fetch of the whole account first; only that answer's verdict is shown. A whole answer whose
  *   "rollback" is against a manifest another tab remembered while this ran (its write may be newer than the answer)
  *   gets one more fetch too.
+ * - An answer whose `revision` is below the one shown is dropped only when it can be a race (the copy moved since the
+ *   request was sent, `fetchSync`). Otherwise the server went back (a database restored from a backup): the whole
+ *   account is fetched once and judged like any answer, so the vaults' checks report it and can be accepted.
  */
 async function doSync() {
   if (!account) return;
@@ -1222,7 +1253,6 @@ async function doSync() {
     const moves = ownMoves;
     // An own write shown since this round began: the answer may predate it. Ask again (or give up without an answer).
     const again = (): boolean => {
-      preOpened = new Map();
       if (round >= SYNC_ROUNDS) {
         if (!importing) setTimeout(() => void sync().catch(() => {}), 0);
         return false;
@@ -1273,7 +1303,6 @@ async function doSync() {
     try {
       result = await checkManifests(snap, checked, gen);
     } catch (e) {
-      preOpened = new Map();
       if (!(e instanceof LogUnavailable)) throw e;
       // The sync failed for that vault, and this app takes an answer over as a whole or not at all.
       if (gen === generation) unchecked.add(e.vaultId);
@@ -1293,7 +1322,6 @@ async function doSync() {
     // newer than this answer (two tabs, review 8): the whole account once more before the warning counts.
     const outrun = whole && !raced && [...checks].some(([id, c]) => c.status === "rollback" && changed.has(id) && fresh(id, c));
     if (failing || outrun) {
-      preOpened = new Map();
       if (failing) refetched = true;
       else raced = true;
       cursor = null;
@@ -1310,10 +1338,10 @@ interface VaultCheck {
   status: ManifestStatus;
   version: number;
   link: string | null;
-  /** The manifest itself checks out, but an item of the vault can't be opened with the vault's key. */
-  hidden?: boolean;
   /** Unresolved, and the served copy is consistent in itself (`acceptVault`): accepting it needs no write. */
   acceptable?: boolean;
+  /** With `acceptable`: the server shows no record at all, so accepting forgets what this device remembers. */
+  noRecord?: boolean;
 }
 
 /** A vault's manifest log couldn't be fetched (no answer, a 5xx, a 429): the answer that needs it isn't checked yet. */
@@ -1367,9 +1395,10 @@ async function manifestLog(vaultId: string, after: number): Promise<unknown[] | 
  * Check every vault of a sync answer against its manifest before the answer is taken over (`doSync`): each vault that
  * passed the signed sharing checks (`checked`) and whose key opens, with all its item rows of `snap`, against the
  * manifest this device remembers (`verifyVault`). "need_log" fetches the vault's manifest log and checks again with
- * it. A vault whose manifest checks out but which holds a row its key can't open is a "mismatch" too (review 4: the
- * manifest doesn't cover `item_key`, so a server could otherwise hide an item by breaking it): the rows are decrypted
- * here for that, and `materialize` takes the results over.
+ * it. The verdict is the manifest's alone. A row that doesn't open doesn't change it (final review, T1): the manifest
+ * doesn't cover `item_key`, so a server can make any item fail to open on one device, and a verdict that held the
+ * vault's writes for it only pushed its user to delete a good item for everyone. Such a row is listed with a notice
+ * instead (`materialize`), or kept as the copy this device already opened.
  *
  * A vault that doesn't check out is also checked with nothing remembered (`acceptVault`): whether its warning can be
  * cleared on this device alone decides what the warning offers.
@@ -1383,8 +1412,6 @@ async function checkManifests(snap: Snapshot, checked: Verdicts, gen: number): P
   const acct = account;
   if (!acct) return null;
   const out = new Map<string, VaultCheck>();
-  const opened = new Map<SyncItemRow, VaultEntry | null>();
-  preOpened = opened;
   const feature = hasFeature(knownPublicConfig(), "vault_manifest");
   const memory = manifestMemoryFor(acct);
   // What another tab remembered meanwhile counts.
@@ -1396,7 +1423,6 @@ async function checkManifests(snap: Snapshot, checked: Verdicts, gen: number): P
     if (list) list.push(row);
     else rowsByVault.set(row.vault_id, [row]);
   }
-  const shown = new Set(state.vaults.map((v) => v.id));
   for (const v of snap.vaults) {
     if (checked.vaults.get(v.id)?.status !== "ok") continue;
     const remembered = memory.get(v.id);
@@ -1417,34 +1443,20 @@ async function checkManifests(snap: Snapshot, checked: Verdicts, gen: number): P
         if (gen !== generation || account !== acct) return null;
         check = log ? verifyVault(key, v, remembered, rows, log) : { ...check, status: "mismatch" };
       }
-      let status: ManifestStatus = check.status === "need_log" ? "mismatch" : check.status;
-      let hidden = false;
-      if (status === "ok") {
-        // The decrypted copies this app holds stay good while the key and the row do (as in `materialize`).
-        const from = openedFrom.get(v.id);
-        const sameKey = shown.has(v.id) && !!from && !vaultKeyChanged(from, v);
-        for (const row of rows) {
-          const old = decrypted.get(row.id);
-          let entry: VaultEntry | null;
-          if (sameKey && old && sameCiphertext(old.row, row)) entry = old.entry;
-          else {
-            entry = decryptRow(key, row);
-            opened.set(row, entry);
-          }
-          if (!entry) hidden = true;
-        }
-        if (hidden) status = "mismatch";
-      }
+      const status: ManifestStatus = check.status === "need_log" ? "mismatch" : check.status;
       // What "Use the server's copy" could do here: nothing remembered, the served record against the served rows.
-      const local = !hidden && unresolved(status) && acceptable(acceptVault(key, v, rows));
+      const local = unresolved(status) ? acceptVault(key, v, rows) : null;
       out.set(
         v.id,
         status === "ok"
           ? { status, version: check.version, link: check.link }
-          : hidden
-            ? // The record itself checked out (the row that doesn't open is counted in it): it is what this device saw.
-              { status, version: check.version, link: check.link, hidden }
-            : { status, version: remembered?.version ?? 0, link: remembered?.link ?? null, ...(local ? { acceptable: true } : {}) },
+          : {
+              status,
+              version: remembered?.version ?? 0,
+              link: remembered?.link ?? null,
+              ...(local && acceptable(local) ? { acceptable: true } : {}),
+              ...(local?.status === "none" ? { noRecord: true } : {}),
+            },
       );
     } finally {
       key.free();
@@ -1473,8 +1485,8 @@ function adopt(snap: Snapshot, checked: Verdicts, checks: Map<string, VaultCheck
   const memory = manifestMemoryFor(acct);
   const statuses = new Map<string, ManifestStatus>();
   const pending = new Set<string>();
-  const hidden = new Set<string>();
   const local = new Set<string>();
+  const recordless = new Set<string>();
   for (const v of snap.vaults) {
     if (memory.unreadable) {
       // Nothing was checked against the record: a vault that has a manifest is unchecked (never an earlier "ok" over
@@ -1482,17 +1494,17 @@ function adopt(snap: Snapshot, checked: Verdicts, checks: Map<string, VaultCheck
       const was = manifestStatus.get(v.id);
       if (unresolved(was)) {
         statuses.set(v.id, was as ManifestStatus);
-        if (hiddenItems.has(v.id)) hidden.add(v.id);
         if (acceptableVaults.has(v.id)) local.add(v.id);
+        if (noRecordVaults.has(v.id)) recordless.add(v.id);
       } else if (manifestSeq(v) > 0 || (typeof v.manifest === "string" && v.manifest.length > 0)) pending.add(v.id);
       continue;
     }
     const c = checks.get(v.id);
     if (!c) continue;
     statuses.set(v.id, c.status);
-    if (c.hidden) hidden.add(v.id);
     if (c.acceptable) local.add(v.id);
-    if (c.status === "ok" || c.hidden) memory.raise(v.id, c.version, c.link);
+    if (c.acceptable && c.noRecord) recordless.add(v.id);
+    if (c.status === "ok") memory.raise(v.id, c.version, c.link);
   }
   memory.flush();
   // How often in a row the record couldn't be read, with a whole answer among them: then the reset is offered.
@@ -1503,21 +1515,31 @@ function adopt(snap: Snapshot, checked: Verdicts, checks: Map<string, VaultCheck
   if (state.deviceRecordUnreadable !== offerReset) set({ deviceRecordUnreadable: offerReset });
   manifestStatus = statuses;
   unchecked = pending;
-  hiddenItems = hidden;
   acceptableVaults = local;
+  noRecordVaults = recordless;
   materialize(snap);
   void signed.flushPins().catch(() => {});
 }
 
 /**
  * `GET /sync`, or with a cursor only what changed since, merged into `synced`. Null when the answer is dropped
- * (locked meanwhile, or older than what is shown); "full" when a delta can't be used.
+ * (locked meanwhile, or older than what is shown and possibly a race); "full" when a delta can't be used.
+ *
+ * An answer with a lower `revision` than the one shown is a race only when the copy moved since this request was sent
+ * (an own write was applied, or another answer taken over): then it is dropped as before. With the copy unmoved the
+ * server itself went back (its database was restored from a backup): the answer is not ignored. A delta is asked for
+ * again as the whole account, and the whole answer goes on to be judged like any other (`doSync`: signed sharing, the
+ * vaults' manifests), which reports the rollback and lets the user accept the server's copy (final review 2).
  */
 async function fetchSync(cursor: string | null, gen: number): Promise<Merged | "full" | null> {
+  const sentFrom = synced;
   const data = await api(cursor ? `/sync?since=${encodeURIComponent(cursor)}` : "/sync");
   if (gen !== generation || !account) return null;
   if (!isSyncResponse(data)) throw new Error(UNEXPECTED_SYNC);
-  if (state.status === "unlocked" && data.revision < state.revision) return null;
+  if (state.status === "unlocked" && data.revision < state.revision) {
+    if (synced !== sentFrom) return null;
+    if (cursor) return "full";
+  }
   let merged: Merged | null = null;
   try {
     merged = mergeSync(cursor ? synced : null, data);
@@ -1554,15 +1576,37 @@ function checkRollback(revs: RevMemory, entry: VaultEntry, shown: VaultEntry | n
   return { ...entry, rollback: true };
 }
 
-function decryptRow(key: core.VaultKey, row: SyncItemRow): VaultEntry | null {
+/** A row's decrypted item, or why there is none: "newer" (`isNewerItemError`) or "unopenable" (everything else). */
+function openRow(key: core.VaultKey, row: SyncItemRow): VaultEntry | "newer" | "unopenable" {
   const enc: EncryptedItem = { id: row.id, vault_id: row.vault_id, key: row.item_key, data: row.data };
   try {
     const item = key.decryptItem(enc) as Item;
     // In the trash exactly when `deleted_at` is not null (a missing field reads as null).
     return { id: row.id, item, vaultId: row.vault_id, revision: row.revision, deletedAt: row.deleted_at ?? null, enc };
-  } catch {
-    return null;
+  } catch (e) {
+    return isNewerItemError(e) ? "newer" : "unopenable";
   }
+}
+
+function decryptRow(key: core.VaultKey, row: SyncItemRow): VaultEntry | null {
+  const opened = openRow(key, row);
+  return typeof opened === "string" ? null : opened;
+}
+
+/**
+ * For a served row that doesn't decrypt: the copy of the same item this device opened before, when the row is that
+ * item unchanged (same id, vault and `data`) and only its `item_key` differs. An honest server never changes a key
+ * without the data, and the vault's manifest covers the data, so the device goes on with the row it has (final
+ * review 1, T1a): the item stays shown and editable, nothing is listed or warned. `held` is the copy shown until now,
+ * `ghost` the last copy shown of an item the server had stopped sending. Returns the entry and the item key to keep.
+ */
+function heldCopy(row: SyncItemRow, held: { row: SyncItemRow; entry: VaultEntry | null } | undefined, ghost: VaultEntry | undefined): { entry: VaultEntry; itemKey: string } | null {
+  const deletedAt = row.deleted_at ?? null;
+  if (held?.entry && held.row.vault_id === row.vault_id && held.row.data === row.data && typeof row.data === "string")
+    return { entry: { ...held.entry, revision: row.revision, deletedAt }, itemKey: held.row.item_key };
+  if (ghost && ghost.vaultId === row.vault_id && ghost.enc.data === row.data && typeof row.data === "string")
+    return { entry: { ...ghost, revision: row.revision, deletedAt }, itemKey: ghost.enc.key };
+  return null;
 }
 
 /** The unlocked account's remembered vault manifests on this device (`manifest.ts`), per server and account. */
@@ -1662,7 +1706,9 @@ function materialize(snap: Snapshot): void {
       ...(verdict?.status === "ok" ? { trust: verdict.trust } : {}),
       ...(unresolved(status) ? { manifestWarning: true } : {}),
       ...(unresolved(status) && acceptableVaults.has(v.id) ? { manifestAcceptable: true } : {}),
-      ...(unresolved(status) && hiddenItems.has(v.id) ? { manifestUnopenable: true } : {}),
+      ...(unresolved(status) && acceptableVaults.has(v.id) && noRecordVaults.has(v.id) ? { manifestNoRecord: true } : {}),
+      // Accepted without a record and none since: not checked, and it says so.
+      ...(status === "none" && manifestSeq(v) === 0 && manifestMemoryFor(acct).notChecked(v.id) ? { manifestNotChecked: true } : {}),
     });
   }
   const byId = new Map(vaults.map((v) => [v.id, v]));
@@ -1671,10 +1717,13 @@ function materialize(snap: Snapshot): void {
   const copies = new Map<string, { row: SyncItemRow; entry: VaultEntry | null }>();
   const items: VaultEntry[] = [];
   const failed = new Map<string, number>();
+  const sealed = new Map<string, number>();
+  const newer = new Set<string>();
   const unopenable: UnopenableItem[] = [];
   const revs = revMemoryFor(acct);
   const rollbacks = { kept: 0, shown: 0 };
-  for (const row of snap.items.values()) {
+  for (const served of snap.items.values()) {
+    let row = served;
     const vault = byId.get(row.vault_id);
     if (!vault) continue;
     const old = decrypted.get(row.id);
@@ -1688,44 +1737,78 @@ function materialize(snap: Snapshot): void {
         if (revOf(entry.item) < (revs.get(entry.id) ?? 0)) rollbacks.shown++;
         else rollbacks.kept++;
       }
+      if (!entry && newerRows.has(row.id)) newer.add(row.id);
     } else {
-      // Decrypted already when the answer was checked (`checkManifests`), or now.
-      const made = preOpened.get(row);
-      entry = made !== undefined ? made : decryptRow(vault.key, row);
-      // The copy to keep when the server sent an older one: what is shown, or what was last shown before the server
-      // stopped sending the item.
-      if (entry) entry = checkRollback(revs, entry, old?.entry ?? ghosts.get(row.id) ?? null, rollbacks);
+      const made = openRow(vault.key, row);
+      if (typeof made !== "string") {
+        // The copy to keep when the server sent an older one: what is shown, or what was last shown before the server
+        // stopped sending the item.
+        entry = checkRollback(revs, made, old?.entry ?? ghosts.get(row.id) ?? null, rollbacks);
+      } else {
+        // Only the key of an item this device already opened fails: the device goes on with the row it has (T1a).
+        const have = made === "unopenable" ? heldCopy(row, old, ghosts.get(row.id)) : null;
+        if (have) {
+          entry = have.entry;
+          row = { ...row, item_key: have.itemKey };
+          snap.items.set(row.id, row);
+          if (entry.rollback) {
+            if (revOf(entry.item) < (revs.get(entry.id) ?? 0)) rollbacks.shown++;
+            else rollbacks.kept++;
+          }
+        } else {
+          entry = null;
+          if (made === "newer") newer.add(row.id);
+        }
+      }
     }
     copies.set(row.id, { row, entry });
     if (entry) items.push(entry);
     else {
       failed.set(row.vault_id, (failed.get(row.vault_id) ?? 0) + 1);
-      // Listed in its vault (or the trash) as an item that can't be opened. It can be deleted for good by someone who
-      // can edit, once the vault's own record checks out (or it has none): nothing of it has to be opened for that.
       const status = manifestStatus.get(vault.id);
+      if (newer.has(row.id)) {
+        // It decrypted, so it is the vault's own: from an app newer than this one. Listed, never deleted from here.
+        unopenable.push({ id: row.id, vaultId: vault.id, deletedAt: row.deleted_at ?? null, deletable: false, kind: "newer" });
+        continue;
+      }
+      sealed.set(row.vault_id, (sealed.get(row.vault_id) ?? 0) + 1);
+      // Listed in its vault (or the trash) as an item that can't be opened, with the name this device last knew it by.
+      // Someone who can edit may delete it for good while the vault's own record checks out (or it has none): nothing
+      // of it has to be opened for that. The vault's other writes don't wait for it.
+      const known = (old?.entry ?? ghosts.get(row.id))?.item.name;
       unopenable.push({
         id: row.id,
         vaultId: vault.id,
         deletedAt: row.deleted_at ?? null,
-        deletable: vault.role !== "read" && !unchecked.has(vault.id) && (hiddenItems.has(vault.id) || !unresolved(status)),
+        deletable: vault.role !== "read" && !unchecked.has(vault.id) && !unresolved(status),
+        kind: "unopenable",
+        ...(typeof known === "string" && known ? { name: known } : {}),
       });
     }
   }
-  for (const [id, n] of failed) {
-    // A vault with a manifest says so in its own warning (`VAULT_UNOPENABLE`); one without has only this line.
-    if (unresolved(manifestStatus.get(id))) continue;
-    const name = byId.get(id)?.name ?? "a vault";
-    warnings.push(`${n === 1 ? "An item" : `${n} items`} in "${name}" can't be opened.`);
+  for (const v of vaults) {
+    const n = sealed.get(v.id);
+    if (!n) continue;
+    // A checked vault says so in a notice of its own (`VAULT_UNOPENABLE`); one without a record has only this line.
+    if ((manifestStatus.get(v.id) ?? "none") !== "none") v.manifestUnopenable = true;
+    else warnings.push(`${n === 1 ? "An item" : `${n} items`} in "${v.name}" can't be opened.`);
   }
-  preOpened = new Map();
   // Items that are no longer shown. An edit counter (and the copy kept for it) is forgotten only when the item's
   // absence is proven: it is missing from the vault it was in, and that vault's manifest checked out for this copy
   // (an own delete for good is forgotten where it is applied, `settle`). An item the server merely stopped sending
   // (left out of an answer, its vault hidden) keeps both, so an older copy served later is still told (review 5).
   const proven: string[] = [];
   for (const [id, was] of decrypted) {
-    if (copies.has(id)) {
-      ghosts.delete(id);
+    const now = copies.get(id);
+    if (now) {
+      // Shown again: no ghost. Served but no longer opening: the copy last shown is kept (its name, and as the newer
+      // copy should the server send an older one that opens).
+      if (now.entry) ghosts.delete(id);
+      else if (was.entry) {
+        ghosts.delete(id);
+        ghosts.set(id, was.entry);
+        if (ghosts.size > GHOSTS_MAX) ghosts.delete(ghosts.keys().next().value as string);
+      }
       continue;
     }
     if (!snap.items.has(id) && byId.has(was.row.vault_id) && manifestStatus.get(was.row.vault_id) === "ok") {
@@ -1747,6 +1830,8 @@ function materialize(snap: Snapshot): void {
   decrypted = copies;
   openedFrom = opened;
   undecryptable = failed;
+  unopenableRows = sealed;
+  newerRows = newer;
   pinPersonalVault(snap.user.id, vaults);
   const names = new Map<string, string | null>();
   const invitations = openInvitations(snap.invitations, (inv) => {
@@ -1922,18 +2007,14 @@ function ownManifestStored(base: Snapshot, vaultId: string, sent: ManifestEntry,
 }
 
 /**
- * A vault's verdict once its manifest is one this device made or accepted for exactly the rows held: "ok", unless a
- * row of it doesn't open (that warning only ends when the row is deleted, `purgeUnopenable`).
+ * A vault's verdict once its manifest is one this device made or accepted for exactly the rows held ("ok"), or once
+ * the user accepted that the server shows none ("none"). A row that doesn't open keeps its notice either way
+ * (`materialize`); it is no part of the verdict.
  */
 function settleVerdict(vaultId: string, status: "ok" | "none" = "ok") {
   acceptableVaults.delete(vaultId);
-  if (undecryptable.get(vaultId) && status === "ok") {
-    manifestStatus.set(vaultId, "mismatch");
-    hiddenItems.add(vaultId);
-  } else {
-    manifestStatus.set(vaultId, status);
-    hiddenItems.delete(vaultId);
-  }
+  noRecordVaults.delete(vaultId);
+  manifestStatus.set(vaultId, status);
 }
 
 /** The body of `PUT /vaults/{id}/manifest`: a first manifest (`baseSeq` 0) or a baseline, pinned to the vault's number. */
@@ -1942,8 +2023,9 @@ const manifestPut = (m: ManifestEntry, baseSeq: number, vaultSeq: number) => ({ 
 /** A vault's first manifest (version 1, replacing none) over exactly the rows of `base`, which must still be the vault's when it is stored. */
 async function startManifest(base: Snapshot, row: SyncVaultRow, rows: SyncItemRow[], gen: number): Promise<Snapshot | null> {
   if (typeof row.key_epoch !== "number" || typeof row.seq !== "number" || rows.some((r) => typeof r.data !== "string")) return base;
-  // Every row opens with the vault's key: a manifest is never started over an item this app can't read.
-  if (undecryptable.get(row.id)) return base;
+  // Every row decrypts with the vault's key: a manifest is never started over a row that doesn't. (A row that
+  // decrypts but holds an item from a newer app is the vault's own and is counted like any other.)
+  if (unopenableRows.get(row.id)) return base;
   const m = startEntry(vaultFor(row.id).key, row.id, row.key_epoch, 1, null, rows.map(manifestRow));
   const answer = await api<ManifestAnswer>(`/vaults/${row.id}/manifest`, { method: "PUT", body: manifestPut(m, 0, row.seq) });
   return ownManifestStored(base, row.id, m, answer, gen);
@@ -2002,12 +2084,22 @@ async function purgeDue(base: Snapshot, row: SyncVaultRow, rows: SyncItemRow[], 
  *   Other devices follow it by themselves when they are on the history under it; the rest accept it as above.
  *
  * Items of the vault that this device had seen newer are accepted as served with it (the user accepted "anything that
- * is missing, restored or out of date"). A vault whose only problem is an item that can't be opened isn't helped by
- * either (`MANIFEST_HIDDEN`: the item has to be deleted, `purgeUnopenable`), and stays warned after both while such
- * an item is left.
+ * is missing, restored or out of date"): the marks, the newer copies kept and the edit counters of the items this
+ * device held in that vault before the fetch (never of an id the fetch newly places there). An item that can't be
+ * opened keeps its notice after both; it is no part of this.
+ *
+ * When the server shows no record at all for a vault this device remembers one for, accepting means forgetting that
+ * memory: from then on nothing is checked for the vault until a new record is started. That needs a confirmation of
+ * its own (`USE_SERVER_COPY_NO_RECORD_BODY`): unless `noRecord` says the user gave it, nothing is forgotten and
+ * "confirm_no_record" is returned (the vault then carries `manifestNoRecord`, also when the server showed a record
+ * when the user first asked). Afterwards the vault is marked as not checked (`Vault.manifestNotChecked`).
  */
-export async function acceptServerCopy(vaultId: string): Promise<void> {
+export async function acceptServerCopy(vaultId: string, opts: { noRecord?: boolean } = {}): Promise<"done" | "confirm_no_record"> {
   const gen = generation;
+  // The items this device holds in the vault now, before anything is fetched: only their marks go with the acceptance.
+  const mine = new Set<string>();
+  for (const [id, held] of decrypted) if (held.row.vault_id === vaultId) mine.add(id);
+  for (const [id, ghost] of ghosts) if (ghost.vaultId === vaultId) mine.add(id);
   for (let attempt = 1; ; attempt++) {
     // A whole answer taken over after this was asked for: never the copy held from before (review Info 12).
     let before = wholeAdoptions;
@@ -2026,22 +2118,22 @@ export async function acceptServerCopy(vaultId: string): Promise<void> {
     const v = state.vaults.find((x) => x.id === vaultId);
     if (!base || !row || !v) throw new Error("Vault not found.");
     // A later answer checked out: nothing to accept.
-    if (!unresolved(manifestStatus.get(vaultId))) return;
-    // The record itself is fine; an item can't be opened. Accepting the same rows would change nothing.
-    if (hiddenItems.has(vaultId)) throw new Error(MANIFEST_HIDDEN);
+    if (!unresolved(manifestStatus.get(vaultId))) return "done";
     const memory = manifestMemoryFor(account);
     if (memory.unreadable) throw new Error(MANIFEST_UNCHECKED);
     const rows = [...base.items.values()].filter((r) => r.vault_id === vaultId);
     const local = acceptVault(v.key, row, rows);
     if (local.status !== "mismatch") {
+      // No record served: the user has to have confirmed that checking stops (the text for it), or is asked now.
+      if (local.status === "none" && !opts.noRecord) return "confirm_no_record";
       // Consistent in itself: remembered from now on (or forgotten, when the server shows no record). No request.
       const done = local.status === "ok" ? memory.replace(vaultId, local.version, local.link) : memory.forget(vaultId);
       if (!done) throw new Error(MANIFEST_UNCHECKED);
       ownMoves++;
-      acceptItemRevs(v.key, rows);
+      acceptItemRevs(v.key, rows, mine);
       settleVerdict(vaultId, local.status);
       materialize(base);
-      return;
+      return "done";
     }
     if (v.role === "read") throw new Error(VAULT_WARNING_READER);
     if (typeof row.key_epoch !== "number" || typeof row.seq !== "number" || rows.some((r) => typeof r.data !== "string")) throw new Error(UNEXPECTED_SYNC);
@@ -2062,11 +2154,11 @@ export async function acceptServerCopy(vaultId: string): Promise<void> {
       if (attempt >= MANIFEST_TRIES) throw new Error(MANIFEST_BUSY);
       continue;
     }
-    if (gen !== generation || !account) return;
+    if (gen !== generation || !account) return "done";
     // Not the record this device sent (not expected): nothing is remembered, the next sync judges what is there.
     if (answer?.manifest_seq !== m.seq || !linkStored(m, answer.manifest_link)) {
       await sync();
-      return;
+      return "done";
     }
     // Stored: this device's memory is that record from now on, whatever it held (also a later version).
     if (!manifestMemoryFor(account).replace(vaultId, m.seq, m.link)) throw new Error(MANIFEST_UNCHECKED);
@@ -2074,22 +2166,25 @@ export async function acceptServerCopy(vaultId: string): Promise<void> {
     if (synced === base && state.status === "unlocked" && typeof answer.vault_seq === "number") {
       const next = applyOwnManifest(base, vaultId, m, answer.vault_seq);
       synced = next;
-      acceptItemRevs(v.key, rows);
+      acceptItemRevs(v.key, rows, mine);
       settleVerdict(vaultId);
       materialize(next);
     } else await sync();
-    return;
+    return "done";
   }
 }
 
 /**
  * With an accepted copy of a vault: its items as served are what this device saw from now on. An item marked as older
  * than this device remembered loses the mark (and the newer copy kept for it): its counter becomes the served one.
+ * Only for `mine`, the items this device held in that vault before the accepted answer was fetched: an id the answer
+ * newly lists under the vault (another vault's item, say) keeps its counter and its mark.
  */
-function acceptItemRevs(key: core.VaultKey, rows: readonly SyncItemRow[]) {
+function acceptItemRevs(key: core.VaultKey, rows: readonly SyncItemRow[], mine: ReadonlySet<string>) {
   if (!account) return;
   const revs = revMemoryFor(account);
   for (const row of rows) {
+    if (!mine.has(row.id)) continue;
     const held = decrypted.get(row.id);
     if (!held?.entry?.rollback && !ghosts.has(row.id)) continue;
     const served = decryptRow(key, row);
@@ -2103,10 +2198,11 @@ function acceptItemRevs(key: core.VaultKey, rows: readonly SyncItemRow[]) {
 
 /**
  * Delete for good a row that can't be opened (`State.unopenable`): nothing of it has to be read, the vault's next
- * manifest counts it out by the row as the server sent it. Live or in the trash, one request. Allowed while the
- * vault's warning stands when that warning is only about such rows (its own record checks out); a vault whose record
- * doesn't check out needs `acceptServerCopy` first. When the vault changed meanwhile the request is built again from a
- * fresh sync, at most `MANIFEST_TRIES` times. Ends with a sync, which lifts the warning once no such row is left.
+ * manifest counts it out by the row as the server sent it. Live or in the trash, one request. Only for a row that
+ * really doesn't decrypt: never one this device shows (also from a copy it opened before, when only the served key
+ * fails), never one that holds an item from a newer app. A vault whose record doesn't check out needs
+ * `acceptServerCopy` first. When the vault changed meanwhile the request is built again from a fresh sync, at most
+ * `MANIFEST_TRIES` times. Ends with a sync, which lifts the notice once no such row is left.
  */
 export async function purgeUnopenable(id: string): Promise<void> {
   requireWritableServer();
@@ -2121,14 +2217,16 @@ export async function purgeUnopenable(id: string): Promise<void> {
     if (!v || !vault) throw new Error(ITEM_GONE);
     // Only a row that really doesn't open: everything else is deleted the ordinary way.
     if (decrypted.get(id)?.entry) throw new Error(ITEM_GONE);
+    // It decrypts: an item from a newer app, not one to delete from here.
+    if (newerRows.has(id)) throw new Error(NEWER_ITEM_NOTE);
     if (v.role === "read") throw new Error("Only someone who can edit this vault can do this.");
     try {
       if (unchecked.has(v.id)) throw new Unchecked();
       let manifest: ManifestEntry | null = null;
       if (manifestSeq(vault)) {
         const status = manifestStatus.get(v.id);
-        // The vault's record must check out for the rows held: "ok", or a warning that is only about rows like this one.
-        if (status !== "ok" && !hiddenItems.has(v.id)) throw new Error(MANIFEST_HELD);
+        // The vault's record must check out for the rows held.
+        if (status !== "ok") throw new Error(MANIFEST_HELD);
         manifest = nextEntry(v.key, vault, [manifestRow(row)], []);
       } else if (unresolved(manifestStatus.get(v.id))) throw new Error(MANIFEST_HELD);
       const params = manifest ? [`revision=${row.revision}`, ...manifestQuery(manifest)] : [];
@@ -2302,7 +2400,7 @@ function connectSocket() {
     setTimeout(() => {
       if (state.status === "unlocked" && socket === ws) {
         api<{ revision: number }>("/sync/revision")
-          .then((r) => (r.revision > state.revision ? sync() : undefined))
+          .then((r) => (r.revision !== state.revision ? sync() : undefined))
           .catch(() => {})
           .finally(() => {
             if (state.status === "unlocked" && socket === ws) connectSocket();
@@ -2323,7 +2421,8 @@ export async function resync(): Promise<void> {
   if (state.status !== "unlocked") return;
   reconnectDelay = RECONNECT_MIN;
   connectSocket();
-  if (r.revision > state.revision) await sync();
+  // Higher: something new. Lower: the server went back (a restored backup); the sync judges it (`fetchSync`).
+  if (r.revision !== state.revision) await sync();
 }
 
 // -------------------------------------------------------------- save target

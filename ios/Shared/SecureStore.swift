@@ -321,6 +321,22 @@ public final class SecureStore {
         }
     }
 
+    /// "Use the server's copy": forget the edit counters of these items, whatever is stored
+    /// (the vault is taken as the server has it now, older versions of its items included).
+    /// Returns false when the memory can't be read or written now (nothing changed).
+    @discardableResult
+    public func forgetItemRevs(_ id: String, _ ids: Set<String>) -> Bool {
+        guard !ids.isEmpty else { return true }
+        updateMemoryFile(revsURL(id), aad: "revs:\(id)") { stored in
+            guard let stored else { return nil }
+            var memory = ItemRevMemory.read(stored)
+            for i in ids { memory.items[i] = nil }
+            return memory.encoded()
+        }
+        guard let now = readItemRevMemory(id) else { return false }
+        return ids.allSatisfy { now.items[$0] == nil }
+    }
+
     // Vault manifests seen (rollback and fork detection)
 
     private func manifestsURL(_ id: String) -> URL { memoryFile(id, "manifests") }
@@ -373,10 +389,12 @@ public final class SecureStore {
 
     private func asideURL(_ url: URL) -> URL { url.appendingPathExtension("unreadable") }
 
-    /// The manifest marks or the item edit counters are stored but can't be read now.
+    /// The manifest marks, the item edit counters or the trash first-seen times are stored but
+    /// can't be read now.
     public func memoryUnreadable(_ id: String) -> Bool {
         if case .unreadable = readMemoryFile(manifestsURL(id), aad: "manifests:\(id)") { return true }
         if case .unreadable = readMemoryFile(revsURL(id), aad: "revs:\(id)") { return true }
+        if case .unreadable = readMemoryFile(trashSeenURL(id), aad: "trashed:\(id)") { return true }
         return false
     }
 

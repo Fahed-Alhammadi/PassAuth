@@ -91,6 +91,8 @@ export const popupHandlers = {
       const rollback = vault.rollbackSummary();
       const manifest = vault.manifestSummary();
       const memory = vault.memoryNotice();
+      const notChecked = vault.notCheckedSummary();
+      const others = vault.otherItems();
       const outdated = await vault.serverNeedsUpdate();
       const problem = url && tabId !== undefined ? await fillProblem(tabId, url) : undefined;
       return {
@@ -101,6 +103,8 @@ export const popupHandlers = {
         ...(rollback ? { rollback } : {}),
         ...(manifest ? { manifest } : {}),
         ...(memory ? { memory } : {}),
+        ...(notChecked ? { notChecked } : {}),
+        ...(others.length ? { others } : {}),
         ...(outdated ? { serverProblem: SERVER_UPDATE_TEXT } : {}),
         ...(problem ? { fillProblem: problem } : {}),
       };
@@ -215,7 +219,7 @@ export const popupHandlers = {
   "sharing:trust": { from: POPUP, unlock: true, activity: "restart", run: ({ userId, fingerprint }) => vault.trustNewKey(userId, fingerprint) },
   "sharing:accept": { from: POPUP, unlock: true, activity: "restart", run: ({ vaultId, token }) => vault.acceptSharedVault(vaultId, token) },
   // "Use the server's copy" and "Reset on this device": the user's own decision, after the popup's confirmation.
-  "manifest:accept": { from: POPUP, unlock: true, activity: "restart", run: ({ vaultId }) => vault.acceptServerCopy(vaultId) },
+  "manifest:accept": { from: POPUP, unlock: true, activity: "restart", run: ({ vaultId, forget }) => vault.acceptServerCopy(vaultId, forget === true) },
   "memory:reset": { from: POPUP, unlock: true, activity: "restart", run: () => vault.resetDeviceMemory() },
   policyNotices: { from: POPUP, run: () => accountNotices() },
   signInRequests: { from: POPUP, unlock: true, run: () => signInRequests() },

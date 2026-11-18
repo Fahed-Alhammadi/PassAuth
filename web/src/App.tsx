@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
-import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation, type RouteObject } from "react-router";
 import { LogoMark } from "./components/Logo";
 import { SheetActions, ToastHost } from "./components/ui";
 import { SERVER_UPDATE_NEEDED, usePolicies } from "./lib/api";
 import { getDesktop } from "./lib/platform";
+import { SIGN_IN_PATH, signedOutState } from "./lib/routes";
 import { webLockMinutes } from "./lib/policies";
 import { server } from "./lib/server";
 import { boot, holdsKeys, lock, logout, useVault } from "./lib/vault";
@@ -24,24 +25,53 @@ import { SendsPage } from "./pages/Sends";
 import { SendViewPage } from "./pages/SendView";
 import { EmergencyVaultPage } from "./pages/Emergency";
 
-/** Routes that need an unlocked vault. */
-function RequireUnlocked() {
+/**
+ * The site root. Signed out, it is the sign-in page: the web vault's sign-in lives at `https://<server>/`, never at
+ * `/login`. Signed in (locked or unlocked), it opens the vault, as any unknown address does. Once the sign-in page is
+ * up it stays until it leaves by itself, so the steps after the password (a two-step code, another device's approval)
+ * aren't cut off when the account opens, and it returns to the page that sent the visitor here (`state.from`).
+ */
+export function RootPage() {
+  const { status } = useVault();
+  const loc = useLocation();
+  const signingIn = useRef(false);
+  if (status === "logged-out") signingIn.current = true;
+  if (signingIn.current) return <LoginPage />;
+  if (status === "unreachable") return <Unreachable />;
+  if (status === "loading") return <Splash />;
+  return <Navigate to="/vault" replace state={loc.state} />;
+}
+
+/** `/login`, the sign-in page's address before: old links and bookmarks go to the root, with where they came from. */
+export function LoginRedirect() {
+  const loc = useLocation();
+  return <Navigate to={SIGN_IN_PATH} replace state={loc.state} />;
+}
+
+function Splash() {
+  return (
+    <div className="splash" role="status">
+      <LogoMark size={56} />
+      <span>Loading PassAuth…</span>
+    </div>
+  );
+}
+
+/**
+ * Routes that need an unlocked vault. Signed out (a visit without a session, or after Log out), the address becomes
+ * the root, where the sign-in page is, and sign-in returns to the page asked for.
+ */
+export function RequireUnlocked() {
   const { status } = useVault();
   const loc = useLocation();
   const { maxVaultTimeoutMinutes } = usePolicies();
   // The keys may stay in memory behind the two-step screen: the idle lock covers them there too.
   useAutoLock(status === "unlocked" || (status === "two-step" && holdsKeys()), webLockMinutes(maxVaultTimeoutMinutes));
-  if (status === "logged-out") return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
+  if (status === "logged-out") return <Navigate to={SIGN_IN_PATH} replace state={signedOutState(loc.pathname)} />;
   if (status === "two-step") return <TwoStepRequiredPage />;
   if (status === "locked") return <UnlockPage />;
   if (status === "unreachable") return <Unreachable />;
-  if (status === "loading")
-    return (
-      <div className="splash" role="status">
-        <LogoMark size={56} />
-        <span>Loading PassAuth…</span>
-      </div>
-    );
+  if (status === "loading") return <Splash />;
   return <Outlet />;
 }
 
@@ -127,8 +157,11 @@ function useAutoLock(active: boolean, minutes: number) {
 // Links from before 0.2.2 used hash routes (/#/admin); keep them working.
 if (location.hash.startsWith("#/")) history.replaceState(null, "", location.hash.slice(1));
 
-const router = createBrowserRouter([
-  { path: "/login", element: <LoginPage /> },
+/** The web vault's addresses (the desktop app uses the same ones inside its window). */
+export const routes: RouteObject[] = [
+  // Sign-in lives at the root; `/login` only redirects there.
+  { path: SIGN_IN_PATH, element: <RootPage /> },
+  { path: "/login", element: <LoginRedirect /> },
   { path: "/register", element: <RegisterPage /> },
   { path: "/verify-email", element: <VerifyEmailPage /> },
   { path: "/admin", element: <AdminPage /> },
@@ -141,7 +174,6 @@ const router = createBrowserRouter([
       {
         element: <Shell />,
         children: [
-          { index: true, element: <Navigate to="/vault" replace /> },
           { path: "/vault", element: <VaultPage /> },
           { path: "/vault/:filter", element: <VaultPage /> },
           { path: "/vault/:filter/:itemId", element: <VaultPage /> },
@@ -158,9 +190,13 @@ const router = createBrowserRouter([
     ],
   },
   { path: "*", element: <Navigate to="/vault" replace /> },
-]);
+];
+
+/** Made at the first render (it reads the browser's address), so the route table above can be loaded without a page. */
+let router: ReturnType<typeof createBrowserRouter> | null = null;
 
 export function App() {
+  router ??= createBrowserRouter(routes);
   return (
     <>
       <RouterProvider router={router} />

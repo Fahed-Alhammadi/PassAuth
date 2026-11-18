@@ -81,9 +81,14 @@ export class FakeVaultKey {
   decryptMeta(_id: string, meta: string) {
     return JSON.parse(meta);
   }
+  /** Like the core: a key that doesn't open the item is "decrypt_failed"; data that decrypted but isn't an item this version reads is "json: …". */
   decryptItem(enc: { key: string; data: string }) {
     this.check(enc);
-    return JSON.parse(enc.data);
+    try {
+      return JSON.parse(enc.data);
+    } catch (e) {
+      throw new Error(`json: ${e instanceof Error ? e.message : e}`);
+    }
   }
   /** Like the core: the item's edit counter `rev` one higher than the item given (1 for a new item). */
   encryptItem(item: unknown, id: string, vault_id: string) {

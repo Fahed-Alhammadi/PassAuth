@@ -151,6 +151,10 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .btn-icon.done { color: var(--ok); }
 .item-row .sub { font-size: var(--text-caption); color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item-row .btn-icon { width: 32px; height: 32px; }
+/* A row for an item that isn't shown (from a newer version, or one that can't be opened): text only, nothing to press. */
+.item-row.other-row { gap: var(--space-3); min-height: 48px; padding-left: var(--space-4); }
+.item-row.other-row:hover { background: none; }
+.item-row.other-row .title { color: var(--ink-2); }
 .btn-fill { height: 32px; padding: 0 var(--space-3); font-size: var(--text-caption); font-weight: 600; background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
 .btn-fill:hover { background: var(--accent-fill); color: var(--on-accent); }
 

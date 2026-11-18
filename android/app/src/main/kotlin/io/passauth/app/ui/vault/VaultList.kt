@@ -221,11 +221,14 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                 v?.unresolved.orEmpty().forEach { u ->
                     item(key = "manifest:${u.id}") { ManifestWarning(ctx, u, named = (v?.vaults?.size ?: 0) > 1) }
                 }
-                // Vaults whose record is fine but that hold an item this phone can't open: said with the way out, the items listed below.
+                // Vaults nothing is checked for since the user accepted "no record": one quiet line until a record exists again.
+                v?.notChecked.orEmpty().forEach { u ->
+                    item(key = "not-checked:${u.id}") { QuietCard(u.name.takeIf { (v?.vaults?.size ?: 0) > 1 }, io.passauth.app.data.Manifests.NOT_CHECKED) }
+                }
+                // Vaults that hold an item this phone can't open: a notice (nothing is held for it), the items listed below.
                 v?.withUnopenable.orEmpty().forEach { u ->
                     item(key = "unopenable:${u.id}") {
-                        val M = io.passauth.app.data.Manifests
-                        WarningCard(ctx, u.name.takeIf { (v?.vaults?.size ?: 0) > 1 }, if (u.role == io.passauth.app.data.Role.Read) M.UNOPENABLE_READERS else M.UNOPENABLE)
+                        WarningCard(ctx, u.name.takeIf { (v?.vaults?.size ?: 0) > 1 }, io.passauth.app.data.Manifests.UNOPENABLE)
                     }
                 }
                 // Items that don't open: nothing to show of them, but someone who can edit the vault can delete them for good.
@@ -235,14 +238,23 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                         val M = io.passauth.app.data.Manifests
                         // A vault whose record doesn't match is reviewed first ("Use the server's copy"); view-only members can't delete.
                         val canDelete = vault.role != io.passauth.app.data.Role.Read && vault.manifest != io.passauth.app.data.ManifestState.Unresolved
+                        val place = if (row.trashed) "In the trash of ${vault.name}." else "In ${vault.name}."
                         WarningCard(
-                            ctx, M.UNOPENABLE_ITEM, "In ${vault.name}.",
+                            ctx, M.UNOPENABLE_ITEM, row.name?.let { "Last saved here as $it. $place" } ?: place,
                             action = M.DELETE_FOR_GOOD.takeIf { canDelete },
                             confirmTitle = "${M.DELETE_FOR_GOOD}?", confirmSubtitle = vault.name, confirmBody = M.DELETE_FOR_GOOD_CONFIRM,
                         ) {
                             ctx.repo.deleteUnopenable(row)
                             ctx.notify("Item deleted.")
                         }
+                    }
+                }
+                // Items a newer app saved that this one can't read: listed, nothing to do but update.
+                v?.newer.orEmpty().forEach { row ->
+                    val vault = v?.vaults?.firstOrNull { it.id == row.vaultId } ?: return@forEach
+                    item(key = "newer-item:${row.id}") {
+                        val O = io.passauth.app.data.ItemOpening
+                        QuietCard(O.NEWER_ITEM, if ((v?.vaults?.size ?: 0) > 1) "${O.NEWER_NOTE} In ${vault.name}." else O.NEWER_NOTE)
                     }
                 }
                 // This phone's own record of the vaults can't be read, again and again: said, with the way out.
@@ -464,8 +476,25 @@ private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, n
         ctx, vault.name.takeIf { named }, m.WARNING,
         note = m.READERS.takeIf { !offered },
         action = m.USE_SERVER_COPY.takeIf { offered },
-        confirmTitle = m.CONFIRM_TITLE, confirmSubtitle = vault.name, confirmBody = m.CONFIRM_BODY,
-    ) { ctx.repo.useServerCopy(vault.id) }
+        // The server shows no record at all for a vault that had one: accepting means no checks, and the sheet says that.
+        confirmTitle = m.CONFIRM_TITLE, confirmSubtitle = vault.name, confirmBody = if (vault.manifestNoRecord) m.CONFIRM_NO_RECORD else m.CONFIRM_BODY,
+    ) { ctx.repo.useServerCopy(vault.id, noRecord = vault.manifestNoRecord) }
+}
+
+/** A quiet standing line above the items (not a warning, nothing to do about it here): an optional [heading] and the [text]. */
+@Composable
+private fun QuietCard(heading: String?, text: String) {
+    Surface(
+        shape = RoundedCornerShape(Radius.card),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, PassAuthTheme.colors.line),
+        modifier = Modifier.fillMaxWidth().padding(top = Space.s),
+    ) {
+        Column(Modifier.padding(Space.m)) {
+            if (heading != null) Text(heading, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+            Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 /**

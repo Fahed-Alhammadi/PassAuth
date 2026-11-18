@@ -10,8 +10,10 @@
  * - items the server sent in an older version than this browser had seen (background/item-revs.ts);
  * - vaults whose items don't match the vault's manifest (background/manifests.ts; not dismissible: nothing is saved
  *   into them until it is resolved): with "Use the server's copy" (after a confirmation) when the server's copy checks
- *   out on its own, else pointing to the web vault or the desktop app; a vault with an item that can't be opened says
- *   where to delete it;
+ *   out on its own (with its own confirmation when the server shows no record at all), else pointing to the web vault
+ *   or the desktop app; in the same box, a vault with an item that can't be opened says so and where it can be deleted
+ *   (nothing is held for it);
+ * - "This vault isn't being checked for missing or restored items." for a vault whose "no record" was accepted;
  * - "PassAuth can't read this device's record of your vaults." with "Reset on this device" (after a confirmation);
  * - a server this version refuses;
  * - signed sharing (background/signed-sharing.ts): shared vaults that failed a check and aren't used, a person whose
@@ -211,13 +213,19 @@ function ManifestLines({ manifest, server, refresh, notify }: { manifest: NonNul
           action={manifest.confirm.action}
           onClose={() => setAsking(null)}
           onConfirm={async () => {
-            await callPopup("manifest:accept", { vaultId: asking.id });
+            try {
+              await callPopup("manifest:accept", { vaultId: asking.id, forget: asking.forget === true });
+            } catch (e) {
+              // Not accepted (the server's copy changed, or can't be accepted): the list shows the vault as it is now.
+              refresh();
+              throw e;
+            }
             notify(`${asking.name}: PassAuth uses the server's copy now.`);
             setAsking(null);
             refresh();
           }}
         >
-          <p className="card-text">{manifest.confirm.body}</p>
+          <p className="card-text">{asking.forget ? manifest.confirm.forgetBody : manifest.confirm.body}</p>
         </ConfirmDialog>
       )}
     </>
@@ -286,9 +294,10 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
   const rollbackShown = rollback && dismissed.rollback !== rollback.key ? rollback : null;
   const manifest = data?.manifest;
   const memory = data?.memory;
+  const notChecked = data?.notChecked;
   const serverProblem = data?.serverProblem;
   const refresh = () => ctx.go({ tab: "vault", page: "list" });
-  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !memory && !serverProblem) return null;
+  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !memory && !notChecked && !serverProblem) return null;
   return (
     <div className="notices">
       {signIns && (
@@ -313,7 +322,7 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
         </div>
       )}
       {manifest && (
-        // Not dismissible: nothing can be saved into these vaults until the warning is resolved.
+        // Not dismissible: nothing can be saved into the warned vaults until the warning is resolved.
         <div className="alert alert-warn small notice" role="note">
           <div className="grow">
             <ManifestLines manifest={manifest} server={ctx.state.server} refresh={refresh} notify={ctx.notify} />
@@ -352,6 +361,18 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
             </span>
           ))}
         </Notice>
+      )}
+      {notChecked && (
+        // Quiet, and not dismissible: it stays until the vault has a record of changes again.
+        <div className="alert alert-info small notice" role="note">
+          <div className="grow">
+            {notChecked.vaults.map((v) => (
+              <span key={v.id}>
+                <strong>{v.name}</strong>: {notChecked.text}
+              </span>
+            ))}
+          </div>
+        </div>
       )}
       {rollbackShown && (
         <Notice tone="warn" onDismiss={() => dismiss("rollback", rollbackShown.key)}>

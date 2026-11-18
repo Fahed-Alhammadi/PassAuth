@@ -308,6 +308,10 @@ final class ManifestContractTests: XCTestCase {
                 guard liveSync, let body = try? body(vaults) else { return nil }
                 return (200, body)
             }
+            if r.method == "GET", r.path == "/api/sync/revision" {
+                guard liveSync else { return nil }
+                return json(200, ["revision": revision, "vaults": Dictionary(uniqueKeysWithValues: vaults.map { ($0.id, $0.seq) })])
+            }
             // /api/vaults/{id}/…
             if parts.count == 4, parts[1] == "vaults", let v = vaults.first(where: { $0.id == parts[2] }) {
                 switch (r.method, parts[3]) {
@@ -928,17 +932,22 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(s, .mismatch, "the row is checked with the data the server sent")
         XCTAssertEqual(repo.vault?.entries.first?.item.name, "Shop, before")
         XCTAssertTrue(repo.copyOf("acc")?.items.allSatisfy { $0.servedSha256 == nil } ?? false, "and never stored from an answer")
-        // An item hidden behind a key that doesn't open it (the data, and so the sum, is right).
+        // A key that doesn't open the item (the data, and so the sum, is right): this device
+        // opened the row before, so it goes on with the key it has (T1 a). Nothing is hidden.
         _ = try await after(good)
         rows = v.rows
         rows[0]["item_key"] = older.key
         s = try await after(try w.body([v], rows: rows))
-        XCTAssertEqual(s, .mismatch)
-        XCTAssertEqual(repo.vault?.entries.count, 0, "it can't be shown")
+        XCTAssertEqual(s, .ok)
+        XCTAssertEqual(repo.vault?.entries.count, 1, "still shown, from the row the device has")
+        XCTAssertEqual(repo.vault?.unopenable, [])
         // A trashed item without its data, with the right hash: this app asks for whole rows.
+        // The manifest adds up; the row is listed as one that can't be opened (T1 c).
         _ = try await after(good)
         s = try await after(try w.body([v], rows: [v.rows[0], Vault.summary(v.rows[1])]))
-        XCTAssertEqual(s, .mismatch)
+        XCTAssertEqual(s, .ok)
+        XCTAssertEqual(repo.vault?.unopenable.map(\.id), [v.rows[1]["id"] as? String ?? ""])
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 1)
         // A `deleted_at` that is no time: never a live item, never a match.
         _ = try await after(good)
         rows = v.rows
@@ -1933,11 +1942,28 @@ final class ManifestContractTests: XCTestCase {
         try await repo.sync()
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .rollback)
         XCTAssertEqual(repo.vault?.vaults.first?.manifestAcceptable, true)
+        // T3: accepting this means the vault is no longer checked; the confirmation says so
+        // (`manifestGone` picks `ManifestText.confirmNoRecord`).
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, true)
+        XCTAssertEqual(repo.vault?.notCheckedVaults.count, 0)
         XCTAssertTrue(sent("PUT", "/manifest").isEmpty, "no first manifest over a rollback")
+        // The server can't start a record now (not every member's apps are up to date).
+        v.manifestOk = false
         try await repo.useServerCopy(v.id)
         XCTAssertTrue(sent("PUT", "/manifest").isEmpty, "accepting sends nothing")
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, ManifestStatus.none)
-        XCTAssertEqual(remembered(v), .forgotten(accepts: 1))
+        XCTAssertEqual(remembered(v), .forgotten(accepts: 1, noRecord: true))
+        // The quiet note, for as long as the vault has no manifest: after syncs, and for every
+        // later open of the copy (a new process, the AutoFill extension).
+        XCTAssertEqual(repo.vault?.notCheckedVaults.map(\.id), [v.id], "This vault isn't being checked for missing or restored items.")
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.notCheckedVaults.map(\.id), [v.id])
+        let reopened = try await self.repo(w, in: store()) { $0.preferCache = true }
+        XCTAssertEqual(reopened.vault?.notCheckedVaults.map(\.id), [v.id])
+        try await repo.createItem(named("Still writable"), vaultId: nil)
+        XCTAssertEqual(repo.vault?.notCheckedVaults.map(\.id), [v.id])
+        v.manifestOk = true
         // Not undone by a stale memory, and readable after a restart.
         XCTAssertEqual(store().readManifestMemory("acc")?[v.id]?.valid, false)
         // The next sync starts the vault's first manifest: version 1 on nothing.
@@ -1949,6 +1975,7 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(put.body["prev"] as? String, Self.zeroLink)
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         XCTAssertEqual(remembered(v), ManifestMark(version: 1, link: try v.link(), accepts: 1))
+        XCTAssertEqual(repo.vault?.notCheckedVaults.count, 0, "a record again: the note is gone")
         XCTAssertEqual(w.problems, [])
     }
 
@@ -2500,11 +2527,10 @@ final class ManifestContractTests: XCTestCase {
 
     // MARK: Items that can't be opened
 
-    /// A row with a correct manifest whose key is garbage (a member with write access can post
-    /// one; the server can't tell): the vault is warned, saying what to do, and the item is
-    /// listed with nothing but "Delete for good". That delete is the one write the vault takes
-    /// while warned; afterwards it is fine and writable. Neither "Use the server's copy" nor
-    /// anything else locks it for good (rereview-mobile F2, rule S2).
+    /// T1 (c): a row that can't be decrypted (and that this device never opened) is listed as
+    /// "Item that can't be opened" and its vault gets the notice. The manifest still matches, so
+    /// nothing is warned or held: other writes go on. Members who can edit may delete it for
+    /// good, an ordinary manifest write without the row; a reader can't.
     func testAnItemThatCannotBeOpenedIsListedAndDeleted() async throws {
         let (w, v) = try world()
         v.manifestSeq = 4
@@ -2518,47 +2544,56 @@ final class ManifestContractTests: XCTestCase {
         v.rows[2]["item_key"] = NSNull()
         w.liveSync = true
         let repo = try await repo(w, app: true)
-        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .mismatch)
-        XCTAssertEqual(repo.vault?.vaults.first?.unopenable, true, "its manifest matches: the items are the one problem")
-        XCTAssertEqual(repo.vault?.vaults.first?.manifestAcceptable, false)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok, "its manifest matches: nothing is warned")
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        XCTAssertEqual(repo.vault?.unopenableNotices.map(\.id), [v.id], "An item in this vault can't be opened.")
         XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Shop"])
         XCTAssertEqual(repo.vault?.trash.count, 0)
         XCTAssertEqual(Set(repo.vault?.unopenable.map(\.id) ?? []), [bad, keyless])
         XCTAssertEqual(repo.vault?.unopenable.first { $0.id == keyless }?.deletedAt, 1_700_000_900, "listed in the trash")
+        XCTAssertNil(repo.vault?.unopenable.first?.name, "never read on this device: no name to show")
         XCTAssertEqual(remembered(v), try mark(v), "the manifest is remembered: it matches")
-        // "Use the server's copy" has nothing to accept, and writes nothing.
-        await assertThrows(ManifestText.unopenable) { try await repo.useServerCopy(v.id) }
-        XCTAssertTrue(sent("PUT", "/manifest").isEmpty)
-        // Other writes wait.
-        await assertThrows(ManifestText.held) { try await repo.createItem(self.named("Note"), vaultId: nil) }
-        XCTAssertTrue(itemWrites().isEmpty)
+        XCTAssertNil(repo.copyOf("acc")?.warned)
+        // No write hold: the vault is used as before.
+        try await repo.createItem(named("Note"), vaultId: nil)
+        XCTAssertEqual(manifests(try XCTUnwrap(sent("POST", "/api/items").last)).first?.seq, 5)
+        XCTAssertEqual(w.problems, [], "the manifest counts the rows it can't open by their data")
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 1, "the notice stays while the rows do")
+        // A new process (the AutoFill extension) opens the copy the same way.
+        let ext = try await self.repo(w, in: store()) { $0.preferCache = true }
+        XCTAssertEqual(ext.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(ext.vault?.manifestWarnings.count, 0)
 
         // Delete for good: an ordinary manifest write without the row as it was synced. A live
         // row goes with the same request.
         var link = try v.link()
         let live = try XCTUnwrap(repo.vault?.unopenable.first { $0.id == bad })
+        // A reader can't.
+        v.role = "read"
+        try await repo.sync()
+        await assertThrows("You can only view items in this vault.") { try await repo.deleteUnopenable(live) }
+        v.role = "owner"
+        try await repo.sync()
         try await repo.deleteUnopenable(live)
         var del = try XCTUnwrap(sent("DELETE", "/api/items/\(bad)/permanent").last)
         XCTAssertEqual(query(del)["revision"], "9")
-        XCTAssertEqual(query(del)["manifest_seq"], "5")
-        XCTAssertEqual(query(del)["manifest_prev"], link)
-        XCTAssertEqual(w.problems, [])
-        XCTAssertEqual(repo.vault?.unopenable.map(\.id), [keyless])
-        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .mismatch, "still warned while one is left")
-        XCTAssertEqual(repo.vault?.vaults.first?.unopenable, true)
-        link = try v.link()
-        try await repo.deleteUnopenable(try XCTUnwrap(repo.vault?.unopenable.first))
-        del = try XCTUnwrap(sent("DELETE", "/api/items/\(keyless)/permanent").last)
         XCTAssertEqual(query(del)["manifest_seq"], "6")
         XCTAssertEqual(query(del)["manifest_prev"], link)
         XCTAssertEqual(w.problems, [])
-        XCTAssertEqual(repo.vault?.unopenable, [])
+        XCTAssertEqual(repo.vault?.unopenable.map(\.id), [keyless])
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
-        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 1, "one is left")
+        link = try v.link()
+        try await repo.deleteUnopenable(try XCTUnwrap(repo.vault?.unopenable.first))
+        del = try XCTUnwrap(sent("DELETE", "/api/items/\(keyless)/permanent").last)
+        XCTAssertEqual(query(del)["manifest_seq"], "7")
+        XCTAssertEqual(query(del)["manifest_prev"], link)
+        XCTAssertEqual(w.problems, [])
+        XCTAssertEqual(repo.vault?.unopenable, [])
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 0)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         XCTAssertEqual(remembered(v), try mark(v))
-        // The vault is writable again, and a sync agrees.
-        try await repo.createItem(named("Note"), vaultId: nil)
-        XCTAssertEqual(manifests(try XCTUnwrap(sent("POST", "/api/items").last)).first?.seq, 7)
         try await repo.sync()
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         XCTAssertEqual(w.problems, [])
@@ -2566,9 +2601,9 @@ final class ManifestContractTests: XCTestCase {
         try await repo.deleteUnopenable(live)
     }
 
-    /// A reader can't delete it; a vault whose manifest is wrong as well needs "Use the server's
-    /// copy" first (the baseline counts the item it can't open) and stays warned afterwards
-    /// until the item is deleted; another device's write in between is retried.
+    /// A vault whose manifest is wrong as well is warned for that, and "Use the server's copy"
+    /// is its way out (the baseline counts the item it can't open); the notice for the item
+    /// stays afterwards until it is deleted. Another device's write in between is retried.
     func testAnUnopenableItemBesideAWrongManifest() async throws {
         let (w, v) = try world()
         v.manifestSeq = 4
@@ -2576,36 +2611,446 @@ final class ManifestContractTests: XCTestCase {
         let bad = try v.add("Broken")
         let stray = try v.key.encryptItem(itemJson: ItemCodec.encode(named("Other")), id: bad, vaultId: v.id)
         v.rows[1]["item_key"] = stray.key
-        v.role = "read"
         w.liveSync = true
         let repo = try await repo(w, app: true)
         XCTAssertEqual(repo.vault?.vaults.first?.unopenable, true)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         let item = try XCTUnwrap(repo.vault?.unopenable.first)
-        await assertThrows("You can only view items in this vault.") { try await repo.deleteUnopenable(item) }
-        await assertThrows(ManifestText.unopenableReader) { try await repo.useServerCopy(v.id) }
-        XCTAssertTrue(itemWrites().isEmpty)
-        // An editor, and the server also lost an item: the record is wrong too.
-        v.role = "owner"
+        // The server also lost an item: the record is wrong.
         w.hidden = [shop]
         try await repo.sync()
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .mismatch)
-        XCTAssertEqual(repo.vault?.vaults.first?.unopenable, false, "not the only problem")
+        XCTAssertEqual(repo.vault?.vaults.first?.unopenable, true, "the item's notice is its own")
         XCTAssertEqual(repo.vault?.unopenable.map(\.id), [bad], "listed all the same")
         await assertThrows(ManifestText.held) { try await repo.deleteUnopenable(item) }
         XCTAssertTrue(itemWrites().isEmpty)
         try await repo.useServerCopy(v.id)
         XCTAssertEqual(sent("PUT", "/manifest").count, 1)
         XCTAssertEqual(w.problems, [], "the baseline counts the row it can't open by its data")
-        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .mismatch, "still warned: the item is still there")
-        XCTAssertEqual(repo.vault?.vaults.first?.unopenable, true)
-        XCTAssertEqual(repo.vault?.manifestWarnings.count, 1)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 1, "the notice stays while the row remains")
         // Another device's write gets in first: synced, checked, sent again.
         ScriptedServer.answer("DELETE /api/items/\(bad)/permanent", 409, conflict)
         try await repo.deleteUnopenable(item)
         XCTAssertEqual(sent("DELETE", "/api/items/\(bad)/permanent").count, 2)
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         XCTAssertEqual(repo.vault?.unopenable, [])
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 0)
         XCTAssertEqual(w.problems, [])
+    }
+
+    /// T1 (a): only the served `item_key` fails for an item this device already opened with the
+    /// same data. The device goes on with the row it has: the item is shown, filled and
+    /// editable, nothing is listed, warned or held, and the copy on the device keeps the key
+    /// that opens it (so a later open, another process, still has the item).
+    func testADamagedKeyForAnItemTheDeviceHasChangesNothing() async throws {
+        let (w, v) = try world()
+        v.manifestSeq = 4
+        let shop = try v.add("Shop", username: "alice", password: "pw-1", url: "https://shop.example.com")
+        try v.add("Other")
+        w.liveSync = true
+        let repo = try await repo(w, app: true)
+        let good = try XCTUnwrap(v.rows[0]["item_key"] as? String)
+        // The server damages the key (the data, which the manifest records, stays).
+        let stray = try v.key.encryptItem(itemJson: ItemCodec.encode(named("Stray")), id: shop, vaultId: v.id)
+        v.rows[0]["item_key"] = stray.key
+        w.revision += 1
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.get(shop)?.item.login?.password, "pw-1", "still the item")
+        XCTAssertEqual(repo.vault?.unopenable, [])
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 0)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertNil(repo.vault?.rollback)
+        XCTAssertEqual(repo.copyOf("acc")?.items.first { $0.id == shop }?.itemKey, good, "the copy keeps the key that opens it")
+        XCTAssertEqual(SyncSnapshot.decode(try XCTUnwrap(repo.store.readCache("acc")))?.items.first { $0.id == shop }?.itemKey, good)
+        // Again and again (every answer carries the bad key), and from a new process.
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.get(shop)?.item.name, "Shop")
+        let ext = try await self.repo(w, in: store()) { $0.preferCache = true }
+        XCTAssertEqual(ext.vault?.get(shop)?.item.login?.password, "pw-1")
+        try await ext.sync()
+        XCTAssertEqual(ext.vault?.get(shop)?.item.login?.password, "pw-1")
+        XCTAssertEqual(ext.vault?.unopenable, [])
+        // Writable: saving it again sends a row that opens everywhere.
+        try await repo.updateItem(try XCTUnwrap(repo.vault?.get(shop)), named("Shop 2"))
+        XCTAssertEqual(repo.vault?.get(shop)?.item.name, "Shop 2")
+        XCTAssertEqual(w.problems, [])
+        // A device that never had the item can't do that: listed, with no name.
+        tearDownStore()
+        v.rows[0]["item_key"] = stray.key
+        let fresh = try await self.repo(w, app: true)
+        XCTAssertEqual(fresh.vault?.unopenable.map(\.id), [shop])
+        XCTAssertEqual(fresh.vault?.vaults.first?.manifest, .ok)
+    }
+
+    /// The name of an item that stops opening is the one this device last read (its data changed
+    /// too, so the device's own row can't stand in).
+    func testAnItemThatStopsOpeningKeepsItsLastKnownName() async throws {
+        let (w, v) = try world()
+        v.manifestOk = false
+        let shop = try v.add("Shop")
+        w.liveSync = true
+        let repo = try await repo(w, app: true)
+        let other = try Vault(w.created.account, name: "Elsewhere")
+        let foreign = try other.key.encryptItem(itemJson: ItemCodec.encode(named("X")), id: shop, vaultId: v.id)
+        v.rows[0]["item_key"] = foreign.key
+        v.rows[0]["data"] = foreign.data
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.unopenable.map(\.id), [shop])
+        XCTAssertEqual(repo.vault?.unopenable.first?.name, "Shop")
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 1)
+    }
+
+    // MARK: Round 3: warnings stay with the stored copy (N1)
+
+    /// A whole server answer that failed its check becomes the stored copy together with its
+    /// warning. Everyone who opens that copy later (the app after a lock and unlock or a
+    /// restart, the iOS AutoFill extension, the macOS extension) is warned too, without the
+    /// server, and AutoFill doesn't hand a login of that vault over unseen. The warning clears
+    /// with a later answer that checks out. Vaults the answer didn't warn about keep the quiet
+    /// two-process rule.
+    func testAWarningStaysWithTheStoredCopy() async throws {
+        for what in ["an item hidden", "an older state of the vault"] {
+            tearDownStore()
+            ScriptedServer.requests = []
+            let (w, v) = try world()
+            let calm = try Vault(w.created.account, name: "Calm")
+            w.vaults = [v, calm]
+            calm.manifestSeq = 2
+            try calm.add("Calm item")
+            v.manifestSeq = 3
+            let shop = try v.add("Shop", username: "alice", password: "pw-1", url: "https://shop.example.com")
+            let olderState = (rows: v.rows, seq: v.seq)
+            try v.add("Second")
+            v.manifestSeq = 4
+            v.seq += 1
+            w.liveSync = true
+            let shared = store()
+            seed(shared, w)
+            let app = try await repo(w, app: true, in: shared)
+            XCTAssertEqual(app.vault?.vaults.map(\.manifest), [.ok, .ok], what)
+            XCTAssertNil(app.copyOf("acc")?.warned, what)
+
+            // The server turns bad; the app (unlocked, in the foreground) syncs.
+            if what == "an item hidden" {
+                w.hidden = [v.rows[1]["id"] as? String ?? ""]
+            } else {
+                v.rows = olderState.rows
+                v.manifestSeq = 3
+                v.seq = olderState.seq
+                w.revision -= 1
+            }
+            try await app.sync()
+            XCTAssertEqual(app.vault?.manifestWarnings.map(\.id), [v.id], what)
+            let warned = try XCTUnwrap(app.vault?.vaults.first?.manifest)
+            XCTAssertEqual(SyncSnapshot.decode(try XCTUnwrap(shared.readCache("acc")))?.warned, LocalWarnings(vaults: [v.id], items: []),
+                           "\(what): kept with the stored copy")
+            XCTAssertEqual(remembered(v, in: shared)?.version, 4, what)
+
+            // From here on the server doesn't answer at all (5xx): nothing but the copy.
+            w.liveSync = false
+            func assertWarned(_ r: VaultRepository, _ who: String, file: StaticString = #filePath, line: UInt = #line) throws {
+                XCTAssertEqual(r.vault?.manifestWarnings.map(\.id), [v.id], "\(what), \(who)", file: file, line: line)
+                XCTAssertEqual(r.vault?.vaults.first?.manifest, warned, "\(what), \(who)", file: file, line: line)
+                XCTAssertEqual(r.vault?.vaults.last?.manifest, .ok, "\(what), \(who): the other vault is fine", file: file, line: line)
+                // What the AutoFill model asks before it fills, and what its list shows.
+                let login = try XCTUnwrap(r.vault?.get(shop), file: file, line: line)
+                XCTAssertEqual(r.vault?.fillNeedsReview(login), true, "\(what), \(who): not filled unseen", file: file, line: line)
+                XCTAssertEqual(r.vault?.fillWarning, "Personal: " + ManifestText.warning, "\(what), \(who)", file: file, line: line)
+                XCTAssertEqual(r.vault?.vaults.first?.manifestAcceptable, what == "an older state of the vault", "\(what), \(who)", file: file, line: line)
+            }
+            let before = ScriptedServer.recorded().count
+            // The iOS AutoFill extension: its own process on the same files; also what
+            // `provideWithoutUserInteraction` opens (kept keys, no sync).
+            let ext = try await repo(w, in: store(.appExtension)) { $0.preferCache = true }
+            try assertWarned(ext, "the AutoFill extension")
+            XCTAssertEqual(ScriptedServer.recorded().count, before, "\(what): from the copy alone")
+            // The macOS extension (summary rows, its own store role).
+            if what == "an older state of the vault" {
+                let mac = try await repo(w, in: store()) { $0.trashSummary = true; $0.preferCache = true }
+                try assertWarned(mac, "the macOS extension")
+            }
+            // The app after a lock and unlock (the same object), and after a restart.
+            await app.lockActive()
+            try await app.unlock(password: password, secretKey: nil)
+            try assertWarned(app, "the app after lock and unlock")
+            await settled(app)
+            try assertWarned(app, "the app after its background sync failed")
+            let relaunched = try await repo(w, app: true, in: store())
+            try assertWarned(relaunched, "the app after a restart")
+            await settled(relaunched)
+            try assertWarned(relaunched, "the restarted app, server still silent")
+
+            // The server answers again, still bad: the warning stays (and stays stored), and
+            // nothing is written into the vault, from the app or from AutoFill's save.
+            w.liveSync = true
+            try await relaunched.sync()
+            try assertWarned(relaunched, "after another bad answer")
+            XCTAssertEqual(syncs().last?.query, "", "\(what): a warned copy is checked against everything, not a delta")
+            await assertThrows(ManifestText.held) { try await relaunched.createItem(self.named("Note"), vaultId: v.id) }
+            await assertThrows(ManifestText.held) { _ = try await ext.saveLogin(page: "https://shop.example.com/", username: "alice", password: "pw-2") }
+            XCTAssertTrue(itemWrites().isEmpty, what)
+            // A later answer that checks out clears it, in the copy too, for everyone.
+            if what == "an item hidden" {
+                w.hidden = []
+            } else {
+                try v.add("Second again")
+                v.manifestSeq = 4
+                v.seq += 1
+                w.revision += 2
+                // (not the state this device saw at 4: only "Use the server's copy" settles it)
+                try await relaunched.sync()
+                XCTAssertEqual(relaunched.vault?.manifestWarnings.map(\.id), [v.id], "a fork at the remembered version")
+                try await relaunched.useServerCopy(v.id)
+            }
+            try await relaunched.sync()
+            XCTAssertEqual(relaunched.vault?.manifestWarnings.count, 0, what)
+            XCTAssertEqual(relaunched.vault?.vaults.map(\.manifest), [.ok, .ok], what)
+            XCTAssertNil(SyncSnapshot.decode(try XCTUnwrap(shared.readCache("acc")))?.warned, "\(what): cleared with the copy")
+            let after = try await repo(w, in: store(.appExtension)) { $0.preferCache = true }
+            XCTAssertEqual(after.vault?.manifestWarnings.count, 0, what)
+            XCTAssertEqual(after.vault?.fillNeedsReview(try XCTUnwrap(after.vault?.get(shop))), false, what)
+            XCTAssertNil(after.vault?.fillWarning, what)
+        }
+    }
+
+    /// An item the server sent an older version of, with no newer copy on this device to show
+    /// instead (it came with a whole answer after this device had only the counter): the mark
+    /// stays with the stored copy too, so a later open still says so and AutoFill doesn't fill
+    /// it unseen. Items the answer didn't mark stay unmarked from the copy (two processes).
+    func testAnOlderItemWithoutANewerCopyStaysMarkedInTheStoredCopy() async throws {
+        let (w, v) = try world()
+        v.manifestOk = false
+        let shop = try v.add("Shop", username: "alice", password: "pw-old", url: "https://shop.example.com")
+        let other = try v.add("Other")
+        w.liveSync = true
+        let shared = store()
+        seed(shared, w)
+        let app = try await repo(w, app: true, in: shared)
+        let original = v.rows[0]
+        var edited = try XCTUnwrap(app.vault?.get(shop)).item
+        edited.login?.password = "pw-new"
+        try await app.updateItem(try XCTUnwrap(app.vault?.get(shop)), edited)
+        XCTAssertEqual(shared.readItemRevs("acc")?[shop], 2)
+        // The copy on the device is lost (the app was reinstalled over its data, a new copy is
+        // fetched); the counters stay. The server serves the item as it was before the edit.
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("vault/acc.bin"))
+        v.rows[0] = original
+        let fresh = try await repo(w, app: true, in: store())
+        await settled(fresh)
+        XCTAssertEqual(fresh.vault?.get(shop)?.rolledBack, true)
+        XCTAssertEqual(fresh.vault?.rollback, ItemRollback(items: [shop], kept: []))
+        XCTAssertEqual(SyncSnapshot.decode(try XCTUnwrap(shared.readCache("acc")))?.warned, LocalWarnings(vaults: [], items: [shop]))
+        // A new process opens that copy, with no server.
+        w.liveSync = false
+        let ext = try await repo(w, in: store(.appExtension)) { $0.preferCache = true }
+        XCTAssertEqual(ext.vault?.get(shop)?.rolledBack, true, "still marked from the copy")
+        XCTAssertEqual(ext.vault?.get(other)?.rolledBack, false)
+        XCTAssertEqual(ext.vault?.fillNeedsReview(try XCTUnwrap(ext.vault?.get(shop))), true)
+        XCTAssertEqual(ext.vault?.fillNeedsReview(try XCTUnwrap(ext.vault?.get(other))), false)
+        XCTAssertEqual(ext.vault?.fillWarning, "Your server sent older versions of some items.")
+        XCTAssertEqual(ext.vault?.manifestWarnings.count, 0)
+        // The newer version again: the mark is gone, in the copy too.
+        w.liveSync = true
+        try await app.updateItem(try XCTUnwrap(fresh.vault?.get(shop)), edited)
+        try await ext.sync()
+        XCTAssertEqual(ext.vault?.get(shop)?.rolledBack, false)
+        XCTAssertNil(ext.vault?.rollback)
+        XCTAssertNil(SyncSnapshot.decode(try XCTUnwrap(shared.readCache("acc")))?.warned)
+    }
+
+    // MARK: Round 3: a restored server (T2), accepting (T3, T4), adoption (N10)
+
+    /// T2: a server restored from a backup answers with a LOWER revision (and lower vault
+    /// numbers). That answer is judged like any other, never dropped as "older than what I
+    /// have": the revision check sees a difference, the sync fetches, the manifest check reports
+    /// the rollback, and "Use the server's copy" works.
+    func testALowerRevisionAfterARestoreIsJudged() async throws {
+        let (w, v) = try world()
+        v.manifestSeq = 9
+        try v.add("Shop")
+        let backup = (rows: v.rows, seq: v.seq, revision: w.revision)
+        try v.add("Second")
+        v.manifestSeq = 10
+        v.seq += 1
+        w.revision += 3
+        w.liveSync = true
+        let repo = try await repo(w, app: true)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(repo.vault?.revision, backup.revision + 3)
+        // The restore: everything as it was, the revision too.
+        v.rows = backup.rows
+        v.manifestSeq = 9
+        v.seq = backup.seq
+        w.revision = backup.revision
+        let before = syncs().count
+        await repo.refreshIfStale()
+        XCTAssertGreaterThan(syncs().count, before, "a lower revision is a reason to sync")
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .rollback, "judged, not ignored")
+        XCTAssertEqual(repo.vault?.revision, backup.revision, "the answer is the copy now, with its warning")
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Shop"])
+        XCTAssertEqual(repo.copyOf("acc")?.warned?.vaults, [v.id])
+        await assertThrows(ManifestText.held) { try await repo.createItem(self.named("Note"), vaultId: nil) }
+        // A plain sync and a new unlock say the same.
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .rollback)
+        let again = try await self.repo(w, app: true, in: store())
+        XCTAssertEqual(again.vault?.vaults.first?.manifest, .rollback)
+        await settled(again)
+        XCTAssertEqual(again.vault?.vaults.first?.manifest, .rollback)
+        // The way out works.
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestAcceptable, true)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, false)
+        try await repo.useServerCopy(v.id)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertNil(repo.copyOf("acc")?.warned)
+        try await repo.createItem(named("Note"), vaultId: nil)
+        XCTAssertEqual(manifests(try XCTUnwrap(sent("POST", "/api/items").last)).first?.seq, 10)
+        XCTAssertEqual(w.problems, [])
+    }
+
+    /// T4: "Use the server's copy" also lets go of what this device held against the server's
+    /// copy of that vault's items: the newer copies it kept and the edit counters it remembered.
+    /// No "older versions" notice is left, the items are shown as the server has them, and
+    /// nothing comes back at the next sync or open. Another vault's items keep their marks.
+    func testAcceptingAlsoClearsTheVaultsOlderItemMarks() async throws {
+        for baseline in [false, true] {
+            tearDownStore()
+            ScriptedServer.requests = []
+            let (w, v) = try world()
+            let other = try Vault(w.created.account, name: "Work")
+            w.vaults = [v, other]
+            v.manifestSeq = 4
+            other.manifestOk = false
+            let shop = try v.add("Shop")
+            try v.add("Second")
+            let work = try other.add("Work item")
+            w.liveSync = true
+            let shared = store()
+            seed(shared, w)
+            let repo = try await repo(w, app: true, in: shared)
+            let backup = (rows: v.rows, seq: v.seq, revision: w.revision, workRows: other.rows)
+            // Edits since the backup, in both vaults.
+            try await repo.updateItem(try XCTUnwrap(repo.vault?.get(shop)), named("Shop 2"))
+            try await repo.updateItem(try XCTUnwrap(repo.vault?.get(work)), named("Work item 2"))
+            XCTAssertEqual(shared.readItemRevs("acc")?[shop], 2)
+            // The admin restores the backup.
+            v.rows = backup.rows
+            v.manifestSeq = 4
+            v.seq = backup.seq
+            other.rows = backup.workRows
+            w.revision = backup.revision
+            if baseline { w.hidden = [v.rows[1]["id"] as? String ?? ""] }
+            try await repo.sync()
+            XCTAssertTrue(repo.vault?.vaults.first?.manifest.warns == true, "\(baseline)")
+            XCTAssertEqual(repo.vault?.rollback, ItemRollback(items: [shop, work], kept: [shop, work]), "\(baseline)")
+            XCTAssertEqual(repo.vault?.get(shop)?.item.name, "Shop 2", "the newer copy is shown until the user decides")
+
+            try await repo.useServerCopy(v.id)
+            XCTAssertEqual(sent("PUT", "/manifest").count, baseline ? 1 : 0, "\(baseline)")
+            XCTAssertEqual(w.problems, [], "\(baseline)")
+            XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok, "\(baseline)")
+            XCTAssertEqual(repo.vault?.get(shop)?.item.name, "Shop", "\(baseline): as the server has it")
+            XCTAssertEqual(repo.vault?.get(shop)?.rolledBack, false, "\(baseline)")
+            XCTAssertNil(repo.copyOf("acc")?.items.first { $0.id == shop }?.servedSha256, "\(baseline): the kept copy is gone")
+            XCTAssertEqual(shared.readItemRevs("acc")?[shop], 1, "\(baseline): the counter is the served one")
+            // Only that vault: the other vault's item is still the newer copy, still marked.
+            XCTAssertEqual(repo.vault?.rollback, ItemRollback(items: [work], kept: [work]), "\(baseline)")
+            XCTAssertEqual(repo.vault?.get(work)?.item.name, "Work item 2", "\(baseline)")
+            XCTAssertEqual(shared.readItemRevs("acc")?[work], 2, "\(baseline)")
+            // Nothing comes back: a sync, a new process, a restart.
+            try await repo.sync()
+            XCTAssertEqual(repo.vault?.rollback?.items, [work], "\(baseline)")
+            XCTAssertEqual(repo.vault?.get(shop)?.item.name, "Shop", "\(baseline)")
+            let again = try await self.repo(w, app: true, in: store())
+            await settled(again)
+            XCTAssertEqual(again.vault?.rollback?.items, [work], "\(baseline)")
+            XCTAssertEqual(again.vault?.get(shop)?.rolledBack, false, "\(baseline)")
+            XCTAssertEqual(again.vault?.vaults.first?.manifest, .ok, "\(baseline)")
+            // And the vault is written to from what was accepted.
+            try await repo.updateItem(try XCTUnwrap(repo.vault?.get(shop)), named("Shop 3"))
+            XCTAssertEqual(w.problems, [], "\(baseline)")
+        }
+    }
+
+    /// N10: what a background refresh kept is judged against the device memory as it is stored
+    /// when it is adopted (not as this process read it when it opened the copy), and only over
+    /// the copy this process opened. The app writes between the extension's open and its
+    /// adoption: the answer from before that write is dropped, the app's newer copy stays.
+    func testAnOlderRefreshNeverReplacesANewerStoredCopy() async throws {
+        let (w, v) = try world()
+        let other = try Vault(w.created.account, name: "Work")
+        w.vaults = [v, other]
+        v.manifestSeq = 4
+        other.manifestSeq = 2
+        try v.add("Shop")
+        try other.add("Work item")
+        w.liveSync = true
+        let shared = store()
+        seed(shared, w)
+        let app = try await repo(w, app: true, in: shared)
+        // The extension opens the copy (nothing kept aside yet) and stays open.
+        let ext = try await repo(w, in: store(.appExtension)) { $0.preferCache = true }
+        let locked = try await repo(w, unlock: false, in: store())
+        // Another device saves into the other vault; a keyless refresh keeps that answer aside.
+        try other.add("Second work item")
+        other.manifestSeq = 3
+        other.seq += 1
+        w.revision += 1
+        try await locked.refreshCacheLocked(accountId: "acc")
+        XCTAssertTrue(shared.hasRefreshed("acc"))
+        // The app saves into the personal vault from its copy (applied to it, no sync): the
+        // stored copy and the memory are at 5 now. The answer kept aside has it at 4.
+        let before = syncs().count
+        try await app.createItem(named("From the app"), vaultId: v.id)
+        XCTAssertEqual(syncs().count, before, "applied to the copy")
+        XCTAssertEqual(remembered(v, in: shared)?.version, 5)
+        XCTAssertTrue(shared.hasRefreshed("acc"), "still there")
+        let newer = try XCTUnwrap(shared.readCache("acc"))
+        // The extension adopts now, with the memory it read before the app's write.
+        await ext.adoptRefreshedNow()
+        XCTAssertEqual(shared.readCache("acc"), newer, "the app's newer copy stays")
+        XCTAssertEqual(SyncSnapshot.decode(newer)?.vaults.first?.manifestVersion, 5)
+        XCTAssertFalse(shared.hasRefreshed("acc"), "dropped")
+        XCTAssertEqual(ext.vault?.manifestWarnings.count, 0)
+        XCTAssertEqual(remembered(v, in: shared)?.version, 5)
+        // Its next sync brings everything.
+        try await ext.sync()
+        XCTAssertEqual(ext.vault?.vaults.map(\.manifest), [.ok, .ok])
+        XCTAssertEqual(ext.vault?.entries.map(\.item.name).sorted(), ["From the app", "Second work item", "Shop", "Work item"])
+    }
+
+    /// The unreadable-memory way out also counts the app's record of when it first saw each
+    /// trashed item: unreadable alone, it gets the notice and "Reset on this device" too.
+    func testAnUnreadableTrashRecordAlsoHasTheWayOut() async throws {
+        let (w, v) = try world()
+        v.manifestSeq = 4
+        try v.add("Shop")
+        try v.add("Old", trashedAt: 1_700_000_500)
+        w.liveSync = true
+        let shared = store()
+        seed(shared, w)
+        _ = try await repo(w, app: true, in: shared)
+        let file = dir.appendingPathComponent("vault/acc.trashed")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        try Data("garbage".utf8).write(to: file)
+        let repo = try await self.repo(w, app: true, in: shared)
+        await settled(repo)
+        try await repo.sync()
+        try await repo.sync()
+        XCTAssertTrue(repo.memoryProblem, "three failed reads across syncs that worked")
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok, "the vault itself is checked: its memory reads")
+        // The AutoFill extension doesn't keep that record: nothing to say there.
+        let ext = try await self.repo(w, in: store(.appExtension)) { $0.preferCache = true }
+        try await ext.sync()
+        try await ext.sync()
+        try await ext.sync()
+        XCTAssertFalse(ext.memoryProblem)
+        try await repo.resetDeviceMemory()
+        XCTAssertFalse(repo.memoryProblem)
+        XCTAssertEqual(try Data(contentsOf: file.appendingPathExtension("unreadable")), Data("garbage".utf8))
+        XCTAssertNotNil(shared.readTrashSeen("acc"))
     }
 
     /// No first manifest is started over a vault with an item that can't be opened (every
@@ -2716,9 +3161,9 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(ext.replaceManifestMark("acc", vault: "v1", with: m(2, "r"))?["v1"], ManifestMark(version: 2, link: m(2, "r").link, accepts: 1))
         app.writeManifestMemory("acc", ["v1": m(5, "a"), "v2": m(4, "d")])
         XCTAssertEqual(app.readManifestMemory("acc")?["v1"], ManifestMark(version: 2, link: m(2, "r").link, accepts: 1))
-        XCTAssertEqual(app.replaceManifestMark("acc", vault: "v3", with: nil)?["v3"], .forgotten(accepts: 1))
+        XCTAssertEqual(app.replaceManifestMark("acc", vault: "v3", with: nil)?["v3"], .forgotten(accepts: 1, noRecord: true))
         ext.writeManifestMemory("acc", ["v3": m(1, "e")])
-        XCTAssertEqual(app.readManifestMemory("acc")?["v3"], .forgotten(accepts: 1), "what was forgotten isn't brought back")
+        XCTAssertEqual(app.readManifestMemory("acc")?["v3"], .forgotten(accepts: 1, noRecord: true), "what was forgotten isn't brought back")
         XCTAssertEqual(app.replaceManifestMark("acc", vault: "v1", with: m(5, "a"))?["v1"]?.accepts, 2)
         XCTAssertEqual(app.replaceManifestMark("acc", vault: "v3", with: m(1, "e"))?["v3"], ManifestMark(version: 1, link: m(1, "e").link, accepts: 2))
         // Sealed on the device (not readable as JSON), in the vault folder.
