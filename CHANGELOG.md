@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.13.0 (2026-11-18)
+
+- Apps: profile pictures and a globe tile when website icons are off (107d7ea)
+- Profile pictures: sealed avatar in core, server storage and sync version (84c5010)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.12.1...server-0.13.0)
+
 ## 0.12.1 (2026-11-17)
 
 - Web vault: reorganize Settings and the admin page into sections (8c73bd9)
