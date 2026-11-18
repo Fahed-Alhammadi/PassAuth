@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.14.0 (2026-11-18)
+
+- Apps: bound wraps, Send v2 and item rollback warnings (260e0ac)
+- Security: epoch-bound account wraps, password-keyed Sends, item edit counter (24282f5)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.13.1...server-0.14.0)
+
 ## 0.13.1 (2026-11-18)
 
 - Server: allow blob: images in the web vault CSP (profile pictures) (2cfc7ae)
