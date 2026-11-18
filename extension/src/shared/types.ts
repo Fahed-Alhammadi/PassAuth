@@ -136,10 +136,18 @@ export interface ItemList {
   /** Items the server sent in an older version than this browser had seen (background/item-revs.ts); `key`: for dismissing. */
   rollback?: { text: string; key: string };
   /**
-   * Vaults whose items don't match the vault's manifest (background/manifests.ts): the warning, what to do about it
-   * (the extension can't resolve it), and the vaults. They stay readable; nothing is written into them meanwhile.
+   * Vaults that show the manifest warning (background/manifests.ts `ManifestNotice`): per vault what is wrong (`text`),
+   * where it is resolved when not here (`hint`; `open`: in the web vault), and whether "Use the server's copy" is
+   * offered (`accept`: the served copy checks out on its own; `confirm`: its confirmation). They stay readable; nothing
+   * is written into them meanwhile.
    */
-  manifest?: { text: string; review: string; vaults: { id: string; name: string }[]; key: string };
+  manifest?: {
+    vaults: { id: string; name: string; text: string; hint?: string; accept?: boolean; open?: boolean }[];
+    key: string;
+    confirm: { action: string; title: string; body: string };
+  };
+  /** What this browser remembers of the account's vaults can't be read: the notice, with "Reset on this device" and its confirmation. */
+  memory?: { text: string; action: string; body: string };
   /** The server is one this version refuses ("Update your PassAuth server to keep using this app."): the list is the offline copy. */
   serverProblem?: string;
 }

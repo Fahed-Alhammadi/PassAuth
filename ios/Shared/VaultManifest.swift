@@ -42,25 +42,63 @@ public enum ManifestStatus: String, Sendable, Equatable {
 }
 
 /// What this device remembers of a vault's manifest: the version and link of the last one it
-/// checked `ok` or wrote itself.
+/// checked `ok`, wrote itself or accepted ("Use the server's copy"), and how often it replaced
+/// that memory by an acceptance (`accepts`). An entry without a version and link (`valid` false)
+/// remembers nothing but keeps its `accepts`, so an older copy of the memory can't bring back
+/// what an acceptance gave up.
 public struct ManifestMark: Codable, Equatable, Sendable {
     public var version: UInt64
     public var link: String
+    public var accepts: UInt64
 
-    public init(version: UInt64, link: String) {
+    public init(version: UInt64, link: String, accepts: UInt64 = 0) {
         self.version = version
         self.link = link
+        self.accepts = accepts
     }
 
-    /// A version of 1 or more and a link of 43 base64url characters; anything else (a bare
-    /// number from the first format too) is "nothing remembered".
-    public var valid: Bool { version >= 1 && version <= VaultManifest.maxNumber && VaultManifest.isLink(link) }
+    /// Nothing remembered, after `accepts` acceptances.
+    public static func forgotten(accepts: UInt64) -> ManifestMark { ManifestMark(version: 0, link: "", accepts: accepts) }
 
-    /// The entry of a stored memory, or nil when it isn't one.
+    /// A version of 1 or more and a link of 43 base64url characters that isn't the all-zero
+    /// link; anything else (a bare number from the first format too) is "nothing remembered".
+    public var valid: Bool {
+        version >= 1 && version <= VaultManifest.maxNumber && VaultManifest.isLink(link) && link != VaultManifest.zeroLink
+    }
+
+    /// The version as the merge orders it (nothing remembered counts as 0).
+    var rank: UInt64 { valid ? version : 0 }
+
+    /// The entry of a stored memory, or nil when it is nothing at all (no manifest remembered
+    /// and no acceptance counted).
     static func read(_ j: JSON) -> ManifestMark? {
-        guard case .object(let o) = j, case .int(let v)? = o["version"], v >= 1, case .string(let link)? = o["link"] else { return nil }
-        let m = ManifestMark(version: UInt64(v), link: link)
-        return m.valid ? m : nil
+        guard case .object(let o) = j else { return nil }
+        var accepts: UInt64 = 0
+        if case .int(let a)? = o["accepts"], a > 0 { accepts = UInt64(a) }
+        if case .int(let v)? = o["version"], v >= 1, case .string(let link)? = o["link"] {
+            let m = ManifestMark(version: UInt64(v), link: link, accepts: accepts)
+            if m.valid { return m }
+        }
+        return accepts > 0 ? .forgotten(accepts: accepts) : nil
+    }
+
+    enum CodingKeys: String, CodingKey { case version, link, accepts }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(UInt64.self, forKey: .version) ?? 0
+        link = try c.decodeIfPresent(String.self, forKey: .link) ?? ""
+        accepts = try c.decodeIfPresent(UInt64.self, forKey: .accepts) ?? 0
+    }
+
+    /// `{version, link, accepts}`; version and link only for a manifest that is remembered.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        if valid {
+            try c.encode(version, forKey: .version)
+            try c.encode(link, forKey: .link)
+        }
+        if accepts > 0 { try c.encode(accepts, forKey: .accepts) }
     }
 }
 
@@ -71,6 +109,21 @@ public enum ManifestText {
     public static let confirmTitle = "Use the server's copy?"
     public static let confirmBody = "PassAuth will accept this vault as the server has it now, including anything that is missing, restored or out of date. Do this only if you know why it changed, for example after the server was restored from a backup."
     public static let reader = "Someone who can edit this vault can review it."
+    /// Where nothing can be written over the server's copy from (the macOS AutoFill extension),
+    /// for a member who can edit the vault.
+    public static let reviewElsewhere = "Open the web vault or the desktop app to review this vault."
+    /// After "Use the server's copy" went through.
+    public static let accepted = "This vault now follows the server's copy."
+    /// The vault's only problem is an item nobody can open (its manifest matches).
+    public static let unopenable = "An item in this vault can't be opened. Delete it to keep using the vault."
+    public static let unopenableReader = "An item in this vault can't be opened. Someone who can edit this vault can delete it."
+    public static let unopenableItem = "Item that can't be opened"
+    public static let deleteForGood = "Delete for good"
+    public static let deleteConfirm = "This item can't be opened on this device. Deleting it removes it for everyone."
+    /// This device's record of the vaults (the memory file) can't be read.
+    public static let memoryUnreadable = "PassAuth can't read this device's record of your vaults."
+    public static let memoryReset = "Reset on this device"
+    public static let memoryResetConfirm = "PassAuth will trust what your server shows now and start a new record on this device."
     /// A write refused on this device while the vault's warning stands.
     public static let held = "This vault can't be changed until its warning is resolved."
     /// The vault isn't checked against the server's answer yet and the sync for it didn't settle it.
@@ -153,6 +206,9 @@ public enum VaultManifest {
     /// The largest whole number a server answer may carry where the apps count (2^53 − 1).
     public static let maxNumber: UInt64 = (1 << 53) - 1
 
+    /// The link a first manifest names as its predecessor (32 zero bytes): never a remembered one.
+    public static let zeroLink = String(repeating: "A", count: 43)
+
     /// How many requests the manifest log of one vault may take (2000 entries each).
     public static let logRequests = 5
 
@@ -199,54 +255,101 @@ public enum VaultManifest {
         }
     }
 
+    /// "Use the server's copy": the vault row and its items as served, checked with nothing
+    /// remembered (the core's `manifestAccept`, its own entry so an acceptance is never built
+    /// from a verdict that took the old memory into account). `ok`: the served manifest
+    /// describes the served items, `mark` is that manifest (this device may take it as its
+    /// memory without writing anything). `none`: the server shows no manifest (the memory may
+    /// be forgotten). Anything else, and anything the core can't read: `mismatch` (nothing may
+    /// be remembered; only a new baseline written by a member who can edit helps).
+    public static func accept(_ v: SyncVault, key: VaultKey, rows: [SyncItem]) -> (status: ManifestStatus, mark: ManifestMark?) {
+        do {
+            let c = try key.manifestAccept(vaultId: v.id, keyEpoch: UInt64(max(0, v.keyEpoch ?? 0)), manifestSeq: UInt64(max(0, v.manifestVersion)),
+                                           prev: v.manifestPrev, sealed: v.manifest, itemsJson: rowsJson(rows))
+            switch c.status {
+            case "none": return (.none, nil)
+            case "incomplete": return (.incomplete, nil)
+            case "ok":
+                guard let link = c.link else { return (.mismatch, nil) }
+                let mark = ManifestMark(version: c.version, link: link)
+                return mark.valid ? (.ok, mark) : (.mismatch, nil)
+            default: return (.mismatch, nil)
+            }
+        } catch {
+            return (.mismatch, nil)
+        }
+    }
+
     /// The device memory after a check: raised for `ok`, never lowered, never another link at
-    /// the same version, untouched otherwise.
+    /// the same version, untouched otherwise. The entry's `accepts` stays as it is.
     public static func remember(_ memory: inout [String: ManifestMark], vault: String, status: ManifestStatus, mark: ManifestMark?) {
-        guard status == .ok, let mark, mark.valid, mark.version > (memory[vault]?.version ?? 0) else { return }
-        memory[vault] = mark
+        guard status == .ok, let mark, mark.valid, mark.version > (memory[vault]?.rank ?? 0) else { return }
+        memory[vault] = ManifestMark(version: mark.version, link: mark.link, accepts: memory[vault]?.accepts ?? 0)
     }
 
-    /// Two device memories as one: per vault the entry with the higher version; at the same
-    /// version the one already stored (`stored`) stays (the app and its AutoFill extension both
-    /// write it; a link is never replaced at its version).
+    /// Two device memories as one, per vault: the entry with more acceptances wins (a process
+    /// that still holds what an acceptance gave up must not bring it back); with as many, the
+    /// higher version (nothing remembered counts as 0); at the same version the one already
+    /// stored (`stored`) stays (the app and its AutoFill extension both write it; a link is
+    /// never replaced at its version).
     public static func merged(_ stored: [String: ManifestMark], _ other: [String: ManifestMark]) -> [String: ManifestMark] {
-        stored.merging(other.filter { $0.value.valid }) { a, b in b.version > a.version ? b : a }
+        stored.merging(other.filter { $0.value.valid || $0.value.accepts > 0 }) { a, b in
+            if b.accepts != a.accepts { return b.accepts > a.accepts ? b : a }
+            return b.rank > a.rank ? b : a
+        }
     }
 
-    /// A stored memory as read: `{vault: {version, link}}`; entries in any other shape (the first
-    /// format's bare numbers, half an entry, a link that isn't one) are nothing remembered. nil
-    /// when the text isn't a JSON object at all.
+    /// The memory of one vault after an acceptance ("Use the server's copy"): `mark` (the
+    /// accepted head or the baseline this device wrote; nil: the server shows no manifest, so
+    /// nothing is remembered), whatever was stored, also when the version goes down, with one
+    /// more acceptance counted than `stored` had.
+    public static func replaced(_ stored: ManifestMark?, with mark: ManifestMark?) -> ManifestMark {
+        let accepts = (stored?.accepts ?? 0) &+ 1
+        guard let mark, mark.valid else { return .forgotten(accepts: accepts) }
+        return ManifestMark(version: mark.version, link: mark.link, accepts: accepts)
+    }
+
+    /// A stored memory as read: `{vault: {version, link, accepts}}`; entries in any other shape
+    /// (the first format's bare numbers, half an entry, a link that isn't one or is all zero) are
+    /// nothing remembered (their `accepts` is kept when they have one). nil when the text isn't a
+    /// JSON object at all.
     public static func readMemory(_ data: Data) -> [String: ManifestMark]? {
         guard case .object(let o)? = try? JSON.parse(data) else { return nil }
         return o.compactMapValues(ManifestMark.read)
     }
 
-    /// The entries of one answer of `GET /vaults/{id}/manifest-log` and whether more follow; nil
-    /// when it isn't such an answer.
+    /// The entries of one answer of `GET /vaults/{id}/manifest-log` (as the server sent them:
+    /// the core skips what isn't an entry) and whether more follow; `last`: the highest version
+    /// among them. nil when it isn't such an answer.
     public static func logPage(_ j: JSON) -> (entries: [JSON], more: Bool, last: Int64?)? {
         guard case .array(let entries)? = j["entries"] else { return nil }
         let more = j["more"] == .bool(true)
-        return (entries, more, entries.last.flatMap { $0["seq"]?.number })
+        return (entries, more, entries.compactMap { $0["seq"]?.number }.max())
     }
 
     /// Whether this app starts the vault's first manifest after a sync: the server keeps
     /// manifests and says every member's apps know them, the vault has none and this device
-    /// never saw one, the account may write, every row can be put in, and none of them is a
+    /// never saw one, the account may write, every row can be put in, none of them is a
     /// newer copy this device kept after the server sent an older version (`rolledBack`: the
-    /// vault has items the server sent older versions of).
+    /// vault has items the server sent older versions of), and every one opens (`unopenable`:
+    /// the vault has rows that don't; a manifest over them would warn on every device for good).
     public static func mayStart(_ v: SyncVault, role: Role, status: ManifestStatus, remembered: ManifestMark?, rows: [SyncItem], features: [String],
-                                rolledBack: Bool = false) -> Bool {
+                                rolledBack: Bool = false, unopenable: Bool = false) -> Bool {
         features.contains(vaultManifestFeature) && v.manifestVersion == 0 && v.manifestOk == true && v.seq != nil && v.keyEpoch != nil
-            && role != .read && status == .none && remembered == nil && complete(rows)
-            && !rolledBack && !rows.contains { $0.servedSha256 != nil }
+            && role != .read && status == .none && remembered?.valid != true && complete(rows)
+            && !rolledBack && !unopenable && !rows.contains { $0.servedSha256 != nil }
     }
 
-    /// The version of a new baseline ("Use the server's copy"): above the row's and above what
-    /// this device remembers, so neither still counts as newer.
-    public static func baselineSeq(row: Int64, remembered: UInt64?) -> UInt64 {
-        let top = max(UInt64(max(0, row)), remembered ?? 0)
-        return top >= maxNumber ? maxNumber : top + 1
+    /// The version of a new baseline ("Use the server's copy"): the served row's + 1, whatever
+    /// this device remembers (the server takes nothing else); nil when there is no such number.
+    public static func baselineSeq(row: Int64) -> UInt64? {
+        guard row >= 0, UInt64(row) < maxNumber else { return nil }
+        return UInt64(row) + 1
     }
+
+    /// The fewest days an item waits in the trash on this device before this app deletes it for
+    /// good, whatever retention the server names.
+    public static let trashFloorDays: Int64 = 7
 
     /// How far the server's clock and this device's may differ for old trash to be deleted.
     public static let clockTolerance: Int64 = 86400
@@ -254,12 +357,12 @@ public enum VaultManifest {
     public static let purgeChunk = 250
 
     /// The trashed rows this device deletes for good now. All of these must hold: the server's
-    /// retention has run out for the row (`deleted_at` before `serverTime - trashDays` days, by
-    /// the server's clock; none when it keeps the trash forever or didn't say); this device has
-    /// itself seen the row in the trash for that long by its own clock (`firstSeen`: when it
-    /// first did); and the two clocks agree within a day. So a server can't have the trash
-    /// emptied by naming a far-off time, a short retention or early `deleted_at`s: nothing goes
-    /// before this device watched it wait.
+    /// retention has run out for the row (`deleted_at` strictly before `serverTime - trashDays`
+    /// days, by the server's clock; none when it keeps the trash forever or didn't say); this
+    /// device has itself seen the row in the trash for at least max(`trashDays`, 7) days by its
+    /// own clock (`firstSeen`: when it first did); and the two clocks agree within a day. So a
+    /// server can't have the trash emptied by naming a far-off time, a short retention or early
+    /// `deleted_at`s: nothing goes before this device watched it wait, a week at the least.
     public static func dueTrash(_ rows: [SyncItem], serverTime: Int64?, trashDays: Int64?, firstSeen: [String: Int64], now: Int64) -> [SyncItem] {
         guard let serverTime, let trashDays, trashDays >= 1, serverTime > 0, now > 0 else { return [] }
         let (span, overflow) = trashDays.multipliedReportingOverflow(by: 86400)
@@ -267,7 +370,7 @@ public enum VaultManifest {
         let (gap, gapOverflow) = serverTime.subtractingReportingOverflow(now)
         guard !gapOverflow, gap >= -clockTolerance, gap <= clockTolerance else { return [] }
         let cutoff = serverTime - span
-        let (seenBefore, seenOverflow) = now.subtractingReportingOverflow(span)
+        let (seenBefore, seenOverflow) = now.subtractingReportingOverflow(max(span, trashFloorDays * 86400))
         guard !seenOverflow else { return [] }
         return rows.filter { r in
             guard let at = r.deletedAt, at > 0, at < cutoff, let seen = firstSeen[r.id], seen > 0 else { return false }

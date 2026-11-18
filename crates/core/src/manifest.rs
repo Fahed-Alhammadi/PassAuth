@@ -63,6 +63,24 @@
 //! not signed, so anyone holding the vault key (a read-only member too) who works with
 //! the server can seal a matching manifest for an altered item set.
 //!
+//! # Accepting the server's copy
+//!
+//! A device whose memory the served vault doesn't continue (a restored backup, a log
+//! that no longer reaches back, another history) keeps its warning until its user
+//! accepts what the server shows. [`accept`] is that step's check: the vault as served,
+//! judged with nothing remembered. When the head opens and records exactly the served
+//! items, the device replaces its memory with that head (also when it remembered a
+//! higher version) and goes on from there; nothing is written to the server, so every
+//! member's device can do it, whatever its role. Only when the head itself is wrong (it
+//! doesn't open, or the items aren't what it records) does someone who may write have
+//! to store a new one over the served items: a baseline, one version up and naming the
+//! served head like any other manifest ([`start`] with [`row_link`]), which its writer
+//! then remembers in place of whatever it remembered before. The chain stays sound
+//! through both: memory only ever becomes a head that was checked against the served
+//! items (or sealed by this device over them), and everything after it must descend
+//! from that head; what the device knew before is given up on the user's word, which is
+//! the one thing no check can replace.
+//!
 //! The server replaces the manifest only together with the write it describes. Apps
 //! check every sync ([`verify`]); see `docs/ARCHITECTURE.md`.
 
@@ -524,11 +542,23 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// From the stored pair (`link` in base64url).
+    /// From the stored pair (`link` in base64url). The all-zero link is refused: no
+    /// manifest has it (it is what a first manifest names as its predecessor), and a
+    /// memory holding it would follow any history that begins above its version.
     pub fn parse(version: u64, link: &str) -> Result<Self> {
-        check_version(version).map_err(|_| Error::Malformed("remembered manifest"))?;
-        let link = parse_link(link).map_err(|_| Error::Malformed("remembered manifest"))?;
-        Ok(Self { version, link })
+        let seen = Self {
+            version,
+            link: parse_link(link).map_err(|_| Error::Malformed("remembered manifest"))?,
+        };
+        seen.check()?;
+        Ok(seen)
+    }
+
+    fn check(&self) -> Result<()> {
+        if check_version(self.version).is_err() || self.link == NO_LINK {
+            return Err(Error::Malformed("remembered manifest"));
+        }
+        Ok(())
     }
 }
 
@@ -536,18 +566,186 @@ impl Seen {
 /// manifest's version, the link it replaced and the SHA-256 of its sealed text (both
 /// base64url). Nothing in it is trusted: it counts only where its hash is the `prev` of
 /// the entry (or head) above it.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// Reading a log never fails on an entry: one that isn't an object, lacks a field or has
+/// one of the wrong kind (a `seq` that is no whole number from 1 to [`MAX_VERSION`], a
+/// `prev` or `digest` that is no text) becomes an entry with `seq` 0, which no walk
+/// reaches. So a server can't turn a check into an error by slipping rubbish into the
+/// log; it can only fail to supply the entries that connect. (A log that isn't a list
+/// at all is still an error.)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LogEntry {
     pub seq: u64,
     pub prev: String,
     pub digest: String,
 }
 
+/// One field of a log entry, whatever the server put there.
+#[derive(Default)]
+struct Loose {
+    number: Option<u64>,
+    text: Option<String>,
+}
+
+impl Loose {
+    fn number(n: u64) -> Self {
+        Self {
+            number: (1..=MAX_VERSION).contains(&n).then_some(n),
+            text: None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Loose {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Loose;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("anything")
+            }
+            fn visit_u64<E>(self, n: u64) -> std::result::Result<Loose, E> {
+                Ok(Loose::number(n))
+            }
+            fn visit_i64<E>(self, n: i64) -> std::result::Result<Loose, E> {
+                Ok(Loose::number(u64::try_from(n).unwrap_or(0)))
+            }
+            /// A whole number that arrives as a float (JavaScript has one number type).
+            fn visit_f64<E>(self, n: f64) -> std::result::Result<Loose, E> {
+                let whole = n.fract() == 0.0 && n >= 1.0 && n <= MAX_VERSION as f64;
+                Ok(Loose::number(if whole { n as u64 } else { 0 }))
+            }
+            fn visit_str<E>(self, s: &str) -> std::result::Result<Loose, E> {
+                Ok(Loose {
+                    number: None,
+                    text: Some(s.to_owned()),
+                })
+            }
+            fn visit_bool<E>(self, _: bool) -> std::result::Result<Loose, E> {
+                Ok(Loose::default())
+            }
+            fn visit_bytes<E>(self, _: &[u8]) -> std::result::Result<Loose, E> {
+                Ok(Loose::default())
+            }
+            fn visit_unit<E>(self) -> std::result::Result<Loose, E> {
+                Ok(Loose::default())
+            }
+            fn visit_none<E>(self) -> std::result::Result<Loose, E> {
+                Ok(Loose::default())
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                d: D,
+            ) -> std::result::Result<Loose, D::Error> {
+                d.deserialize_any(V)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Loose, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(Loose::default())
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Loose, A::Error> {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(Loose::default())
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for LogEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = LogEntry;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a manifest log entry")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<LogEntry, A::Error> {
+                let (mut seq, mut prev, mut digest) = (None, None, None);
+                let mut twice = false;
+                while let Some((name, value)) = map.next_entry::<Loose, Loose>()? {
+                    let slot = match name.text.as_deref() {
+                        Some("seq") => {
+                            twice |= seq.is_some();
+                            seq = value.number;
+                            continue;
+                        }
+                        Some("prev") => &mut prev,
+                        Some("digest") => &mut digest,
+                        _ => continue,
+                    };
+                    twice |= slot.is_some();
+                    *slot = value.text;
+                }
+                Ok(match (seq, prev, digest) {
+                    (Some(seq), Some(prev), Some(digest)) if !twice => {
+                        LogEntry { seq, prev, digest }
+                    }
+                    _ => LogEntry::default(),
+                })
+            }
+            // Anything that isn't an object is an entry no walk reaches.
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<LogEntry, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(LogEntry::default())
+            }
+            fn visit_u64<E>(self, _: u64) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_i64<E>(self, _: i64) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_f64<E>(self, _: f64) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_str<E>(self, _: &str) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_bool<E>(self, _: bool) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_bytes<E>(self, _: &[u8]) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_unit<E>(self) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_none<E>(self) -> std::result::Result<LogEntry, E> {
+                Ok(LogEntry::default())
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                d: D,
+            ) -> std::result::Result<LogEntry, D::Error> {
+                d.deserialize_any(V)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
 /// Whether the manifest `seen` is an ancestor of the head of version `head_seq` whose
 /// authenticated predecessor is `head_prev`: following `prev` back through `log` by
 /// hashes arrives at `seen.link`. Versions must fall on the way and stay above
-/// `seen.version`, so the walk ends; entries that are malformed, out of that range or
-/// off the chain are simply never reached.
+/// `seen.version`, so the walk ends; entries that are malformed (see [`LogEntry`]),
+/// out of that range or off the chain are simply never reached.
 fn descends(head_seq: u64, head_prev: &Link, seen: &Seen, log: &[LogEntry]) -> bool {
     let mut by_link: HashMap<Link, (u64, Link)> = HashMap::with_capacity(log.len());
     for e in log {
@@ -590,9 +788,10 @@ pub enum Status {
     /// Some item came without `data` and without `data_sha256`: nothing was checked.
     /// Fetch the vault in full once; still incomplete then counts as a mismatch.
     Incomplete,
-    /// Everything else checks out, but the manifest is more than one step ahead of the
-    /// remembered one: fetch the vault's manifest log after the remembered version and
-    /// check again with it. Remember nothing yet.
+    /// Everything else checks out, but the manifest is more than one version ahead of
+    /// the remembered one: fetch the vault's manifest log after the remembered version
+    /// and check again with it. Remember nothing yet. (Exactly one version ahead needs
+    /// no log: the manifest names the remembered one or it is a mismatch.)
     NeedLog,
 }
 
@@ -618,9 +817,10 @@ pub struct Check {
 /// In this order: a lower version than remembered (or none) is a rollback; no manifest
 /// and nothing remembered is `none`; a manifest that doesn't open for (this key, vault,
 /// epoch, version, `prev`) is a mismatch; so is another manifest at the remembered
-/// version, and a newer one that the log shows not to descend from the remembered one;
-/// then the items are counted (`incomplete`, `mismatch`); and last, a newer manifest
-/// that doesn't name the remembered one as its direct predecessor needs the log.
+/// version, the next version when it names another predecessor (nothing can lie between
+/// the two), and a newer one that the log shows not to descend from the remembered one;
+/// then the items are counted (`incomplete`, `mismatch`); and last, a manifest two or
+/// more versions ahead that doesn't name the remembered one needs the log.
 pub fn verify(
     vault_key: &SymmetricKey,
     vault_id: &str,
@@ -630,8 +830,8 @@ pub fn verify(
     log: Option<&[LogEntry]>,
     items: &[Entry],
 ) -> Result<Check> {
-    if remembered.is_some_and(|r| check_version(r.version).is_err()) {
-        return Err(Error::Malformed("remembered manifest"));
+    if let Some(r) = remembered {
+        r.check()?;
     }
     let verdict = |status, live, trashed| Check {
         status,
@@ -666,6 +866,11 @@ pub fn verify(
             }
         }
         Some(r) if r.link == prev => {}
+        // The very next version naming something else: no log entry fits in between,
+        // so no log can connect the two.
+        Some(r) if row.seq == r.version + 1 => {
+            return Ok(verdict(Status::Mismatch, live, trashed));
+        }
         Some(r) => match log {
             Some(log) if descends(row.seq, &prev, r, log) => {}
             Some(_) => return Ok(verdict(Status::Mismatch, live, trashed)),
@@ -690,6 +895,32 @@ pub fn verify(
     Ok(verdict(status, live, trashed))
 }
 
+/// The check behind "Use the server's copy" (see the module docs): the vault as one sync
+/// answer shows it, judged with nothing remembered. What the device may do on its
+/// user's confirmation follows from the status alone:
+///
+/// - `ok`: the head opens and records exactly these items. Replace the device's memory
+///   for the vault with `version` and `link` (the head's), whatever it held before.
+/// - `none`: the server shows no manifest. Forget the vault's memory (`version` 0, no
+///   link); the vault is then one that never had a manifest on this device.
+/// - `mismatch` (or `incomplete` after a full fetch): the head is wrong in itself.
+///   Nothing may be remembered; someone who can write stores a baseline
+///   (`start(…, row.seq + 1, row_link(row), items)`) and remembers what [`start`]
+///   returned once the server stored it.
+///
+/// Never `rollback` or `need_log`: those need a memory. This is [`verify`] without one,
+/// under a name of its own so that an acceptance can't be built from a verdict that
+/// took the old memory into account.
+pub fn accept(
+    vault_key: &SymmetricKey,
+    vault_id: &str,
+    key_epoch: u64,
+    row: Row,
+    items: &[Entry],
+) -> Result<Check> {
+    verify(vault_key, vault_id, key_epoch, row, None, None, items)
+}
+
 /// What a write sends (`seq`, `prev`, `sealed`) and what its writer remembers once the
 /// server stored it (`seq` and `link`). All but `seq` in base64url.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -704,7 +935,8 @@ pub struct Written {
 /// manifest whose link is `prev`: `None` for a vault's first manifest; for a new
 /// baseline and for the one a key replacement carries, [`row_link`] of the vault row's
 /// current manifest (for a baseline whatever the server shows, checked or not: the
-/// baseline is the user's acceptance of it).
+/// baseline is the user's acceptance of it). Both are exactly one version above the
+/// row's, like every other write; the server takes nothing else.
 pub fn start(
     vault_key: &SymmetricKey,
     vault_id: &str,
@@ -1162,10 +1394,12 @@ mod tests {
         assert_eq!(b.check(None, None), Status::Ok);
         // Fork at the same version: A is shown B's version 6.
         assert_eq!(b.check(Some(&seen(&a6)), None), Status::Mismatch);
-        // Fork joined later: B's history moved on, A is shown its version 7 or 9.
+        // Fork joined later: B's history moved on, A is shown its version 7 or 9. One
+        // version ahead naming another predecessor is settled without a log.
         b.write();
-        assert_eq!(b.check(Some(&seen(&a6)), None), Status::NeedLog);
+        assert_eq!(b.check(Some(&seen(&a6)), None), Status::Mismatch);
         assert_eq!(b.check(Some(&seen(&a6)), Some(&b.log(6))), Status::Mismatch);
+        assert_eq!(b.check(Some(&seen(&a6)), Some(&a.log(0))), Status::Mismatch);
         b.write();
         b.write();
         assert_eq!(b.check(Some(&seen(&a6)), None), Status::NeedLog);
@@ -1232,18 +1466,20 @@ mod tests {
         assert_eq!(check(Some(&old), Some(&log[1..]), &w5), Status::Ok);
         // A rotation that doesn't name the head it replaced is off the chain.
         let loose = start(&new_key, VAULT, 1, 3, None, &items).unwrap();
-        assert_eq!(check(Some(&old), None, &loose), Status::NeedLog);
+        assert_eq!(check(Some(&old), None, &loose), Status::Mismatch);
         assert_eq!(check(Some(&old), Some(&[]), &loose), Status::Mismatch);
 
-        // A baseline: a jump in version, built on whatever the server showed (here a
-        // manifest the device couldn't open at all).
+        // A baseline: the next version like any write, built on whatever the server
+        // showed (here a manifest the device couldn't open at all).
         let shown = Written {
             seq: 5,
             prev: w4.link.clone(),
             sealed: "AAAA".into(),
             link: row_link(5, &w4.link, "AAAA").unwrap(),
         };
-        let base = start(&new_key, VAULT, 1, 12, Some(&shown.link), &items).unwrap();
+        let unopened = verify(&new_key, VAULT, 1, served(&shown), None, None, &items);
+        assert_eq!(unopened.unwrap().status, Status::Mismatch);
+        let base = start(&new_key, VAULT, 1, 6, Some(&shown.link), &items).unwrap();
         assert_eq!(
             check(Some(&seen(&base)), None, &base),
             Status::Ok,
@@ -1251,11 +1487,13 @@ mod tests {
         );
         assert_eq!(check(None, None, &base), Status::Ok, "a new device");
         // A device that was on the history under the shown head follows through the
-        // log; one that saw the real version 5 doesn't, and neither does one further on.
+        // log; one that saw the real version 5 doesn't (settled at once: the baseline is
+        // the very next version), and neither does one further on.
         let mut log = vec![logged(&rotated), logged(&w4), logged(&shown)];
+        assert_eq!(check(Some(&old), None, &base), Status::NeedLog);
         assert_eq!(check(Some(&old), Some(&log), &base), Status::Ok);
         assert_eq!(check(Some(&seen(&shown)), None, &base), Status::Ok);
-        assert_eq!(check(Some(&seen(&w5)), None, &base), Status::NeedLog);
+        assert_eq!(check(Some(&seen(&w5)), None, &base), Status::Mismatch);
         log.push(logged(&w5));
         assert_eq!(check(Some(&seen(&w5)), Some(&log), &base), Status::Mismatch);
         let ahead = Seen {
@@ -1263,6 +1501,309 @@ mod tests {
             link: [3; 32],
         };
         assert_eq!(check(Some(&ahead), None, &base), Status::Rollback);
+    }
+
+    /// "Use the server's copy": the vault as served, judged with nothing remembered.
+    /// What a device may remember afterwards, and that the chain goes on from there.
+    #[test]
+    fn accepting_the_servers_copy_replaces_the_memory_with_a_checked_head() {
+        let k = key(1);
+        let items = set();
+        // The server was restored from a backup: its history ends at version 3, the
+        // device remembers version 9 of what was lost.
+        let v1 = start(&k, VAULT, 0, 1, None, &items).unwrap();
+        let v2 = advance(&k, VAULT, 0, served(&v1), &[], &[]).unwrap();
+        let v3 = advance(&k, VAULT, 0, served(&v2), &[], &[]).unwrap();
+        let lost = Seen {
+            version: 9,
+            link: [4; 32],
+        };
+        assert_eq!(status(&k, &v3, Some(&lost), None, &items), Status::Rollback);
+        // The served head stands on its own: the device may take it, also though its
+        // version is lower than the remembered one.
+        let got = accept(&k, VAULT, 0, served(&v3), &items).unwrap();
+        assert_eq!(
+            (got.status, got.version, got.link.as_deref()),
+            (Status::Ok, 3, Some(v3.link.as_str()))
+        );
+        let mem = Seen::parse(got.version, got.link.as_deref().unwrap()).unwrap();
+        assert_eq!(status(&k, &v3, Some(&mem), None, &items), Status::Ok);
+        // From there the chain holds as for any memory: the vault's own continuation
+        // is followed, also through the versions the lost history had used…
+        let mut all = vec![v3.clone()];
+        for _ in 4..=12 {
+            let w = advance(&k, VAULT, 0, served(all.last().unwrap()), &[], &[]).unwrap();
+            all.push(w);
+        }
+        let log: Vec<LogEntry> = all.iter().map(logged).collect();
+        let head = all.last().unwrap();
+        assert_eq!(status(&k, head, Some(&mem), None, &items), Status::NeedLog);
+        assert_eq!(status(&k, head, Some(&mem), Some(&log), &items), Status::Ok);
+        // …while a device that didn't accept still doesn't pass at, or beyond, the
+        // version it remembers, and can accept in its turn.
+        let at_9 = &all[9 - 3];
+        assert_eq!(at_9.seq, 9);
+        assert_eq!(
+            status(&k, at_9, Some(&lost), None, &items),
+            Status::Mismatch
+        );
+        assert_eq!(
+            status(&k, head, Some(&lost), Some(&log), &items),
+            Status::Mismatch
+        );
+        assert_eq!(
+            accept(&k, VAULT, 0, served(head), &items).unwrap().status,
+            Status::Ok
+        );
+        // …and another history shown to the accepting device is refused as before.
+        let other = advance(&k, VAULT, 0, served(&v2), &[], &[]).unwrap();
+        assert_ne!(other.link, v3.link);
+        assert_eq!(
+            status(&k, &other, Some(&mem), None, &items),
+            Status::Mismatch
+        );
+        let other_4 = advance(&k, VAULT, 0, served(&other), &[], &[]).unwrap();
+        assert_eq!(
+            status(&k, &other_4, Some(&mem), None, &items),
+            Status::Mismatch
+        );
+
+        // Nothing to accept when the head is wrong in itself: the items aren't what it
+        // records, it doesn't open, or its predecessor was swapped.
+        let nothing = (Status::Mismatch, 0, None);
+        let wrong = accept(&k, VAULT, 0, served(&v3), &items[..2]).unwrap();
+        assert_eq!((wrong.status, wrong.version, wrong.link), nothing);
+        let closed = accept(&key(2), VAULT, 0, served(&v3), &items).unwrap();
+        assert_eq!((closed.status, closed.version, closed.link), nothing);
+        let swapped = Row {
+            prev: Some(&v1.link),
+            ..served(&v3)
+        };
+        let moved = accept(&k, VAULT, 0, swapped, &items).unwrap();
+        assert_eq!((moved.status, moved.version, moved.link), nothing);
+        let bare = [Entry {
+            id: "a".into(),
+            ..Entry::default()
+        }];
+        assert_eq!(
+            accept(&k, VAULT, 0, served(&v3), &bare).unwrap().status,
+            Status::Incomplete
+        );
+        // A writer then stores a baseline: one version up, naming the served head, over
+        // the served items; it remembers that, whatever it held before. Devices on the
+        // served history follow it by themselves, the others accept it locally.
+        let base = start(
+            &k,
+            VAULT,
+            0,
+            v3.seq + 1,
+            Some(&row_link(v3.seq, &v3.prev, &v3.sealed).unwrap()),
+            &items[..2],
+        )
+        .unwrap();
+        assert_eq!((base.seq, &base.prev), (4, &v3.link));
+        assert_eq!(
+            status(&k, &base, Some(&seen(&base)), None, &items[..2]),
+            Status::Ok
+        );
+        assert_eq!(
+            status(&k, &base, Some(&seen(&v3)), None, &items[..2]),
+            Status::Ok
+        );
+        assert_eq!(
+            status(&k, &base, Some(&lost), None, &items[..2]),
+            Status::Rollback
+        );
+        assert_eq!(
+            accept(&k, VAULT, 0, served(&base), &items[..2])
+                .unwrap()
+                .link,
+            Some(base.link.clone())
+        );
+
+        // No manifest served (a backup from before the vault's first one): the status
+        // says so, and there is nothing to remember: the device forgets the vault.
+        let gone = accept(&k, VAULT, 0, Row::default(), &items).unwrap();
+        assert_eq!(
+            (gone.status, gone.version, gone.link),
+            (Status::None, 0, None)
+        );
+    }
+
+    #[test]
+    fn a_memory_is_never_the_empty_link() {
+        let k = key(1);
+        let items = set();
+        // The review's case: a first manifest above the remembered version, and a
+        // memory holding the link every first manifest names.
+        let first = start(&k, VAULT, 0, 5, None, &items).unwrap();
+        assert!(Seen::parse(3, &b64(&NO_LINK)).is_err());
+        assert!(Seen::parse(3, &first.link).is_ok());
+        let zero = Seen {
+            version: 3,
+            link: NO_LINK,
+        };
+        assert!(verify(&k, VAULT, 0, served(&first), Some(&zero), None, &items).is_err());
+        let next = advance(&k, VAULT, 0, served(&first), &[], &[]).unwrap();
+        let log = [logged(&first)];
+        assert!(verify(&k, VAULT, 0, served(&next), Some(&zero), Some(&log), &items).is_err());
+    }
+
+    #[test]
+    fn rubbish_in_a_log_is_skipped_not_fatal() {
+        let mut main = Branch::begin(1);
+        let v1 = main.head().clone();
+        for _ in 0..4 {
+            main.write();
+        }
+        let good = serde_json::to_value(
+            main.log(1)
+                .iter()
+                .map(|e| serde_json::json!({ "seq": e.seq, "prev": e.prev, "digest": e.digest }))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let parse = |v: &serde_json::Value| serde_json::from_value::<Vec<LogEntry>>(v.clone());
+        assert_eq!(parse(&good).unwrap(), main.log(1));
+        // Every kind of entry a server could slip in, around the real ones.
+        let p = &v1.link;
+        let rubbish = serde_json::json!([
+            null, true, 7, -7, 1.5, "text", [], [1, [2]], {}, { "seq": 3 },
+            { "seq": -1, "prev": p, "digest": p },
+            { "seq": 0, "prev": p, "digest": p },
+            { "seq": 2.5, "prev": p, "digest": p },
+            { "seq": "3", "prev": p, "digest": p },
+            { "seq": 9_007_199_254_740_992_u64, "prev": p, "digest": p },
+            { "seq": 18_446_744_073_709_551_615_u64, "prev": p, "digest": p },
+            { "seq": null, "prev": p, "digest": p },
+            { "seq": 3, "prev": 4, "digest": p },
+            { "seq": 3, "prev": p, "digest": null },
+            { "seq": 3, "prev": p, "digest": [p] },
+            { "seq": 3, "prev": p },
+            { "seq": { "n": 3 }, "prev": p, "digest": p },
+        ]);
+        let skipped = parse(&rubbish).unwrap();
+        assert_eq!(skipped.len(), rubbish.as_array().unwrap().len());
+        assert!(skipped.iter().all(|e| *e == LogEntry::default()));
+        let mut mixed = rubbish.as_array().unwrap().clone();
+        mixed.extend(good.as_array().unwrap().iter().cloned());
+        mixed.extend(rubbish.as_array().unwrap().iter().cloned());
+        let log = parse(&serde_json::Value::Array(mixed)).unwrap();
+        assert_eq!(main.check(Some(&seen(&v1)), Some(&log)), Status::Ok);
+        // Rubbish alone connects nothing.
+        assert_eq!(
+            main.check(Some(&seen(&v1)), Some(&skipped)),
+            Status::Mismatch
+        );
+        // Whole numbers written as floats count (JavaScript), a key given twice doesn't.
+        let floats = r#"[{"seq":2.0,"prev":"a","digest":"b","more":{"x":[1]}}]"#;
+        assert_eq!(
+            serde_json::from_str::<Vec<LogEntry>>(floats).unwrap()[0].seq,
+            2
+        );
+        let twice = r#"[{"seq":2,"seq":3,"prev":"a","digest":"b"}]"#;
+        assert_eq!(
+            serde_json::from_str::<Vec<LogEntry>>(twice).unwrap(),
+            [LogEntry::default()]
+        );
+        // A log that is no list at all is an error.
+        assert!(serde_json::from_str::<Vec<LogEntry>>(r#"{"entries":[]}"#).is_err());
+        assert!(serde_json::from_str::<Vec<LogEntry>>("7").is_err());
+    }
+
+    /// The re-review's log attacks on a device kept on another branch (all refused),
+    /// with the very next version now settled without asking for the log.
+    #[test]
+    fn log_tricks_do_not_join_a_fork() {
+        let k = key(1);
+        let base = vec![row("a", false, "a1")];
+        let mut chain = vec![start(&k, VAULT, 0, 1, None, &base).unwrap()];
+        let mut items = base.clone();
+        for i in 2..=3 {
+            let add = row(&format!("c{i}"), false, "d");
+            let last = chain.last().unwrap();
+            let w = advance(&k, VAULT, 0, served(last), &[], std::slice::from_ref(&add)).unwrap();
+            items.push(add);
+            chain.push(w);
+        }
+        let fork = |tag: &str, n: usize| {
+            let (mut c, mut it) = (vec![chain[2].clone()], items.clone());
+            for i in 0..n {
+                let add = row(&format!("{tag}{i}"), false, tag);
+                let w = advance(
+                    &k,
+                    VAULT,
+                    0,
+                    served(c.last().unwrap()),
+                    &[],
+                    std::slice::from_ref(&add),
+                )
+                .unwrap();
+                it.push(add);
+                c.push(w);
+            }
+            (c, it)
+        };
+        let (x, _) = fork("x", 3);
+        let (y, yi) = fork("y", 5);
+        let mem = seen(x.last().unwrap()); // the device: branch X at version 6
+        let ylog: Vec<LogEntry> = y.iter().map(logged).collect();
+        let xlog: Vec<LogEntry> = x.iter().map(logged).collect();
+        let mut mixed = xlog.clone();
+        mixed.extend(ylog.clone());
+        let mut reversed = mixed.clone();
+        reversed.reverse();
+        // Y at version 7 (the very next) and at version 8 (the log is asked for).
+        let next_one = &y[4];
+        assert_eq!(next_one.seq, 7);
+        let at_7 = &yi[..yi.len() - 1];
+        assert_eq!(
+            status(&k, next_one, Some(&mem), None, at_7),
+            Status::Mismatch
+        );
+        let head = y.last().unwrap();
+        assert_eq!(head.seq, 8);
+        assert_eq!(status(&k, head, Some(&mem), None, &yi), Status::NeedLog);
+        let mut relabel = ylog.clone();
+        for (i, l) in relabel.iter_mut().enumerate() {
+            l.seq = 7 + i as u64;
+        }
+        // Entries that claim X's manifests as predecessors of Y's.
+        let mut graft = ylog.clone();
+        graft.push(LogEntry {
+            seq: 7,
+            prev: x[3].link.clone(),
+            digest: b64(&sealed_digest(&y[4].sealed)),
+        });
+        graft.push(LogEntry {
+            seq: 8,
+            prev: x[3].link.clone(),
+            digest: b64(&sealed_digest(&head.sealed)),
+        });
+        for log in [&ylog, &mixed, &reversed, &relabel, &graft, &Vec::new()] {
+            assert_eq!(
+                status(&k, head, Some(&mem), Some(log), &yi),
+                Status::Mismatch
+            );
+            assert_eq!(
+                status(&k, next_one, Some(&mem), Some(log), at_7),
+                Status::Mismatch
+            );
+        }
+        // The same version on the other branch.
+        assert_eq!(
+            status(&k, &y[3], Some(&mem), Some(&mixed), &yi[..yi.len() - 2]),
+            Status::Mismatch
+        );
+        // A device at the common version 3 follows Y in any order, with extra entries.
+        let common = seen(&chain[2]);
+        for log in [&ylog, &mixed, &reversed] {
+            assert_eq!(status(&k, head, Some(&common), Some(log), &yi), Status::Ok);
+        }
+        // Documented: a manifest sealed on X's head for Y's items passes on X's devices
+        // (whoever holds the key and works with the server can do that).
+        let laundered = start(&k, VAULT, 0, 7, Some(&x[3].link), &yi).unwrap();
+        assert_eq!(status(&k, &laundered, Some(&mem), None, &yi), Status::Ok);
     }
 
     #[test]

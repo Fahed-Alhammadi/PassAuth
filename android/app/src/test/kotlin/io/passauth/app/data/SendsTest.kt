@@ -295,6 +295,18 @@ class SendsTest {
         without.update(without.get(old.id), SendEdit(text = "old 2"))
         assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
         assertEquals(needsV2, refused { without.update(without.get(old.id), SendEdit(password = "pw3")) })
+        // Rule S8: on a server that takes Send v2, such a Send gets a new name or text only together with its
+        // password (so it becomes v2); without it the edit is refused and nothing is sent.
+        val calls = server.calls.count { it.first == "PUT" }
+        assertEquals("Enter this Send's password to change its text.", SendActions.NEEDS_PASSWORD)
+        assertEquals(SendActions.NEEDS_PASSWORD, refused { v2.update(v2.get(old.id), SendEdit(text = "old 3")) })
+        assertEquals(SendActions.NEEDS_PASSWORD, refused { v2.update(v2.get(old.id).copy(data = null), SendEdit(name = "D2")) })
+        assertEquals(SendActions.NEEDS_PASSWORD, refused { v2.changesOf(v2.get(old.id), SendEdit(text = "old 3"), v2 = true) })
+        assertEquals("nothing was sent", calls, server.calls.count { it.first == "PUT" })
+        // Its settings change without the password, as before.
+        v2.update(v2.get(old.id), SendEdit(disabled = true))
+        assertEquals(setOf("disabled"), server.last().keys)
+        v2.update(v2.get(old.id), SendEdit(disabled = false))
         v2.update(v2.get(old.id), SendEdit(password = "pw3"))
         val up = server.last()
         assertEquals(2, io.passauth.core.sendFieldVersion(text(up, "data")).toInt())

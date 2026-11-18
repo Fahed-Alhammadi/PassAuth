@@ -48,3 +48,25 @@ test("writing: the manifest memory is merged with what is stored (higher version
   expect(next.trashSeen).toStrictEqual({ i2: 1000 });
   for (const unreadable of ["garbage", { v: 9 }, []]) expect(mergedDeviceMemory(unreadable, mine)).toBe(unreadable);
 });
+
+test("ROUND 2: an acceptance ('Use the server's copy') lowers what is stored, and a copy from before it can't bring the old version back; a forgotten vault stays forgotten", () => {
+  const stored = { v: 1, manifests: { v1: { version: 9, link: B }, v2: { version: 4, link: B, accepts: 1 }, v3: { accepts: 2 } } };
+  const mine: DeviceMemory = {
+    revs: emptyRevMemory(),
+    manifests: new Map([
+      ["v1", { version: 2, link: A, accepts: 1 }], // accepted here: replaces the stored 9
+      ["v2", { version: 7, link: A }], // this worker's copy from before the stored acceptance
+      ["v3", { version: 5, link: A, accepts: 1 }], // forgotten since, with a later acceptance
+    ]),
+    trashSeen: new Map(),
+  };
+  const next = mergedDeviceMemory(stored, mine) as { manifests: unknown };
+  expect(next.manifests).toStrictEqual({ v1: { version: 2, link: A, accepts: 1 }, v2: { version: 4, link: B, accepts: 1 }, v3: { accepts: 2 } });
+  // Read back: the forgotten vault is nothing remembered, with its counter.
+  const read = readDeviceMemory(JSON.parse(JSON.stringify(next))) as DeviceMemory;
+  expect([...read.manifests]).toStrictEqual([
+    ["v1", { version: 2, link: A, accepts: 1 }],
+    ["v2", { version: 4, link: B, accepts: 1 }],
+    ["v3", { accepts: 2 }],
+  ]);
+});

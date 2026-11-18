@@ -24,8 +24,33 @@ import type { SyncItemRow, SyncVaultRow } from "@web/lib/types";
 export const MANIFEST_FEATURE = "vault_manifest";
 
 export const MANIFEST_WARNING_TEXT = "Your server's copy of this vault doesn't match its record of changes. Items may be missing, restored or out of date.";
-/** Under the warning: the extension has no "Use the server's copy". */
+/**
+ * Under the warning, when the served copy can't be accepted as it is (its record doesn't describe the served items):
+ * the extension writes no new record, so someone with write access reviews it in the web vault or the desktop app.
+ */
 export const MANIFEST_REVIEW_TEXT = "Open the web vault or the desktop app to review this vault.";
+/** The same case for an account that can only read the vault. */
+export const MANIFEST_READER_TEXT = "Someone who can edit this vault can review it.";
+/** "Use the server's copy": the action (offered whenever the served copy checks out on its own), and its confirmation. */
+export const MANIFEST_ACCEPT_ACTION = "Use the server's copy";
+export const MANIFEST_ACCEPT_TITLE = "Use the server's copy?";
+export const MANIFEST_ACCEPT_BODY =
+  "PassAuth will accept this vault as the server has it now, including anything that is missing, restored or out of date. Do this only if you know why it changed, for example after the server was restored from a backup.";
+/** The served copy still can't be accepted after a fresh fetch (it changed meanwhile, or never could). */
+export const MANIFEST_NOT_ACCEPTABLE_TEXT = "The server's copy of this vault can't be accepted as it is.";
+/** A vault whose record checks out, but which holds an item this account's key doesn't open. */
+export const MANIFEST_ITEM_TEXT = "An item in this vault can't be opened. Delete it to keep using the vault.";
+export const MANIFEST_ITEM_READER_TEXT = "An item in this vault can't be opened. Someone who can edit this vault can delete it.";
+/** Under it, for an account with write access: the extension has no such delete. */
+export const MANIFEST_ITEM_WHERE_TEXT = "Open the web vault or the desktop app to delete it.";
+/** A write into a vault no server's answer was checked for yet. */
+export const MANIFEST_UNCHECKED_TEXT = "PassAuth couldn't check this vault with your server yet. Try again in a moment.";
+/** What this browser remembers can't be read (after three tries and a whole sync), with the way out. */
+export const MEMORY_UNREADABLE_TEXT = "PassAuth can't read this device's record of your vaults.";
+export const MEMORY_RESET_ACTION = "Reset on this device";
+export const MEMORY_RESET_BODY = "PassAuth will trust what your server shows now and start a new record on this device.";
+/** Reads that must fail in a row (with a whole sync among them) before the reset is offered. */
+export const MEMORY_UNREAD_TRIES = 3;
 /** A write refused here because the vault's warning is unresolved. */
 export const MANIFEST_HELD_TEXT = "This vault can't be changed until its warning is resolved.";
 /** A write that met other writes into the vault three times. */
@@ -143,55 +168,109 @@ export function manifestItems(snap: Pick<Snapshot, "items">, served?: ServedHash
   return out;
 }
 
-/** What this browser remembers of one vault: the version and the link of the last manifest it checked "ok" or wrote itself. */
+/** What this browser remembers of one vault: the version and the link of the last manifest it checked "ok", wrote itself or accepted. */
 export interface Remembered {
   version: number;
   link: string;
 }
 
-export type ManifestMemory = Map<string, Remembered>;
+/**
+ * A vault's entry in the memory: what is remembered (`version` + `link`, both or neither: neither is "nothing
+ * remembered"), and `accepts`: how often the user replaced this vault's memory with "Use the server's copy" here
+ * (left out while 0). The counter orders two copies of the memory before their versions do: an acceptance may lower
+ * the version, and a copy from before it must not bring the old one back.
+ */
+export interface MemoryEntry {
+  version?: number;
+  link?: string;
+  accepts?: number;
+}
+
+export type ManifestMemory = Map<string, MemoryEntry>;
 
 const LINK = /^[A-Za-z0-9_-]{43}$/;
+/** The link of 32 zero bytes: what a first manifest names as its predecessor, never a manifest's own link. */
+const ZERO_LINK = "A".repeat(43);
 
 /** A link as it travels (base64url of 32 bytes). */
 export const isLink = (v: unknown): v is string => typeof v === "string" && LINK.test(v);
 
 const isRemembered = (v: unknown): v is Remembered => {
   const r = v as Partial<Remembered> | null;
-  return !!r && typeof r === "object" && typeof r.version === "number" && Number.isSafeInteger(r.version) && r.version >= 1 && isLink(r.link);
+  return !!r && typeof r === "object" && typeof r.version === "number" && Number.isSafeInteger(r.version) && r.version >= 1 && isLink(r.link) && r.link !== ZERO_LINK;
 };
 
+const acceptsOf = (v: unknown): number => {
+  const n = (v as { accepts?: unknown } | null | undefined)?.accepts;
+  return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : 0;
+};
+
+const entryWith = (r: Remembered | null, accepts: number): MemoryEntry => ({ ...(r ? { version: r.version, link: r.link } : {}), ...(accepts ? { accepts } : {}) });
+
+/** What is remembered of the vault, or undefined: no entry, or one without a version and link (forgotten by an acceptance). */
+export function rememberedOf(m: ManifestMemory, vaultId: string): Remembered | undefined {
+  const e = m.get(vaultId);
+  return isRemembered(e) ? { version: e.version, link: e.link } : undefined;
+}
+
 /**
- * The memory as stored (`{vaultId: {version, link}}`). Anything that isn't an entry is left out: the first format's
- * bare number, half an entry, a link that isn't one. That is "nothing remembered" for the vault.
+ * The memory as stored (`{vaultId: {version, link, accepts}}`). An entry that isn't a version with a link (the first
+ * format's bare number, half an entry, a link that isn't one or is all zero) is "nothing remembered" for the vault; its
+ * `accepts`, if it has one, is kept.
  */
 export function readManifestMemory(stored: unknown): ManifestMemory {
   const m: ManifestMemory = new Map();
   if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-    for (const [id, entry] of Object.entries(stored)) if (isRemembered(entry)) m.set(id, { version: entry.version, link: entry.link });
+    for (const [id, entry] of Object.entries(stored)) {
+      const accepts = acceptsOf(entry);
+      if (isRemembered(entry)) m.set(id, entryWith(entry, accepts));
+      else if (accepts) m.set(id, { accepts });
+    }
   }
   return m;
 }
 
 /** The memory as it is stored. Vaults that are gone stay: ids are never reused, and a server could hide a vault and show it again. */
-export function storedManifestMemory(m: ManifestMemory): Record<string, Remembered> {
+export function storedManifestMemory(m: ManifestMemory): Record<string, MemoryEntry> {
   return Object.fromEntries(m);
 }
 
 /**
- * Remember `version` + `link` for the vault: the higher version wins; at the same version the entry already there
- * stays (a link is never replaced at its version: if the two differ, one of them is on another history, and the next
- * check says so). Half a memory is never stored.
+ * Remember `version` + `link` for the vault (after an "ok", or an own write the server stored): only a higher version
+ * than the one there; at the same version the entry already there stays (a link is never replaced at its version: if
+ * the two differ, one of them is on another history, and the next check says so). `accepts` stays. Half a memory and
+ * the all-zero link are never stored.
  */
 export function rememberManifest(m: ManifestMemory, vaultId: string, version: number, link: unknown): void {
-  if (!Number.isSafeInteger(version) || version < 1 || !isLink(link)) return;
-  if (version > (m.get(vaultId)?.version ?? 0)) m.set(vaultId, { version, link });
+  if (!isRemembered({ version, link })) return;
+  if (version > (rememberedOf(m, vaultId)?.version ?? 0)) m.set(vaultId, entryWith({ version, link: link as string }, acceptsOf(m.get(vaultId))));
 }
 
-/** Two memories merged by that rule (`a`'s entries are the ones "already there"). */
+/**
+ * "Use the server's copy" (`acceptServerCopy` in vault.ts, nothing else): the vault's entry becomes the accepted
+ * manifest's version and link, whatever was there (the version may go down), or nothing remembered (`accepted` null:
+ * the server shows no manifest), with `accepts` one above `floor` (the higher of the stored and the loaded counter).
+ */
+export function acceptedEntry(accepted: Remembered | null, floor: number): MemoryEntry {
+  return entryWith(accepted && isRemembered(accepted) ? accepted : null, floor + 1);
+}
+
+/** An entry's `accepts` (0 when it has none). */
+export const acceptsIn = (m: ManifestMemory, vaultId: string): number => acceptsOf(m.get(vaultId));
+
+/**
+ * Two memories merged (`a`'s entries are the ones "already there", the stored ones), per vault: the entry with the
+ * higher `accepts` wins; at the same `accepts` the higher version (nothing remembered counts as 0); at the same
+ * version the one already there.
+ */
 export function mergeManifestMemory(a: ManifestMemory, b: ManifestMemory): ManifestMemory {
   const out: ManifestMemory = new Map(a);
-  for (const [id, r] of b) rememberManifest(out, id, r.version, r.link);
+  for (const [id, mine] of b) {
+    const there = out.get(id);
+    const [ta, ma] = [acceptsOf(there), acceptsOf(mine)];
+    const [tv, mv] = [rememberedOf(out, id)?.version ?? 0, rememberedOf(b, id)?.version ?? 0];
+    if (!there || ma > ta || (ma === ta && mv > tv)) out.set(id, mine);
+  }
   return out;
 }
 
@@ -208,6 +287,8 @@ export interface ManifestKey {
     log: unknown,
     items: unknown,
   ): unknown;
+  /** `manifestVerify` with nothing remembered, under its own name: what "Use the server's copy" may accept. */
+  manifestAccept(vault_id: string, key_epoch: number, manifest_seq: number, prev: string | null | undefined, sealed: string | null | undefined, items: unknown): unknown;
 }
 
 const VERDICTS: readonly string[] = ["none", "ok", "rollback", "mismatch", "incomplete", "need_log"];
@@ -227,7 +308,7 @@ const MISMATCH: Check = { status: "mismatch", version: 0, link: null };
  * the core can't read, an id listed twice, a `deleted_at` that is no time) and any answer that isn't a verdict is a
  * mismatch; so is "need_log" when a log was given (the core never says that, and nothing may ask for a log twice).
  */
-export function verifyVault(key: ManifestKey, row: SyncVaultRow, remembered: Remembered | undefined, items: ManifestItem[], log?: unknown[] | null): Check {
+export function verifyVault(key: Pick<ManifestKey, "manifestVerify">, row: SyncVaultRow, remembered: Remembered | undefined, items: ManifestItem[], log?: unknown[] | null): Check {
   try {
     const mine = remembered && isRemembered(remembered) ? remembered : undefined;
     const check = key.manifestVerify(row.id, epochOf(row), manifestSeqOf(row), manifestPrevOf(row), manifestTextOf(row), mine?.version ?? null, mine?.link ?? null, log ?? null, items) as {
@@ -245,6 +326,26 @@ export function verifyVault(key: ManifestKey, row: SyncVaultRow, remembered: Rem
   }
 }
 
+/** What "Use the server's copy" finds: the served manifest describes the served rows ("ok"), the server shows none ("none"), or neither. */
+export type Acceptance = { status: "ok"; version: number; link: string } | { status: "none" } | { status: "no" };
+
+/**
+ * Whether the vault's served copy can be accepted as it is, nothing remembered taken into account (the core's
+ * `manifestAccept` on the row and every row of the vault). Anything thrown, "incomplete" and any answer that isn't
+ * "ok" with a version and link, or "none", is "no": nothing may be remembered from it.
+ */
+export function acceptVault(key: Pick<ManifestKey, "manifestAccept">, row: SyncVaultRow, items: ManifestItem[]): Acceptance {
+  try {
+    const a = key.manifestAccept(row.id, epochOf(row), manifestSeqOf(row), manifestPrevOf(row), manifestTextOf(row), items) as { status?: unknown; version?: unknown; link?: unknown } | null;
+    if (a?.status === "none") return { status: "none" };
+    const version = whole(a?.version);
+    if (a?.status === "ok" && isRemembered({ version, link: a.link })) return { status: "ok", version: version as number, link: a.link as string };
+  } catch {
+    /* not acceptable */
+  }
+  return { status: "no" };
+}
+
 /** How many requests one check may spend on a vault's manifest log (a log with more pages doesn't connect). */
 export const LOG_REQUESTS = 5;
 
@@ -254,8 +355,9 @@ export class LogUnavailable extends Error {}
 /**
  * The vault's manifest log after `after`, page by page. `fetchPage(after)` resolves to the endpoint's answer, rejects
  * with `LogUnavailable` when there is none, and resolves to null for a 404 or 400 (an answer: the log doesn't exist
- * for this device). Resolves to the entries as sent (the core ignores what doesn't belong), or to null when the log
- * doesn't connect: no log, an answer that isn't one, or more pages than `LOG_REQUESTS`.
+ * for this device). Resolves to the well-typed entries, each exactly as the server sent it (`isLogEntry`: what the
+ * core counts, and what the web vault passes on; anything else in a list is left out, never fatal), or to null when
+ * the log doesn't connect: no log, an answer that isn't one, or more pages than `LOG_REQUESTS`.
  */
 export async function collectLog(after: number, fetchPage: (after: number) => Promise<unknown>): Promise<unknown[] | null> {
   const all: unknown[] = [];
@@ -263,14 +365,24 @@ export async function collectLog(after: number, fetchPage: (after: number) => Pr
   for (let n = 0; n < LOG_REQUESTS; n++) {
     const page = (await fetchPage(from)) as { entries?: unknown; more?: unknown } | null;
     if (!page || typeof page !== "object" || !Array.isArray(page.entries)) return null;
-    all.push(...page.entries);
+    const entries = page.entries.filter(isLogEntry);
+    all.push(...entries);
     if (page.more !== true) return all;
-    const last = whole((page.entries[page.entries.length - 1] as { seq?: unknown } | undefined)?.seq);
+    const last = entries.reduce((max, e) => Math.max(max, e.seq), 0);
     // "More" without a higher place to go on from: it would ask the same page again.
-    if (last === null || last <= from) return null;
+    if (last <= from) return null;
     from = last;
   }
   return null;
+}
+
+/**
+ * An entry of a vault's manifest log as the core reads one: an object with a whole `seq` from 1 to 2^53 - 1 and the
+ * texts `prev` and `digest`. Only such entries are passed to the core (the same in every client), as they came.
+ */
+export function isLogEntry(v: unknown): v is { seq: number; prev: string; digest: string } {
+  const e = v as { seq?: unknown; prev?: unknown; digest?: unknown } | null;
+  return !!e && typeof e === "object" && !Array.isArray(e) && typeof e.seq === "number" && Number.isSafeInteger(e.seq) && e.seq >= 1 && typeof e.prev === "string" && typeof e.digest === "string";
 }
 
 /**
@@ -325,9 +437,11 @@ export function readServed(answer: unknown): Served {
 /**
  * Whether this browser starts the vault's first manifest now: the server keeps manifests and says every member's apps
  * can (`manifest_ok`), the account may write, the vault has none and none was ever seen here, its verdict is "none",
- * every row has its data or its hash, and no row is a kept newer copy (`kept`: the server sent an older version of an
- * item of this vault; this browser never seals that into a first manifest). (The caller checks that the vault is open
- * and passed signed sharing, and that what this browser remembers could be read.)
+ * every row has its data or its hash, no row is a kept newer copy (`kept`: the server sent an older version of an
+ * item of this vault; this browser never seals that into a first manifest), and no row of the vault fails to open
+ * (`unopenable`: a first manifest over such a row would make the vault a mismatch for every member at once; the row is
+ * deleted first, in the web vault or the desktop app). (The caller checks that the vault is open and passed signed
+ * sharing, and that what this browser remembers could be read.)
  */
 export function mayStart(o: {
   features: ReadonlySet<string>;
@@ -337,8 +451,9 @@ export function mayStart(o: {
   remembered: Remembered | undefined;
   items: ManifestItem[];
   kept?: boolean;
+  unopenable?: boolean;
 }): boolean {
-  if (!o.features.has(MANIFEST_FEATURE) || o.status !== "none" || o.remembered !== undefined || o.kept) return false;
+  if (!o.features.has(MANIFEST_FEATURE) || o.status !== "none" || o.remembered !== undefined || o.kept || o.unopenable) return false;
   if (manifestSeqOf(o.row) !== 0 || !manifestReady(o.row) || typeof o.row.seq !== "number") return false;
   if (o.role !== "write" && o.role !== "admin" && o.role !== "owner") return false;
   return o.items.every((i) => typeof i.data === "string" || typeof i.data_sha256 === "string");
@@ -347,6 +462,8 @@ export function mayStart(o: {
 const DAY = 86400;
 /** The server's clock and this browser's may differ by this much (seconds) for old trash to be deleted from here. */
 export const CLOCK_TOLERANCE = DAY;
+/** An item is never deleted for good from here before this browser saw it in the trash for this many days. */
+export const TRASH_FLOOR_DAYS = 7;
 
 /**
  * Item id → this browser's clock (Unix seconds) when it first saw the item in the trash. The server's word alone
@@ -376,9 +493,11 @@ export function noteTrash(seen: TrashSeen, rows: Iterable<SyncItemRow>, now: num
 
 /**
  * The vault's trashed rows this browser deletes for good now. All of these must hold:
- * - the server's rule says the row is due: `trash_days >= 1` and `deleted_at + trash_days days <= server_time`, from
- *   the answer's own clock and setting (none when the answer names no clock);
- * - this browser has itself seen the row in the trash for at least `trash_days` days by its own clock (`seen`, `now`);
+ * - the server's rule says the row is due: `trash_days >= 1` and `deleted_at < server_time - trash_days days`
+ *   (strictly, as the server's own sweeper and every other client count), from the answer's own clock and setting
+ *   (none when the answer names no clock);
+ * - this browser has itself seen the row in the trash for at least max(`trash_days`, `TRASH_FLOOR_DAYS`) days by its
+ *   own clock (`seen`, `now`): never less than a week, whatever setting the server names;
  * - the server's clock and this browser's agree within a day.
  * So a server that lies about its clock, its setting or a row's `deleted_at` can't have the trash emptied: at worst
  * it delays it. (Right after an update nothing is due until this browser has watched the trash for the period.)
@@ -387,6 +506,7 @@ export function dueTrash(rows: Iterable<SyncItemRow>, vaultId: string, served: S
   const { serverTime, trashDays } = served;
   if (serverTime === null || trashDays === null || trashDays < 1 || !Number.isSafeInteger(now) || now < 0) return [];
   const keep = trashDays * DAY;
+  const watched = Math.max(trashDays, TRASH_FLOOR_DAYS) * DAY;
   if (!Number.isSafeInteger(keep) || Math.abs(serverTime - now) > CLOCK_TOLERANCE) return [];
   const out: SyncItemRow[] = [];
   for (const r of rows) {
@@ -395,7 +515,7 @@ export function dueTrash(rows: Iterable<SyncItemRow>, vaultId: string, served: S
     const first = seen.get(r.id);
     if (at === null || at < 1 || first === undefined) continue;
     // Subtractions only: nothing here can leave the whole numbers.
-    if (serverTime - at >= keep && now - first >= keep) out.push(r);
+    if (serverTime - at > keep && now - first >= watched) out.push(r);
   }
   return out;
 }
@@ -434,16 +554,85 @@ export function behindOwn(own: Readonly<Record<string, number>>, vaults: readonl
   });
 }
 
-/** The popup's notice: the warning with the vaults it is about (`key`: for dismissing; it changes with the set). */
-export interface ManifestNotice {
-  text: string;
-  review: string;
-  vaults: { id: string; name: string }[];
-  key: string;
+/**
+ * Why a vault shows its warning, which decides what the popup offers:
+ * - "accept": the served copy checks out on its own (the core's `manifestAccept`: "ok" or "none"), so "Use the
+ *   server's copy" can accept it here, whatever the account's role;
+ * - "review": it doesn't, so someone with write access has to write a new record in the web vault or the desktop app;
+ * - "unopenable": the vault's record checks out, but an item of it doesn't open with the vault's key: it has to be
+ *   deleted (web vault or desktop app); accepting changes nothing.
+ */
+export type WarningCause = "accept" | "review" | "unopenable";
+
+/**
+ * A vault's standing warning: the verdict, its cause and the vault row it was judged on (`stamp`: `rowStampOf`). Kept
+ * with the offline copy, so the same answer isn't fetched in full again at every sync or worker start to find the
+ * same verdict. Only ever a warning: "ok" is never read from here.
+ */
+export interface Standing {
+  status: "rollback" | "mismatch";
+  cause: WarningCause;
+  stamp: string;
 }
 
-export function manifestNotice(vaults: { id: string; name: string }[], states: ReadonlyMap<string, ManifestStatus>): ManifestNotice | null {
-  const list = vaults.filter((v) => unresolved(states.get(v.id))).map((v) => ({ id: v.id, name: v.name }));
+/** What a verdict on a vault row depends on, of the row itself: any write into the vault changes it (its `seq`). */
+export function rowStampOf(row: SyncVaultRow): string {
+  const r = row as unknown as Rec;
+  return JSON.stringify([r.seq ?? null, r.manifest_seq ?? null, r.manifest_prev ?? null, r.manifest ?? null, r.key_epoch ?? null, r.wrapped_key ?? null]);
+}
+
+/** The standing warnings an offline copy holds (anything that isn't one is left out). */
+export function readStanding(stored: unknown): Map<string, Standing> {
+  const out = new Map<string, Standing>();
+  if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+    for (const [id, v] of Object.entries(stored as Record<string, Partial<Standing> | null>)) {
+      if (!v || typeof v !== "object" || typeof v.stamp !== "string") continue;
+      if ((v.status === "rollback" || v.status === "mismatch") && (v.cause === "accept" || v.cause === "review" || v.cause === "unopenable"))
+        out.set(id, { status: v.status, cause: v.cause, stamp: v.stamp });
+    }
+  }
+  return out;
+}
+
+/** One vault of the popup's notice: what is wrong, what to do about it, and what the popup offers. */
+export interface NoticeVault {
+  id: string;
+  name: string;
+  /** The warning. */
+  text: string;
+  /** Under it: where it can be resolved when not here (none when "Use the server's copy" is offered). */
+  hint?: string;
+  /** "Use the server's copy" is offered (after the confirmation). */
+  accept?: boolean;
+  /** `hint` points to the web vault: its link is shown. */
+  open?: boolean;
+}
+
+/** The popup's notice: the vaults that show a warning (`key`: it changes with the set). */
+export interface ManifestNotice {
+  vaults: NoticeVault[];
+  key: string;
+  /** The confirmation of "Use the server's copy". */
+  confirm: { action: string; title: string; body: string };
+}
+
+/** What one warned vault shows, by its cause and whether the account may write into it. */
+export function warningOf(cause: WarningCause | undefined, canWrite: boolean): { text: string; hint?: string; accept?: boolean; open?: boolean } {
+  if (cause === "unopenable") return canWrite ? { text: MANIFEST_ITEM_TEXT, hint: MANIFEST_ITEM_WHERE_TEXT, open: true } : { text: MANIFEST_ITEM_READER_TEXT };
+  if (cause === "accept") return { text: MANIFEST_WARNING_TEXT, accept: true };
+  return canWrite ? { text: MANIFEST_WARNING_TEXT, hint: MANIFEST_REVIEW_TEXT, open: true } : { text: MANIFEST_WARNING_TEXT, hint: MANIFEST_READER_TEXT };
+}
+
+export function manifestNotice(
+  vaults: { id: string; name: string; role?: string }[],
+  states: ReadonlyMap<string, ManifestStatus>,
+  causes?: ReadonlyMap<string, { cause: WarningCause }>,
+): ManifestNotice | null {
+  const list = vaults.filter((v) => unresolved(states.get(v.id))).map((v) => ({ id: v.id, name: v.name, ...warningOf(causes?.get(v.id)?.cause, v.role !== undefined && v.role !== "read") }));
   if (!list.length) return null;
-  return { text: MANIFEST_WARNING_TEXT, review: MANIFEST_REVIEW_TEXT, vaults: list, key: JSON.stringify(list.map((v) => v.id).sort()) };
+  return {
+    vaults: list,
+    key: JSON.stringify(list.map((v) => [v.id, v.accept ? 1 : 0]).sort()),
+    confirm: { action: MANIFEST_ACCEPT_ACTION, title: MANIFEST_ACCEPT_TITLE, body: MANIFEST_ACCEPT_BODY },
+  };
 }

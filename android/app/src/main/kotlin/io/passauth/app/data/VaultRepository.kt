@@ -125,6 +125,12 @@ data class VaultInfo(
     val trust: VaultTrust = VaultTrust.Unchecked,
     /** How its items stand against the vault's manifest ([Manifests]); [ManifestState.Unresolved]: warned, no writes. */
     val manifest: ManifestState = ManifestState.None,
+    /**
+     * Of an [ManifestState.Unresolved] vault: "Use the server's copy" can accept it on this phone alone
+     * (the manifest served records exactly the rows served, or there is none), so every role gets the
+     * action; otherwise only an account that can write does (it makes a new baseline).
+     */
+    val manifestAcceptable: Boolean = false,
 ) {
     val personal: Boolean get() = keyKind == KEY_KIND_ACCOUNT
 
@@ -185,6 +191,9 @@ data class RotationReport(
     }
 }
 
+/** A row of the copy that doesn't open on this phone (its key or data doesn't decrypt): listed so it can be deleted for good ([Manifests.UNOPENABLE_ITEM]). */
+data class UnopenableItem(val id: String, val vaultId: String)
+
 /** The unlocked vault of the active account. */
 data class VaultData(
     val entries: List<Entry> = emptyList(),
@@ -200,9 +209,16 @@ data class VaultData(
     val keptNewer: Boolean = false,
     /** Why the server isn't asked ([ServerSupport.UPDATE_SERVER]) while the copy on this phone is shown; null: it just couldn't be reached. */
     val syncProblem: String? = null,
+    /** Live items that don't open on this phone: not shown as items, listed to be deleted for good. */
+    val unopenable: List<UnopenableItem> = emptyList(),
+    /** This phone's record of the account's vaults can't be read, again and again ([Manifests.MEMORY_UNREADABLE], "Reset on this device"). */
+    val memoryUnreadable: Boolean = false,
 ) {
     /** Vaults whose items don't match the vault's manifest ([Manifests.WARNING]): shown, never written to. */
     val unresolved: List<VaultInfo> get() = vaults.filter { it.manifest == ManifestState.Unresolved }
+
+    /** Vaults whose manifest passes but that hold an item that doesn't open ([Manifests.UNOPENABLE]): only deleting such items is written. */
+    val withUnopenable: List<VaultInfo> get() = vaults.filter { it.manifest == ManifestState.Unopenable }
 
     /** The sync-level notice about [rolledBack], or null. */
     val rollbackNotice: String? get() = ItemRevs.notice(rolledBack, keptNewer)
@@ -331,7 +347,10 @@ class VaultRepository(
     private var itemRevs: Pair<String, Map<String, Long>>? = null
 
     /** The last manifest (version and link) this phone checked or wrote of each vault of one account ([Manifests]; stored with its offline copy). */
-    private var manifestMemory: Pair<String, Map<String, ManifestMark>>? = null
+    private var manifestMemory: Pair<String, Map<String, Remembered>>? = null
+
+    /** How often in a row one account's manifest memory couldn't be read ([UnreadableMemory]); memory only. */
+    private var unreadableMemory: Pair<String, UnreadableMemory>? = null
 
     /** When this phone first saw each trashed item of one account in the trash ([TrashSeen]; stored with its offline copy). */
     private var trashSeen: Pair<String, Map<String, Long>>? = null
@@ -341,6 +360,12 @@ class VaultRepository(
 
     /** How each vault of the copy shown stands against its manifest. */
     private var manifestStates = mapOf<String, ManifestState>()
+
+    /** Of the vaults with a warning: the ones "Use the server's copy" can accept on this phone alone ([Manifests.Judged.acceptable]). */
+    private var manifestAcceptable = setOf<String>()
+
+    /** The rows of the copy shown that don't open (by item id), for [deleteUnopenable]. */
+    private var unopenableRows = mapOf<String, SyncItem>()
 
     /** Public syncs: one in flight, one waiting ([SyncQueue]). */
     private val syncQueue = SyncQueue(scope)
@@ -1067,6 +1092,8 @@ class VaultRepository(
         vaultHeaders = emptyMap()
         invitationNames = emptyMap()
         manifestStates = emptyMap()
+        manifestAcceptable = emptySet()
+        unopenableRows = emptyMap()
         copy = null
         _vault.value = null
         _sharing.value = SharingStatus()
@@ -1266,10 +1293,15 @@ class VaultRepository(
      * decides and only the changes are fetched and merged into the copy; otherwise the whole
      * `/sync` replaces it. Only a valid sync answer (with the account bundle) at least as new as
      * the copy is written ([DeltaSync.refresh]): never downgrades, never an unparseable body.
+     *
+     * Rule S3: nothing can be checked without the keys, so the result never replaces the copy this
+     * phone checked. It is kept beside it ([SecureStore.writeRefreshed]; a later refresh goes on from
+     * there), and the next unlock judges it with the keys before anything of it is shown
+     * ([adoptRefreshed]).
      */
     private suspend fun refreshCacheLocked(id: String) {
         requireSupportedServer(id)
-        val cached = readSnapshot(id)
+        val cached = readRefreshed(id) ?: readSnapshot(id)
         val delta = deltaSyncEnabled(id)
         val result = DeltaSync.refresh(cached, delta, TRASH_SUMMARY) { path -> api.callText(id, path) }
         if (store.get().accounts[id]?.tokens == null) return // signed out meanwhile
@@ -1278,13 +1310,13 @@ class VaultRepository(
             DeltaSync.CacheRefresh.Keep -> return
             DeltaSync.CacheRefresh.Current -> store.updateAccount(id) { it.copy(lastSync = System.currentTimeMillis()) }
             is DeltaSync.CacheRefresh.Write -> {
-                // Nothing is decrypted here: the versions replaced are held for the next unlocked sync's rollback check.
-                val next = ItemRevs.withHeld(result.snapshot, cached)
+                val next = result.snapshot
                 val text = core { next.encode() }
                 mutex.withLock {
                     // Unlocked and shown meanwhile: its own sync writes the copy.
                     if (sessions.containsKey(id) && activeId() == id) return@withLock
-                    withContext(Dispatchers.IO) { store.writeCache(id, text) }
+                    // Beside the checked copy, never over it.
+                    withContext(Dispatchers.IO) { store.writeRefreshed(id, text) }
                     // Locked: a bundle naming another account than the one kept is never stored (round 5 iOS H);
                     // an unlocked (inactive) session checks it is the account's own.
                     val unlocked = sessions[id]?.account
@@ -1316,6 +1348,7 @@ class VaultRepository(
         if (cacheFirst) {
             val cached = readSnapshot(id)
             if (cached != null && runCatching { show(id, session, cached, offline = false, mode = CopyStore.None) }.isSuccess) {
+                adoptRefreshed(id, session, offline = false)
                 scope.launch { backgroundSync(id, session) }
                 return
             }
@@ -1334,6 +1367,7 @@ class VaultRepository(
                 throw e
             }
             show(id, session, cached, offline = true, mode = CopyStore.None)
+            adoptRefreshed(id, session, offline = true)
             if (problem != null && sessions[id] === session) _vault.value = _vault.value?.copy(syncProblem = problem)
         }
         val next = try {
@@ -1352,6 +1386,33 @@ class VaultRepository(
             return unreached(e.cause as? Exception ?: e)
         }
         if (upkeep) manifestUpkeep(id, session, shown.serverTime, shown.trashDays)
+    }
+
+    /** The copy a locked background refresh left beside the checked one didn't pass with the keys ([Manifests.adoptable]): it is dropped. */
+    private class NotAdopted : Exception()
+
+    /**
+     * Rule S3, at unlock: the checked copy is shown ([show] just ran for it); now the copy a locked
+     * background refresh left beside it is judged with the keys, like a delta from the server but
+     * without asking it anything. It takes the checked copy's place only when every vault passes its
+     * manifest and its place in the chain (or has none), every vault's key checks out and no item
+     * came in an older version than this phone remembers. Anything else: it is deleted, the checked
+     * copy stays shown, and the next sync decides (with the usual warnings). The autofill and
+     * credential services open the vault through here too, so they never see rows nobody checked.
+     */
+    private suspend fun adoptRefreshed(id: String, session: Session, offline: Boolean) {
+        val next = readRefreshed(id) ?: return
+        val shown = copy?.takeIf { it.first == id }?.second
+        try {
+            if (shown == null || next.revision < shown.revision) throw NotAdopted()
+            show(id, session, next, offline = offline, mode = CopyStore.Refreshed)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // Not taken: the checked copy stays as shown.
+        } finally {
+            withContext(Dispatchers.IO) { store.dropRefreshed(id) }
+        }
     }
 
     /**
@@ -1377,7 +1438,7 @@ class VaultRepository(
     }
 
     /** Everything the server has for account [id], fetched now, checked as one whole answer, shown and stored. */
-    private suspend fun showWholeAnswer(id: String, session: Session): SyncSnapshot {
+    private suspend fun showWholeAnswer(id: String, session: Session, accepting: Set<String> = emptySet()): SyncSnapshot {
         val full = try {
             DeltaSync.fetch(null, false, TRASH_SUMMARY) { path -> api.callText(id, path) }
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1386,7 +1447,7 @@ class VaultRepository(
             if (e is UserException && e.message == DeltaSync.unreadable().message) throw e
             throw ManifestLogUnavailable(e)
         }
-        show(id, session, full, offline = false, mode = CopyStore.Synced)
+        show(id, session, full, offline = false, mode = CopyStore.Synced, accepting = accepting)
         return full
     }
 
@@ -1410,9 +1471,15 @@ class VaultRepository(
         return DeltaSync.fetch(base, delta, TRASH_SUMMARY) { path -> api.callText(id, path) }
     }
 
-    /** The account's copy on this device (null if missing or unreadable). */
+    /** The account's copy on this device, the one this phone checked (null if missing or unreadable). */
     private suspend fun readSnapshot(id: String): SyncSnapshot? {
         val text = withContext(Dispatchers.IO) { store.readCache(id) } ?: return null
+        return core { SyncSnapshot.decode(text) }
+    }
+
+    /** What a locked background refresh left beside the account's checked copy (null: nothing). Never shown before [adoptRefreshed] judged it. */
+    private suspend fun readRefreshed(id: String): SyncSnapshot? {
+        val text = withContext(Dispatchers.IO) { store.readRefreshed(id) } ?: return null
         return core { SyncSnapshot.decode(text) }
     }
 
@@ -1438,7 +1505,19 @@ class VaultRepository(
     }
 
     /** What [show] keeps of a copy besides showing it. */
-    private enum class CopyStore { None, LocalChange, Synced }
+    private enum class CopyStore {
+        /** The copy from this phone, shown as it is. */
+        None,
+
+        /** This device's write applied to the copy. */
+        LocalChange,
+
+        /** The server's answer, just fetched. */
+        Synced,
+
+        /** What a locked background refresh fetched, judged at unlock ([adoptRefreshed]): taken whole or not at all. */
+        Refreshed,
+    }
 
     /**
      * Decrypt [snap] (only what changed since the copy shown now) and show it. [CopyStore.Synced]:
@@ -1460,77 +1539,132 @@ class VaultRepository(
         written: Map<String, ManifestMark> = emptyMap(),
         /** [CopyStore.LocalChange]: items this device just deleted for good. */
         purged: Set<String> = emptySet(),
+        /**
+         * [CopyStore.Synced], right after "Use the server's copy": vaults whose rows are taken as the
+         * server has them, whatever item edit counters this phone remembers or newer copies it kept
+         * (the user accepted "anything that is missing, restored or out of date").
+         */
+        accepting: Set<String> = emptySet(),
     ) {
         if (sessions[id] !== session) return
+        val fromServer = mode == CopyStore.Synced
+        val refreshed = mode == CopyStore.Refreshed
         // Only the server's whole answer, exactly as sent, raises a vault's warning.
-        val whole = snap.whole && mode == CopyStore.Synced
+        val whole = snap.whole && fromServer
         // Signed sharing: every vault and invitation checked before anything of it is used.
         val shownBefore = copy?.takeIf { it.first == id }?.second?.vaults?.filter { it.keyKind == "sealed" }?.map { it.id }?.toSet()
-        val checks = verifySharing(id, session, snap, online = !offline && mode != CopyStore.None, sharedBefore = shownBefore ?: session.earlierShared, fromServer = !offline && mode == CopyStore.Synced)
+        val checks = verifySharing(
+            id, session, snap, online = !offline && (fromServer || mode == CopyStore.LocalChange),
+            sharedBefore = shownBefore ?: session.earlierShared, fromServer = !offline && fromServer,
+        )
         if (sessions[id] !== session) return
+        // A refreshed copy is taken only when every vault's key checks out with what this phone has.
+        if (refreshed && checks != null && snap.vaults.any { checks.vaults[it.id] !is VaultCheck.Ok }) throw NotAdopted()
         // An identity uploaded at this sync goes into the copy kept, so an offline unlock later opens it (instead of pausing).
-        @Suppress("NAME_SHADOWING")
-        val served = (checks?.identityRecord?.let { withIdentity(snap, it) } ?: snap).let { s -> checks?.pinsSeq?.takeIf { mode == CopyStore.Synced }?.let { withPinsSeq(s, it) } ?: s }
+        val served = checks?.identityRecord?.let { withIdentity(snap, it) } ?: snap
         val previous = if (copy?.first == id) _vault.value?.let { Opened(it, vaultKeys, vaultHeaders, emptyList()) } else null
         val names = if (copy?.first == id) invitationNames else emptyMap()
         // Rollback check: what this phone remembers, and the copies it has to compare with (the copy
-        // shown, else the stored one, and the versions a locked refresh held or that wait for an item
-        // the server stopped sending). Memory that can't be read now: nothing is remembered from this
-        // copy and nothing written (the copies this phone has are still compared).
+        // shown, else the stored one, and the versions that wait for an item the server stopped
+        // sending). Memory that can't be read now: nothing is remembered from this copy and nothing
+        // written (the copies this phone has are still compared).
         val revs = itemRevsOf(id)
-        val priorCopy = copy?.takeIf { it.first == id }?.second ?: if (mode == CopyStore.Synced) readSnapshot(id) else null
-        val priors = (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held).groupBy { it.id }
-        val opened = core { decryptVault(session.account, served, previous, names, checks, revs.orEmpty(), priors) }
+        if (refreshed && revs == null) throw NotAdopted()
+        val priorCopy = copy?.takeIf { it.first == id }?.second ?: if (fromServer) readSnapshot(id) else null
+        // "Use the server's copy": nothing this phone remembers or kept of the accepted vaults' items counts.
+        val acceptedIds = if (accepting.isEmpty()) emptySet() else
+            (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.items + served.held).filter { it.vaultId in accepting }.map { it.id }.toSet()
+        val priors = (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held).filter { it.vaultId !in accepting }.groupBy { it.id }
+        val opened = core { decryptVault(session.account, served, previous, names, checks, revs.orEmpty() - acceptedIds, priors) }
         if (sessions[id] !== session) {
             opened.fresh.forEach { it.destroy() }
             return
         }
         // Vault manifests: the items exactly as the server sent them (one answer, applied) against each
-        // vault's record; after this device's own write the copy carries the manifest it made.
-        val before = if (copy?.first == id) manifestStates else emptyMap()
+        // vault's record; after this device's own write the copy carries the manifest it made. The
+        // warnings that stood when the copy was stored come with it (a restart doesn't fetch everything
+        // again to find them).
+        val before = if (copy?.first == id) manifestStates else (if (mode == CopyStore.None) snap else priorCopy)?.unresolved.orEmpty().associateWith { ManifestState.Unresolved }
+        val hidden = opened.unopenable.map { it.vaultId }.toSet()
         val memory = manifestMemoryOf(id)
         var remember: Map<String, ManifestMark> = written
+        var acceptable = manifestAcceptable.takeIf { copy?.first == id }.orEmpty()
         val states: Map<String, ManifestState> = when {
-            mode == CopyStore.LocalChange -> opened.keys.keys.associateWith { vid -> if (vid in written) ManifestState.Ok else before[vid] ?: ManifestState.None }
+            mode == CopyStore.LocalChange -> opened.keys.keys.associateWith { vid ->
+                // A vault this device just wrote passed (it made that manifest); one that still holds a row that doesn't open stays warned.
+                if (vid in written) (if (vid in hidden) ManifestState.Unopenable else ManifestState.Ok) else before[vid] ?: ManifestState.None
+            }
             // What this phone remembers can't be read now: nothing is checked against "nothing remembered"
-            // (and nothing is written over it). A warning that stands stays; every other vault is unchecked
-            // until a sync can check it (never an earlier "ok" over rows that weren't checked), so nothing is
-            // written, started or purged meanwhile.
-            memory == null -> opened.keys.keys.associateWith { vid -> if (before[vid] == ManifestState.Unresolved) ManifestState.Unresolved else ManifestState.Unchecked }
+            // (and nothing is written over it). A warning that stands stays; a vault with a manifest is
+            // unchecked until the memory reads again or is reset (never an earlier "ok" over rows that
+            // weren't checked); a vault without one goes on as before, writes included (rule S4).
+            memory == null -> {
+                if (refreshed) {
+                    opened.fresh.forEach { it.destroy() }
+                    throw NotAdopted()
+                }
+                opened.keys.keys.associateWith { vid ->
+                    when {
+                        before[vid] == ManifestState.Unresolved -> ManifestState.Unresolved
+                        (opened.headers[vid]?.manifestSeq ?: 0) > 0 -> ManifestState.Unchecked
+                        else -> ManifestState.None
+                    }
+                }
+            }
             else -> {
                 val judged = try {
                     withContext(Dispatchers.Default) {
                         Manifests.judge(
-                            served.vaults, served.items, opened.keys, memory, whole, opened.hidden,
-                            log = if (mode == CopyStore.Synced) { vid, after -> manifestLog(id, vid, after) } else null,
+                            served.vaults, served.items, opened.keys, Manifests.marks(memory), whole, hidden,
+                            log = if (fromServer) { vid, after -> manifestLog(id, vid, after) } else null,
                         )
                     }
                 } catch (e: Throwable) {
                     opened.fresh.forEach { it.destroy() }
                     throw e
                 }
+                // What a locked refresh fetched: taken only when everything passes; nothing is asked or warned here.
+                if (refreshed && !Manifests.adoptable(judged, opened.rollbacks.isNotEmpty())) {
+                    opened.fresh.forEach { it.destroy() }
+                    throw NotAdopted()
+                }
                 // A vault whose warning already stands (raised by a whole answer) keeps it while it doesn't pass;
                 // any other that doesn't pass is decided by the server's whole answer, asked for now.
-                if (mode == CopyStore.Synced && !whole && judged.undecided.any { before[it] != ManifestState.Unresolved }) {
+                if (fromServer && !whole && judged.undecided.any { before[it] != ManifestState.Unresolved }) {
                     opened.fresh.forEach { it.destroy() }
                     throw NeedsWholeAnswer()
                 }
                 remember = judged.remember
+                acceptable = judged.acceptable
                 judged.states.mapValues { (vid, state) -> if (vid in judged.undecided && before[vid] == ManifestState.Unresolved) ManifestState.Unresolved else state }
             }
         }
+        acceptable = acceptable.filter { states[it] == ManifestState.Unresolved }.toSet()
+        // The copy is taken from here on. Signed sharing's own writes (vaults the server stopped listing,
+        // the key pins) belong to an answer that is kept, never to one that was just refused.
+        val pinsSeq = checks?.commit?.invoke()
+        if (sessions[id] !== session) {
+            opened.fresh.forEach { it.destroy() }
+            return
+        }
         // Items gone for certain: deleted for good by this phone, or absent from a vault whose manifest passed for this answer.
-        val forget = purged + if (mode == CopyStore.Synced) ItemRevs.gone(priorCopy, served, states) else emptySet()
-        // The copy kept: newer copies in place of older versions served; held versions checked now;
-        // kept newer copies of items the server stopped sending (without that being certain) wait.
+        val forget = purged + if (fromServer || refreshed) ItemRevs.gone(priorCopy, served, states) else emptySet()
+        // The copy kept: newer copies in place of older versions served; kept newer copies of items
+        // the server stopped sending (without that being certain) wait. The key pins version this phone
+        // wrote at this sync goes in too (the answer was read before the write).
         @Suppress("NAME_SHADOWING")
         val snap = ItemRevs.keepRows(served, opened.keptRows).let { kept ->
-            kept.copy(held = ItemRevs.waiting(priorCopy ?: served, kept, forget), serverTime = null, trashDays = null, whole = false)
-        }
+            kept.copy(
+                held = ItemRevs.waiting(priorCopy ?: served, kept, forget + acceptedIds),
+                unresolved = states.filterValues { it == ManifestState.Unresolved }.keys.sorted(),
+                serverTime = null, trashDays = null, whole = false,
+            )
+        }.let { s -> pinsSeq?.takeIf { fromServer }?.let { withPinsSeq(s, it) } ?: s }
         if (mode != CopyStore.None) {
             val text = core { snap.encode() }
+            // The checked copy; whatever a locked refresh left beside it is older than this and goes.
             withContext(Dispatchers.IO) { store.writeCache(id, text) }
-            if (mode == CopyStore.Synced) {
+            if (fromServer) {
                 store.updateAccount(id) {
                     it.copy(
                         lastSync = System.currentTimeMillis(),
@@ -1545,8 +1679,12 @@ class VaultRepository(
             rememberTrashSeen(id, snap.items)
         }
         // Remembered only now: together with the stored copy that carries it (never ahead of it).
-        if (revs != null) rememberRevs(id, revs, opened.revUpdates, forget, snap.items.map { it.id }.toSet())
+        if (revs != null) rememberRevs(id, revs, opened.revUpdates, forget, snap.items.map { it.id }.toSet(), acceptedIds)
         rememberManifests(id, remember)
+        // Rule S4: a memory that can't be read again and again, across a finished sync, gets its way out.
+        if (mode == CopyStore.None || fromServer) {
+            unreadableMemory = if (memory != null) null else id to (unreadableMemory?.takeIf { it.first == id }?.second ?: UnreadableMemory()).failed(fromServer)
+        }
         // Keys of vaults gone or opened again are freed; kept ones live on in the new map.
         val kept = opened.keys.values
         vaultKeys.values.filter { old -> kept.none { it === old } }.forEach { it.destroy() }
@@ -1555,7 +1693,13 @@ class VaultRepository(
         invitationNames = opened.invitationNames
         copy = id to snap
         manifestStates = states
-        _vault.value = opened.data.copy(offline = offline, vaults = opened.data.vaults.map { it.copy(manifest = states[it.id] ?: ManifestState.None) })
+        manifestAcceptable = acceptable
+        unopenableRows = opened.unopenable.associateBy { it.id }
+        _vault.value = opened.data.copy(
+            offline = offline,
+            vaults = opened.data.vaults.map { it.copy(manifest = states[it.id] ?: ManifestState.None, manifestAcceptable = it.id in acceptable) },
+            memoryUnreadable = unreadableMemory?.takeIf { it.first == id }?.second?.offerReset == true,
+        )
         rememberUsable(id, session, opened.data.vaults.map { it.id }.toSet(), checks)
         if (!offline) vaultKeysMaybeChanged(id, opened.data.vaults)
     }
@@ -1583,8 +1727,9 @@ class VaultRepository(
      * [updates] remembered (never lowered); [forget]: items gone for certain ([ItemRevs.gone]);
      * [present]: the copy's items (kept first when the memory is full). Written only when changed.
      */
-    private suspend fun rememberRevs(id: String, memory: Map<String, Long>, updates: Map<String, Long>, forget: Set<String>, present: Set<String>) {
-        val next = ItemRevs.merged(memory, updates, forget, present)
+    private suspend fun rememberRevs(id: String, memory: Map<String, Long>, updates: Map<String, Long>, forget: Set<String>, present: Set<String>, accepted: Set<String> = emptySet()) {
+        // [accepted]: items of a vault the user took as the server has it: what was remembered of them goes, what was served now counts.
+        val next = ItemRevs.merged(if (accepted.isEmpty()) memory else memory - accepted, updates, forget, present)
         if (next == memory) return
         val text = ItemRevs.encode(next)
         if (withContext(Dispatchers.IO) { store.revs(id).write { text } }) itemRevs = id to next
@@ -1594,7 +1739,7 @@ class VaultRepository(
      * What account [id] remembers of its vaults' manifests (read from the phone once per account
      * and kept); null while the file can't be read: no vault is checked against "nothing".
      */
-    private suspend fun manifestMemoryOf(id: String): Map<String, ManifestMark>? {
+    private suspend fun manifestMemoryOf(id: String): Map<String, Remembered>? {
         manifestMemory?.takeIf { it.first == id }?.let { return it.second }
         val m = when (val r = withContext(Dispatchers.IO) { store.manifests(id).read() }) {
             SealedFile.Read.Unreadable -> return null
@@ -1605,20 +1750,31 @@ class VaultRepository(
         return m
     }
 
+    /**
+     * The stored memory of account [id] changed by [change] (given what the file holds, brought
+     * together with this process's copy: [Manifests.joined]) and written; false, and nothing written,
+     * while the file can't be read.
+     */
+    private suspend fun writeManifestMemory(id: String, change: (Map<String, Remembered>) -> Map<String, Remembered>): Boolean {
+        val mine = manifestMemoryOf(id) ?: return false
+        val stored = withContext(Dispatchers.IO) {
+            var out = mine
+            val done = store.manifests(id).write { text ->
+                out = change(Manifests.joined(Manifests.decodeMemory(text), mine))
+                Manifests.encodeMemory(out)
+            }
+            out.takeIf { done }
+        } ?: return false
+        manifestMemory = id to stored
+        return true
+    }
+
     /** [updates] remembered (the higher version wins, merged with what the file holds). Written only when something went up, never over a file that can't be read. */
     private suspend fun rememberManifests(id: String, updates: Map<String, ManifestMark>) {
         if (updates.isEmpty()) return
         val memory = manifestMemoryOf(id) ?: return
         if (Manifests.merged(memory, updates) == memory) return
-        val stored = withContext(Dispatchers.IO) {
-            var out = memory
-            val done = store.manifests(id).write { text ->
-                out = Manifests.merged(Manifests.merged(Manifests.decodeMemory(text), memory), updates)
-                Manifests.encodeMemory(out)
-            }
-            out.takeIf { done }
-        } ?: return
-        manifestMemory = id to stored
+        writeManifestMemory(id) { Manifests.merged(it, updates) }
     }
 
     /** When account [id] first saw each trashed item in the trash; null while the file can't be read (no old trash is deleted then). */
@@ -1681,7 +1837,8 @@ class VaultRepository(
         val id = activeId()
         val c = copy?.takeIf { it.first == id }
         val session = sessions[id]
-        // With a manifest sent, the copy takes the write only when the answer names exactly that version.
+        // With a manifest sent, the copy takes the write (and remembers it) only when the answer names exactly that
+        // manifest by its link (rule S6): a retried create that sealed its manifest again is synced instead.
         if (change == null || c == null || session == null || !Manifests.mayApplyLocally(sent, answer)) return syncAfterWrite()
         val known = c.second.vaults.firstOrNull { it.id == vaultId }?.seq
         val seq = ((answer as? JsonObject)?.get("vault_seq") as? JsonPrimitive)?.longOrNull
@@ -1693,7 +1850,7 @@ class VaultRepository(
                 show(
                     id, session, next, offline = false, mode = CopyStore.LocalChange,
                     written = listOfNotNull(sent).associate { it.vaultId to it.mark },
-                    purged = (change as? LocalChange.PurgeAll)?.ids.orEmpty(),
+                    purged = (change as? LocalChange.PurgeAll)?.ids.orEmpty() + listOfNotNull((change as? LocalChange.Purge)?.id),
                 )
                 true
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1738,16 +1895,18 @@ class VaultRepository(
     /**
      * The manifest entry a write into [vaultId] carries ([Manifests.next]): null for a vault without
      * a manifest; [Manifests.HELD] for one whose warning isn't resolved. A copy that couldn't be
-     * checked yet (shown from this phone before the server answered) is synced first.
+     * checked yet (shown from this phone before the server answered) is synced first. [deleting]:
+     * the write deletes a row that doesn't open ([deleteUnopenable]).
      */
-    private suspend fun manifestEntry(vaultId: String, removed: List<SyncItem>, added: List<SyncItem>): ManifestEntry? {
+    private suspend fun manifestEntry(vaultId: String, removed: List<SyncItem>, added: List<SyncItem>, deleting: Boolean = false): ManifestEntry? {
         val v = copyVault(vaultId) ?: return null
         val state = manifestStates[vaultId]
         // Not checked against the server's answer yet: the sync first. Unless what this phone remembers
-        // can't be read (a sync can't check it either): held, like a vault with a warning.
-        if (state == ManifestState.Unchecked) throw if (manifestMemoryOf(activeId()) == null) UserException(Manifests.HELD) else ItemWrites.StaleCopy()
+        // can't be read (a sync can't check it either): refused in words that don't speak of a warning,
+        // since none shows (rule S4; the way out is "Reset on this device").
+        if (state == ManifestState.Unchecked) throw if (manifestMemoryOf(activeId()) == null) UserException(Manifests.UNCHECKED) else ItemWrites.StaleCopy()
         val key = vaultKeys[vaultId] ?: throw UserException("Vault not found.")
-        return core { Manifests.next(key, v, state, removed, added) }
+        return core { Manifests.next(key, v, state, removed, added, deleting) }
     }
 
     /**
@@ -1793,8 +1952,8 @@ class VaultRepository(
                 val number = v.seq ?: continue
                 if (upkeepTried[tried] == number) continue
                 val memory = manifestMemoryOf(id) ?: return
-                if (Manifests.mayStart(v, state, role, true, memory[vid], rows, _vault.value?.rolledBack.orEmpty())) {
-                    val (body, entry) = core { Manifests.startBody(key, v, 1, rows) } ?: continue
+                if (Manifests.mayStart(v, state, role, true, memory[vid]?.mark, rows, _vault.value?.rolledBack.orEmpty(), unopenableRows.values.any { it.vaultId == vid })) {
+                    val (body, entry) = core { Manifests.startBody(key, v, rows) } ?: continue
                     upkeepTried[tried] = number
                     val answer = api.call(id, "/vaults/${urlPart(vid)}/manifest", body, "PUT")
                     afterWrite(vid, answer, LocalChange.ManifestOnly, entry)
@@ -1817,10 +1976,18 @@ class VaultRepository(
     }
 
     /**
-     * "Use the server's copy" of vault [vaultId] ([Manifests.CONFIRM_BODY], after the user confirmed):
-     * the vault is fetched in full, and a new manifest for exactly what the server sent is written
-     * as a version above the vault's and above everything this phone remembers. Only for a vault
-     * whose warning is showing, by an account that can write to it.
+     * "Use the server's copy" of vault [vaultId] ([Manifests.CONFIRM_BODY], after the user confirmed;
+     * rule S1). Everything is fetched again; if the vault still doesn't pass:
+     *
+     * - the manifest served records exactly the rows served (or the server shows none): accepted on
+     *   this phone alone, by any role. This phone's memory of the vault is replaced with that
+     *   manifest (also when it remembered a higher version) and nothing is sent;
+     * - otherwise an account that can write stores a new baseline, one version above the row's, for
+     *   exactly the rows served, and this phone's memory is replaced with it; a view-only account
+     *   can't ([Manifests.READERS]).
+     *
+     * The vault's items are then taken as served, whatever item edit counters this phone remembered.
+     * A vault that only holds an item that doesn't open isn't touched (that item is deleted instead).
      */
     suspend fun useServerCopy(vaultId: String) = mutex.withLock {
         val id = activeId()
@@ -1838,30 +2005,103 @@ class VaultRepository(
             if (manifestStates[vaultId] != ManifestState.Unresolved) return@withLock
             val v = copyVault(vaultId) ?: return@withLock
             val role = _vault.value?.vaults?.firstOrNull { it.id == vaultId }?.role
-            if (role == null || role == Role.Read) throw UserException(Manifests.READERS)
             val key = vaultKeys[vaultId] ?: throw UserException("Vault not found.")
             val rows = copy?.second?.items.orEmpty().filter { it.vaultId == vaultId }
-            // Above everything this phone remembers: without that memory no version can be chosen.
-            val memory = manifestMemoryOf(id) ?: throw DeltaSync.unreadable()
-            val seq = Manifests.baselineSeq(v.manifestSeq, memory[vaultId]?.version)
-            val (body, entry) = try {
-                core { Manifests.startBody(key, v, seq, rows) }
-            } catch (_: CoreException) {
-                null
-            } ?: throw DeltaSync.unreadable()
-            try {
-                val answer = api.call(id, "/vaults/${urlPart(vaultId)}/manifest", body, "PUT")
-                afterWrite(vaultId, answer, LocalChange.ManifestOnly, entry)
-                return@withLock
-            } catch (e: ApiException) {
-                when {
-                    Manifests.isNotReady(e) -> throw UserException(Manifests.NOT_READY)
-                    Manifests.isConflict(e) && attempt < Manifests.ATTEMPTS - 1 -> return@repeat
-                    Manifests.isConflict(e) -> throw UserException(Manifests.CHANGED_ELSEWHERE)
-                    else -> throw e
+            // What this phone remembers is about to be replaced: not while it can't be read.
+            manifestMemoryOf(id) ?: throw UserException(Manifests.MEMORY_UNREADABLE)
+            val accepted: ManifestMark? = when (val plan = core { Manifests.serverCopy(key, v, role, rows) }) {
+                is Manifests.ServerCopy.Accept -> plan.mark
+                Manifests.ServerCopy.Forget -> null
+                Manifests.ServerCopy.Readers -> throw UserException(Manifests.READERS)
+                Manifests.ServerCopy.Broken -> throw DeltaSync.unreadable()
+                is Manifests.ServerCopy.Baseline -> {
+                    val answer = try {
+                        api.call(id, "/vaults/${urlPart(vaultId)}/manifest", plan.body, "PUT")
+                    } catch (e: ApiException) {
+                        when {
+                            Manifests.isNotReady(e) -> throw UserException(Manifests.NOT_READY)
+                            Manifests.isConflict(e) && attempt < Manifests.ATTEMPTS - 1 -> return@repeat
+                            Manifests.isConflict(e) -> throw UserException(Manifests.CHANGED_ELSEWHERE)
+                            // Also the baseline rate limit (429): the app's usual "try again in …" message; the warning stays.
+                            else -> throw e
+                        }
+                    }
+                    // Not the manifest sent (someone wrote right after): nothing is remembered, the sync below judges what is there.
+                    if (!Manifests.stored(plan.entry, answer)) {
+                        syncAfterWrite()
+                        return@withLock
+                    }
+                    plan.entry.mark
                 }
             }
+            if (!writeManifestMemory(id) { Manifests.replaced(it, vaultId, accepted) }) throw UserException(Manifests.MEMORY_UNREADABLE)
+            // The server's rows, checked against the new memory, with the vault's items taken as they are.
+            try {
+                showWholeAnswer(id, session, accepting = setOf(vaultId))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _vault.value = _vault.value?.copy(offline = true, syncProblem = (e as? ServerTooOldException)?.message)
+            }
+            return@withLock
         }
+    }
+
+    /**
+     * "Delete for good" of an item that doesn't open on this phone ([Manifests.DELETE_FOR_GOOD_CONFIRM];
+     * rule S2): the row is deleted on the server as it is, live or trashed, with the vault's next
+     * manifest when it has one. Nothing has to be opened for that. Taken for a vault whose only
+     * trouble is such rows ([ManifestState.Unopenable]: the way out of its warning) or that has no
+     * manifest; a vault whose manifest doesn't pass is reviewed first ([useServerCopy]).
+     */
+    suspend fun deleteUnopenable(item: UnopenableItem) = mutex.withLock {
+        var answer: JsonElement? = null
+        var manifest: ManifestEntry? = null
+        var sent = false
+        ItemWrites.place(
+            send = {
+                val v = requireVault()
+                requireOnline(v)
+                val vault = v.vaults.firstOrNull { it.id == item.vaultId } ?: throw UserException("Vault not found.")
+                if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
+                // Gone meanwhile, or it opens now: nothing to delete.
+                val row = unopenableRows[item.id]?.takeIf { it.vaultId == item.vaultId } ?: return@place
+                val m = manifestEntry(item.vaultId, listOf(row), emptyList(), deleting = true)
+                try {
+                    answer = api.call(activeId(), Manifests.deletePath(row, m), method = "DELETE")
+                    manifest = m
+                } catch (e: ApiException) {
+                    // Already deleted elsewhere: the sync below shows it.
+                    if (e.status != 404) throw e
+                }
+                sent = true
+            },
+            resync = { syncLocked() },
+        )
+        if (sent) afterWrite(item.vaultId, answer, answer?.let { LocalChange.Purge(item.id) }, manifest)
+    }
+
+    /**
+     * "Reset on this device" ([Manifests.RESET_MEMORY_CONFIRM]; rule S4): what this phone remembers of
+     * the active account's vaults and can't read is moved aside, and the phone goes on as one that
+     * remembers nothing (it trusts what the server shows at the sync that follows). Files that read
+     * are left alone.
+     */
+    suspend fun resetDeviceMemory() {
+        mutex.withLock {
+            val id = activeId()
+            withContext(Dispatchers.IO) {
+                store.manifests(id).setAside()
+                store.revs(id).setAside()
+                store.trashSeen(id).setAside()
+            }
+            if (manifestMemory?.first == id) manifestMemory = null
+            if (itemRevs?.first == id) itemRevs = null
+            if (trashSeen?.first == id) trashSeen = null
+            unreadableMemory = null
+            _vault.value = _vault.value?.copy(memoryUnreadable = false)
+        }
+        sync()
     }
 
     /**
@@ -1878,8 +2118,10 @@ class VaultRepository(
         val revUpdates: Map<String, Long> = emptyMap(),
         /** Rows of newer copies kept instead of an older version served (by item id). */
         val keptRows: Map<String, SyncItem> = emptyMap(),
-        /** Opened vaults with a live item that doesn't open: behind a manifest that counts it, an item is being hidden. */
-        val hidden: Set<String> = emptySet(),
+        /** Live rows of opened vaults that don't open: listed to be deleted; their vault is warned while they are there. */
+        val unopenable: List<SyncItem> = emptyList(),
+        /** Items this decryption found served in an older version than this phone remembers or has (not the ones only kept from before). */
+        val rollbacks: Set<String> = emptySet(),
     )
 
     /**
@@ -1942,7 +2184,8 @@ class VaultRepository(
         val revUpdates = mutableMapOf<String, Long>()
         val keptRows = mutableMapOf<String, SyncItem>()
         val rolledBack = mutableSetOf<String>()
-        val hidden = mutableSetOf<String>()
+        val unopenable = mutableListOf<SyncItem>()
+        val rollbacks = mutableSetOf<String>()
         var keptNewer = false
         // A copy this phone has of an item (shown before, or held by a locked refresh), decrypted only when needed.
         fun priorOf(row: SyncItem): Pair<SyncItem, Item>? = priors[row.id].orEmpty()
@@ -1965,8 +2208,8 @@ class VaultRepository(
                 try {
                     ItemCodec.decode(key.decryptItem(enc))
                 } catch (_: Exception) {
-                    // An item that doesn't open isn't shown; its vault's manifest still counts it ([Manifests.judge]).
-                    hidden += row.vaultId
+                    // An item that doesn't open isn't shown as one; its vault's manifest still counts it ([Manifests.judge]).
+                    unopenable += row
                     continue
                 }
             }
@@ -1990,6 +2233,7 @@ class VaultRepository(
                 is ItemRevs.Verdict.Accept -> v.remember?.let { revUpdates[row.id] = it }
                 is ItemRevs.Verdict.Rollback -> {
                     rolledBack += row.id
+                    rollbacks += row.id
                     val p = prior
                     // Only a copy from the same vault can stand in for the row (its data is that vault's, and so is its manifest).
                     if (v.keepPrior && p != null && p.first.vaultId == row.vaultId) {
@@ -2016,8 +2260,11 @@ class VaultRepository(
             name
         }.map { inv -> checks?.invitations?.get(inv.vaultId)?.let { inv.copy(trust = it) } ?: inv }
         return Opened(
-            VaultData(entries, vaults, snap.revision, invitations = invitations, rolledBack = rolledBack, keptNewer = keptNewer),
-            keys, headers, fresh, names, revUpdates, keptRows, hidden,
+            VaultData(
+                entries, vaults, snap.revision, invitations = invitations, rolledBack = rolledBack, keptNewer = keptNewer,
+                unopenable = unopenable.map { UnopenableItem(it.id, it.vaultId) },
+            ),
+            keys, headers, fresh, names, revUpdates, keptRows, unopenable, rollbacks,
         )
     }
 
@@ -2033,8 +2280,14 @@ class VaultRepository(
         val legacyAllowed: (String, Long?) -> Boolean,
         /** The identity record this session uploaded, for a copy whose `user.identity` is still null. */
         val identityRecord: String? = null,
-        /** The key pins version this session wrote at this sync, for a copy whose `user.key_pins_seq` was read before the write. */
-        val pinsSeq: Long? = null,
+        /**
+         * What signed sharing writes for an answer that is kept (called once the copy passed its other
+         * checks, never for one that is refused): accepted vaults the server stopped listing are
+         * tombstoned, changed key pins saved, the sharing status published. Returns the key pins
+         * version this session wrote at this sync (null: none), for a copy whose `user.key_pins_seq`
+         * was read before the write.
+         */
+        val commit: (suspend () -> Long?)? = null,
     )
 
     /** [snap] with [record] as `user.identity` when it lists none (the sync answer was read before the upload). */
@@ -2197,12 +2450,17 @@ class VaultRepository(
                 )
             }
             sh.endChecks()
-            // Accepted shared vaults a sync from the server no longer lists: tombstoned once that is confirmed
-            // (the server says it's gone, or two such syncs in a row), so the server can't bring the old copy back.
-            sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, fromServer)
-            if (online) savePinsQuietly(sh)
-            if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names, sh.missingWhy())
-            SharingChecks(vaults, invitations, { vid, epoch -> sh.legacyAllowed(vid, epoch) }, sh.uploadedRecord, sh.serverPinsSeq.takeIf { online })
+            val commit: suspend () -> Long? = {
+                withContext(Dispatchers.Default) {
+                    // Accepted shared vaults a sync from the server no longer lists: tombstoned once that is confirmed
+                    // (the server says it's gone, or two such syncs in a row), so the server can't bring the old copy back.
+                    sh.tombstoneRemoved(snap.vaults.map { it.id }.toSet(), sharedBefore, fromServer)
+                    if (online) savePinsQuietly(sh)
+                    if (sessions[id] === session && id == activeId()) publishSharing(sh, vaults, names, sh.missingWhy())
+                    sh.serverPinsSeq.takeIf { online }
+                }
+            }
+            SharingChecks(vaults, invitations, { vid, epoch -> sh.legacyAllowed(vid, epoch) }, sh.uploadedRecord, commit)
         }
     }
 
@@ -3223,7 +3481,8 @@ class VaultRepository(
             val own = _vault.value?.vaults?.firstOrNull { it.id == vaultId } ?: return Rotation.Skipped
             if (own.role != Role.Owner && own.role != Role.Admin) return Rotation.Skipped
             // A vault whose manifest warning isn't resolved gets no new key (its items aren't what its record says).
-            if (own.manifest == ManifestState.Unresolved || own.manifest == ManifestState.Unchecked) throw UserException(Manifests.HELD)
+            if (own.manifest == ManifestState.Unresolved || own.manifest == ManifestState.Unopenable) throw UserException(Manifests.HELD)
+            if (own.manifest == ManifestState.Unchecked) throw UserException(Manifests.UNCHECKED)
             val header = vaultHeaders[vaultId] ?: return Rotation.Skipped
             val oldKey = vaultKeys[vaultId] ?: return Rotation.Skipped
             val oldEpoch = header.keyEpoch

@@ -183,16 +183,20 @@ export function applyOwnManifest(s: Snapshot, vaultId: string, manifest: SentMan
  * Vault manifests (`manifest`, optional): `sent` is the manifest version the write carried (undefined: none) and
  * `answered` the answer's `manifest_seq`. A write is shown as sent only when the two agree: a write that carried one
  * must be answered with exactly that version, and one that carried none must not be answered with a version above 0.
+ * With `sentLink` (the link of the manifest sent) the answer's `manifest_link` (`answeredLink`) must be that link as
+ * well: a request sent again whose first try was stored under another manifest answers with the same version and
+ * the stored manifest's link, and is then never shown as sent.
  */
 export function afterWrite(
   known: number | undefined,
   vaultSeq: unknown,
   canApply: boolean,
-  manifest?: { sent: number | undefined; answered: unknown },
+  manifest?: { sent: number | undefined; answered: unknown; sentLink?: string; answeredLink?: unknown },
 ): "none" | "apply" | "sync" {
   if (known === undefined || typeof vaultSeq !== "number") return "sync";
   if (vaultSeq <= known) return "none";
   if (manifest && (manifest.sent === undefined ? typeof manifest.answered === "number" && manifest.answered > 0 : manifest.answered !== manifest.sent)) return "sync";
+  if (manifest?.sentLink !== undefined && manifest.answeredLink !== manifest.sentLink) return "sync";
   return vaultSeq === known + 1 && canApply ? "apply" : "sync";
 }
 

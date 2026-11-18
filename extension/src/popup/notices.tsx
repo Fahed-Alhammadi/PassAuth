@@ -9,14 +9,18 @@
  * - sign-ins on other devices put off with "Not now" (sign-in-requests.tsx), with "Review";
  * - items the server sent in an older version than this browser had seen (background/item-revs.ts);
  * - vaults whose items don't match the vault's manifest (background/manifests.ts; not dismissible: nothing is saved
- *   into them until it is resolved in the web vault or the desktop app), and a server this version refuses;
+ *   into them until it is resolved): with "Use the server's copy" (after a confirmation) when the server's copy checks
+ *   out on its own, else pointing to the web vault or the desktop app; a vault with an item that can't be opened says
+ *   where to delete it;
+ * - "PassAuth can't read this device's record of your vaults." with "Reset on this device" (after a confirmation);
+ * - a server this version refuses;
  * - signed sharing (background/signed-sharing.ts): shared vaults that failed a check and aren't used, a person whose
  *   keys changed (with their new fingerprint and "Trust the new key" once the user compared it), account-wide warnings,
  *   and invitations that can't be accepted as they are.
  * The policy, invitation, older-version and sharing notices can be dismissed for this browser session; they come back when their set
  * changes.
  */
-import { Icon } from "@web/components/ui";
+import { ConfirmDialog, Icon } from "@web/components/ui";
 import { type ReactNode, useEffect, useState } from "react";
 import { callPopup } from "../shared/protocol";
 import { DISMISSED_KEY, FILL_PROBLEM_PREFIX } from "../shared/storage-keys";
@@ -172,6 +176,85 @@ function SharingLines({ sharing, refresh, notify }: { sharing: SharingNotice; re
   );
 }
 
+type ManifestVault = NonNullable<ItemList["manifest"]>["vaults"][number];
+
+/**
+ * The manifest warning, one line per vault: what is wrong, then what can be done. "Use the server's copy" asks first
+ * (the contract's confirmation) and then has the background accept the vault as the server has it now; a failure is
+ * shown in the dialog, and the warning stays.
+ */
+function ManifestLines({ manifest, server, refresh, notify }: { manifest: NonNullable<ItemList["manifest"]>; server: string; refresh: () => void; notify: (t: string) => void }) {
+  const [asking, setAsking] = useState<ManifestVault | null>(null);
+  return (
+    <>
+      {manifest.vaults.map((v) => (
+        <span key={v.id}>
+          <strong>{v.name}</strong>: {v.text}
+          {v.hint ? ` ${v.hint}` : ""}{" "}
+          {v.accept && (
+            <button type="button" className="link" onClick={() => setAsking(v)}>
+              {manifest.confirm.action}…
+            </button>
+          )}
+          {v.open && (
+            <button type="button" className="link" onClick={() => openTab(server)}>
+              Open the web vault
+            </button>
+          )}
+        </span>
+      ))}
+      {asking && (
+        <ConfirmDialog
+          title={manifest.confirm.title}
+          subtitle={asking.name}
+          icon="shield"
+          action={manifest.confirm.action}
+          onClose={() => setAsking(null)}
+          onConfirm={async () => {
+            await callPopup("manifest:accept", { vaultId: asking.id });
+            notify(`${asking.name}: PassAuth uses the server's copy now.`);
+            setAsking(null);
+            refresh();
+          }}
+        >
+          <p className="card-text">{manifest.confirm.body}</p>
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
+/** "PassAuth can't read this device's record of your vaults." with its way out, "Reset on this device" (after a confirmation). */
+function MemoryLine({ memory, refresh, notify }: { memory: NonNullable<ItemList["memory"]>; refresh: () => void; notify: (t: string) => void }) {
+  const [asking, setAsking] = useState(false);
+  return (
+    <>
+      <span>
+        {memory.text}{" "}
+        <button type="button" className="link" onClick={() => setAsking(true)}>
+          {memory.action}…
+        </button>
+      </span>
+      {asking && (
+        <ConfirmDialog
+          title={`${memory.action}?`}
+          icon="shield"
+          action={memory.action}
+          onClose={() => setAsking(false)}
+          onConfirm={async () => {
+            await callPopup("memory:reset");
+            notify("PassAuth started a new record on this device.");
+            setAsking(false);
+            refresh();
+          }}
+        >
+          <p className="card-text">{memory.body}</p>
+        </ConfirmDialog>
+      )}
+    </>
+  );
+}
+
 export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null; tabId: number | undefined }) {
   const [dismissed, setDismissed] = useState<Dismissed>({});
   const [policy, setPolicy] = useState<PolicyNotices | null>(null);
@@ -202,8 +285,10 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
   const rollback = data?.rollback;
   const rollbackShown = rollback && dismissed.rollback !== rollback.key ? rollback : null;
   const manifest = data?.manifest;
+  const memory = data?.memory;
   const serverProblem = data?.serverProblem;
-  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !serverProblem) return null;
+  const refresh = () => ctx.go({ tab: "vault", page: "list" });
+  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !memory && !serverProblem) return null;
   return (
     <div className="notices">
       {signIns && (
@@ -228,18 +313,18 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
         </div>
       )}
       {manifest && (
-        // Not dismissible: nothing can be saved into these vaults until the warning is resolved (elsewhere).
+        // Not dismissible: nothing can be saved into these vaults until the warning is resolved.
         <div className="alert alert-warn small notice" role="note">
           <div className="grow">
-            <span>
-              <strong>{manifest.vaults.map((v) => v.name).join(", ")}</strong>: {manifest.text}
-            </span>
-            <span>
-              {manifest.review}{" "}
-              <button type="button" className="link" onClick={() => openTab(ctx.state.server)}>
-                Open the web vault
-              </button>
-            </span>
+            <ManifestLines manifest={manifest} server={ctx.state.server} refresh={refresh} notify={ctx.notify} />
+          </div>
+        </div>
+      )}
+      {memory && (
+        // Not dismissible: vaults with a record can't be checked or changed from here until it is reset.
+        <div className="alert alert-warn small notice" role="note">
+          <div className="grow">
+            <MemoryLine memory={memory} refresh={refresh} notify={ctx.notify} />
           </div>
         </div>
       )}
@@ -275,7 +360,7 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
       )}
       {sharingShown && (
         <Notice tone="warn" onDismiss={() => dismiss("sharing", sharingShown.key)}>
-          <SharingLines sharing={sharingShown} refresh={() => ctx.go({ tab: "vault", page: "list" })} notify={ctx.notify} />
+          <SharingLines sharing={sharingShown} refresh={refresh} notify={ctx.notify} />
         </Notice>
       )}
       {invitesShown && (

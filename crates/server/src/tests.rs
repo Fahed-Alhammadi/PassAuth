@@ -4408,7 +4408,13 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
         |v: &Value| -> Vec<String> { sorted(v.as_object().unwrap().keys().cloned().collect()) };
     assert_eq!(
         keys(&created),
-        ["id", "manifest_seq", "revision", "vault_seq"]
+        [
+            "id",
+            "manifest_link",
+            "manifest_seq",
+            "revision",
+            "vault_seq"
+        ]
     );
     let full = synced(&app, &t).await;
     assert_eq!(

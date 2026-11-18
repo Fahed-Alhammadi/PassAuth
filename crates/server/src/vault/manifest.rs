@@ -13,9 +13,13 @@
 //!   ([`super::VaultWrite::manifests`]); a write without it is refused, also from
 //!   apps that don't know manifests yet;
 //! - `PUT /vaults/{id}/manifest` starts a vault's first manifest, or replaces it
-//!   with a new baseline (the user's "Use the server's copy"). A first one waits
-//!   until every signed-in app of every member keeps manifests ([`may_start`],
-//!   `manifest_ok` in `/sync`), so no app is locked out of writing by surprise;
+//!   with a new baseline (a member's "Use the server's copy" when the stored
+//!   manifest doesn't open or doesn't match the items). Both are exactly one version
+//!   up, like every other write: no request can make a version jump, so no member
+//!   can push a vault's version towards its ceiling. A first one waits until every
+//!   signed-in app of every member who can write keeps manifests ([`may_start`],
+//!   `manifest_ok` in `/sync`), so no app is locked out of writing by surprise; a
+//!   baseline is limited to [`BASELINES_PER_HOUR`] per member and vault;
 //! - the server never changes the items of a vault with a manifest by itself: the
 //!   trash sweeper leaves such vaults to the apps (`items::purge_trash`).
 //!
@@ -25,10 +29,16 @@
 //! manifest it saw accepts a newer one only when it descends from that one. For a
 //! manifest more than one step ahead it follows the hashes through the vault's log
 //! (`vault_manifest_log`, `GET /vaults/{id}/manifest-log`): one entry `(seq, prev,
-//! digest)` per stored manifest, the newest [`LOG_KEPT`] of each vault. The server
+//! digest)` per stored manifest, kept by age and count ([`LOG_KEEP`]). The server
 //! checks only that a new manifest names the current one ([`super::VaultWrite`]); an
 //! honest server so never stores a manifest off the chain, and a dishonest one
 //! gains nothing from doing it, since the apps check the hashes themselves.
+//!
+//! Every answer of a write that can carry a manifest names the link of the vault's
+//! manifest after the request (`manifest_link`, [`super::VaultWrite::manifest_link`]):
+//! an app applies its write to its own copy only when that is the link of the
+//! manifest it sent. A version number alone can't tell a stored write from a retried
+//! one that found its item already there under another sealing of the manifest.
 //!
 //! Attachments and item history are separate tables and are not covered.
 
@@ -49,21 +59,48 @@ use crate::auth::{AuthUser, keeps_manifests};
 use crate::db::now;
 use crate::error::{ApiError, ApiResult, code};
 use crate::events::Event;
-use crate::state::AppState;
+use crate::state::{AppState, Class};
 
 /// The largest manifest version: whole numbers every app carries exactly.
 const MAX_SEQ: i64 = 9_007_199_254_740_991;
 /// A sealed manifest is about 200 characters.
 const MAX_SEALED: usize = 1024;
-/// How far a new baseline (`PUT /vaults/{id}/manifest`) may jump past the current
-/// version: enough to pass what any device remembers, never enough for a member to
-/// push the version to its ceiling and stop every later write (security review).
-const MAX_BASELINE_JUMP: i64 = 1_000_000;
+/// New baselines (`PUT /vaults/{id}/manifest` on a vault that has a manifest) one
+/// member may store in one vault within an hour. A baseline is a rare, deliberate
+/// act (one settles a vault for every device on its history), each one writes an
+/// activity-log entry every member sees, and a member's app gone wrong shouldn't
+/// write them in a loop. Counted per member, not per vault: with one budget for
+/// the vault, a member who used it up could keep everyone else from repairing a
+/// manifest that same member broke with an ordinary write. First manifests aren't
+/// counted (a vault has one).
+pub(crate) const BASELINES_PER_HOUR: u32 = 10;
 
-/// How many manifests of a vault its log keeps (the newest): how far behind a device
-/// may be and still follow the chain to the current manifest. Further behind, its
-/// app shows the vault's warning (it can't tell a pruned log from a withheld one).
-pub(crate) const LOG_KEPT: i64 = 5000;
+/// What a vault's manifest log keeps: how far behind a device may be and still
+/// follow the chain to the current manifest. Further behind, its app shows the
+/// vault's warning (it can't tell a pruned log from a withheld one) until its user
+/// accepts the server's copy on that device.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LogKeep {
+    /// The newest entries, whatever their age.
+    pub newest: i64,
+    /// Every entry younger than this many seconds: a burst of writes can't cut off
+    /// a device that was away for a short while…
+    pub age: i64,
+    /// …up to this many entries in all; the oldest go first beyond it.
+    pub most: i64,
+}
+
+pub(crate) const LOG_KEEP: LogKeep = LogKeep {
+    newest: 5000,
+    age: 90 * 86_400,
+    most: 200_000,
+};
+
+/// The log is pruned with every this-many-th manifest of a vault, not with each:
+/// the entries to drop are found by walking the old end of the log, which a busy
+/// vault shouldn't pay for on every write. The bounds of [`LOG_KEEP`] are so
+/// exceeded by at most this many entries.
+const LOG_PRUNE_EVERY: i64 = 64;
 /// Log entries in one answer of `GET /vaults/{id}/manifest-log`.
 const LOG_PAGE: i64 = 2000;
 
@@ -114,7 +151,8 @@ pub(super) fn head_link(seq: i64, prev: Option<&str>, sealed: Option<&str>) -> L
     }
 }
 
-/// Add a stored manifest to its vault's log and keep the newest [`LOG_KEPT`].
+/// Add a stored manifest to its vault's log, and now and then drop what the log no
+/// longer keeps ([`LOG_KEEP`], [`LOG_PRUNE_EVERY`]).
 pub(super) async fn log(
     conn: &mut AnyConnection,
     vault: &str,
@@ -122,28 +160,44 @@ pub(super) async fn log(
     prev: &str,
     digest: &[u8; 32],
 ) -> ApiResult<()> {
+    let t = now();
     sqlx::query(
-        "INSERT INTO vault_manifest_log (vault_id, seq, prev, digest) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO vault_manifest_log (vault_id, seq, prev, digest, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(vault)
     .bind(seq)
     .bind(prev)
     .bind(passauth_core::item::b64(digest))
+    .bind(t)
     .execute(&mut *conn)
     .await?;
-    prune_log(conn, vault, LOG_KEPT).await
+    if seq % LOG_PRUNE_EVERY == 0 {
+        prune_log(conn, vault, seq, LOG_KEEP, t).await?;
+    }
+    Ok(())
 }
 
-/// Delete all but the newest `kept` entries of a vault's log.
-pub(crate) async fn prune_log(conn: &mut AnyConnection, vault: &str, kept: i64) -> ApiResult<()> {
-    // The subquery is the oldest entry to keep; no row (fewer than `kept`) deletes nothing.
+/// Drop from the log of a vault whose newest manifest is version `head` what `keep`
+/// doesn't hold at time `t`: entries that are neither among the newest `keep.newest`
+/// nor younger than `keep.age`, and everything beyond the newest `keep.most`.
+/// Versions go up by exactly one per stored manifest, so "the newest n" are the
+/// versions above `head - n`.
+pub(crate) async fn prune_log(
+    conn: &mut AnyConnection,
+    vault: &str,
+    head: i64,
+    keep: LogKeep,
+    t: i64,
+) -> ApiResult<()> {
     sqlx::query(
-        "DELETE FROM vault_manifest_log WHERE vault_id = $1 AND seq < (
-             SELECT seq FROM vault_manifest_log WHERE vault_id = $1
-             ORDER BY seq DESC LIMIT 1 OFFSET $2)",
+        "DELETE FROM vault_manifest_log
+         WHERE vault_id = $1 AND (seq <= $2 OR (seq <= $3 AND created_at < $4))",
     )
     .bind(vault)
-    .bind(kept - 1)
+    .bind(head - keep.most)
+    .bind(head - keep.newest)
+    .bind(t - keep.age)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -164,7 +218,7 @@ pub(super) struct LogQuery {
 /// (`more`: ask again with `after` = the last `seq`). `prev` is the link of the manifest an entry replaced
 /// and `digest` the SHA-256 of its sealed text, both base64url. An app that
 /// remembers version N asks with `after=N` to follow the chain from there to the
-/// manifest its sync answer shows; entries older than the newest [`LOG_KEPT`] are
+/// manifest its sync answer shows; entries the log no longer keeps ([`LOG_KEEP`]) are
 /// gone. Nothing here is secret from a member, and nothing in it is trusted by the
 /// apps beyond what the hashes prove.
 pub(super) async fn get_log(
@@ -273,7 +327,7 @@ pub(super) async fn not_ready(
 pub(super) struct PutManifest {
     /// The vault's `manifest_seq` as the app's sync saw it (0 = none yet).
     base_seq: i64,
-    /// The new version, above `base_seq` (and above what the app remembers).
+    /// The new version: `base_seq + 1`.
     seq: i64,
     /// The link of the manifest it replaces: all zero for a first one, else the link
     /// of the vault row's current manifest as the app's sync showed it.
@@ -285,16 +339,19 @@ pub(super) struct PutManifest {
 }
 
 /// `PUT /vaults/{id}/manifest` `{base_seq, seq, prev, sealed, vault_seq}` (write
-/// access): the vault's first manifest (`base_seq` 0) or a new baseline replacing the
-/// current one, computed by the app from the complete item set of one sync answer.
-/// A baseline stays on the chain: it names the manifest it replaces like any other,
-/// so devices on the replaced history follow it and others still see that theirs
-/// was left. Refused with 409 `manifest_conflict` when the vault was written since
-/// that answer (`vault_seq`), its manifest isn't at `base_seq` or `prev` isn't the
-/// current manifest's link, with 400 when `seq` is more than [`MAX_BASELINE_JUMP`]
-/// above the current version, and a first one with 409
-/// `manifest_not_ready` while some member's signed-in app doesn't keep manifests.
-/// Answers `{revision, vault_seq, manifest_seq}`.
+/// access): the vault's first manifest (`base_seq` 0, `seq` 1) or a new baseline
+/// replacing the current one (`seq` = `base_seq + 1`), computed by the app from the
+/// complete item set of one sync answer. A baseline stays on the chain: it names the
+/// manifest it replaces like any other and is one version above it, so devices on
+/// the replaced history follow it by themselves; a device that saw another history,
+/// or a later version on one the server no longer has, keeps its warning until its
+/// user accepts the server's copy there (which needs no request). Refused with 400
+/// when `seq` isn't `base_seq + 1`; with 409 `manifest_conflict` when the vault was
+/// written since that answer (`vault_seq`), its manifest isn't at `base_seq` or `prev`
+/// isn't the current manifest's link; a first one with 409 `manifest_not_ready`
+/// while the signed-in app of some member who can write doesn't keep manifests; a
+/// baseline with 429 beyond [`BASELINES_PER_HOUR`] of this member in this vault.
+/// Answers `{revision, vault_seq, manifest_seq, manifest_link}`.
 pub(super) async fn put_manifest(
     State(state): State<AppState>,
     user: AuthUser,
@@ -303,8 +360,12 @@ pub(super) async fn put_manifest(
 ) -> ApiResult<Json<Value>> {
     check_id(&id)?;
     check_sealed(b.seq, &b.prev, &b.sealed)?;
-    if b.base_seq < 0 || b.seq <= b.base_seq {
-        return Err(ApiError::bad("a manifest's version only goes up"));
+    // One version up, always: a first manifest is version 1, a baseline the next
+    // one. (`seq` is at most `MAX_SEQ`, so the sum can't overflow.)
+    if b.base_seq < 0 || b.seq - 1 != b.base_seq {
+        return Err(ApiError::bad(
+            "a new manifest is one version above the current one",
+        ));
     }
     let need = Need::new(&id, Role::Write, None);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
@@ -312,9 +373,6 @@ pub(super) async fn put_manifest(
     let current = w.manifest_seq(&id);
     if current != b.base_seq || vault_seq - 1 != b.vault_seq {
         return Err(ApiError::manifest_conflict());
-    }
-    if b.seq - current > MAX_BASELINE_JUMP {
-        return Err(ApiError::bad("invalid manifest"));
     }
     if current == 0 && !may_start(w.conn(), &id).await? {
         return Err(ApiError::coded(
@@ -336,10 +394,24 @@ pub(super) async fn put_manifest(
             .data(json!({ "from": current, "to": b.seq })),
     )
     .await?;
+    if current > 0 {
+        // Counted only once every check passed and the baseline is stored in this
+        // transaction, before the commit: a refused request (a conflict, a stale
+        // sync) costs nothing, an over-limit one rolls back. The key names a vault
+        // and a member the request has proven to exist (a [`Class::Target`] key).
+        state.limiter.limit(
+            Class::Target,
+            &format!("manifest-baseline:{id}:{}", user.user_id),
+            BASELINES_PER_HOUR,
+            3600,
+        )?;
+    }
+    let manifest_link = w.manifest_link(&id);
     let revision = w.commit(&state).await?;
     Ok(Json(json!({
         "revision": revision,
         "vault_seq": vault_seq,
         "manifest_seq": b.seq,
+        "manifest_link": manifest_link,
     })))
 }

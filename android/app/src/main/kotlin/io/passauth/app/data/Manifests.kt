@@ -40,6 +40,13 @@ enum class ManifestState {
     Unresolved,
 
     /**
+     * The items are exactly what the manifest records, but one of them doesn't open on this phone
+     * (its key or data doesn't decrypt): warned ([Manifests.UNOPENABLE]); nothing is written into the
+     * vault except deleting such items for good, which is the way out.
+     */
+    Unopenable,
+
+    /**
      * Not checked against an answer of the server yet: a copy from this phone (shown before the
      * server answered, or while it can't be reached) that doesn't pass, can't be counted, or is
      * more than one step ahead of what this phone remembers; or what this phone remembers can't be
@@ -49,8 +56,16 @@ enum class ManifestState {
     Unchecked,
 }
 
-/** What this phone remembers of a vault's manifest: the version and the link of the last one it checked "ok" or wrote itself. */
+/** What this phone remembers of a vault's manifest: the version and the link of the last one it checked "ok", wrote itself or accepted. */
 data class ManifestMark(val version: Long, val link: String)
+
+/**
+ * One vault's entry in this phone's memory: [mark] (null: nothing remembered) and [accepts], how
+ * often the user replaced it with "Use the server's copy" ([Manifests.replaced]). The counter orders
+ * two copies of the memory before the version does, so a copy from before an acceptance (a higher
+ * version) never brings the old mark back.
+ */
+data class Remembered(val mark: ManifestMark?, val accepts: Long = 0)
 
 /**
  * The next manifest of a vault, as a write carries it (`manifests: [{vault_id, seq, prev, sealed}]`,
@@ -82,6 +97,27 @@ object Manifests {
         "Do this only if you know why it changed, for example after the server was restored from a backup."
     const val READERS = "Someone who can edit this vault can review it."
     const val HELD = "This vault can't be changed until its warning is resolved."
+
+    /** A write into a vault this phone couldn't check yet (no warning shows): the web vault's words. */
+    const val UNCHECKED = "PassAuth couldn't check this vault with your server yet. Try again in a moment."
+
+    /** The emergency access view of a vault that has no manifest: nothing could be checked. */
+    const val VIEW_UNCHECKED = "This vault has no record of changes yet, so PassAuth couldn't check that nothing is missing or out of date."
+
+    // Items that don't open (rule S2).
+    const val UNOPENABLE_ITEM = "Item that can't be opened"
+    const val UNOPENABLE = "An item in this vault can't be opened. Delete it to keep using the vault."
+    const val UNOPENABLE_READERS = "An item in this vault can't be opened. Someone who can edit this vault can delete it."
+    const val DELETE_FOR_GOOD = "Delete for good"
+    const val DELETE_FOR_GOOD_CONFIRM = "This item can't be opened on this device. Deleting it removes it for everyone."
+
+    // This phone's memory can't be read (rule S4).
+    const val MEMORY_UNREADABLE = "PassAuth can't read this device's record of your vaults."
+    const val RESET_MEMORY = "Reset on this device"
+    const val RESET_MEMORY_CONFIRM = "PassAuth will trust what your server shows now and start a new record on this device."
+
+    /** The link a first manifest names (32 zero bytes): never a remembered link. */
+    const val ZERO_LINK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     const val CHANGED_ELSEWHERE = "This vault changed on another device. Try again."
     const val NOT_READY = "This can't be done until every member's apps are up to date."
 
@@ -130,6 +166,9 @@ object Manifests {
     /** A link as it travels: base64url of 32 bytes, 43 characters. */
     fun isLink(s: String?): Boolean = s != null && s.length == 43 && s.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '-' || it == '_' }
 
+    /** A mark this phone may remember and hand to the core: a version ≥ 1 with a link that isn't the all-zero one. */
+    fun isMark(m: ManifestMark?): Boolean = m != null && m.version in 1..MAX_NUMBER && isLink(m.link) && m.link != ZERO_LINK
+
     /**
      * The link of the manifest the row [v] carries (the core's `manifestLink`: nothing is opened, so
      * it also works for a manifest this phone can't read); null for a vault without one, or a row
@@ -171,6 +210,25 @@ object Manifests {
     }
 
     /**
+     * The check behind "Use the server's copy" (the core's `manifestAccept`): the vault row [v]
+     * against exactly [items] with nothing remembered. "ok": the manifest served records exactly
+     * these rows ([Check.mark]: what takes the place of this phone's memory); "none": the server
+     * shows no manifest (the memory is forgotten); anything else, or anything thrown: nothing may be
+     * remembered.
+     */
+    fun accept(key: VaultKey, v: SyncVault, items: List<SyncItem>): Check = try {
+        val c = key.manifestAccept(v.id, epoch(v), seqOf(v).toULong(), v.manifestPrev, v.manifest, rows(items))
+        val link = c.link
+        when (c.status) {
+            "ok" -> ManifestMark(c.version.toLong(), link.orEmpty()).takeIf(::isMark)?.let { Check("ok", it) } ?: Check("mismatch", null)
+            "none" -> Check("none", null)
+            else -> Check(c.status, null)
+        }
+    } catch (_: Exception) {
+        Check("mismatch", null)
+    }
+
+    /**
      * What a whole copy's check gave: each opened vault's state and the marks to remember. [failed]:
      * vaults that don't pass (rollback or mismatch); [incomplete]: vaults that couldn't be counted;
      * [unlogged]: vaults more than one step ahead of this phone's memory whose log wasn't asked for
@@ -183,6 +241,10 @@ object Manifests {
         val incomplete: Set<String> = emptySet(),
         val failed: Set<String> = emptySet(),
         val unlogged: Set<String> = emptySet(),
+        /** Of [failed]: vaults "Use the server's copy" can accept on this phone alone ([accept] gave "ok" or "none"). */
+        val acceptable: Set<String> = emptySet(),
+        /** Vaults whose manifest passed but that hold a row that doesn't open ([ManifestState.Unopenable]). */
+        val unopenable: Set<String> = emptySet(),
     ) {
         /** Vaults whose verdict needs the server's whole answer before it counts. */
         val undecided: Set<String> get() = incomplete + failed
@@ -200,8 +262,9 @@ object Manifests {
      * delta on this phone's copy, or the copy itself) such a vault is only [ManifestState.Unchecked]:
      * a warning is raised from the server's whole answer alone.
      *
-     * [hidden]: vaults with a live row that doesn't open; with a manifest that would pass, that is a
-     * mismatch (an item hidden behind a record that counts it).
+     * [hidden]: vaults with a live row that doesn't open. With a manifest that passes, the vault is
+     * [ManifestState.Unopenable] whatever the copy is (the row doesn't open in any answer): warned,
+     * and only deleting such rows is written; what the core checked is still remembered.
      *
      * [log]: asks the server for a vault's manifest log after the version given (the entries as a
      * JSON array; null: the server refused, or the log doesn't connect: a mismatch). Called for a
@@ -224,6 +287,8 @@ object Manifests {
         val incomplete = mutableSetOf<String>()
         val failed = mutableSetOf<String>()
         val unlogged = mutableSetOf<String>()
+        val acceptable = mutableSetOf<String>()
+        val unopenable = mutableSetOf<String>()
         val undecided = if (whole) ManifestState.Unresolved else ManifestState.Unchecked
         for (v in vaults) {
             val key = keys[v.id] ?: continue
@@ -247,12 +312,14 @@ object Manifests {
             }
             states[v.id] = when (check.status) {
                 "none" -> ManifestState.None
-                "ok" -> if (v.id in hidden) {
-                    failed += v.id
-                    undecided
-                } else {
+                "ok" -> {
                     check.mark?.let { remember[v.id] = it }
-                    ManifestState.Ok
+                    if (v.id in hidden) {
+                        unopenable += v.id
+                        ManifestState.Unopenable
+                    } else {
+                        ManifestState.Ok
+                    }
                 }
                 "incomplete" -> {
                     incomplete += v.id
@@ -260,12 +327,25 @@ object Manifests {
                 }
                 else -> {
                     failed += v.id
+                    // What the warning offers: an acceptance on this phone alone, or (writers) a new baseline.
+                    if (accept(key, v, rows).status.let { it == "ok" || it == "none" }) acceptable += v.id
                     undecided
                 }
             }
         }
-        return Judged(states, remember, incomplete, failed, unlogged)
+        return Judged(states, remember, incomplete, failed, unlogged, acceptable, unopenable)
     }
+
+    /**
+     * Rule S3: may the copy a locked background refresh left beside the checked one take its place?
+     * Only when, judged with the keys like a delta from the server ([judged], no log asked), every
+     * opened vault passes its manifest and its place in the chain ("ok") or has none, and no item
+     * came in an older version than this phone remembers ([rolledBack]). Anything else: the refreshed
+     * copy is dropped and the next sync decides.
+     */
+    fun adoptable(judged: Judged, rolledBack: Boolean): Boolean =
+        !rolledBack && judged.undecided.isEmpty() && judged.unlogged.isEmpty() &&
+            judged.states.values.all { it == ManifestState.Ok || it == ManifestState.None }
 
     // ------------------------------------------------------------ the log
 
@@ -301,8 +381,9 @@ object Manifests {
             val more = (o["more"] as? JsonPrimitive)?.takeIf { !it.isString }?.content
             if (more != "true") return JsonArray(all).toString()
             // More follows: from the last entry, which has to be further on (else the server would be asked the same again).
-            val last = ((entries.lastOrNull() as? JsonObject)?.get("seq") as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull ?: return null
-            if (last <= from || last > MAX_NUMBER) return null
+            // (The entries go to the core as they came; only for paging is the highest version among the well-formed ones read.)
+            val last = entries.mapNotNull { ((it as? JsonObject)?.get("seq") as? JsonPrimitive)?.takeIf { p -> !p.isString }?.longOrNull?.takeIf { n -> n in 1..MAX_NUMBER } }.maxOrNull() ?: return null
+            if (last <= from) return null
             from = last
         }
         return null
@@ -314,14 +395,17 @@ object Manifests {
      * The manifest entry a write into [v] carries: null when the vault has none (the write goes as
      * before). [removed]: the affected rows as the copy holds them before the write; [added]: as
      * they are after it (with the exact `data` sent). Only for a vault whose state is [ManifestState.Ok];
-     * [UserException] ([HELD]) otherwise.
+     * [UserException] ([HELD]) otherwise. [deleting]: the write only deletes rows that don't open,
+     * which is also taken for a vault that is [ManifestState.Unopenable] (its manifest passed; such
+     * rows are the one reason for its warning, and deleting them is the way out).
      */
-    fun next(key: VaultKey, v: SyncVault, state: ManifestState?, removed: List<SyncItem>, added: List<SyncItem>): ManifestEntry? {
+    fun next(key: VaultKey, v: SyncVault, state: ManifestState?, removed: List<SyncItem>, added: List<SyncItem>, deleting: Boolean = false): ManifestEntry? {
         val seq = seqOf(v)
         if (seq <= 0 && state != ManifestState.Unresolved && state != ManifestState.Unchecked) return null
         val sealed = v.manifest
         val prev = v.manifestPrev
-        if (state != ManifestState.Ok || sealed == null || prev == null || removed.any { !countable(it) }) throw UserException(HELD)
+        val writable = state == ManifestState.Ok || (deleting && state == ManifestState.Unopenable && added.isEmpty())
+        if (!writable || sealed == null || prev == null || removed.any { !countable(it) }) throw UserException(HELD)
         val w = try {
             key.manifestNext(v.id, epoch(v), seq.toULong(), prev, sealed, rows(removed), rows(added))
         } catch (_: Exception) {
@@ -347,16 +431,25 @@ object Manifests {
     fun answered(answer: JsonElement?): Long? =
         ((answer as? JsonObject)?.get("manifest_seq") as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
 
-    /** The server stored exactly the manifest [sent] with this write: the vault's rows are the copy's with this write, and its manifest is this one. */
-    fun stored(sent: ManifestEntry?, answer: JsonElement?): Boolean = sent != null && answered(answer) == sent.seq
+    /** `manifest_link` of a write's answer: the link of the vault's manifest after it (null: the vault has none, or an older server). */
+    fun answeredLink(answer: JsonElement?): String? =
+        ((answer as? JsonObject)?.get("manifest_link") as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf(::isLink)
+
+    /**
+     * The server stored exactly the manifest [sent] with this write (rule S6): the answer's
+     * `manifest_link` is the link of what was sent. The version alone doesn't say that: a retried
+     * create whose first attempt got through answers the same version though the retry sealed its
+     * manifest again.
+     */
+    fun stored(sent: ManifestEntry?, answer: JsonElement?): Boolean = sent != null && isLink(sent.link) && answeredLink(answer) == sent.link
 
     /**
      * This device's write with manifest [sent] is the vault's latest: the copy may take it without
-     * asking the server. Without one sent, only while the answer says the vault still has none
-     * (a manifest that appeared meanwhile is fetched and checked by a sync).
+     * asking the server, and [sent] is remembered. Without one sent, only while the answer says the
+     * vault still has none (a manifest that appeared meanwhile is fetched and checked by a sync).
      */
     fun mayApplyLocally(sent: ManifestEntry?, answer: JsonElement?): Boolean =
-        if (sent == null) (answered(answer) ?: 0) <= 0 else answered(answer) == sent.seq
+        if (sent == null) (answered(answer) ?: 0) <= 0 && answeredLink(answer) == null else stored(sent, answer)
 
     /** How many trashed items one purge request names: at most 250, and never more than the server's `limits.max_import_items`. */
     fun purgeChunk(maxImportItems: Int?): Int = minOf(250, maxImportItems?.takeIf { it > 0 } ?: 250)
@@ -366,27 +459,31 @@ object Manifests {
      * member's apps do ([SyncVault.manifestOk]), the vault has none and this phone never saw one,
      * the account can write to it, every row can be counted, and none of its items is marked as
      * served in an older version ([marked]: a first record must not be made over a copy the server
-     * rolled back).
+     * rolled back) and none of its rows fails to open ([unopenable]: such rows are deleted first).
      */
-    fun mayStart(v: SyncVault, state: ManifestState?, role: Role?, listed: Boolean, remembered: ManifestMark?, rows: List<SyncItem>, marked: Set<String> = emptySet()): Boolean =
+    fun mayStart(
+        v: SyncVault, state: ManifestState?, role: Role?, listed: Boolean, remembered: ManifestMark?, rows: List<SyncItem>,
+        marked: Set<String> = emptySet(), unopenable: Boolean = false,
+    ): Boolean =
         listed && state == ManifestState.None && seqOf(v) == 0L && v.manifestOk == true && v.seq != null &&
-            role != null && role != Role.Read && remembered == null && rows.all(::countable) &&
+            role != null && role != Role.Read && remembered == null && !unopenable && rows.all(::countable) &&
             rows.none { it.servedSha256 != null || it.id in marked }
 
-    /** The version of a new baseline: above the vault row's and above everything this phone remembers. */
-    fun baselineSeq(rowSeq: Long?, remembered: Long?): Long = maxOf(rowSeq ?: 0, remembered ?: 0, 0).coerceAtMost(MAX_NUMBER - 1) + 1
-
     /**
-     * `PUT /vaults/{id}/manifest`: the vault's first manifest ([seq] 1 on a vault without one) or a
-     * new baseline, for exactly [rows] (every row of the vault in the copy), pinned to the vault's
-     * number of the sync the copy came from, and naming the manifest the row carries now as the one
-     * it replaces (whatever it is: a baseline is built on what the server shows; none when the row
-     * doesn't carry all three fields). Null when the copy has no number for the vault.
+     * `PUT /vaults/{id}/manifest`: the vault's first manifest (version 1 on a vault without one) or a
+     * new baseline, always exactly one version above the manifest the row carries (the server takes
+     * nothing else; what this phone remembers plays no part), for exactly [rows] (every row of the
+     * vault in the copy), pinned to the vault's number of the sync the copy came from, and naming the
+     * manifest the row carries now as the one it replaces (whatever it is: a baseline is built on
+     * what the server shows). Null when the copy has no number for the vault. Throws when the row
+     * has a version but not the other two fields, or a row can't be counted.
      */
-    fun startBody(key: VaultKey, v: SyncVault, seq: Long, rows: List<SyncItem>): Pair<JsonObject, ManifestEntry>? {
+    fun startBody(key: VaultKey, v: SyncVault, rows: List<SyncItem>): Pair<JsonObject, ManifestEntry>? {
         val vaultSeq = v.seq ?: return null
-        val prev = linkOf(v)
-        val w = key.manifestStart(v.id, epoch(v), seq.toULong(), prev, rows(rows))
+        val base = seqOf(v)
+        if (base >= MAX_NUMBER) throw IllegalStateException("no version above this one")
+        val prev = if (base > 0) linkOf(v) ?: throw IllegalStateException("the row doesn't carry its manifest") else null
+        val w = key.manifestStart(v.id, epoch(v), (base + 1).toULong(), prev, rows(rows))
         return buildJsonObject {
             put("base_seq", seqOf(v))
             put("seq", w.seq.toLong())
@@ -396,14 +493,65 @@ object Manifests {
         } to ManifestEntry(v.id, w.seq.toLong(), w.prev, w.sealed, w.link)
     }
 
+    /** What "Use the server's copy" does for one vault, once everything was fetched again ([serverCopy]). */
+    sealed interface ServerCopy {
+        /** Accepted on this phone alone: [mark] (the manifest served) takes the place of its memory. No request. */
+        data class Accept(val mark: ManifestMark) : ServerCopy
+
+        /** Accepted on this phone alone: the server shows no manifest, so the vault's memory is forgotten. No request. */
+        data object Forget : ServerCopy
+
+        /** The manifest served doesn't record the rows served: a new baseline is written ([body] for `PUT …/manifest`), by an account that can write. */
+        data class Baseline(val body: JsonObject, val entry: ManifestEntry) : ServerCopy
+
+        /** Nothing this account can do ([READERS]). */
+        data object Readers : ServerCopy
+
+        /** No baseline can be made from what the server sent (a row without data, a version without its manifest). */
+        data object Broken : ServerCopy
+    }
+
+    /**
+     * Rule S1: what "Use the server's copy" does for vault [v] of the whole answer just fetched
+     * ([rows]: its item rows), after the user confirmed. Every role accepts on this phone alone when
+     * the manifest served records exactly these rows, or there is none ([accept]); otherwise an
+     * account that can write makes a new baseline one version above the row's.
+     */
+    fun serverCopy(key: VaultKey, v: SyncVault, role: Role?, rows: List<SyncItem>): ServerCopy {
+        val a = accept(key, v, rows)
+        val mark = a.mark
+        return when {
+            a.status == "ok" && mark != null -> ServerCopy.Accept(mark)
+            a.status == "none" -> ServerCopy.Forget
+            role == null || role == Role.Read -> ServerCopy.Readers
+            else -> try {
+                startBody(key, v, rows)?.let { ServerCopy.Baseline(it.first, it.second) } ?: ServerCopy.Broken
+            } catch (_: Exception) {
+                ServerCopy.Broken
+            }
+        }
+    }
+
+    /**
+     * `DELETE /items/{id}/permanent` for a row that doesn't open (rule S2; the server deletes a live
+     * row with it too): the query names the row's revision and, for a vault with a manifest, the
+     * next one without the row ([entry]).
+     */
+    fun deletePath(row: SyncItem, entry: ManifestEntry?): String {
+        val id = java.net.URLEncoder.encode(row.id, "UTF-8").replace("+", "%20")
+        val query = if (entry != null) query(entry, row.revision) else row.revision?.let { "?revision=$it" }.orEmpty()
+        return "/items/$id/permanent$query"
+    }
+
     /**
      * The trashed rows of a vault this phone may delete for good. Neither the server's clock nor a
      * row's `deleted_at` is covered by the manifest, so both are bounded by what this phone saw:
      *
      * - the server's rule: retention is on ([trashDays] ≥ 1) and the row has been in the trash
      *   longer than that by the server's own clock ([serverTime]);
-     * - this phone has itself seen the row in the trash for at least that long by its own clock
-     *   ([seen]: when it first saw each item trashed, [TrashSeen]; [deviceNow]);
+     * - this phone has itself seen the row in the trash for at least that long, and never less than
+     *   [MIN_TRASH_WATCH_DAYS] days, by its own clock ([seen]: when it first saw each item trashed,
+     *   [TrashSeen]; [deviceNow]): a server that names a retention of one day still waits a week;
      * - the server's clock is within a day of this phone's.
      *
      * Numbers that don't fit give nothing (never an overflow).
@@ -412,15 +560,17 @@ object Manifests {
         if (serverTime == null || trashDays == null || trashDays < 1) return emptyList()
         if (serverTime < 0 || serverTime > MAX_NUMBER || trashDays > MAX_TRASH_DAYS || deviceNow < 0 || deviceNow > MAX_NUMBER) return emptyList()
         if (kotlin.math.abs(serverTime - deviceNow) > CLOCK_SLACK_SECONDS) return emptyList()
-        val span = trashDays * 86_400
-        val before = serverTime - span
-        val seenBefore = deviceNow - span
+        val before = serverTime - trashDays * 86_400
+        val seenBefore = deviceNow - maxOf(trashDays, MIN_TRASH_WATCH_DAYS) * 86_400
         return rows.filter { r ->
             val at = r.deletedAt
             val first = seen[r.id]
             at != null && at > 0 && at < before && first != null && first <= seenBefore
         }
     }
+
+    /** Whatever retention the server names, old trash goes only after this phone watched it there for this many days. */
+    const val MIN_TRASH_WATCH_DAYS = 7L
 
     /** The server's clock may differ from this phone's by a day at most for old trash to be deleted. */
     const val CLOCK_SLACK_SECONDS = 86_400L
@@ -486,37 +636,93 @@ object Manifests {
 
     // ------------------------------------------------------------ device memory
 
+    private fun wholeNumber(e: JsonElement?): Long? = (e as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
+
     /**
-     * What this phone remembers from its stored JSON (`{"<vault id>": {"version": n, "link": "…"}}`).
-     * An entry that isn't a version ≥ 1 with a link (the first version's bare number included) is
-     * "nothing remembered": half a memory is never handed to the core.
+     * What this phone remembers from its stored JSON
+     * (`{"<vault id>": {"version": n, "link": "…", "accepts": k}}`). An entry that isn't a version ≥ 1
+     * with a link that isn't all zero (the first version's bare number included) is "nothing
+     * remembered": half a memory is never handed to the core. Its `accepts` (missing: 0) is kept
+     * either way.
      */
-    fun decodeMemory(text: String?): Map<String, ManifestMark> {
+    fun decodeMemory(text: String?): Map<String, Remembered> {
         val o = text?.let { runCatching { AppJson.parseToJsonElement(it) as? JsonObject }.getOrNull() } ?: return emptyMap()
         return o.mapNotNull { (id, v) ->
             val e = v as? JsonObject ?: return@mapNotNull null
-            val version = (e["version"] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull?.takeIf { it in 1..MAX_NUMBER } ?: return@mapNotNull null
-            val link = (e["link"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf(::isLink) ?: return@mapNotNull null
-            id to ManifestMark(version, link)
+            val accepts = wholeNumber(e["accepts"])?.takeIf { it in 0..MAX_NUMBER } ?: 0
+            val version = wholeNumber(e["version"])
+            val link = (e["link"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val mark = if (version != null && link != null) ManifestMark(version, link).takeIf(::isMark) else null
+            if (mark == null && accepts == 0L) null else id to Remembered(mark, accepts)
         }.toMap()
     }
 
-    fun encodeMemory(m: Map<String, ManifestMark>): String = JsonObject(m.mapValues { (_, mark) -> buildJsonObject { put("version", mark.version); put("link", mark.link) } }).toString()
+    fun encodeMemory(m: Map<String, Remembered>): String = JsonObject(
+        m.mapValues { (_, r) ->
+            buildJsonObject {
+                r.mark?.let { put("version", it.version); put("link", it.link) }
+                if (r.accepts > 0) put("accepts", r.accepts)
+            }
+        },
+    ).toString()
+
+    /** The marks of [memory] (what a check is made against). */
+    fun marks(memory: Map<String, Remembered>): Map<String, ManifestMark> = memory.mapNotNull { (id, r) -> r.mark?.let { id to it } }.toMap()
 
     /**
-     * [memory] with [updates]: the higher version wins; at the same version the one already there
-     * stays (a link is never replaced at its version: if the two differ, one of them is on another
-     * history and the next check says so). Vaults that are gone stay (a server could hide a vault
-     * and show it again).
+     * [memory] advanced by [updates] (a check that gave "ok", or this phone's own stored write): the
+     * higher version wins; at the same version the one already there stays (a link is never replaced
+     * at its version: if the two differ, one of them is on another history and the next check says
+     * so). `accepts` stays. Vaults that are gone stay (a server could hide a vault and show it again).
      */
-    fun merged(memory: Map<String, ManifestMark>, updates: Map<String, ManifestMark>): Map<String, ManifestMark> {
+    fun merged(memory: Map<String, Remembered>, updates: Map<String, ManifestMark>): Map<String, Remembered> {
         val out = memory.toMutableMap()
         for ((id, m) in updates) {
-            if (m.version < 1 || m.version > MAX_NUMBER || !isLink(m.link)) continue
+            if (!isMark(m)) continue
             val have = out[id]
-            if (have == null || m.version > have.version) out[id] = m
+            if (have?.mark == null || m.version > have.mark.version) out[id] = Remembered(m, have?.accepts ?: 0)
         }
         return out
+    }
+
+    /**
+     * Two copies of the memory brought together ([stored]: what the file holds; [mine]: what this
+     * process holds), per vault: the entry with more acceptances wins; with as many, the higher
+     * version (none counts as 0); with the same version, the stored one.
+     */
+    fun joined(stored: Map<String, Remembered>, mine: Map<String, Remembered>): Map<String, Remembered> {
+        val out = stored.toMutableMap()
+        for ((id, m) in mine) {
+            val have = out[id]
+            val newer = have == null || m.accepts > have.accepts ||
+                (m.accepts == have.accepts && (m.mark?.version ?: 0) > (have.mark?.version ?: 0))
+            if (newer) out[id] = m
+        }
+        return out
+    }
+
+    /**
+     * [memory] after "Use the server's copy" for vault [vaultId] (the only way a mark is replaced or
+     * goes down): [mark] takes the place of whatever was remembered (null: forgotten, the server
+     * shows no manifest), and the vault's `accepts` goes up by one.
+     */
+    fun replaced(memory: Map<String, Remembered>, vaultId: String, mark: ManifestMark?): Map<String, Remembered> =
+        memory + (vaultId to Remembered(mark?.takeIf(::isMark), (memory[vaultId]?.accepts ?: 0).coerceAtMost(MAX_NUMBER - 1) + 1))
+}
+
+/**
+ * Rule S4: how often in a row this phone's memory of an account couldn't be read ([attempts]), and
+ * whether a sync with the server finished meanwhile ([synced]). After [OFFER_AFTER] such reads
+ * across at least one finished sync the app says so and offers "Reset on this device"; one good
+ * read starts over.
+ */
+data class UnreadableMemory(val attempts: Int = 0, val synced: Boolean = false) {
+    fun failed(synced: Boolean): UnreadableMemory = UnreadableMemory((attempts + 1).coerceAtMost(1_000), this.synced || synced)
+
+    val offerReset: Boolean get() = attempts >= OFFER_AFTER && synced
+
+    companion object {
+        const val OFFER_AFTER = 3
     }
 }
 

@@ -268,8 +268,8 @@ public enum SyncMerge {
     /// nil for an answer that isn't a vault snapshot (a numeric revision, `vaults` and `items`;
     /// well-formed rows, checked by decoding, and only trashed ones without key and data) or a
     /// delta without the copy it was asked for. The numbers the apps count with (a vault's
-    /// `seq`, `manifest_seq` and `key_epoch`, a row's `deleted_at`) must be whole numbers up to
-    /// 2^53 − 1 (a vault's not below 0), else the answer isn't one either.
+    /// `seq`, `manifest_seq` and `key_epoch`, a row's `deleted_at`) must be whole numbers from 0 up
+    /// to 2^53 − 1, else the answer isn't one either.
     ///
     /// `local`: `r` is this device's own stored copy. Only then do rows keep what the device
     /// itself put on them (`servedSha256`); in a server's answer it is dropped.
@@ -278,7 +278,7 @@ public enum SyncMerge {
         let top = Int64(VaultManifest.maxNumber)
         func counted(_ n: Int64?) -> Bool { n.map { $0 >= 0 && $0 <= top } ?? true }
         guard vaults.allSatisfy({ counted($0.seq) && counted($0.manifestSeq) && counted($0.keyEpoch) }),
-              items.allSatisfy({ ($0.deletedAt ?? 0) <= top }) else { return nil }
+              items.allSatisfy({ counted($0.deletedAt) }) else { return nil }
         if !local {
             for i in items.indices where items[i].servedSha256 != nil { items[i].servedSha256 = nil }
         }

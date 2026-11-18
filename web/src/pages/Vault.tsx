@@ -10,6 +10,7 @@ import { clearDraft, setEditorDirty, useDraft } from "../lib/drafts";
 import { attachFiles } from "../lib/files";
 import { isWeak } from "../lib/health";
 import { ROLLBACK_ITEM } from "../lib/item-revs";
+import { DELETE_FOR_GOOD, DELETE_UNOPENABLE_BODY, UNOPENABLE_ITEM } from "../lib/manifest";
 import { useBreachCheck, useHealthReport } from "../lib/health-session";
 import { authorName, passkeysMissingFrom, versionLabel, type ItemVersion } from "../lib/history";
 import { patternNote } from "../lib/patterns";
@@ -21,6 +22,7 @@ import {
   newItemId,
   openItemVersion,
   purgeItem,
+  purgeUnopenable,
   restoreItem,
   restoreItemVersion,
   trashItem,
@@ -79,8 +81,9 @@ export function VaultPage() {
   const filter = params.filter ?? "all";
   const itemId = params.itemId;
   const nav = useNavigate();
-  const { items } = useVault();
+  const { items, unopenable } = useVault();
   const [query, setQuery] = useState("");
+  const [deleting, setDeleting] = useState<string | null>(null);
   // Filtering thousands of items on every keystroke would make typing lag: let React render it in the background.
   const deferredQuery = useDeferredValue(query);
   const [creating, setCreating] = useState(false);
@@ -99,6 +102,14 @@ export function VaultPage() {
     );
   }, [items, filter, deferredQuery]);
 
+  // Rows that can't be opened are listed where the item would be: in its vault (and "All items"), or in the trash.
+  const broken = useMemo(
+    () =>
+      deferredQuery.trim()
+        ? []
+        : unopenable.filter((u) => (filter === "trash" ? u.deletedAt !== null : u.deletedAt === null && (filter === "all" || filter === `vault:${u.vaultId}`))),
+    [unopenable, filter, deferredQuery],
+  );
   const selected = items.find((e) => e.id === itemId);
   const newKind = itemId?.startsWith("new-") ? (itemId.slice(4) as ItemKind) : null;
   // A prepared edit (desktop: a verification code from a link) shows while its item's route is open.
@@ -146,7 +157,7 @@ export function VaultPage() {
           </div>
         </div>
         <div className="list">
-          {list.length === 0 ? (
+          {list.length === 0 && broken.length === 0 ? (
             <div className="empty">
               {query ? (
                 <>
@@ -198,7 +209,40 @@ export function VaultPage() {
               </button>
             ))
           )}
+          {broken.map((u) => (
+            <div key={u.id} className="list-item list-item-static" data-unopenable={u.id}>
+              <span className="avatar" aria-hidden="true">
+                <Icon name="lock" />
+              </span>
+              <span className="grow">
+                <span className="title">{UNOPENABLE_ITEM}</span>
+                <span className="sub">{vaults.find((v) => v.id === u.vaultId)?.name ?? "Vault"}</span>
+              </span>
+              {u.deletable && (
+                <button type="button" className="btn btn-text btn-danger" onClick={() => setDeleting(u.id)}>
+                  {DELETE_FOR_GOOD}
+                </button>
+              )}
+            </div>
+          ))}
         </div>
+        {deleting && (
+          <ConfirmDialog
+            title={`${DELETE_FOR_GOOD}?`}
+            subtitle={UNOPENABLE_ITEM}
+            icon="trash"
+            action={DELETE_FOR_GOOD}
+            busyAction="Deleting…"
+            onClose={() => setDeleting(null)}
+            onConfirm={async () => {
+              await purgeUnopenable(deleting);
+              setDeleting(null);
+              toast("Item deleted");
+            }}
+          >
+            <p className="card-text">{DELETE_UNOPENABLE_BODY}</p>
+          </ConfirmDialog>
+        )}
       </section>
 
       <section className="detail-pane" aria-label="Item details">

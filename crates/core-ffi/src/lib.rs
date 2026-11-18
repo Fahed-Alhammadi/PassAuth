@@ -626,10 +626,14 @@ impl VaultKey {
     /// manifest log after the remembered version and call again with it as `log_json`).
     /// `manifest_seq`, `prev` and `sealed` are the vault row's `manifest_seq`,
     /// `manifest_prev` and `manifest` (0 / nil = none); `remembered_version` and
-    /// `remembered_link` what this device stored for the vault (both or neither);
-    /// `log_json` a JSON array of the log's entries (`seq`, `prev`, `digest`), nil when
-    /// none was fetched; `items_json` a JSON array of every item row of the vault as
-    /// synced (`id`, `deleted_at`, `data` or `data_sha256`; other fields are ignored).
+    /// `remembered_link` what this device stored for the vault (both or neither;
+    /// a link of 32 zero bytes is no memory and throws); `log_json` a JSON array of the
+    /// log's entries (`seq`, `prev`, `digest`) as the server sent them, nil when none
+    /// was fetched (an entry that isn't such an object is skipped, it never makes the
+    /// call throw; text that is no JSON array does); `items_json` a JSON array of every
+    /// item row of the vault as synced (`id`, `deleted_at`, `data` or `data_sha256`;
+    /// other fields are ignored). "need_log" only comes for a manifest two or more
+    /// versions ahead of the remembered one.
     #[allow(clippy::too_many_arguments)]
     pub fn manifest_verify(
         &self,
@@ -667,20 +671,48 @@ impl VaultKey {
             log.as_deref(),
             &items,
         )?;
-        Ok(ManifestCheck {
-            status: sharing::enum_name(&check.status)?,
-            version: check.version,
-            link: check.link,
-            live: check.live,
-            trashed: check.trashed,
-        })
+        ManifestCheck::from_core(check)
+    }
+
+    /// The check behind "Use the server's copy": this vault as the sync answer shows it
+    /// (`manifest_seq`, `prev`, `sealed` = the row's `manifest_seq`, `manifest_prev`,
+    /// `manifest`; `items_json` every item row of the vault), judged with nothing
+    /// remembered. "ok" = the served manifest records exactly these items: on the
+    /// user's confirmation replace this device's memory for the vault with `version`
+    /// and `link`, whatever it held; "none" = the server shows no manifest: forget the
+    /// vault's memory (`version` 0, `link` nil); "mismatch" / "incomplete" = nothing may
+    /// be remembered (a member who can write stores a baseline: `manifest_start` one
+    /// version above the row, naming `manifest_link` of it).
+    pub fn manifest_accept(
+        &self,
+        vault_id: String,
+        key_epoch: u64,
+        manifest_seq: u64,
+        prev: Option<String>,
+        sealed: Option<String>,
+        items_json: String,
+    ) -> R<ManifestCheck> {
+        let items: Vec<manifest::Entry> = json_in(&items_json)?;
+        let check = manifest::accept(
+            &self.0,
+            &vault_id,
+            key_epoch,
+            manifest::Row {
+                seq: manifest_seq,
+                prev: prev.as_deref(),
+                sealed: sealed.as_deref(),
+            },
+            &items,
+        )?;
+        ManifestCheck::from_core(check)
     }
 
     /// A manifest of `version` for exactly the items in `items_json` (every item row of
     /// the vault, each with `data` or `data_sha256`), replacing the manifest whose link
     /// is `prev`: nil for a vault's first manifest; for a new baseline and for the one
     /// a key replacement carries (called on the new key with the new `key_epoch` and
-    /// the re-encrypted items), `manifest_link` of the vault row's current manifest.
+    /// the re-encrypted items), `manifest_link` of the vault row's current manifest,
+    /// with `version` = the row's `manifest_seq` + 1 (the server takes nothing else).
     pub fn manifest_start(
         &self,
         vault_id: String,
@@ -736,7 +768,7 @@ impl VaultKey {
     }
 }
 
-/// `VaultKey::manifest_verify`'s verdict.
+/// `VaultKey::manifest_verify`'s verdict, and `manifest_accept`'s.
 #[derive(uniffi::Record)]
 pub struct ManifestCheck {
     /// "none" | "ok" | "rollback" | "mismatch" | "incomplete" | "need_log".
@@ -749,6 +781,18 @@ pub struct ManifestCheck {
     /// The manifest's counts when it opened (0 otherwise).
     pub live: u64,
     pub trashed: u64,
+}
+
+impl ManifestCheck {
+    fn from_core(check: manifest::Check) -> R<Self> {
+        Ok(Self {
+            status: sharing::enum_name(&check.status)?,
+            version: check.version,
+            link: check.link,
+            live: check.live,
+            trashed: check.trashed,
+        })
+    }
 }
 
 /// `VaultKey::manifest_next`'s and `manifest_start`'s result: `seq`, `prev` and
@@ -1951,6 +1995,67 @@ mod tests {
         assert_eq!(check(&third, Some(&first), Some(log), "two").status, "ok");
         let empty = check(&third, Some(&first), Some("[]".into()), "two");
         assert_eq!(empty.status, "mismatch");
+        // Rubbish in the log is skipped, not an error; text that is no list is one.
+        let noisy = format!(
+            r#"[null,7,"x",{{"seq":-1}},{{"seq":2,"prev":"{}","digest":"{digest}"}},{{"seq":2.5,"prev":1,"digest":[]}}]"#,
+            next.prev
+        );
+        assert_eq!(check(&third, Some(&first), Some(noisy), "two").status, "ok");
+        let rubbish = r#"[null,{"seq":-1,"prev":"x","digest":"y"}]"#;
+        let skipped = check(&third, Some(&first), Some(rubbish.into()), "two");
+        assert_eq!(skipped.status, "mismatch");
+        let verify_raw = |version: Option<u64>, link: Option<String>, log: Option<&str>| {
+            made.key.manifest_verify(
+                "v".into(),
+                0,
+                3,
+                Some(third.prev.clone()),
+                Some(third.sealed.clone()),
+                version,
+                link,
+                log.map(str::to_owned),
+                rows("two"),
+            )
+        };
+        assert!(verify_raw(Some(1), Some(first.link.clone()), Some("{}")).is_err());
+        // The link no manifest has is no memory.
+        let zero = b64(&manifest::NO_LINK);
+        assert!(verify_raw(Some(1), Some(zero), None).is_err());
+        // The very next version naming another predecessor: settled without a log.
+        let other = made
+            .key
+            .manifest_start("v".into(), 0, 2, Some(first.link.clone()), rows("two"))
+            .unwrap();
+        assert_ne!(other.link, next.link);
+        assert_eq!(check(&third, Some(&other), None, "two").status, "mismatch");
+        // "Use the server's copy": the served vault judged with nothing remembered.
+        let accept = |w: Option<&ManifestWrite>, data: &str| {
+            made.key
+                .manifest_accept(
+                    "v".into(),
+                    0,
+                    w.map_or(0, |w| w.seq),
+                    w.map(|w| w.prev.clone()),
+                    w.map(|w| w.sealed.clone()),
+                    rows(data),
+                )
+                .unwrap()
+        };
+        let taken = accept(Some(&third), "two");
+        assert_eq!(
+            (taken.status.as_str(), taken.version, taken.link.as_deref()),
+            ("ok", 3, Some(third.link.as_str()))
+        );
+        let refused = accept(Some(&third), "one");
+        assert_eq!(
+            (refused.status.as_str(), refused.version, refused.link),
+            ("mismatch", 0, None)
+        );
+        let none = accept(None, "two");
+        assert_eq!(
+            (none.status.as_str(), none.version, none.link),
+            ("none", 0, None)
+        );
         // A key replacement's manifest (or a baseline) names the row's link.
         let rotated = made
             .key

@@ -45,6 +45,9 @@ import { type DeviceMemory, mergedDeviceMemory, readDeviceMemory } from "./devic
 import { capRevMemory, emptyRevMemory, forgetRev, itemRevOf, noteServed, type RevMemory, readRevMemory, rollbackNotice } from "./item-revs";
 import { forgetLastUsed } from "./last-used";
 import {
+  acceptedEntry,
+  acceptsIn,
+  acceptVault,
   behindOwn,
   collectLog,
   dueTrash,
@@ -56,12 +59,21 @@ import {
   MANIFEST_FEATURE,
   MANIFEST_HELD,
   MANIFEST_HELD_TEXT,
+  MANIFEST_NOT_ACCEPTABLE_TEXT,
+  MANIFEST_READER_TEXT,
+  MANIFEST_REVIEW_TEXT,
   MANIFEST_TRIES,
+  MANIFEST_UNCHECKED_TEXT,
   type ManifestEntry,
   type ManifestItem,
   type ManifestMemory,
   type ManifestNotice,
   type ManifestStatus,
+  MEMORY_RESET_ACTION,
+  MEMORY_RESET_BODY,
+  MEMORY_UNREAD_TRIES,
+  MEMORY_UNREADABLE_TEXT,
+  type MemoryEntry,
   manifestItem,
   manifestItems,
   manifestNotice,
@@ -73,8 +85,12 @@ import {
   noteTrash,
   purgeBatch,
   readServed,
+  readStanding,
+  rememberedOf,
   rememberManifest,
+  rowStampOf,
   type Served,
+  type Standing,
   sentEntry,
   stripPrivate,
   type TrashSeen,
@@ -82,6 +98,8 @@ import {
   unsettled,
   validNumbers,
   verifyVault,
+  type WarningCause,
+  warningOf,
   withManifest,
   writeQuery,
 } from "./manifests";
@@ -129,7 +147,7 @@ import {
   WRONG_ACCOUNT_TEXT,
   waitingText,
 } from "./signed-sharing";
-import { type AccountData, accountKey, activeId, deviceMemory, earlierVaults, local, pinCopies, pinsFloor, type SessionData, scratch, session, syncCache, trustMemory } from "./storage";
+import { type AccountData, accountKey, activeId, deviceMemory, earlierVaults, local, memoryUnread, pinCopies, pinsFloor, type SessionData, scratch, session, syncCache, trustMemory } from "./storage";
 import { emptyExtras, fromStored, isStale, type RevisionAnswer, type RowExtras, readExtras, readRevision, STASH_CAP, type StoredSync, toStored, withSignedFields } from "./sync-rules";
 
 export interface Entry {
@@ -197,6 +215,13 @@ let trashSeen: TrashSeen = new Map();
 let memUnreadable = false;
 let memPlace: { server: string; userId: string } | null = null;
 /**
+ * While the record can't be read: where it lives, and how often in a row it failed to read with whether a whole sync
+ * was done meanwhile (storage.ts `memoryUnread`, counted across worker starts). After `MEMORY_UNREAD_TRIES` failures
+ * and a whole sync the popup offers "Reset on this device" (`resetDeviceMemory`).
+ */
+let unreadPlace: { server: string; userId: string } | null = null;
+let unread: { fails: number; full: boolean } | null = null;
+/**
  * What belongs to the rows of `synced` without being on them (sync-rules.ts `RowExtras`, kept in the offline copy
  * beside the rows, read from it once per generation: `extrasGen`): the hashes of what the server sent for rows that
  * hold this browser's kept newer copy, and openable rows the server stopped listing without proof.
@@ -213,6 +238,18 @@ let extrasGen = -1;
 let manifestStates = new Map<string, ManifestStatus>();
 const upkeepTried = new Map<string, string>();
 let fullNext = false;
+/**
+ * The vaults that show their warning, each with its cause and the vault row it was judged on (manifests.ts
+ * `Standing`): always from a server's whole answer, kept with the offline copy. While a vault's row stays the one its
+ * warning was judged on, a delta doesn't ask for everything again, and a worker start shows the warning without a
+ * whole fetch. `unopenableVaults`: the open vaults holding a row (live, or trashed with its data) that doesn't open.
+ * `trashOpens`: whether each trashed row that came with its data opened, so it isn't opened again at every sync.
+ * `fullAnswers`: counts the whole answers shown ("Use the server's copy" needs a fresh one).
+ */
+let standing = new Map<string, Standing>();
+let unopenableVaults = new Set<string>();
+let trashOpens = new Map<string, { row: SyncItemRow; opens: boolean }>();
+let fullAnswers = 0;
 /**
  * Vaults whose last answer couldn't be checked because their manifest log couldn't be fetched: the answer wasn't used,
  * the vault keeps its previous copy and state, and nothing is written into it until a sync got through (else a
@@ -919,10 +956,13 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
       // The copy against its vaults' manifests, now that the keys are here. A copy that doesn't check out (or holds
       // rows from before the server sent their hashes) is still this browser's own copy and is shown, but it is no
       // server's answer: no warning comes from it. One full sync decides (`syncNow`), and writes wait for it.
-      const judged = judgeCached(prepared);
-      commit(prepared, judged.statuses, null);
+      // A warning the copy was stored with (from a whole answer, for the vault row it still holds) stands as it was.
+      const judged = judgeCached(prepared, readStanding(copy?.warnings));
+      commit(prepared, judged.statuses, null, judged.standing);
       syncAvatar(id, snap.user);
-      if (judged.unchecked) {
+      // Not while the memory can't be read and a whole sync already found that out: it would find the same again
+      // at every worker start (the way out is the reset the popup offers).
+      if (judged.unchecked && !(memUnreadable && unread?.full)) {
         fullNext = true;
         void sync().catch(logged("Syncing"));
       } else void refreshIfStale().catch(logged("Checking for changes"));
@@ -1007,6 +1047,11 @@ function unload() {
   trashSeen = new Map();
   memUnreadable = false;
   memPlace = null;
+  unreadPlace = null;
+  unread = null;
+  standing = new Map();
+  unopenableVaults = new Set();
+  trashOpens = new Map();
   extras = emptyExtras();
   extrasGen = -1;
   manifestStates = new Map();
@@ -1323,7 +1368,17 @@ async function accept(snap: Snapshot, id: string, full: boolean, arrived: Readon
   }
   for (const r of judged.remember) rememberManifest(manifestMem, r.vaultId, r.version, r.link);
   logPending.clear();
-  commit(prepared, judged.statuses, before);
+  commit(prepared, judged.statuses, before, judged.standing);
+  if (full) {
+    fullAnswers++;
+    // A whole sync got through while the memory can't be read: with three failed reads, the reset is offered.
+    const place = unreadPlace;
+    if (memUnreadable && place && !unread?.full) {
+      // (Kept in this worker when the count can't be stored: else every sync would ask for everything.)
+      const count = await memoryUnread.update(place.server, place.userId, (c) => ({ fails: c.fails, full: true })).catch(() => null);
+      if (gen === generation && memUnreadable) unread = count ?? { fails: unread?.fails ?? 0, full: true };
+    }
+  }
   await persist(id);
   await local.set({ lastSync: Date.now(), name: typeof snap.user?.name === "string" ? snap.user.name : "" }, id);
   syncAvatar(id, snap.user);
@@ -2328,7 +2383,8 @@ function persist(id: string): Promise<void> {
     }
     // Checked again and queued in the same step: a sign-out's removal of the copy, queued after it, always runs after it.
     if (!current() || !synced) return;
-    await syncCache.set(id, sharingOn ? { ...toStored(synced, extras), trust: Object.fromEntries(verdicts) } : { ...toStored(synced, extras), checks: "off" });
+    const copy = toStored(synced, extras, standing);
+    await syncCache.set(id, sharingOn ? { ...copy, trust: Object.fromEntries(verdicts) } : { ...copy, checks: "off" });
   });
   storing = p.catch(() => {});
   return p;
@@ -2366,9 +2422,18 @@ async function loadMemory(id: string, read?: { copy: StoredSync | undefined }): 
   if (!fresh()) return;
   if (state === "unreadable") {
     memUnreadable = true;
+    unreadPlace = { server, userId };
+    // Counted across worker starts; until a whole sync got through in this state, the next sync asks for everything.
+    const count = await memoryUnread.update(server, userId, (c) => ({ fails: c.fails + 1, full: c.full })).catch(() => null);
+    if (!fresh()) return;
+    unread = count ?? { fails: (unread?.fails ?? 0) + 1, full: unread?.full ?? false };
+    if (!unread.full) fullNext = true;
     return;
   }
   memUnreadable = false;
+  unreadPlace = null;
+  unread = null;
+  void memoryUnread.update(server, userId, () => null).catch(logged("Forgetting the unreadable-memory count"));
   if (state === "missing") {
     revMem = mine ? readRevMemory(copy) : emptyRevMemory();
     manifestMem = new Map();
@@ -2426,6 +2491,8 @@ async function fetchLogPage(id: string, vaultId: string, after: number): Promise
 interface Judged {
   statuses: Map<string, ManifestStatus>;
   remember: { vaultId: string; version: number; link: string }[];
+  /** The vaults that show their warning, with cause and the row judged. */
+  standing: Map<string, Standing>;
 }
 
 /**
@@ -2435,11 +2502,18 @@ interface Judged {
  *   and the core decides again with it. A log that can't be fetched rejects: the answer isn't checked, so it isn't
  *   used (a server must not get its answer shown by failing one request). A 404 or 400, or a log that doesn't lead
  *   back to the remembered manifest, is a mismatch.
- * - an "ok" vault with a live item that has no data or doesn't open (a wrong `item_key`: the manifest doesn't cover
- *   it) is a mismatch: a server can't hide an item under an "ok".
+ * - an "ok" vault with an item that doesn't open (live: no data or a wrong `item_key`; trashed: a row that came with
+ *   its data and doesn't open, as the web vault counts it; the manifest doesn't cover the item key) is a mismatch: a
+ *   server can't hide an item under an "ok". Its cause is "unopenable": the item has to be deleted, not accepted.
  * - a delta that would give "rollback" / "mismatch", or whose rows are "incomplete" (kept before the server sent
  *   their hashes): "full". Nothing is used and no warning is raised from a delta merged into this browser's own copy;
  *   the caller fetches everything, and that answer decides (`full`: then "incomplete" counts as a mismatch too).
+ * - except for a vault that already shows its warning (`standing`: raised by a whole answer): it keeps it without
+ *   everything being fetched again at every sync, as in the web vault. The delta is still judged, so the warning
+ *   goes by itself when an answer checks out (another device's new record on this browser's history); what a whole
+ *   fetch would find otherwise is found by "Use the server's copy", which starts with one.
+ * - a "rollback" / "mismatch" also asks the core whether the served copy checks out on its own (`acceptVault`): that
+ *   decides what the popup offers ("accept": "Use the server's copy", for every role; "review": elsewhere).
  * - what this browser remembers can't be read: nothing is checked against it. A vault that fails on its own rows is
  *   still a mismatch; one that would pass is "unchecked", never "ok", and nothing is remembered.
  * The verdict rests on the rows alone, not on the server's feature list: a vault whose manifest this browser has seen
@@ -2449,11 +2523,13 @@ async function judge(p: Prepared, id: string, full: boolean, stale: () => boolea
   const items = manifestItems(p.snap, p.extras.served);
   const rows = new Map(p.snap.vaults.map((v) => [v.id, v]));
   const readable = p.checkRevs;
-  const out: Judged = { statuses: new Map(), remember: [] };
+  const out: Judged = { statuses: new Map(), remember: [], standing: new Map() };
   for (const vault of p.vaults) {
     const row = rows.get(vault.id);
     if (!row) continue;
-    const mine = readable ? manifestMem.get(vault.id) : undefined;
+    // The vault shows its warning already: no whole fetch to find it again.
+    const warned = standing.has(vault.id) && unresolved(manifestStates.get(vault.id));
+    const mine = readable ? rememberedOf(manifestMem, vault.id) : undefined;
     const held = items.get(vault.id) ?? [];
     let check = verifyVault(vault.key, row, mine, held);
     if (check.status === "need_log") {
@@ -2470,11 +2546,19 @@ async function judge(p: Prepared, id: string, full: boolean, stale: () => boolea
     }
     let status: ManifestStatus = check.status === "need_log" ? "mismatch" : check.status;
     if (status === "incomplete") {
-      if (!full) return "full";
+      if (!full && !warned) return "full";
       status = "mismatch";
     }
-    if (status === "ok" && p.hidden.has(vault.id)) status = "mismatch";
-    if (unresolved(status) && !full) return "full";
+    let cause: WarningCause | null = null;
+    if (status === "ok" && p.hidden.has(vault.id)) {
+      status = "mismatch";
+      cause = "unopenable";
+    }
+    if (unresolved(status) && !full && !warned) return "full";
+    if (status === "rollback" || status === "mismatch") {
+      cause ??= acceptVault(vault.key, row, held).status === "no" ? "review" : "accept";
+      out.standing.set(vault.id, { status, cause, stamp: rowStampOf(row) });
+    }
     if (status === "ok") {
       if (!readable) status = "unchecked";
       else if (check.link) out.remember.push({ vaultId: vault.id, version: check.version, link: check.link });
@@ -2489,39 +2573,171 @@ async function judge(p: Prepared, id: string, full: boolean, stale: () => boolea
  * comes out; but only "ok" and "none" are states: a copy that doesn't check out (its row is behind or ahead of what
  * is remembered, rows from before the server sent hashes, an item that doesn't open, memory that can't be read) is
  * "unchecked". No warning is raised from bookkeeping: the caller syncs in full, and that answer decides.
+ * One exception, which is no bookkeeping: a warning the copy was stored with (`stored`: raised by a server's whole
+ * answer, for the very vault row the copy holds) stands as it was, so a worker start doesn't fetch everything again
+ * to find the same verdict. Only warnings are taken from the copy, never an "ok".
  */
-function judgeCached(p: Prepared): { statuses: Map<string, ManifestStatus>; unchecked: boolean } {
+function judgeCached(p: Prepared, stored: ReadonlyMap<string, Standing>): { statuses: Map<string, ManifestStatus>; standing: Map<string, Standing>; unchecked: boolean } {
   const items = manifestItems(p.snap, p.extras.served);
   const rows = new Map(p.snap.vaults.map((v) => [v.id, v]));
   const statuses = new Map<string, ManifestStatus>();
+  const kept = new Map<string, Standing>();
   let unchecked = false;
   for (const vault of p.vaults) {
     const row = rows.get(vault.id);
     if (!row) continue;
-    const check = verifyVault(vault.key, row, p.checkRevs ? manifestMem.get(vault.id) : undefined, items.get(vault.id) ?? []);
+    const check = verifyVault(vault.key, row, p.checkRevs ? rememberedOf(manifestMem, vault.id) : undefined, items.get(vault.id) ?? []);
+    const was = stored.get(vault.id);
     let status: ManifestStatus = "unchecked";
     if (check.status === "none") status = "none";
     else if (check.status === "ok" && p.checkRevs && !p.hidden.has(vault.id)) {
       status = "ok";
       rememberManifest(manifestMem, vault.id, check.version, check.link);
+    } else if (was && was.stamp === rowStampOf(row)) {
+      status = was.status;
+      kept.set(vault.id, was);
     }
     if (status === "unchecked") unchecked = true;
     statuses.set(vault.id, status);
   }
-  return { statuses, unchecked };
+  return { statuses, standing: kept, unchecked };
 }
 
 /** The popup's warning about vaults that don't match their manifest, or null. */
 export function manifestSummary(): ManifestNotice | null {
-  return manifestNotice(vaults, manifestStates);
+  return manifestNotice(vaults, manifestStates, standing);
 }
 
 /** Whether the vault shows the manifest warning (its item pages say so too). */
 export const manifestWarned = (vaultId: string): boolean => unresolved(manifestStates.get(vaultId));
 
+/** The vault's warning as one line for an item page (what is wrong, and where it is resolved when not in the list's notice), or null. */
+export function manifestWarning(vaultId: string): string | null {
+  if (!manifestWarned(vaultId)) return null;
+  const w = warningOf(standing.get(vaultId)?.cause, vaults.find((v) => v.id === vaultId)?.role !== "read");
+  return w.hint ? `${w.text} ${w.hint}` : w.text;
+}
+
+/** Resolves once no sync is running or queued behind one. */
+async function syncsDone() {
+  while (syncing) await syncing.catch(() => {});
+}
+
+/**
+ * "Use the server's copy" for one vault that shows its warning (the popup, after its confirmation; every role):
+ * 1. everything is fetched afresh and checked as always. The vault is fine now (another device wrote a new record on
+ *    this browser's history, or the cause went away): done.
+ * 2. the core says whether the served copy checks out on its own, nothing remembered taken into account
+ *    (`manifestAccept`). If the served manifest describes the served rows, this browser's memory of the vault is
+ *    REPLACED by that manifest's version and link, also when it remembered a higher version (that is the point: the
+ *    user accepts what is missing, restored or out of date). If the server shows no manifest, the memory is forgotten.
+ *    Nothing is sent: accepting changes nothing for anyone else.
+ * 3. otherwise nothing may be remembered: only a new record written by someone with write access (in the web vault
+ *    or the desktop app; the extension writes none) can resolve it, and this fails saying so.
+ * The acceptance is counted in the entry (`accepts`), so no older copy of the memory can bring the earlier version
+ * back (manifests.ts `mergeManifestMemory`). A vault that still holds an item that doesn't open keeps its warning,
+ * now for that cause. Items the server sent in an older version stay marked: those marks never hold a write here.
+ */
+export async function acceptServerCopy(vaultId: string): Promise<void> {
+  const gen = generation;
+  const id = currentId;
+  if (!account || !id) throw lockedError();
+  await syncsDone();
+  if (gen !== generation) throw lockedError();
+  if (!unresolved(manifestStates.get(vaultId))) return;
+  if (memUnreadable) throw new AppError(FAILED, MEMORY_UNREADABLE_TEXT, true);
+  const answersBefore = fullAnswers;
+  fullNext = true;
+  await syncFor(gen);
+  await syncsDone();
+  if (gen !== generation || currentId !== id) throw lockedError();
+  // The answer was dropped (something newer was shown meanwhile, or nothing came): nothing is accepted unseen.
+  if (fullAnswers === answersBefore) throw new AppError(FAILED, MANIFEST_UNCHECKED_TEXT, true);
+  if (!unresolved(manifestStates.get(vaultId))) return;
+  const vault = vaults.find((v) => v.id === vaultId);
+  const row = rowOf(vaultId);
+  const place = memPlace;
+  if (!vault || !row || !synced) throw new AppError(FAILED, MANIFEST_UNCHECKED_TEXT, true);
+  if (memUnreadable || !place || revGen !== generation) throw new AppError(FAILED, MEMORY_UNREADABLE_TEXT, true);
+  // Only an item that doesn't open is wrong: accepting changes nothing (the item has to be deleted).
+  if (standing.get(vaultId)?.cause === "unopenable") throw new AppError(FAILED, manifestWarning(vaultId) ?? MANIFEST_NOT_ACCEPTABLE_TEXT, true);
+  const a = acceptVault(vault.key, row, manifestItems(synced, extras.served).get(vaultId) ?? []);
+  if (a.status === "no") throw new AppError(FAILED, `${MANIFEST_NOT_ACCEPTABLE_TEXT} ${vault.role === "read" ? MANIFEST_READER_TEXT : MANIFEST_REVIEW_TEXT}`, true);
+  const accepted = a.status === "ok" ? { version: a.version, link: a.link } : null;
+  // In this worker first (no sync that starts from here on checks against the old memory), then the stored record,
+  // read and written in one step with the acceptance counted above whatever is stored.
+  const prior = manifestMem.get(vaultId);
+  let entry: MemoryEntry = acceptedEntry(accepted, acceptsIn(manifestMem, vaultId));
+  manifestMem.set(vaultId, entry);
+  try {
+    await deviceMemory.update(place.server, place.userId, (old) => {
+      const read = readDeviceMemory(old);
+      if (read === "unreadable") throw new AppError(FAILED, MEMORY_UNREADABLE_TEXT, true);
+      if (gen !== generation) throw lockedError();
+      const there = read === "missing" ? 0 : acceptsIn(read.manifests, vaultId);
+      if (there >= (entry.accepts ?? 0)) {
+        entry = acceptedEntry(accepted, there);
+        manifestMem.set(vaultId, entry);
+      }
+      return mergedDeviceMemory(old, { revs: revMem, manifests: manifestMem, trashSeen });
+    });
+  } catch (e) {
+    if (gen === generation && manifestMem.get(vaultId) === entry) {
+      if (prior) manifestMem.set(vaultId, prior);
+      else manifestMem.delete(vaultId);
+    }
+    throw e;
+  }
+  if (gen !== generation || currentId !== id) throw lockedError();
+  log.warn("The server's copy of a vault was accepted on this browser (\"Use the server's copy\").");
+  if (a.status === "ok" && unopenableVaults.has(vaultId)) {
+    // Its record is accepted; the item that doesn't open is still there, and so is the warning, for that cause.
+    manifestStates.set(vaultId, "mismatch");
+    standing.set(vaultId, { status: "mismatch", cause: "unopenable", stamp: rowStampOf(row) });
+  } else {
+    manifestStates.set(vaultId, a.status === "ok" ? "ok" : "none");
+    standing.delete(vaultId);
+  }
+  upkeepTried.delete(vaultId);
+  await persist(id);
+}
+
+/** What this browser remembers can't be read, and the way out is on offer: the popup's notice, or null. */
+export function memoryNotice(): { text: string; action: string; body: string } | null {
+  if (!memUnreadable || !unread || unread.fails < MEMORY_UNREAD_TRIES || !unread.full) return null;
+  return { text: MEMORY_UNREADABLE_TEXT, action: MEMORY_RESET_ACTION, body: MEMORY_RESET_BODY };
+}
+
+/**
+ * "Reset on this device" (the popup, after its confirmation): the record that can't be read is moved aside (kept
+ * under its own key, never read again) and this browser goes on as one that remembers nothing for the account: it
+ * trusts what the server shows now, with one whole sync, and starts a new record. A record that reads again is left
+ * alone.
+ */
+export async function resetDeviceMemory(): Promise<void> {
+  const gen = generation;
+  const id = currentId;
+  const acct = account;
+  if (!acct || !id) throw lockedError();
+  await syncsDone();
+  if (gen !== generation) throw lockedError();
+  if (!memUnreadable) return;
+  const server = (await local.account(id)).data?.server ?? "";
+  const userId = meOf(acct);
+  if (gen !== generation) throw lockedError();
+  await deviceMemory.setAside(server, userId, (stored) => readDeviceMemory(stored) === "unreadable");
+  await memoryUnread.update(server, userId, () => null).catch(logged("Forgetting the unreadable-memory count"));
+  if (gen !== generation) throw lockedError();
+  log.warn("What this browser remembered about the vault's versions couldn't be read and was reset.");
+  unread = null;
+  // Read again (nothing is stored now) by the sync that follows, which asks for everything.
+  fullNext = true;
+  await syncFor(gen);
+}
+
 const heldError = () => new AppError(MANIFEST_HELD, MANIFEST_HELD_TEXT, true);
 /** A write into a vault no server's answer was checked for yet, after the sync that should have decided. */
-const uncheckedError = () => new AppError(FAILED, "PassAuth couldn't check this vault with your server yet. Try again in a moment.", true);
+const uncheckedError = () => new AppError(FAILED, memoryNotice() ? MEMORY_UNREADABLE_TEXT : MANIFEST_UNCHECKED_TEXT, true);
 const busyError = () => new AppError(MANIFEST_BUSY, MANIFEST_BUSY_TEXT, true);
 
 /**
@@ -2539,7 +2755,9 @@ const manifestRefused = (e: unknown): boolean => e instanceof ApiError && (e.cod
 async function manifestSettled(vaultId: string, gen: number): Promise<void> {
   if (logPending.has(vaultId)) return syncFor(gen);
   if (!unsettled(manifestStates.get(vaultId))) return;
-  fullNext = true;
+  // Not everything again when it is what this browser remembers that can't be read (a whole sync already found
+  // that out): the sync only tries the read again.
+  if (!(memUnreadable && unread?.full)) fullNext = true;
   await syncFor(gen);
 }
 
@@ -2581,18 +2799,20 @@ function nextManifest(vault: Vault, removed: SyncItemRow[], added: ManifestItem[
 }
 
 /** What the manifest endpoints answer. */
-type ManifestAnswer = { vault_seq?: unknown; manifest_seq?: unknown } | null;
+type ManifestAnswer = { vault_seq?: unknown; manifest_seq?: unknown; manifest_link?: unknown } | null;
 
 /** Whether the copy's vault row is still the one `sent` was built on: the version before it, and (when there was one) the manifest it names. */
 const stillBase = (row: SyncVaultRow, sent: ManifestEntry): boolean => manifestSeqOf(row) === sent.seq - 1 && (sent.seq === 1 || linkOf(row) === sent.prev);
 
 /**
- * Whether an own manifest write can be shown without asking: the server stored exactly the version sent, as the
- * vault's next write (`known`: the vault's number the write was computed from), and nothing else was shown meanwhile.
+ * Whether an own manifest write can be shown without asking: the server's manifest of the vault is exactly the one
+ * sent (the answer's `manifest_link` is its link: a version number alone would also fit another sealing of it), stored
+ * as the vault's next write (`known`: the vault's number the write was computed from), and nothing else was shown
+ * meanwhile.
  */
-function ownManifestApplies(vaultId: string, known: number | undefined, sent: ManifestEntry, answer: ManifestAnswer): answer is { vault_seq: number; manifest_seq: number } {
+function ownManifestApplies(vaultId: string, known: number | undefined, sent: ManifestEntry, answer: ManifestAnswer): answer is { vault_seq: number; manifest_link: string } {
   const row = rowOf(vaultId);
-  if (!synced || !row || known === undefined || answer?.manifest_seq !== sent.seq || answer.vault_seq !== known + 1 || knownSeq(synced, vaultId) !== known) return false;
+  if (!synced || !row || known === undefined || answer?.manifest_link !== sent.link || answer.vault_seq !== known + 1 || knownSeq(synced, vaultId) !== known) return false;
   return stillBase(row, sent);
 }
 
@@ -2623,7 +2843,9 @@ async function manifestUpkeep(id: string, served: Served, stale: () => boolean):
       const rows = manifestItems(synced, extras.served).get(vault.id) ?? [];
       // Never over a kept newer copy: the server sent an older version of an item of this vault.
       const kept = rows.some((r) => extras.served.has(r.id));
-      if (!mayStart({ features: info.features, row, role: vault.role, status, remembered: manifestMem.get(vault.id), items: rows, kept })) continue;
+      // Never over a row that doesn't open either: the vault would be a mismatch for every member from then on.
+      if (!mayStart({ features: info.features, row, role: vault.role, status, remembered: rememberedOf(manifestMem, vault.id), items: rows, kept, unopenable: unopenableVaults.has(vault.id) }))
+        continue;
       if (upkeepTried.get(vault.id) === `start:${known}`) continue;
       upkeepTried.set(vault.id, `start:${known}`);
       let sent: ManifestEntry;
@@ -2720,8 +2942,10 @@ interface Prepared {
   /** Whether what this browser remembers was read for this generation (else nothing is checked against it). */
   checkRevs: boolean;
   extras: RowExtras;
-  /** Open vaults with a live item that has no data or doesn't open. */
+  /** Open vaults with an item that doesn't open: a live one (also one without data), or a trashed one that came with its data. */
   hidden: Set<string>;
+  /** Whether each trashed row that came with its data opened. */
+  trashOpens: Map<string, { row: SyncItemRow; opens: boolean }>;
 }
 
 /**
@@ -2791,9 +3015,21 @@ function prepare(snap: Snapshot, arrived: ReadonlySet<string> | "all" | null): P
   const served = new Map<string, string>();
   if (arrived !== "all") for (const [id, hash] of extras.served) if (!arrived?.has(id) && snap.items.has(id)) served.set(id, hash);
   const stash = new Map(extras.stash);
+  const trashed = new Map<string, { row: SyncItemRow; opens: boolean }>();
   for (const row of snap.items.values()) {
     const vault = byId.get(row.vault_id);
-    if (!vault || isTrashed(row)) continue;
+    if (!vault) continue;
+    if (isTrashed(row)) {
+      // The trash is never shown, but a trashed row that came with its data must open like any other (as the web
+      // vault counts it); a trash summary (no data, only its hash) can't be told and is the manifest's business alone.
+      if (typeof row.data === "string") {
+        const was = trashOpens.get(row.id);
+        const opens = was && kept.has(vault.key) && sameCiphertext(was.row, row) ? was.opens : decryptRow(vault.key, row) !== null;
+        trashed.set(row.id, { row, opens });
+        if (!opens) hidden.add(vault.id);
+      }
+      continue;
+    }
     const old = decrypted.get(row.id);
     let entry: Entry | null;
     if (old && kept.has(vault.key) && sameCiphertext(old.row, row)) {
@@ -2835,12 +3071,13 @@ function prepare(snap: Snapshot, arrived: ReadonlySet<string> | "all" | null): P
     }
     copies.set(row.id, { row, entry });
     if (entry) list.push(entry);
-    // A live item of an open vault that has no data or doesn't open: `judge` makes the vault a mismatch.
+    // A live item of an open vault that has no data or doesn't open: `judge` makes the vault a mismatch, and no
+    // first manifest is started over it.
     else hidden.add(vault.id);
   }
   for (const id of [...stash.keys()]) if (snap.items.has(id)) stash.delete(id);
   list.sort((a, b) => byName.compare(a.item.name, b.item.name));
-  return { snap, vaults: next, kept, keysFrom, entries: list, copies, revs, checkRevs, extras: { served, stash }, hidden };
+  return { snap, vaults: next, kept, keysFrom, entries: list, copies, revs, checkRevs, extras: { served, stash }, hidden, trashOpens: trashed };
 }
 
 /** Drop a candidate: the key handles opened for it are freed; the state shown is untouched. */
@@ -2851,12 +3088,12 @@ function discard(p: Prepared) {
 /**
  * Make a candidate the loaded state: shown, with `statuses` as its vaults' manifest states, and the match index
  * published. `before`: the snapshot shown until now, when the candidate is a server's answer (null: the offline copy
- * or an own write). Then the rows that are gone are sorted: an item absent from a vault that checked "ok" for this
+ * or an own write). `warnings`: the standing warnings that go with `statuses` (left out: the ones shown stay). Then the rows that are gone are sorted: an item absent from a vault that checked "ok" for this
  * very answer is gone for certain and is forgotten (its edit counter, its marks, its kept copy); any other missing
  * item keeps its counter, and its row is kept aside (`stash`): a server that hides an item once can't then bring back
  * an older version of it unnoticed.
  */
-function commit(p: Prepared, statuses: Map<string, ManifestStatus>, before: Snapshot | null) {
+function commit(p: Prepared, statuses: Map<string, ManifestStatus>, before: Snapshot | null, warnings?: ReadonlyMap<string, Standing>) {
   if (before && p.checkRevs) {
     const listed = new Set(p.snap.vaults.map((v) => v.id));
     const proven = (row: SyncItemRow) => listed.has(row.vault_id) && statuses.get(row.vault_id) === "ok";
@@ -2889,6 +3126,10 @@ function commit(p: Prepared, statuses: Map<string, ManifestStatus>, before: Snap
   openedFrom = p.keysFrom;
   extras = p.extras;
   manifestStates = statuses;
+  // `warnings`: with a judged candidate. Without (an own write shown): the warnings shown stay with their vaults.
+  standing = new Map([...(warnings ?? standing)].filter(([id]) => unresolved(statuses.get(id))));
+  unopenableVaults = p.hidden;
+  trashOpens = p.trashOpens;
   if (p.checkRevs) {
     revMem = p.revs;
     capRevMemory(revMem, p.snap.items);
@@ -3111,7 +3352,7 @@ async function syncFor(gen: number) {
 }
 
 /** What item writes answer: the item's new revision and, with delta sync, the vault's number after the write. */
-type WriteAnswer = { revision?: unknown; vault_seq?: unknown; manifest_seq?: unknown } | null;
+type WriteAnswer = { revision?: unknown; vault_seq?: unknown; manifest_seq?: unknown; manifest_link?: unknown } | null;
 
 /**
  * After one of this browser's item writes, bring the vault up to date with the least work. Without delta sync: a
@@ -3121,7 +3362,9 @@ type WriteAnswer = { revision?: unknown; vault_seq?: unknown; manifest_seq?: unk
  * the write was answered may not include it, so it is waited for first.
  *
  * `sent`: the manifest the write carried (null: the vault has none). Then the write is shown without asking only when
- * the answer's `manifest_seq` is the version sent and the copy still holds the manifest it was built on; the vault row
+ * the answer's `manifest_link` is the link of the manifest sent (not merely its version: a create sent again after a
+ * lost answer is answered as a repeat, with the manifest the first try stored, which is another sealing with another
+ * link) and the copy still holds the manifest it was built on; the vault row
  * gets the manifest sent (`manifest`, `manifest_seq`, `manifest_prev`), and its version and link are remembered.
  * Anything else → a sync, which checks the vault.
  */
@@ -3133,7 +3376,7 @@ async function settle(vaultId: string | undefined, answer: WriteAnswer, own?: (v
   await syncIdle();
   if (gen !== generation || currentId !== id || !synced) return;
   const row = rowOf(vaultId);
-  const mine = !sent || (answer?.manifest_seq === sent.seq && !!row && stillBase(row, sent));
+  const mine = !sent || (answer?.manifest_link === sent.link && !!row && stillBase(row, sent));
   const action = afterWrite(knownSeq(synced, vaultId), vaultSeq, !!own && mine);
   if (action === "none") return;
   if (action === "apply" && own) {

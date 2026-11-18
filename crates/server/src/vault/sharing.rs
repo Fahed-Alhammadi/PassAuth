@@ -714,14 +714,10 @@ pub(super) async fn rotate_vault(
     // Counted only once every check passed (review round 5 L), before the commit: a
     // refused request costs nothing, an over-limit one rolls back.
     limit_key_replacements(&state, &id)?;
-    let manifest_seq = w.manifest_seq(&id);
+    let manifest = (w.manifest_seq(&id), w.manifest_link(&id));
     let revision = w.commit(&state).await?;
     Ok(Json(rotated(
-        revision,
-        key_epoch,
-        seq,
-        roster_seq,
-        manifest_seq,
+        revision, key_epoch, seq, roster_seq, manifest,
     )))
 }
 
@@ -775,14 +771,10 @@ pub(super) async fn remove_member_and_rotate(
     let seq = w.seq(&id);
     let (key_epoch, roster_seq) = apply_rotation(&mut w, &id, &b, seq).await?;
     limit_key_replacements(&state, &id)?;
-    let manifest_seq = w.manifest_seq(&id);
+    let manifest = (w.manifest_seq(&id), w.manifest_link(&id));
     let revision = w.commit(&state).await?;
     Ok(Json(rotated(
-        revision,
-        key_epoch,
-        seq,
-        roster_seq,
-        manifest_seq,
+        revision, key_epoch, seq, roster_seq, manifest,
     )))
 }
 
@@ -801,20 +793,22 @@ fn limit_key_replacements(state: &AppState, id: &str) -> ApiResult<()> {
     )
 }
 
-/// A rotation's answer: `{"revision", "key_epoch", "vault_seq", "manifest_seq"}`,
-/// plus `"member_roster_seq"` when a roster was stored.
+/// A rotation's answer: `{"revision", "key_epoch", "vault_seq", "manifest_seq",
+/// "manifest_link"}` (the vault's manifest after it: version and link, 0 and null
+/// without one), plus `"member_roster_seq"` when a roster was stored.
 fn rotated(
     revision: i64,
     key_epoch: i64,
     seq: i64,
     roster_seq: Option<i64>,
-    manifest_seq: i64,
+    (manifest_seq, manifest_link): (i64, Option<String>),
 ) -> Value {
     let mut answer = json!({
         "revision": revision,
         "key_epoch": key_epoch,
         "vault_seq": seq,
         "manifest_seq": manifest_seq,
+        "manifest_link": manifest_link,
     });
     if let Some(r) = roster_seq {
         answer["member_roster_seq"] = r.into();

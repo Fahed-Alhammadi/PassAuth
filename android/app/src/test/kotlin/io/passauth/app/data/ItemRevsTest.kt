@@ -88,10 +88,9 @@ class ItemRevsTest {
         val waiting = ItemRevs.waiting(before, after, emptySet())
         assertEquals(listOf("newer"), waiting.map { it.data })
         assertNull("it is no longer a row standing in for a served one", waiting[0].servedSha256)
-        // It stays through further syncs and locked refreshes, in the stored copy…
+        // It stays through further syncs, in the stored copy…
         val stored = SyncSnapshot.decode(after.copy(bundle = kotlinx.serialization.json.JsonObject(emptyMap()), held = waiting).encode())!!
         assertEquals(listOf("newer"), ItemRevs.waiting(stored, after, emptySet()).map { it.data })
-        assertEquals(listOf("newer"), ItemRevs.withHeld(after.copy(revision = 3), stored).held.map { it.data })
         // …until the item comes back (the old version served then finds the newer copy to compare with)…
         val back = after.copy(items = after.items + SyncItem("a", "v", "k-old", "older", 5))
         assertTrue(ItemRevs.waiting(stored, back, emptySet()).isEmpty())
@@ -109,23 +108,6 @@ class ItemRevsTest {
     }
 
     private fun row(id: String, data: String?, deleted: Long? = null) = SyncItem(id, "v", if (data == null) null else "k-$data", data, 1, deleted)
-
-    @Test
-    fun aLockedRefreshHoldsTheVersionsItReplaces() {
-        val cached = SyncSnapshot(1, items = listOf(row("a", "a1"), row("b", "b1"), row("gone", "g1")))
-        val next = SyncSnapshot(2, items = listOf(row("a", "a2"), row("b", "b1"), row("new", "n1")))
-        val held = ItemRevs.withHeld(next, cached)
-        assertEquals(listOf(row("a", "a1")), held.held)
-        // A second refresh: the version held first (last checked) stays, the latest replaced is added; at most two per item.
-        val third = ItemRevs.withHeld(SyncSnapshot(3, items = listOf(row("a", "a3"), row("b", "b1"))), held)
-        assertEquals(setOf("a1", "a2"), third.held.map { it.data }.toSet())
-        val fourth = ItemRevs.withHeld(SyncSnapshot(4, items = listOf(row("a", "a4"))), third)
-        assertEquals(setOf("a1", "a3"), fourth.held.map { it.data }.toSet())
-        // Back to a held version: not held twice.
-        assertEquals(listOf("a4"), ItemRevs.withHeld(SyncSnapshot(5, items = listOf(row("a", "a1"))), fourth).held.map { it.data })
-        // An item the answer lacks: nothing is certain while locked, so its held versions wait (the next unlocked sync decides).
-        assertEquals(setOf("a1", "a3"), ItemRevs.withHeld(SyncSnapshot(5, items = emptyList()), fourth).held.map { it.data }.toSet())
-    }
 
     @Test
     fun heldVersionsSurviveTheStoredCopyAndNeverComeFromAServer() {

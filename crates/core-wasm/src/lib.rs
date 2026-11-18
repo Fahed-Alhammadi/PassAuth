@@ -733,10 +733,14 @@ impl VaultKey {
     /// version and call again with it as `log`). `manifest_seq`, `prev` and `sealed` are
     /// the vault row's `manifest_seq`, `manifest_prev` and `manifest` (0 / null = none);
     /// `remembered_version` and `remembered_link` what this device stored for the vault
-    /// (both or neither); `log` the log's entries (`[{seq, prev, digest}]`), null when
-    /// none was fetched; `items` every item row of the vault as synced (`id`,
-    /// `deleted_at`, `data` or `data_sha256`; other fields are ignored). `version` and
-    /// `link` are what to remember from now on (unchanged unless "ok").
+    /// (both or neither; a link of 32 zero bytes is no memory and throws); `log` the
+    /// log's entries (`[{seq, prev, digest}]`) as the server sent them, null when none
+    /// was fetched (an entry that isn't `{seq, prev, digest}` of the right kinds is
+    /// skipped, it never makes the call throw; a `log` that is no array does); `items`
+    /// every item row of the vault as synced (`id`, `deleted_at`, `data` or
+    /// `data_sha256`; other fields are ignored). `version` and `link` are what to
+    /// remember from now on (unchanged unless "ok"). "need_log" only comes for a
+    /// manifest two or more versions ahead of the remembered one.
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = manifestVerify)]
     pub fn manifest_verify(
@@ -787,12 +791,49 @@ impl VaultKey {
         to_js(&check)
     }
 
+    /// The check behind "Use the server's copy": this vault as the sync answer shows it
+    /// (`manifest_seq`, `prev`, `sealed` = the row's `manifest_seq`, `manifest_prev`,
+    /// `manifest`; `items` every item row of the vault), judged with nothing remembered.
+    /// `{status, version, link, live, trashed}`: "ok" = the served manifest records
+    /// exactly these items: on the user's confirmation replace this device's memory for
+    /// the vault with `version` and `link`, whatever it held; "none" = the server shows
+    /// no manifest: forget the vault's memory (`version` 0, `link` null); "mismatch" /
+    /// "incomplete" = nothing may be remembered (a member who can write stores a
+    /// baseline: `manifestStart` one version above the row, naming `manifestLink` of it).
+    #[wasm_bindgen(js_name = manifestAccept)]
+    pub fn manifest_accept(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
+        key_epoch: f64,
+        manifest_seq: f64,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] prev: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] sealed: JsValue,
+        items: JsValue,
+    ) -> R<JsValue> {
+        let (vault_id, prev, sealed) = (string(vault_id)?, opt_string(prev)?, opt_string(sealed)?);
+        let items: Vec<manifest::Entry> = from_js(items)?;
+        let check = manifest::accept(
+            &self.0,
+            &vault_id,
+            manifest_number(key_epoch)?,
+            manifest::Row {
+                seq: manifest_number(manifest_seq)?,
+                prev: prev.as_deref(),
+                sealed: sealed.as_deref(),
+            },
+            &items,
+        )
+        .map_err(js_err)?;
+        to_js(&check)
+    }
+
     /// `{seq, prev, sealed, link}`: a manifest of `version` for exactly `items` (every
     /// item row of the vault, each with `data` or `data_sha256`), replacing the manifest
     /// whose link is `prev`: null for a vault's first manifest; for a new baseline and
     /// for the one a key replacement carries (called on the new key with the new
     /// `key_epoch` and the re-encrypted items), `manifestLink` of the vault row's
-    /// current manifest. `seq`, `prev` and `sealed` go into the request; `seq` and
+    /// current manifest, with `version` = the row's `manifest_seq` + 1 (the server
+    /// takes nothing else). `seq`, `prev` and `sealed` go into the request; `seq` and
     /// `link` are what the device remembers once the server stored it.
     #[wasm_bindgen(js_name = manifestStart)]
     pub fn manifest_start(

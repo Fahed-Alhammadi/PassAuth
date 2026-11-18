@@ -409,6 +409,10 @@ fieldset.choice-group > legend { padding: 0; margin-bottom: 6px; }
 .list-item .sub { display: block; font-size: var(--text-caption); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-item .fav { flex: none; display: inline-flex; color: var(--ink-3); }
 .list-item .fav svg { fill: currentColor; }
+/* A row that is no item to open (one that can't be opened): its one action is a button inside it. */
+.list-item-static { cursor: default; }
+.list-item-static:hover { background: none; }
+.list-item-static .btn { flex: none; }
 .avatar {
   flex: none; width: 36px; height: 36px; border-radius: var(--radius-s); display: grid; place-items: center;
   background: var(--surface-2); color: var(--ink-2); font-weight: 600;

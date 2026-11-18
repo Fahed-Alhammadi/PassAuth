@@ -746,6 +746,8 @@ private fun EmergencyVaultScreen(ctx: UiCtx, g: Grant, back: () -> Unit) {
                 v.mismatched.forEach { name ->
                     Alert(if (v.vaults.size > 1) "$name: ${io.passauth.app.data.Manifests.WARNING}" else io.passauth.app.data.Manifests.WARNING, AlertKind.Error)
                 }
+                // A vault without a record of changes: shown, and said that nothing could be checked.
+                v.unchecked.forEach { name -> Muted("$name: ${io.passauth.app.data.Manifests.VIEW_UNCHECKED}") }
                 if (v.failed > 0) WarningNote("${if (v.failed == 1) "One item couldn't be opened and is" else "${v.failed} items couldn't be opened and are"} left out.")
                 TextInput(query, { query = it }, "Search")
                 val trashed = v.items.count { it.deletedAt != null }

@@ -44,7 +44,7 @@ vi.mock("./api", async (importOriginal) => {
 vi.mock("./vault", () => ({ getAccount: () => h.account }));
 vi.stubGlobal("location", new URL("https://vault.example.test/"));
 
-import { SEND_PASSWORD_NEEDS_V2, SEND_UNREADABLE, createSend, getSend, nameOf, sendFormat, textOf, updateSend } from "./send-client";
+import { SEND_PASSWORD_NEEDS_V2, SEND_PASSWORD_TO_EDIT, SEND_UNREADABLE, createSend, getSend, nameOf, sendFormat, textOf, updateSend } from "./send-client";
 import { sendKeysHere } from "./send-kdf";
 import { readSend, type OwnedSend } from "./sends";
 
@@ -190,6 +190,36 @@ describe("Send v2 (password-derived content key)", () => {
     const b = lastBody();
     expect(version(b.name)).toBe(2);
     expect(core.sendOpen(linkKey(link), sendKeysHere(PW, b.access_salt as string, linkKey(link)).contentKey, "data", b.data as string)).toBe("plain");
+  }, 60_000);
+
+  it("rereview 8 (S8): a v1 state of a Send the server says has a password takes a new name or text only together with the password", async () => {
+    const { send, link } = await createSend({ ...base, name: "Note", text: "plain", password: null });
+    // Later the Send got a password (v2); the server serves its earlier v1 fields again and still lists the password.
+    const replayed = { ...send, hasPassword: true };
+    expect(sendFormat(replayed)).toBe(1);
+    h.calls = [];
+    await expect(updateSend(replayed, { text: "secret" })).rejects.toThrow(SEND_PASSWORD_TO_EDIT);
+    await expect(updateSend(replayed, { name: "Renamed" })).rejects.toThrow(SEND_PASSWORD_TO_EDIT);
+    expect(SEND_PASSWORD_TO_EDIT).toBe("Enter this Send's password to change its text.");
+    expect(h.calls.filter((c) => c.method === "PUT")).toEqual([]);
+    // Settings alone still go through.
+    await updateSend(replayed, { disabled: true });
+    expect(lastBody().name).toBeUndefined();
+    expect(lastBody().data).toBeUndefined();
+    // With the password the text is written v2: the link alone doesn't open it.
+    await updateSend(replayed, { text: "secret", password: PW });
+    const b = lastBody();
+    expect(version(b.data)).toBe(2);
+    expect(() => core.sendOpen(linkKey(link), null, "data", b.data as string)).toThrow();
+    // Taking the password away writes v1, as before; so does an ordinary v1 Send without a password.
+    await updateSend(replayed, { text: "open", password: null });
+    expect(version(lastBody().data)).toBe(1);
+    await updateSend(send, { text: "still plain" });
+    expect(version(lastBody().data)).toBe(1);
+    // A server without send_v2 (an old one keeps v1 password Sends): edited as before.
+    h.features = ["sends"];
+    await updateSend(replayed, { text: "old server" });
+    expect(version(lastBody().data)).toBe(1);
   }, 60_000);
 
   it("a v2 Send whose content key can't be opened shows as unreadable", async () => {

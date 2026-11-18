@@ -1065,6 +1065,23 @@ fn vault_manifest_vectors() {
         assert_eq!(check.status, manifest::Status::Ok, "{w}");
         assert_eq!(check.link.as_deref(), Some(next.link.as_str()));
     }
+    for a in m["accepts"].as_array().unwrap() {
+        let (k, e) = key_of(a);
+        assert_eq!(a["keyEpoch"], e, "{a}");
+        let (seq, prev, sealed) = row_of(&m["manifests"][str_of(a, "manifest")]);
+        let row = Row {
+            seq,
+            prev: prev.as_deref(),
+            sealed: sealed.as_deref(),
+        };
+        let got = manifest::accept(k, vault_id, e, row, &rows(&a["items"])).unwrap();
+        assert_eq!(serde_json::to_value(&got).unwrap(), a["expected"], "{a}");
+    }
+    for bad in m["badMemories"].as_array().unwrap() {
+        let parsed = Seen::parse(bad["version"].as_u64().unwrap(), str_of(bad, "link"));
+        assert!(parsed.is_err(), "{bad}");
+    }
+    assert!(m["badMemories"].as_array().unwrap().len() >= 6);
     for s in m["starts"].as_array().unwrap() {
         let (k, e) = key_of(s);
         assert_eq!(s["keyEpoch"], e, "{s}");

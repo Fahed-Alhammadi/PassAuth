@@ -294,6 +294,52 @@ final class GoldenVectorTests: XCTestCase {
         }
         XCTAssertEqual(statuses, ["incomplete", "mismatch", "need_log", "none", "ok", "rollback"])
 
+        // "Use the server's copy": the served manifest against the served items, nothing remembered.
+        let accepts = m["accepts"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(accepts.count, 15)
+        var accepted = Set<String>()
+        for a in accepts {
+            let name = "accept '\(a["name"] ?? "")'"
+            let row = manifests[a["manifest"] as? String ?? ""] ?? [:]
+            let key = try XCTUnwrap(keys[a["key"] as? String ?? ""], name)
+            let keyEpoch = try XCTUnwrap(number(a["keyEpoch"]), name)
+            let seq = number(row["manifest_seq"]) ?? 0
+            let prev = row["manifest_prev"] as? String, sealed = row["manifest"] as? String
+            let rows = items[a["items"] as? String ?? ""]
+            let expected = a["expected"] as? Object ?? [:]
+            let got = try key.manifestAccept(vaultId: vaultId, keyEpoch: keyEpoch, manifestSeq: seq, prev: prev, sealed: sealed, itemsJson: try text(rows))
+            accepted.insert(got.status)
+            XCTAssertEqual(got.status, expected["status"] as? String, name)
+            XCTAssertEqual(got.version, number(expected["version"]), name)
+            XCTAssertEqual(got.link, expected["link"] as? String, name)
+            XCTAssertEqual(got.live, number(expected["live"]), name)
+            XCTAssertEqual(got.trashed, number(expected["trashed"]), name)
+            // The app's wrapper: `ok` gives the head to remember, `none` nothing, the rest never anything.
+            if let decoded = try? JSONDecoder().decode([SyncItem].self, from: JSONSerialization.data(withJSONObject: rows ?? [])) {
+                let header = SyncVault(id: vaultId, keyEpoch: Int64(keyEpoch), manifest: sealed, manifestSeq: Int64(seq), manifestPrev: prev)
+                let mine = VaultManifest.accept(header, key: key, rows: decoded)
+                XCTAssertEqual(mine.status.rawValue, expected["status"] as? String, "\(name) through VaultManifest")
+                XCTAssertEqual(mine.mark, mine.status == .ok ? mark(expected) : nil, "\(name): what replaces the memory")
+            }
+        }
+        XCTAssertEqual(accepted, ["incomplete", "mismatch", "none", "ok"])
+
+        // A memory that is no memory (the all-zero link, half an entry): the core refuses to
+        // check against it; the app never reads one from its file.
+        let head = try XCTUnwrap(manifests["current"])
+        let bad = m["badMemories"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(bad.count, 6)
+        for (i, b) in bad.enumerated() {
+            let mainKey = try XCTUnwrap(keys["main"])
+            XCTAssertThrowsError(try mainKey.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: number(head["manifest_seq"]) ?? 0,
+                                                            prev: head["manifest_prev"] as? String, sealed: head["manifest"] as? String,
+                                                            rememberedVersion: number(b["version"]), rememberedLink: b["link"] as? String, logJson: nil,
+                                                            itemsJson: try text(items["full"])), "bad memory \(i)")
+            let stored = try JSONSerialization.data(withJSONObject: ["v": b])
+            XCTAssertEqual(VaultManifest.readMemory(stored), [:], "bad memory \(i) is nothing remembered")
+            XCTAssertEqual(ManifestMark(version: number(b["version"]) ?? 0, link: b["link"] as? String ?? "").valid, false, "bad memory \(i)")
+        }
+
         // Item sets every entry point refuses (a `deleted_at` that is no time, an id twice, …).
         let current = try XCTUnwrap(manifests["current"])
         let version = try XCTUnwrap(number(current["manifest_seq"]))

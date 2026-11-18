@@ -455,10 +455,10 @@ const SCHEMA_V16: &[&str] = &["ALTER TABLE sends ADD COLUMN owner_content_key TE
 /// 0 = the vault has none) and the link of the manifest it replaced (`manifest_prev`,
 /// base64url; the apps bind it into the sealing). Once a vault has one, every write
 /// that changes its items replaces all three in the same transaction
-/// (`vault/manifest.rs`). `vault_manifest_log` keeps, for the newest manifests of each
-/// vault, what an app needs to follow the chain from the one it last saw to the
-/// current one by hashes alone: the version, `prev`, and the SHA-256 of the sealed
-/// text (`digest`, base64url).
+/// (`vault/manifest.rs`). `vault_manifest_log` keeps, for the recent manifests of each
+/// vault (by age, `created_at`, and count), what an app needs to follow the chain from
+/// the one it last saw to the current one by hashes alone: the version, `prev`, and
+/// the SHA-256 of the sealed text (`digest`, base64url).
 const SCHEMA_V17: &[&str] = &[
     "ALTER TABLE vaults ADD COLUMN manifest TEXT",
     "ALTER TABLE vaults ADD COLUMN manifest_seq BIGINT NOT NULL DEFAULT 0",
@@ -468,6 +468,7 @@ const SCHEMA_V17: &[&str] = &[
         seq BIGINT NOT NULL,
         prev TEXT NOT NULL,
         digest TEXT NOT NULL,
+        created_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (vault_id, seq)
     )",
 ];

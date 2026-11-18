@@ -114,10 +114,13 @@ async fn insert_item(
     }
 }
 
-/// `{"id", "revision", "vault_seq", "manifest_seq"}`: `vault_seq` is the vault's
-/// sequence number after the write and `manifest_seq` its manifest's version (for a
-/// retried create that found its item, the current ones: such a repeat neither needs
-/// nor stores a manifest).
+/// `{"id", "revision", "vault_seq", "manifest_seq", "manifest_link"}`: `vault_seq` is
+/// the vault's sequence number after the write, `manifest_seq` its manifest's version
+/// and `manifest_link` that manifest's link (null without one). For a retried create
+/// that found its item they are the current ones: such a repeat neither needs nor
+/// stores a manifest, and the link tells the app whether the vault's manifest is the
+/// one it sent with this attempt (it isn't when the first attempt carried another
+/// sealing of it, or when the vault was written since).
 pub(super) async fn create_item(
     State(state): State<AppState>,
     user: AuthUser,
@@ -130,7 +133,7 @@ pub(super) async fn create_item(
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
     let seq = w.seq(&i.vault_id);
     let rev = now_ms();
-    let (revision, vault_seq, manifest_seq) =
+    let (revision, vault_seq, manifest_seq, manifest_link) =
         match insert_item(w.conn(), &i, rev, seq, Some(&user.user_id)).await? {
             None => {
                 w.untombstone(&i.vault_id).await?;
@@ -138,18 +141,24 @@ pub(super) async fn create_item(
                 w.charge(&i.vault_id, 1, i.bytes());
                 w.log(Event::new("item.created").vault(&i.vault_id).item(&i.id))
                     .await?;
-                let manifest_seq = w.manifest_seq(&i.vault_id);
+                let manifest = (w.manifest_seq(&i.vault_id), w.manifest_link(&i.vault_id));
                 w.commit(&state).await?;
-                (rev, seq, manifest_seq)
+                (rev, seq, manifest.0, manifest.1)
             }
             // Nothing to write: dropping `w` rolls back the lock and the number it took.
-            Some(stored) => (stored, seq - 1, w.manifest_seq(&i.vault_id)),
+            Some(stored) => (
+                stored,
+                seq - 1,
+                w.manifest_seq(&i.vault_id),
+                w.manifest_link(&i.vault_id),
+            ),
         };
     Ok(Json(json!({
         "id": i.id,
         "revision": revision,
         "vault_seq": vault_seq,
         "manifest_seq": manifest_seq,
+        "manifest_link": manifest_link,
     })))
 }
 
@@ -165,8 +174,8 @@ pub(super) struct Import {
 /// already stored exactly like this (a retried import) count as imported; a
 /// vault that got nothing new neither needs nor stores a manifest.
 /// Answers `{"imported", "vault_seqs": {vault: seq}, "manifest_seqs": {vault:
-/// seq}}`, plus `vault_seq` and `manifest_seq` when every item went into one vault
-/// (the usual case).
+/// seq}, "manifest_links": {vault: link or null}}`, plus `vault_seq`, `manifest_seq`
+/// and `manifest_link` when every item went into one vault (the usual case).
 pub(super) async fn import_items(
     State(state): State<AppState>,
     user: AuthUser,
@@ -208,6 +217,7 @@ pub(super) async fn import_items(
     }
     let created: i64 = counts.values().sum();
     let mut manifest_seqs: BTreeMap<String, i64> = BTreeMap::new();
+    let mut manifest_links: BTreeMap<String, Option<String>> = BTreeMap::new();
     if created > 0 {
         for vault in seqs.keys() {
             w.untombstone(vault).await?;
@@ -220,6 +230,7 @@ pub(super) async fn import_items(
         w.manifests(&b.manifests, &grown).await?;
         for vault in seqs.keys() {
             manifest_seqs.insert(vault.clone(), w.manifest_seq(vault));
+            manifest_links.insert(vault.clone(), w.manifest_link(vault));
         }
         for (vault, count) in counts.into_iter().filter(|(_, n)| *n > 0) {
             w.log(
@@ -235,16 +246,19 @@ pub(super) async fn import_items(
         seqs.values_mut().for_each(|s| *s -= 1);
         for vault in seqs.keys() {
             manifest_seqs.insert(vault.clone(), w.manifest_seq(vault));
+            manifest_links.insert(vault.clone(), w.manifest_link(vault));
         }
     }
     let mut out = json!({
         "imported": b.items.len(),
         "vault_seqs": seqs,
         "manifest_seqs": manifest_seqs,
+        "manifest_links": manifest_links,
     });
     if let [(vault, seq)] = seqs.iter().collect::<Vec<_>>()[..] {
         out["vault_seq"] = (*seq).into();
         out["manifest_seq"] = manifest_seqs[vault].into();
+        out["manifest_link"] = manifest_links[vault].clone().into();
     }
     Ok(Json(out))
 }
@@ -259,8 +273,9 @@ async fn item_vault(state: &AppState, id: &str) -> ApiResult<(String, i64)> {
 
 /// Edit an item, or move it to another vault (write access to both). A move
 /// takes a sequence number in both vaults and leaves a tombstone in the old one;
-/// `vault_seq` and `manifest_seq` in the answer are the item's (new) vault's. A move
-/// carries the next manifest of each of the two vaults that has one.
+/// `vault_seq`, `manifest_seq` and `manifest_link` in the answer are the item's (new)
+/// vault's; a move also answers `manifest_links: {vault: link or null}` for both
+/// vaults. A move carries the next manifest of each of the two vaults that has one.
 pub(super) async fn update_item(
     State(state): State<AppState>,
     user: AuthUser,
@@ -366,13 +381,21 @@ pub(super) async fn update_item(
         w.charge_files(&i.vault_id, attached);
     }
     let manifest_seq = w.manifest_seq(&i.vault_id);
+    let manifest_link = w.manifest_link(&i.vault_id);
+    let old_link = moved.then(|| w.manifest_link(&old_vault));
     w.commit(&state).await?;
-    Ok(Json(json!({
+    let mut answer = json!({
         "id": id,
         "revision": rev,
         "vault_seq": seq,
         "manifest_seq": manifest_seq,
-    })))
+        "manifest_link": manifest_link,
+    });
+    if let Some(old_link) = old_link {
+        answer["manifest_links"] =
+            json!({ old_vault: old_link, i.vault_id.as_str(): manifest_link });
+    }
+    Ok(Json(answer))
 }
 
 /// Optional optimistic-concurrency check for trash / restore / purge, and the next
@@ -429,12 +452,14 @@ async fn set_deleted(
     };
     w.log(Event::new(kind).vault(&vault).item(id)).await?;
     let manifest_seq = w.manifest_seq(&vault);
+    let manifest_link = w.manifest_link(&vault);
     w.commit(state).await?;
     Ok(Json(json!({
         "id": id,
         "revision": rev,
         "vault_seq": seq,
         "manifest_seq": manifest_seq,
+        "manifest_link": manifest_link,
     })))
 }
 
@@ -494,12 +519,14 @@ pub(super) async fn purge_item(
         .await?;
     let vault_seq = w.seq(&vault);
     let manifest_seq = w.manifest_seq(&vault);
+    let manifest_link = w.manifest_link(&vault);
     let revision = w.commit(&state).await?;
     attachments::remove_files(&state, &files).await;
     Ok(Json(json!({
         "revision": revision,
         "vault_seq": vault_seq,
         "manifest_seq": manifest_seq,
+        "manifest_link": manifest_link,
     })))
 }
 
@@ -523,7 +550,8 @@ pub(super) struct PurgeItems {
 /// delete what has been in it longer than the admin's `trash_days` in a vault with a
 /// manifest, which the server's sweeper leaves alone. An item that isn't in this
 /// vault's trash (any more), or whose `revision` differs, is a 409
-/// `revision_conflict`. Answers `{purged, revision, vault_seq, manifest_seq}`.
+/// `revision_conflict`. Answers `{purged, revision, vault_seq, manifest_seq,
+/// manifest_link}`.
 pub(super) async fn purge_items(
     State(state): State<AppState>,
     user: AuthUser,
@@ -580,6 +608,7 @@ pub(super) async fn purge_items(
     .await?;
     let vault_seq = w.seq(&vault);
     let manifest_seq = w.manifest_seq(&vault);
+    let manifest_link = w.manifest_link(&vault);
     let revision = w.commit(&state).await?;
     attachments::remove_files(&state, &files).await;
     Ok(Json(json!({
@@ -587,6 +616,7 @@ pub(super) async fn purge_items(
         "revision": revision,
         "vault_seq": vault_seq,
         "manifest_seq": manifest_seq,
+        "manifest_link": manifest_link,
     })))
 }
 

@@ -9,8 +9,11 @@
  * - `nextEntry` / `startEntry`: every write into a vault that has a manifest carries the next one, which names the one
  *   it replaces (`prev`); the device remembers the version and link of the last manifest it checked or wrote, so a
  *   server can't move it onto another history at the same or a later version (the vault's manifest log bridges jumps).
- * - `mayStart`, `baselineSeq`, `dueTrash`: when a first manifest is started, the version of a new baseline ("Use the
- *   server's copy") and which trashed items an app deletes for the server (its sweeper leaves such vaults alone).
+ * - `acceptVault`: the check behind "Use the server's copy": the served manifest against the served rows with nothing
+ *   remembered. When it passes, this device takes that manifest as what it remembers (no request); when it doesn't, a
+ *   member who can edit writes a new baseline, always exactly one version above the row's.
+ * - `mayStart`, `dueTrash`: when a first manifest is started and which trashed items an app deletes for the server
+ *   (its sweeper leaves such vaults alone).
  *
  * The web vault never asks for `trash=summary`, so its rows always carry `data`.
  */
@@ -22,8 +25,21 @@ import type { Role, SyncItemRow, SyncVaultRow } from "./types";
 
 /** Shown on a vault whose items don't match its manifest, or whose manifest went back. */
 export const VAULT_WARNING = "Your server's copy of this vault doesn't match its record of changes. Items may be missing, restored or out of date.";
-/** Under the warning, for members who can't write. */
+/** Under the warning, for members who can't write, when the server's copy can't be accepted on this device alone. */
 export const VAULT_WARNING_READER = "Someone who can edit this vault can review it.";
+/** The warning of a vault whose record checks out but which holds an item its key can't open. */
+export const VAULT_UNOPENABLE = "An item in this vault can't be opened. Delete it to keep using the vault.";
+export const VAULT_UNOPENABLE_READER = "An item in this vault can't be opened. Someone who can edit this vault can delete it.";
+/** How a row that doesn't open is listed, and its one action. */
+export const UNOPENABLE_ITEM = "Item that can't be opened";
+export const DELETE_FOR_GOOD = "Delete for good";
+export const DELETE_UNOPENABLE_BODY = "This item can't be opened on this device. Deleting it removes it for everyone.";
+/** This device's record of the vaults' manifests can't be read (after `UNREADABLE_READS` tries and a whole sync). */
+export const MEMORY_UNREADABLE = "PassAuth can't read this device's record of your vaults.";
+export const MEMORY_RESET = "Reset on this device";
+export const MEMORY_RESET_BODY = "PassAuth will trust what your server shows now and start a new record on this device.";
+/** "Use the server's copy" when the server answered but no fresh copy of the whole account could be taken from it. */
+export const ACCEPT_NO_ANSWER = "PassAuth couldn't get this vault from your server just now. Try again in a moment.";
 export const USE_SERVER_COPY = "Use the server's copy";
 export const USE_SERVER_COPY_TITLE = "Use the server's copy?";
 export const USE_SERVER_COPY_BODY =
@@ -32,8 +48,11 @@ export const USE_SERVER_COPY_BODY =
 export const MANIFEST_HELD = "This vault can't be changed until its warning is resolved.";
 /** A write into a vault whose check couldn't be finished (its record couldn't be fetched, or this device's memory can't be read). */
 export const MANIFEST_UNCHECKED = "PassAuth couldn't check this vault with your server yet. Try again in a moment.";
-/** "Use the server's copy" for a vault that holds an item its key can't open: a new record wouldn't change that. */
-export const MANIFEST_HIDDEN = "This vault holds an item that its key can't open, so the server's copy can't be accepted. Restore the server from a backup.";
+/**
+ * "Use the server's copy" for a vault whose only problem is an item its key can't open: accepting wouldn't change
+ * that, deleting the item does (`VAULT_UNOPENABLE`).
+ */
+export const MANIFEST_HIDDEN = VAULT_UNOPENABLE;
 /** A write that met other writes three times in a row. */
 export const MANIFEST_BUSY = "This vault changed on another device. Try again.";
 /** A new baseline for a vault whose manifest is gone, while some member's app is too old to keep one. */
@@ -45,7 +64,10 @@ export const MANIFEST_TRIES = 3;
 /** The core's verdicts. "none": no manifest and none seen; the last three leave the vault unresolved. */
 export type ManifestStatus = "none" | "ok" | "rollback" | "mismatch" | "incomplete";
 
-/** What this device remembers of a vault: the version and link of the last manifest it checked "ok" or wrote itself. */
+/**
+ * What this device remembers of a vault: the version and link of the last manifest it checked "ok", wrote itself or
+ * accepted ("Use the server's copy").
+ */
 export interface Remembered {
   version: number;
   link: string;
@@ -114,13 +136,27 @@ const STATUSES = new Set<string>(["none", "ok", "rollback", "mismatch", "incompl
 /** A manifest link as it travels: base64url of 32 bytes. */
 export const isLink = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{43}$/.test(v);
 
+/** The link no manifest has (32 zero bytes): what a vault's first manifest names as the one it replaces. */
+export const ZERO_LINK = "A".repeat(43);
+/** A link this device may remember: a manifest's, never the all-zero one (the core refuses that as a memory). */
+const isMemoryLink = (v: unknown): v is string => isLink(v) && v !== ZERO_LINK;
+
 /** A whole number a version can be. */
 const isVersion = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 
-/** A remembered pair as stored; anything else (the first format's bare number, half a pair) is nothing remembered. */
+/**
+ * A remembered pair as stored; anything else (the first format's bare number, half a pair, the all-zero link) is
+ * nothing remembered.
+ */
 export const asRemembered = (v: unknown): Remembered | undefined => {
   const r = v as { version?: unknown; link?: unknown } | null;
-  return r && typeof r === "object" && isVersion(r.version) && isLink(r.link) ? { version: r.version, link: r.link } : undefined;
+  return r && typeof r === "object" && isVersion(r.version) && isMemoryLink(r.link) ? { version: r.version, link: r.link } : undefined;
+};
+
+/** How often this device replaced a vault's memory by an acceptance, as stored (missing or malformed: 0). */
+const acceptsOf = (v: unknown): number => {
+  const n = (v as { accepts?: unknown } | null)?.accepts;
+  return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : 0;
 };
 
 /**
@@ -158,6 +194,7 @@ export function verifyVault(
       typeof row.manifest === "string" ? row.manifest : null,
       remembered?.version ?? null,
       remembered?.link ?? null,
+      // The server's entries as they came: the core skips what is no entry.
       log ? [...log] : null,
       rows.map(manifestRow),
     ) as { status?: unknown; version?: unknown; link?: unknown } | null;
@@ -171,6 +208,43 @@ export function verifyVault(
     return { status: "mismatch", ...keep };
   }
 }
+
+/** What `acceptVault` found: "ok" with the served manifest's version and link, "none" (no manifest served), or not acceptable. */
+export type AcceptCheck = { status: "ok"; version: number; link: string } | { status: "none" } | { status: "mismatch" };
+
+/**
+ * The check behind "Use the server's copy": the row's manifest against exactly `rows`, with nothing remembered (the
+ * core's `manifestAccept`, its own call so an acceptance is never built from a verdict that took the old memory into
+ * account). "ok": the served manifest matches the served items, so this device may take it as what it remembers,
+ * also when it remembered a later one. "none": the server shows no manifest, so the vault's memory may be forgotten.
+ * Anything else, and everything the core refuses, is "mismatch": nothing may be remembered from it.
+ */
+export function acceptVault(
+  key: core.VaultKey,
+  row: Pick<SyncVaultRow, "id" | "key_epoch" | "manifest" | "manifest_seq" | "manifest_prev">,
+  rows: readonly Pick<SyncItemRow, "id" | "deleted_at" | "data">[],
+): AcceptCheck {
+  const seq = row.manifest_seq ?? 0;
+  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) return { status: "mismatch" };
+  try {
+    const r = key.manifestAccept(
+      row.id,
+      typeof row.key_epoch === "number" ? row.key_epoch : 0,
+      seq,
+      typeof row.manifest_prev === "string" ? row.manifest_prev : null,
+      typeof row.manifest === "string" ? row.manifest : null,
+      rows.map(manifestRow),
+    ) as { status?: unknown; version?: unknown; link?: unknown } | null;
+    if (r?.status === "none") return seq === 0 ? { status: "none" } : { status: "mismatch" };
+    if (r?.status !== "ok" || !isVersion(r.version) || r.version !== seq || !isMemoryLink(r.link)) return { status: "mismatch" };
+    return { status: "ok", version: r.version, link: r.link };
+  } catch {
+    return { status: "mismatch" };
+  }
+}
+
+/** Whether the warning of a vault can be cleared on this device alone (`acceptVault` "ok" or "none"). */
+export const acceptable = (a: AcceptCheck): boolean => a.status !== "mismatch";
 
 const readEntry = (vaultId: string, m: unknown, seq: number): ManifestEntry => {
   const e = m as { seq?: unknown; prev?: unknown; sealed?: unknown; link?: unknown } | null;
@@ -286,8 +360,21 @@ export function mayStart(feature: boolean, row: SyncVaultRow, status: ManifestSt
   );
 }
 
-/** The version of a new baseline: above the server's and above what this device remembers. */
-export const baselineSeq = (row: Pick<SyncVaultRow, "manifest_seq">, remembered: Remembered | undefined): number => Math.max(manifestSeq(row), remembered?.version ?? 0) + 1;
+/**
+ * The version of a new baseline: always exactly one above the row's (the server refuses anything else), whatever this
+ * device remembers.
+ */
+export const baselineSeq = (row: Pick<SyncVaultRow, "manifest_seq">): number => manifestSeq(row) + 1;
+
+/**
+ * Whether a write's answer says the vault's manifest is now the one this app sent: its `manifest_link` is that
+ * manifest's link. Only then is the write shown without asking and the manifest remembered; a retried request that
+ * was stored under an earlier manifest answers with that one's link (and the same version), so it syncs instead.
+ */
+export const linkStored = (sent: Pick<ManifestEntry, "link"> | null | undefined, answered: unknown): boolean => !!sent && isLink(answered) && answered === sent.link;
+
+/** An app never deletes an item it has seen in the trash for fewer days than this, whatever the server says. */
+export const TRASH_FLOOR_DAYS = 7;
 
 /** The server's clock and this device's may differ by this much (seconds) for old trash to be deleted here. */
 export const CLOCK_SLACK = 86400;
@@ -303,8 +390,8 @@ export const isTrashedRow = (row: Pick<SyncItemRow, "deleted_at">): boolean => (
  * alone never empties a trash):
  * - the server's rule, with its clock and retention: in the trash for longer than `trashDays` (at least 1; none when
  *   the server keeps the trash forever or didn't say);
- * - this device itself has seen the item in the trash for at least that long, by its own clock (`seen`: when it first
- *   saw each row trashed, `TrashSeen`);
+ * - this device itself has seen the item in the trash for at least that long and never less than `TRASH_FLOOR_DAYS`
+ *   days, by its own clock (`seen`: when it first saw each row trashed, `TrashSeen`), whatever retention the server names;
  * - the two clocks agree within a day.
  */
 export function dueTrash(
@@ -318,9 +405,10 @@ export function dueTrash(
   if (!whole(serverTime) || !whole(trashDays) || !whole(now)) return [];
   const keep = trashDays * 86400;
   if (!Number.isSafeInteger(keep) || Math.abs(serverTime - now) > CLOCK_SLACK) return [];
+  const watched = Math.max(trashDays, TRASH_FLOOR_DAYS) * 86400;
   return rows.filter((r) => {
     const first = seen(r.id);
-    return whole(r.deleted_at) && r.deleted_at < serverTime - keep && whole(first) && first <= now - keep;
+    return whole(r.deleted_at) && r.deleted_at < serverTime - keep && whole(first) && now - first >= watched;
   });
 }
 
@@ -332,13 +420,26 @@ export const mayPurge = (row: SyncVaultRow, status: ManifestStatus | undefined):
 export const MANIFESTS_PREFIX = "pa.vault-manifests.";
 export const manifestsKey = (scope: string) => `${MANIFESTS_PREFIX}${scope}`;
 
-/**
- * The remembered manifests as stored. Nothing stored is nothing remembered, and so is a single entry that isn't a
- * `{version, link}` pair (the first format kept a bare number). A stored value that can't be read at all is null: it is
- * neither checked against nor written over (`ManifestMemory.unreadable`).
- */
-export function readManifestMemory(store: KeyValueStore, scope: string): Map<string, Remembered> | null {
-  const out = new Map<string, Remembered>();
+/** A vault's entry in the device memory: what is remembered (version 0 / link null: nothing) and the acceptance count. */
+interface MemoryEntry {
+  version: number;
+  link: string | null;
+  /** How often this device replaced the vault's memory by an acceptance: orders entries before their versions. */
+  accepts: number;
+}
+
+const entryOf = (v: unknown): MemoryEntry => {
+  const r = asRemembered(v);
+  return { version: r?.version ?? 0, link: r?.link ?? null, accepts: acceptsOf(v) };
+};
+
+const storedForm = (e: MemoryEntry) => ({ ...(e.version > 0 && e.link ? { version: e.version, link: e.link } : {}), ...(e.accepts ? { accepts: e.accepts } : {}) });
+
+/** Whether `a` replaces `b` in a merge: more acceptances, or as many and a higher version. At equal versions `b` stays. */
+const outranks = (a: MemoryEntry, b: MemoryEntry | undefined): boolean => !b || a.accepts > b.accepts || (a.accepts === b.accepts && a.version > b.version);
+
+function readEntries(store: KeyValueStore, scope: string): Map<string, MemoryEntry> | null {
+  const out = new Map<string, MemoryEntry>();
   const text = store.get(manifestsKey(scope));
   if (text === null) return out;
   let v: unknown;
@@ -349,22 +450,49 @@ export function readManifestMemory(store: KeyValueStore, scope: string): Map<str
   }
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   for (const [id, entry] of Object.entries(v as Record<string, unknown>)) {
-    const r = asRemembered(entry);
-    if (r) out.set(id, r);
+    const e = entryOf(entry);
+    if (e.version > 0 || e.accepts > 0) out.set(id, e);
   }
   return out;
 }
 
 /**
+ * The remembered manifests as stored. Nothing stored is nothing remembered, and so is a single entry that isn't a
+ * `{version, link}` pair (the first format kept a bare number; an entry may also hold only its acceptance count). A
+ * stored value that can't be read at all is null: it is neither checked against nor written over
+ * (`ManifestMemory.unreadable`).
+ */
+export function readManifestMemory(store: KeyValueStore, scope: string): Map<string, Remembered> | null {
+  const entries = readEntries(store, scope);
+  if (!entries) return null;
+  const out = new Map<string, Remembered>();
+  for (const [id, e] of entries) if (e.version > 0 && e.link) out.set(id, { version: e.version, link: e.link });
+  return out;
+}
+
+/**
+ * Where an unreadable record is moved by "Reset on this device" (kept, never read again). Under the memory's prefix,
+ * so it is device memory like the rest (`isTrustMemoryKey`); a scope starts with the server's origin, never with this word.
+ */
+export const manifestsAsideKey = (scope: string) => `${MANIFESTS_PREFIX}unreadable.${scope}`;
+/** How many syncs in a row found the record unreadable (kept across reloads; gone once it reads). */
+export const manifestsFailedKey = (scope: string) => `${MANIFESTS_PREFIX}failed.${scope}`;
+/** Failed reads in a row (with one whole sync among them) before the reset is offered. */
+export const UNREADABLE_READS = 3;
+
+/**
  * Per server and account, the last manifest this device saw for each vault: its version and link (same store and
- * scope as the item edit counters). A version is only ever raised, and the link of a version is never replaced; vaults
- * that disappear keep their entry (vault ids are never reused, and a server could hide a vault and show it again).
- * Several tabs merge by the higher version.
+ * scope as the item edit counters), and how often this device accepted the server's copy of it (`accepts`). In
+ * ordinary use a version is only ever raised and the link of a version is never replaced; only an acceptance
+ * (`replace`, `forget`: "Use the server's copy") sets an entry whatever it held, and counts `accepts` up so that a
+ * tab still holding the entry from before can't bring it back. Vaults that disappear keep their entry (vault ids are
+ * never reused, and a server could hide a vault and show it again). Several tabs merge by acceptances, then by the
+ * higher version; at the same version the stored entry stays.
  */
 export class ManifestMemory {
   readonly scope: string;
   private readonly store: KeyValueStore;
-  private seen: Map<string, Remembered>;
+  private seen: Map<string, MemoryEntry>;
   private dirty = false;
   /** Something is stored that can't be read: nothing is checked against it and nothing is written over it. */
   unreadable: boolean;
@@ -372,42 +500,115 @@ export class ManifestMemory {
   constructor(store: KeyValueStore, scope: string) {
     this.store = store;
     this.scope = scope;
-    const stored = readManifestMemory(store, scope);
+    const stored = readEntries(store, scope);
     this.unreadable = stored === null;
     this.seen = stored ?? new Map();
   }
 
   /** The remembered manifest of a vault (undefined: none). */
   get(vaultId: string): Remembered | undefined {
-    return this.seen.get(vaultId);
+    const e = this.seen.get(vaultId);
+    return e && e.version > 0 && e.link ? { version: e.version, link: e.link } : undefined;
   }
 
   /** Remember a manifest unless one of that version or a higher one is remembered already. */
   raise(vaultId: string, version: number, link: string | null) {
-    if (this.unreadable || !isVersion(version) || !isLink(link)) return;
-    if ((this.seen.get(vaultId)?.version ?? 0) >= version) return;
-    this.seen.set(vaultId, { version, link });
+    if (this.unreadable || !isVersion(version) || !isMemoryLink(link)) return;
+    const have = this.seen.get(vaultId);
+    if ((have?.version ?? 0) >= version) return;
+    this.seen.set(vaultId, { version, link, accepts: have?.accepts ?? 0 });
     this.dirty = true;
   }
 
-  /** What another tab wrote meanwhile (the higher version wins; at the same version the one held here stays), without writing. */
-  refresh() {
-    const stored = readManifestMemory(this.store, this.scope);
-    if (stored === null) {
-      this.unreadable = true;
-      return;
-    }
-    if (this.unreadable) return;
-    for (const [id, r] of stored) if (r.version > (this.seen.get(id)?.version ?? 0)) this.seen.set(id, r);
+  /**
+   * An acceptance ("Use the server's copy"): the vault's memory becomes this manifest whatever was remembered, also
+   * a lower version. Read, changed and written in one go, on top of what is stored now. False when nothing was
+   * written (unreadable memory, or no manifest's version and link).
+   */
+  replace(vaultId: string, version: number, link: string): boolean {
+    if (!isVersion(version) || !isMemoryLink(link)) return false;
+    return this.accept(vaultId, { version, link });
   }
 
-  /** Write back, merged with what another tab wrote meanwhile. */
+  /** An acceptance of a vault the server shows without a manifest: nothing is remembered for it any more. */
+  forget(vaultId: string): boolean {
+    return this.accept(vaultId, { version: 0, link: null });
+  }
+
+  private accept(vaultId: string, to: { version: number; link: string | null }): boolean {
+    this.refresh();
+    if (this.unreadable) return false;
+    this.seen.set(vaultId, { ...to, accepts: (this.seen.get(vaultId)?.accepts ?? 0) + 1 });
+    this.dirty = true;
+    this.flush();
+    return !this.dirty;
+  }
+
+  /**
+   * What another tab wrote meanwhile, without writing: an entry with more acceptances wins, then the higher version;
+   * at the same version the stored entry is taken (a link is never replaced at its version: if the two differ, this
+   * tab is on another history and its next check says so). Returns the vaults whose entry changed here.
+   */
+  refresh(): Set<string> {
+    const changed = new Set<string>();
+    const stored = readEntries(this.store, this.scope);
+    if (stored === null) {
+      this.unreadable = true;
+      return changed;
+    }
+    // Readable again (another tab reset or rewrote it): what is held here is from before it broke, merged as always.
+    this.unreadable = false;
+    for (const [id, theirs] of stored) {
+      const mine = this.seen.get(id);
+      if (outranks(theirs, mine) || (mine && theirs.accepts === mine.accepts && theirs.version === mine.version && theirs.link !== mine.link)) {
+        this.seen.set(id, theirs);
+        changed.add(id);
+      }
+    }
+    return changed;
+  }
+
+  /** Write back, merged with what another tab wrote meanwhile (`refresh`: never over an entry of the same version). */
   flush() {
     if (!this.dirty || this.unreadable) return;
     this.refresh();
     if (this.unreadable) return;
-    this.store.set(manifestsKey(this.scope), JSON.stringify(Object.fromEntries(this.seen)));
+    this.store.set(manifestsKey(this.scope), JSON.stringify(Object.fromEntries([...this.seen].map(([id, e]) => [id, storedForm(e)]))));
     this.dirty = false;
+  }
+
+  /**
+   * One more sync found the record unreadable (`failed` true), or it read: the count of failed reads in a row, kept in
+   * the store so a reload doesn't start it over.
+   */
+  noteRead(failed: boolean): number {
+    const key = manifestsFailedKey(this.scope);
+    if (!failed) {
+      if (this.store.get(key) !== null) this.store.set(key, null);
+      return 0;
+    }
+    const n = Number(this.store.get(key) ?? "0");
+    const next = (Number.isSafeInteger(n) && n > 0 ? n : 0) + 1;
+    this.store.set(key, String(Math.min(next, 1000)));
+    return next;
+  }
+
+  /**
+   * "Reset on this device": the unreadable record is moved aside (kept under `manifestsAsideKey`, never read again)
+   * and this device goes on with nothing remembered. Does nothing while the record reads.
+   */
+  reset() {
+    const text = this.store.get(manifestsKey(this.scope));
+    if (readEntries(this.store, this.scope) !== null) {
+      this.unreadable = false;
+      return;
+    }
+    if (text !== null) this.store.set(manifestsAsideKey(this.scope), text);
+    this.store.set(manifestsKey(this.scope), null);
+    this.store.set(manifestsFailedKey(this.scope), null);
+    this.seen = new Map();
+    this.dirty = false;
+    this.unreadable = false;
   }
 }
 

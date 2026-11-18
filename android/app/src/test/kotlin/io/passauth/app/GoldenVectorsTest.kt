@@ -368,6 +368,35 @@ class GoldenVectorsTest {
         }
         assertEquals(setOf("none", "ok", "rollback", "mismatch", "incomplete", "need_log"), seen)
 
+        // Round 2: `manifestAccept` (the check behind "Use the server's copy"): the served head against the served rows, nothing remembered.
+        val accepts = v["accepts"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(accepts.size >= 4)
+        val acceptSeen = mutableSetOf<String>()
+        for (c in accepts) {
+            val row = manifests[c.s("manifest")]!!.jsonObject
+            val rows = items[c.s("items")]!!.jsonArray
+            val expected = c["expected"]!!.jsonObject
+            acceptSeen += expected.s("status")
+            for (mine in listOf(false, true)) {
+                val got = keys.getValue(c.s("key")).manifestAccept(
+                    vaultId, c.s("keyEpoch").toULong(), row.s("manifest_seq").toULong(), row.sOrNull("manifest_prev"), row.sOrNull("manifest"),
+                    if (mine) appRows(rows) else rows.toString(),
+                )
+                if (!same(got, expected)) failures += "accept ${c.s("name")} (app rows: $mine): got $got, want $expected"
+            }
+            // The app's own wrapper gives the same verdict, with a mark only for "ok".
+            val header = io.passauth.app.data.SyncVault(
+                vaultId, keyEpoch = c.s("keyEpoch").toLong(), manifest = row.sOrNull("manifest"), manifestSeq = row.s("manifest_seq").toLong(), manifestPrev = row.sOrNull("manifest_prev"),
+            )
+            val appItems = rows.map { it.jsonObject }.map { r ->
+                io.passauth.app.data.SyncItem(r.s("id"), vaultId, null, r.sOrNull("data"), long(r, "revision"), long(r, "deleted_at"), dataSha256 = r.sOrNull("data_sha256"))
+            }
+            val wrapped = io.passauth.app.data.Manifests.accept(keys.getValue(c.s("key")), header, appItems)
+            check(failures, "app accept ${c.s("name")}", expected.s("status"), wrapped.status)
+            check(failures, "app accept mark ${c.s("name")}", expected.sOrNull("link").takeIf { expected.s("status") == "ok" }, wrapped.mark?.link)
+        }
+        assertTrue("$acceptSeen", acceptSeen.containsAll(setOf("ok", "mismatch")))
+
         // Rows every entry point refuses (a `deleted_at` that is no time, …).
         val current = manifests["current"]!!.jsonObject
         val main = keys.getValue("main")
@@ -386,6 +415,27 @@ class GoldenVectorsTest {
                 failures += "malformed $n: start took it"
             } catch (_: io.passauth.core.CoreException) {
             }
+            try {
+                main.manifestAccept(vaultId, mainEpoch, current.s("manifest_seq").toULong(), current.s("manifest_prev"), current.s("manifest"), rows)
+                failures += "malformed $n: accept took it"
+            } catch (_: io.passauth.core.CoreException) {
+            }
+        }
+
+        // Round 2: memories the core refuses (version 0, the all-zero link): never handed to it by the app.
+        val badMemories = v["badMemories"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(badMemories.isNotEmpty())
+        for ((n, m) in badMemories.withIndex()) {
+            try {
+                main.manifestVerify(
+                    vaultId, mainEpoch, current.s("manifest_seq").toULong(), current.s("manifest_prev"), current.s("manifest"),
+                    m.s("version").toULong(), m.sOrNull("link"), null, items["full"]!!.jsonArray.toString(),
+                )
+                failures += "bad memory $n: verify took it"
+            } catch (_: io.passauth.core.CoreException) {
+            }
+            val asStored = """{"v":{"version":${m["version"]},"link":${m["link"]}}}"""
+            if (io.passauth.app.data.Manifests.marks(io.passauth.app.data.Manifests.decodeMemory(asStored)).isNotEmpty()) failures += "bad memory $n: the app would remember it"
         }
 
         val writes = v["writes"]!!.jsonArray.map { it.jsonObject }

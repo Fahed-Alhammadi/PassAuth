@@ -71,20 +71,23 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
 
     // ------------------------------------------------------------ sync cache
 
-    private fun cacheFile(id: String) = File(File(context.noBackupFilesDir, "vault"), "$id.bin")
+    private val copies = CopyFiles(
+        File(context.noBackupFilesDir, "vault"),
+        seal = { Keystore.encrypt(Keystore.storeKey(), it) },
+        open = { Keystore.decrypt(Keystore.storeKey(), it) },
+    )
 
-    fun writeCache(id: String, json: String) {
-        val f = cacheFile(id)
-        f.parentFile?.mkdirs()
-        val tmp = File(f.parentFile, "${f.name}.tmp")
-        tmp.writeBytes(Keystore.encrypt(Keystore.storeKey(), json.encodeToByteArray()))
-        tmp.renameTo(f)
-    }
+    /** The offline copy this phone checked with the account's keys ([CopyFiles.writeChecked]). */
+    fun writeCache(id: String, json: String) = copies.writeChecked(id, json)
 
-    fun readCache(id: String): String? = runCatching {
-        val f = cacheFile(id)
-        if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
-    }.getOrNull()
+    fun readCache(id: String): String? = copies.readChecked(id)
+
+    /** What a locked background refresh fetched, kept beside the checked copy until an unlock checks it ([CopyFiles]). */
+    fun writeRefreshed(id: String, json: String) = copies.writeRefreshed(id, json)
+
+    fun readRefreshed(id: String): String? = copies.readRefreshed(id)
+
+    fun dropRefreshed(id: String) = copies.dropRefreshed(id)
 
     private fun memory(id: String, kind: String) = SealedFile(
         File(File(context.noBackupFilesDir, "vault"), "$id.$kind"),
@@ -103,7 +106,7 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
 
     /** Deletes account [id]'s offline copy (with its item edit counters, manifest memory and trash times) and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
-        cacheFile(id).delete()
+        copies.delete(id)
         revs(id).delete()
         manifests(id).delete()
         trashSeen(id).delete()
@@ -170,11 +173,77 @@ class SealedFile(private val file: File, private val seal: (ByteArray) -> ByteAr
         synchronized(lock) {
             file.delete()
             File(file.parentFile, "${file.name}.tmp").delete()
+            aside().delete()
         }
+    }
+
+    private fun aside() = File(file.parentFile, "${file.name}.unreadable")
+
+    /**
+     * "Reset on this device" (rule S4): a file that is there but doesn't open is moved aside (kept
+     * as `<name>.unreadable`, replacing an earlier one), so the phone goes on as one that remembers
+     * nothing. False, and nothing touched, for a file that opens or isn't there.
+     */
+    fun setAside(): Boolean = synchronized(lock) {
+        if (read() != Read.Unreadable) return false
+        aside().delete()
+        file.renameTo(aside()) || file.delete()
     }
 
     private companion object {
         /** One writer at a time across every sealed file (they are small and rarely written). */
         val lock = Any()
+    }
+}
+
+/**
+ * An account's offline copies in one folder, sealed with the store key ([seal]/[open]: fakes in
+ * tests). Two files per account (rule S3):
+ *
+ * - `<id>.bin`, the **checked** copy: written only by the unlocked app, from a server answer it
+ *   checked with the account's keys (vault manifests, item edit counters) or from its own write.
+ *   It is the only copy ever opened, shown or filled from.
+ * - `<id>.next`, the **refreshed** copy: what a background refresh fetched while the account was
+ *   locked. Nothing can be checked without the keys, so it never replaces the checked copy; the
+ *   next unlock judges it with the keys and takes it or drops it ([Manifests.adoptable]).
+ *
+ * Writing the checked copy drops the refreshed one (it was made from an older checked copy).
+ */
+class CopyFiles(private val dir: File, private val seal: (ByteArray) -> ByteArray, private val open: (ByteArray) -> ByteArray) {
+    private fun checked(id: String) = File(dir, "$id.bin")
+    private fun refreshed(id: String) = File(dir, "$id.next")
+
+    private fun write(f: File, text: String): Boolean {
+        dir.mkdirs()
+        val tmp = File(dir, "${f.name}.tmp")
+        tmp.writeBytes(seal(text.encodeToByteArray()))
+        if (tmp.renameTo(f)) return true
+        tmp.delete()
+        return false
+    }
+
+    private fun read(f: File): String? = runCatching { if (!f.exists()) null else open(f.readBytes()).decodeToString() }.getOrNull()
+
+    fun writeChecked(id: String, json: String) {
+        if (write(checked(id), json)) dropRefreshed(id)
+    }
+
+    fun readChecked(id: String): String? = read(checked(id))
+
+    fun writeRefreshed(id: String, json: String) {
+        write(refreshed(id), json)
+    }
+
+    fun readRefreshed(id: String): String? = read(refreshed(id))
+
+    fun dropRefreshed(id: String) {
+        refreshed(id).delete()
+        File(dir, "${refreshed(id).name}.tmp").delete()
+    }
+
+    fun delete(id: String) {
+        checked(id).delete()
+        File(dir, "${checked(id).name}.tmp").delete()
+        dropRefreshed(id)
     }
 }

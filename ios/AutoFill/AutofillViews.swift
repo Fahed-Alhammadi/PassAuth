@@ -229,7 +229,8 @@ private struct ListScreen: View {
             VStack(spacing: 2) {
                 // Vault manifests: logins still fill; nothing is saved into such a vault.
                 if let v = model.repo.vault?.manifestWarnings.first {
-                    Text("\(v.name): \(ManifestText.warning)").font(.caption).foregroundStyle(Color.paDanger)
+                    Text("\(v.name): \(v.unopenable ? (v.role == .read ? ManifestText.unopenableReader : ManifestText.unopenable) : ManifestText.warning)")
+                        .font(.caption).foregroundStyle(Color.paDanger)
                         .multilineTextAlignment(.center).padding(.horizontal, PA.Space.l)
                         .accessibilityIdentifier("autofillManifestWarning")
                 }

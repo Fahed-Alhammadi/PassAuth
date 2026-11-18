@@ -246,6 +246,8 @@ export const local = {
         await trustMemory.clear(gone.server, gone.userId);
         // What this browser remembered to notice a rollback goes only here: with the account, never at a sign-out.
         await deviceMemory.clear(gone.server, gone.userId);
+        // Inside the write queue already: the count goes directly.
+        await writeUnread(gone.server, gone.userId, () => null).catch(logged("Forgetting the unreadable-memory count"));
       }
     }),
 
@@ -476,6 +478,8 @@ export const trustMemory = {
 
 /** The device memory's key: like the trust memory's, the server's address as stored and the account id the core authenticated. */
 const deviceKey = (server: string, userId: string) => `device:${server}|${userId}`;
+/** Where a device memory that couldn't be read is put aside by "Reset on this device" (kept, never read again). */
+const asideKey = (server: string, userId: string) => `device-unreadable:${server}|${userId}`;
 
 /**
  * What this browser remembers for one account to notice a rollback (device-memory.ts `StoredDeviceMemory`): the
@@ -497,9 +501,62 @@ export const deviceMemory = {
       await tx("readwrite", (s) => s.put(next, key));
       return next;
     }),
+  /**
+   * Move a record that can't be read aside (under its own key, replacing an earlier one put aside) and leave none in
+   * its place: the account goes on as on a browser that remembers nothing ("Reset on this device"). `unreadable(stored)`
+   * is asked in the same queued step; a record that reads again is left where it is. Rejects when a step fails.
+   */
+  setAside: (server: string, userId: string, unreadable: (stored: unknown) => boolean): Promise<boolean> =>
+    inOrder(async () => {
+      const key = deviceKey(server, userId);
+      const stored = await tx<unknown>("readonly", (s) => s.get(key));
+      if (!unreadable(stored)) return false;
+      await tx("readwrite", (s) => s.put(stored, asideKey(server, userId)));
+      await tx("readwrite", (s) => s.delete(key));
+      return true;
+    }),
   clear: (server: string, userId: string): Promise<void> =>
-    inOrder(() => tx("readwrite", (s) => s.delete(deviceKey(server, userId)))).then(() => {}, logged("Removing what this browser remembered about the vault's versions")),
+    inOrder(async () => {
+      await tx("readwrite", (s) => s.delete(deviceKey(server, userId)));
+      await tx("readwrite", (s) => s.delete(asideKey(server, userId)));
+    }).then(() => {}, logged("Removing what this browser remembered about the vault's versions")),
 };
+
+const UNREAD_KEY = "deviceMemoryUnread";
+
+/** How often in a row an account's device memory couldn't be read, and whether a whole sync was done meanwhile. */
+export interface UnreadCount {
+  fails: number;
+  full: boolean;
+}
+
+/**
+ * Per account (the device memory's key), how often its device memory failed to read in a row (vault.ts: after three,
+ * with a whole sync among them, the popup offers "Reset on this device"). In chrome.storage.local, not beside the
+ * record: it must count also when the record's own store can't be read. Gone with the first read that works.
+ */
+export const memoryUnread = {
+  async get(server: string, userId: string): Promise<UnreadCount> {
+    const all = ((await chrome.storage.local.get(UNREAD_KEY)) as Record<string, unknown>)[UNREAD_KEY] as Record<string, Partial<UnreadCount>> | undefined;
+    const c = all && typeof all === "object" ? all[deviceKey(server, userId)] : undefined;
+    return { fails: typeof c?.fails === "number" && Number.isSafeInteger(c.fails) && c.fails > 0 ? c.fails : 0, full: c?.full === true };
+  },
+  /** `fn(count)` → the count to keep (null: none), read and written in one queued step. */
+  update: (server: string, userId: string, fn: (c: UnreadCount) => UnreadCount | null): Promise<UnreadCount | null> => serial(() => writeUnread(server, userId, fn)),
+};
+
+async function writeUnread(server: string, userId: string, fn: (c: UnreadCount) => UnreadCount | null): Promise<UnreadCount | null> {
+  const all = (((await chrome.storage.local.get(UNREAD_KEY)) as Record<string, unknown>)[UNREAD_KEY] as Record<string, UnreadCount> | undefined) ?? {};
+  const key = deviceKey(server, userId);
+  const old = all[key];
+  const next = fn({ fails: typeof old?.fails === "number" && old.fails > 0 ? old.fails : 0, full: old?.full === true });
+  if (!next && !old) return null;
+  const { [key]: _gone, ...rest } = all;
+  const kept = next ? { ...rest, [key]: next } : rest;
+  if (Object.keys(kept).length) await chrome.storage.local.set({ [UNREAD_KEY]: kept });
+  else await chrome.storage.local.remove(UNREAD_KEY);
+  return next;
+}
 
 const FEATURES_KEY = "serverFeatures";
 

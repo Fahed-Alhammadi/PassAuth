@@ -9,8 +9,8 @@
 // cross-checked here independently of the core with node:crypto and BigInt arithmetic), the item
 // edit counter rule (`itemRev`), Send v2's password-derived content key (`sendV2`, cross-checked
 // with node:crypto's Argon2id and HKDF) and vault manifests (`vaultManifest`: item terms, sums,
-// sealed manifests, their links and chains (forks, key replacement, baseline, pruned logs) and
-// every verdict of the check, cross-checked with node:crypto's HKDF, HMAC and SHA-256, BigInt sums
+// sealed manifests, their links and chains (forks, key replacement, baseline, pruned logs, logs
+// with rubbish in them), every verdict of the check and of "Use the server's copy", cross-checked with node:crypto's HKDF, HMAC and SHA-256, BigInt sums
 // and ChaCha20-Poly1305).
 //
 // The expected values come from the Rust core (crates/core/src/site) through its WASM build: the
@@ -1770,8 +1770,9 @@ function vaultManifestVectors(core) {
   // A key replacement after version 5: the new key, the next epoch, the re-encrypted items.
   const r6 = stored(6, rotatedItems, 0x5d, linkBytes(m5), { epoch: keyEpoch + 1, raw: rotatedRaw });
   const r7 = stored(7, rotatedItems, 0x5e, linkBytes(r6), { epoch: keyEpoch + 1, raw: rotatedRaw });
-  // A baseline ("Use the server's copy") by a device that was shown the second history: a jump.
-  const b9 = stored(9, items, 0x5f, linkBytes(f5));
+  // A baseline ("Use the server's copy") by a device that was shown the second history: the next
+  // version, like every write.
+  const b6 = stored(6, items, 0x5f, linkBytes(f5));
   const version = current.manifest_seq;
   const total = summary(items);
   const terms = items.map((r) => ({ id: r.id, trashed: trashedOf(r), dataSha256: hashOf(r), term: term(r.id, trashedOf(r), r.data).toString("hex") }));
@@ -1788,7 +1789,7 @@ function vaultManifestVectors(core) {
     forkFifth: f5,
     rotated: r6,
     rotatedNext: r7,
-    baseline: b9,
+    baseline: b6,
     // The current manifest listed with another version, or another predecessor.
     relabelled: { ...current, manifest_seq: 4 },
     otherPrev: { ...current, manifest_prev: b64(NO_LINK) },
@@ -1826,6 +1827,29 @@ function vaultManifestVectors(core) {
   const mainLog = logOf(m1, m2, current, m4, m5);
   const forkLog = logOf(m1, m2, f3, f4, f5);
   const elsewhere = { version: 4, link: b64(sha256("a manifest this server never showed")) };
+  // Entries no walk may reach and no binding may throw on (all of it valid JSON).
+  const rubbish = [
+    null,
+    true,
+    7,
+    -7,
+    1.5,
+    "text",
+    [],
+    [1, [2]],
+    {},
+    { seq: 3 },
+    { seq: -1, prev: m2.link, digest: m2.link },
+    { seq: 0, prev: m2.link, digest: m2.link },
+    { seq: 2.5, prev: m2.link, digest: m2.link },
+    { seq: "3", prev: m2.link, digest: m2.link },
+    { seq: null, prev: m2.link, digest: m2.link },
+    { seq: 3, prev: 4, digest: m2.link },
+    { seq: 3, prev: m2.link, digest: null },
+    { seq: 3, prev: m2.link, digest: [m2.link] },
+    { seq: 3, prev: m2.link },
+    { seq: { n: 3 }, prev: m2.link, digest: m2.link },
+  ];
   // [name, row (a name in `manifests`), remembered, log, items (a name in `items`), expected status, key]
   const checks = [
     // Nothing remembered: the first manifest a device sees is trusted.
@@ -1853,8 +1877,10 @@ function vaultManifestVectors(core) {
     // Fork: another history at the same version, or joined later.
     ["another manifest at the remembered version", "forkThird", seenOf(current), null, "full", "mismatch"],
     ["the other way round", "current", seenOf(f3), null, "full", "mismatch"],
-    ["joined one version later, no log yet", "forkFourth", seenOf(current), null, "full", "need_log"],
+    // The very next version naming another predecessor is settled without the log (review fix).
+    ["joined one version later, no log needed", "forkFourth", seenOf(current), null, "full", "mismatch"],
     ["joined one version later, its log", "forkFourth", seenOf(current), forkLog, "full", "mismatch"],
+    ["joined two versions later, no log yet", "forkFifth", seenOf(current), null, "full", "need_log"],
     ["joined two versions later, its log", "forkFifth", seenOf(current), forkLog, "full", "mismatch"],
     ["joined later, both histories' logs", "forkFifth", seenOf(m4), [...forkLog, ...mainLog], "full", "mismatch"],
     ["joined later, an empty log", "forkFifth", seenOf(current), [], "full", "mismatch"],
@@ -1866,6 +1892,9 @@ function vaultManifestVectors(core) {
     ["a log entry renumbered", "fifth", seenOf(m1), mainLog.map((e) => (e.seq === 3 ? { ...e, seq: 2 } : e)), "full", "mismatch"],
     ["a log entry with another digest", "fifth", seenOf(m1), mainLog.map((e) => (e.seq === 3 ? { ...e, digest: b64(sha256("x")) } : e)), "full", "mismatch"],
     ["a log entry that is no link", "fifth", seenOf(m2), [{ seq: 3, prev: "AAAA", digest: "AAAA" }, ...logOf(m4)], "full", "mismatch"],
+    // Rubbish in a log is skipped, never an error (review fix): pass the log as the server sent it.
+    ["a log with rubbish around the real entries", "fifth", seenOf(m1), [...rubbish, ...mainLog, ...rubbish], "full", "ok"],
+    ["a log of rubbish alone", "fifth", seenOf(m1), rubbish, "full", "mismatch"],
     // The row itself.
     ["no text", "noText", null, null, "full", "mismatch"],
     ["no predecessor listed", "noPrev", null, null, "full", "mismatch"],
@@ -1895,12 +1924,15 @@ function vaultManifestVectors(core) {
     ["after a key replacement, the old key", "rotated", seenOf(m5), null, "rotated", "mismatch"],
     ["after a key replacement, the old items", "rotated", seenOf(m5), null, "full", "mismatch", "rotated"],
     // Baseline: accepted by its writer and by devices on the history it was built on.
-    ["a baseline, its writer", "baseline", seenOf(b9), null, "full", "ok"],
+    ["a baseline, its writer", "baseline", seenOf(b6), null, "full", "ok"],
     ["a baseline, first sight", "baseline", null, null, "full", "ok"],
     ["a baseline, a device on the history it replaced", "baseline", seenOf(f5), null, "full", "ok"],
     ["a baseline, a device further back on that history", "baseline", seenOf(m2), logOf(f3, f4, f5), "full", "ok"],
-    ["a baseline, a device on the other history", "baseline", seenOf(m5), logOf(f3, f4, f5, m4, m5), "full", "mismatch"],
-    ["a baseline, a device on the other history, no log yet", "baseline", seenOf(m5), null, "full", "need_log"],
+    ["a baseline, a device on the other history", "baseline", seenOf(m5), null, "full", "mismatch"],
+    ["a baseline, a device on the other history, with the logs", "baseline", seenOf(m5), logOf(f3, f4, f5, m4, m5), "full", "mismatch"],
+    ["a baseline, a device further back on the other history, no log yet", "baseline", seenOf(m4), null, "full", "need_log"],
+    ["a baseline, a device further back on the other history", "baseline", seenOf(m4), logOf(f3, f4, f5, m4, m5), "full", "mismatch"],
+    ["a baseline, a device that saw a later version", "baseline", seenOf(r7), null, "full", "rollback"],
   ].map(([name, rowName, remembered, log, rows, status, keyName = "main"]) => {
     const row = manifests[rowName];
     const k = keyName === "rotated" ? rotatedKey : key;
@@ -1938,6 +1970,56 @@ function vaultManifestVectors(core) {
   must(fails(() => key.manifestVerify(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, 3, null, null, items)), "a remembered version without its link was accepted");
   must(fails(() => key.manifestVerify(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, null, current.link, null, items)), "a remembered link without its version was accepted");
   must(fails(() => key.manifestVerify(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, 0, current.link, null, items)), "a remembered version 0 was accepted");
+  // A memory that can't be one (review fix: the link no manifest has, 32 zero bytes, among them).
+  const badMemories = [
+    { version: 2, link: b64(NO_LINK) },
+    { version: 3, link: b64(NO_LINK) },
+    { version: 0, link: m2.link },
+    { version: 2, link: "AAAA" },
+    { version: 2, link: `${m2.link}A` },
+    { version: 2, link: "" },
+  ];
+  for (const bad of badMemories) must(fails(() => key.manifestVerify(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, bad.version, bad.link, null, items)), `the memory ${JSON.stringify(bad)} was accepted`);
+  // A log that is no list throws; rubbish inside a list never does (the checks above).
+  for (const bad of [{}, { entries: [] }, 7, "[]"]) must(fails(() => key.manifestVerify(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, 1, m1.link, bad, items)), `the log ${JSON.stringify(bad)} was taken`);
+
+  // "Use the server's copy": the served vault judged with nothing remembered. `ok` = replace the
+  // device's memory with {version, link}; `none` = forget it; anything else = remember nothing.
+  // [name, row, items, expected status, key]
+  const accepts = [
+    ["the served manifest records the served items", "current", "full", "ok"],
+    ["the same from summary rows", "current", "summary", "ok"],
+    ["an older state of the vault (a restored backup)", "second", "full", "ok"],
+    ["the other history", "forkFifth", "full", "ok"],
+    ["a baseline", "baseline", "full", "ok"],
+    ["after a key replacement", "rotatedNext", "rotated", "ok", "rotated"],
+    ["no manifest served", "none", "full", "none"],
+    ["version 0 with a text left over", "noneWithText", "full", "none"],
+    ["an item hidden", "current", "hidden", "mismatch"],
+    ["an item brought back", "current", "resurrected", "mismatch"],
+    ["an older copy of an item", "current", "older", "mismatch"],
+    ["a manifest that doesn't open", "garbage", "full", "mismatch"],
+    ["another predecessor listed", "otherPrev", "full", "mismatch"],
+    ["no predecessor listed", "noPrev", "full", "mismatch"],
+    ["another version listed", "relabelled", "full", "mismatch"],
+    ["the old key after a key replacement", "rotated", "rotated", "mismatch"],
+    ["a row without data or hash", "current", "noHash", "incomplete"],
+  ].map(([name, rowName, rows, status, keyName = "main"]) => {
+    const row = manifests[rowName];
+    const k = keyName === "rotated" ? rotatedKey : key;
+    const epoch = keyName === "rotated" ? keyEpoch + 1 : keyEpoch;
+    const expected = k.manifestAccept(vaultId, epoch, row.manifest_seq, row.manifest_prev, row.manifest, variants[rows]);
+    must(expected.status === status, `accept "${name}" should be ${status}, is ${JSON.stringify(expected)}`);
+    const keeps = status === "ok" ? { version: row.manifest_seq, link: row.link } : { version: 0, link: null };
+    must(expected.version === keeps.version && expected.link === keeps.link, `accept "${name}" remembers ${JSON.stringify(expected)}`);
+    // The same verdict as the check with nothing remembered, and what it gives is a memory the
+    // check then takes.
+    const plain = k.manifestVerify(vaultId, epoch, row.manifest_seq, row.manifest_prev, row.manifest, null, null, null, variants[rows]);
+    must(JSON.stringify(plain) === JSON.stringify(expected), `accept "${name}" differs from the check without a memory`);
+    if (status === "ok") must(k.manifestVerify(vaultId, epoch, row.manifest_seq, row.manifest_prev, row.manifest, expected.version, expected.link, null, variants[rows]).status === "ok", `accept "${name}": the accepted memory doesn't check out`);
+    return { name, manifest: rowName, key: keyName, keyEpoch: epoch, items: rows, expected };
+  });
+  for (const bad of malformed) must(fails(() => key.manifestAccept(vaultId, keyEpoch, 3, current.manifest_prev, current.manifest, bad.items)), `deleted_at ${JSON.stringify(bad.deletedAt)} was counted by manifestAccept`);
 
   // Writes: `removed` as the items were, `added` as they are afterwards.
   const edited = { ...items[0], data: "AbCdEf0123456789-_first-edited" };
@@ -1970,8 +2052,9 @@ function vaultManifestVectors(core) {
   const starts = [
     { name: "a vault's first manifest", key: "main", keyEpoch, version: 1, prev: null, items: "full", remembered: null },
     { name: "a key replacement's manifest", key: "rotated", keyEpoch: keyEpoch + 1, version: 6, prev: m5.link, items: "rotated", remembered: seenOf(m5) },
-    { name: "a baseline on the manifest the server shows", key: "main", keyEpoch, version: 9, prev: f5.link, items: "full", remembered: seenOf(f5) },
-    { name: "a baseline on a manifest that doesn't open", key: "main", keyEpoch, version: 9, prev: manifests.garbage.link, items: "full", remembered: null },
+    // A baseline is one version above the row it replaces, whatever the device remembered.
+    { name: "a baseline on the manifest the server shows", key: "main", keyEpoch, version: f5.manifest_seq + 1, prev: f5.link, items: "full", remembered: seenOf(f5) },
+    { name: "a baseline on a manifest that doesn't open", key: "main", keyEpoch, version: manifests.garbage.manifest_seq + 1, prev: manifests.garbage.link, items: "full", remembered: null },
   ].map((s) => {
     const k = s.key === "rotated" ? rotatedKey : key;
     const w = k.manifestStart(vaultId, s.keyEpoch, s.version, s.prev, variants[s.items]);
@@ -1996,7 +2079,7 @@ function vaultManifestVectors(core) {
   account.free();
 
   return {
-    about: "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); link = SHA-256(\"passauth/vault-manifest-link/v1\" ‖ 0x00 ‖ version (8 bytes, big-endian) ‖ prev (32 bytes; zero for a first manifest) ‖ SHA-256(sealed text)); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>/<prev in hex>. An item is in the trash exactly when its deleted_at is not null; deleted_at must be null/absent or a whole number above 0 (`malformed`: every entry point throws). Keys: accountFromSessionBytes(accountId, sessionBytes), then openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false) for `main` and openVaultKey(vaultId, rotated.wrappedKey, \"account\", rotated.keyEpoch, false) for `rotated`. `manifests`: vault rows (manifest_seq, manifest_prev, manifest) with their link (manifestLink must give it). `checks`: manifestVerify(vaultId, keyEpoch of the check, the row of `manifest`, remembered version and link or none, log or none, items[`items`]) with that check's key gives `expected` exactly. `writes`: manifestNext on `manifests.current` gives seq and prev of `expected`, opens to its counts and sum, and checks out against `after` for a device that remembers `current`. `starts`: manifestStart(vaultId, keyEpoch, version, prev, items[`items`]) with that key gives seq and prev of `expected` and checks out for `remembered`.",
+    about: "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); link = SHA-256(\"passauth/vault-manifest-link/v1\" ‖ 0x00 ‖ version (8 bytes, big-endian) ‖ prev (32 bytes; zero for a first manifest) ‖ SHA-256(sealed text)); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>/<prev in hex>. An item is in the trash exactly when its deleted_at is not null; deleted_at must be null/absent or a whole number above 0 (`malformed`: every entry point throws). Keys: accountFromSessionBytes(accountId, sessionBytes), then openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false) for `main` and openVaultKey(vaultId, rotated.wrappedKey, \"account\", rotated.keyEpoch, false) for `rotated`. `manifests`: vault rows (manifest_seq, manifest_prev, manifest) with their link (manifestLink must give it). `checks`: manifestVerify(vaultId, keyEpoch of the check, the row of `manifest`, remembered version and link or none, log or none, items[`items`]) with that check's key gives `expected` exactly. `writes`: manifestNext on `manifests.current` gives seq and prev of `expected`, opens to its counts and sum, and checks out against `after` for a device that remembers `current`. `starts`: manifestStart(vaultId, keyEpoch, version, prev, items[`items`]) with that key gives seq and prev of `expected` and checks out for `remembered`. `accepts`: manifestAccept(vaultId, keyEpoch of the entry, the row of `manifest`, items[`items`]) with that entry's key gives `expected` exactly (ok: replace the device's memory with version and link; none: forget it; else remember nothing). `badMemories`: manifestVerify throws for each as the remembered pair. Log entries in `checks` are passed as they are, rubbish included: no binding may throw on them.",
     accountId,
     sessionBytes: b64(sessionBytes),
     vaultId,
@@ -2013,6 +2096,8 @@ function vaultManifestVectors(core) {
     malformed,
     manifests: Object.fromEntries(Object.entries(manifests).map(([name, { keyEpoch: _sealedFor, ...row }]) => [name, row])),
     checks,
+    accepts,
+    badMemories,
     writes,
     starts,
   };

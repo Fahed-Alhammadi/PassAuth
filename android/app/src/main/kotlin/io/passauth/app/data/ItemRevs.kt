@@ -45,7 +45,7 @@ object ItemRevs {
     /**
      * What to do with a served item of [served] rev. [remembered]: the highest rev this phone
      * remembers of it (null: never seen); [prior]: the rev of the newer copy this phone has of it
-     * (its offline copy or a version a locked refresh replaced), if it was read. [check] is the
+     * (its offline copy, or a version an earlier build's locked refresh held), if it was read. [check] is the
      * core's `itemRevCheck` ("new", "same", "newer" or "rollback").
      */
     fun judge(remembered: Long?, served: Long, prior: Long?, check: (Long?, Long) -> String): Verdict {
@@ -150,29 +150,5 @@ object ItemRevs {
     fun keepRows(snap: SyncSnapshot, kept: Map<String, SyncItem>): SyncSnapshot {
         if (kept.isEmpty()) return snap
         return snap.copy(items = snap.items.filter { it.id !in kept } + kept.values)
-    }
-
-    /**
-     * A locked refresh's [next] copy keeping, in `held`, the versions of each item it replaces:
-     * nothing is decrypted while locked, so the next unlocked sync compares them ([judge]) and keeps
-     * the newest. Per item at most two: the one held first (the version this phone last checked)
-     * and [cached]'s row (the latest one replaced). Only rows whose ciphertext changed are held.
-     */
-    fun withHeld(next: SyncSnapshot, cached: SyncSnapshot?): SyncSnapshot {
-        if (cached == null) return next
-        val now = next.items.associateBy { it.id }
-        val first = cached.held.groupBy { it.id }.mapValues { it.value.first() }
-        val old = cached.items.associateBy { it.id }
-        // Nothing is certain while locked: kept newer copies of items the answer lacks go on waiting ([waiting]).
-        val held = waiting(cached, next, emptySet()).toMutableList()
-        val ids = (first.keys + old.keys).filter { it in now }.toSet()
-        for (id in ids) {
-            val current = now.getValue(id).data
-            listOfNotNull(first[id], old[id])
-                .filter { it.data != null && it.itemKey != null && it.deletedAt == null && it.data != current }
-                .distinctBy { it.data }
-                .forEach { held += it }
-        }
-        return next.copy(held = held)
     }
 }

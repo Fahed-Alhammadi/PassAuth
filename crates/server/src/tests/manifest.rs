@@ -4,8 +4,12 @@
 //! The tests play the apps' part with the core (`passauth_core::manifest`), so each
 //! accepted write is also checked the way an app checks a sync. Review fixes: the
 //! chain (every manifest names the one it replaces, the log lets a device follow it,
-//! and a history that doesn't contain what a device saw is told apart), the bound on
-//! a baseline's jump, and the gate that counts only members who can write.
+//! and a history that doesn't contain what a device saw is told apart) and the gate
+//! that counts only members who can write. Second round: every manifest, a baseline
+//! too, is exactly one version up; baselines are limited per member and vault; the
+//! log is kept by age and count; every write's answer names the link of the vault's
+//! manifest; accepting the server's copy on a device needs no request; and a row
+//! nobody can open is deleted like any other.
 
 use passauth_core::manifest::{self, Entry, LogEntry, Row, Seen, Status};
 
@@ -124,6 +128,22 @@ fn verdict_with(
     .status
 }
 
+/// "Use the server's copy" on a device, without a request: what the device remembers
+/// from then on when the vault as `sync` shows it stands on its own (`None`: it
+/// doesn't, and nothing may be remembered).
+fn accepted(sync: &Value, (vault, key): (&str, &SymmetricKey)) -> Option<Seen> {
+    let epoch = row(sync, vault)["key_epoch"].as_u64().unwrap();
+    let items = entries(sync, vault);
+    let check = manifest::accept(key, vault, epoch, head(sync, vault), &items).unwrap();
+    match check.status {
+        Status::Ok => Some(Seen::parse(check.version, &check.link.unwrap()).unwrap()),
+        _ => {
+            assert_eq!((check.version, check.link), (0, None));
+            None
+        }
+    }
+}
+
 /// What an app concludes about `vault` from one sync answer alone.
 fn verdict(sync: &Value, vault: (&str, &SymmetricKey), remembered: Option<&Seen>) -> Status {
     verdict_with(sync, vault, remembered, None)
@@ -172,6 +192,15 @@ async fn followed(
 async fn logged(app: &Router, t: &str, vault: &str) -> Vec<u64> {
     let log = log_after(app, t, vault, 0).await;
     log.iter().map(|e| e.seq).collect()
+}
+
+/// Every version in the vault's log, as the database holds it.
+async fn logged_all(state: &crate::state::AppState, vault: &str) -> Vec<i64> {
+    sqlx::query_scalar("SELECT seq FROM vault_manifest_log WHERE vault_id = $1 ORDER BY seq")
+        .bind(vault)
+        .fetch_all(&state.db)
+        .await
+        .unwrap()
 }
 
 fn sent(vault: &str, w: &manifest::Written) -> Value {
@@ -388,7 +417,7 @@ async fn a_first_manifest_waits_for_every_members_apps() {
 
 #[tokio::test]
 async fn a_manifest_starts_only_from_the_vaults_current_state() {
-    let app = app().await;
+    let (app, state) = app_with_state().await;
     let (c, t) = member(&app, "ms@example.com").await;
     let vault = (c.vault_id.as_str(), &c.vault_key);
     let (_, body) = new_item(vault, "one");
@@ -429,6 +458,13 @@ async fn a_manifest_starts_only_from_the_vaults_current_state() {
         json!({ "base_seq": 0, "seq": 1, "prev": "AAAA", "sealed": sealed, "vault_seq": seq + 1 }),
         json!({ "base_seq": 0, "seq": 1, "prev": format!("{NO_PREV}A"), "sealed": sealed, "vault_seq": seq + 1 }),
         json!({ "base_seq": 0, "seq": 1, "prev": "not base64 at all, forty-three characters!!", "sealed": sealed, "vault_seq": seq + 1 }),
+        // One version up, always: no first manifest above version 1 (which would let
+        // a member put a vault's version anywhere, its ceiling included).
+        json!({ "base_seq": 0, "seq": 2, "prev": NO_PREV, "sealed": sealed, "vault_seq": seq + 1 }),
+        json!({ "base_seq": 0, "seq": 9_007_199_254_740_991_i64, "prev": NO_PREV, "sealed": sealed, "vault_seq": seq + 1 }),
+        json!({ "base_seq": 3, "seq": 5, "prev": NO_PREV, "sealed": sealed, "vault_seq": seq + 1 }),
+        json!({ "base_seq": 3, "seq": 3, "prev": NO_PREV, "sealed": sealed, "vault_seq": seq + 1 }),
+        json!({ "base_seq": 3, "seq": 2, "prev": NO_PREV, "sealed": sealed, "vault_seq": seq + 1 }),
     ] {
         assert_eq!(put(bad.clone()).await.0, StatusCode::BAD_REQUEST, "{bad}");
     }
@@ -447,8 +483,8 @@ async fn a_manifest_starts_only_from_the_vaults_current_state() {
     // Started once: a second first manifest is a conflict.
     assert_eq!(code_of(&start(&app, &t, vault).await), CONFLICT);
 
-    // A new baseline ("Use the server's copy") may jump ahead of what a device
-    // remembers. It names the manifest it replaces like any other write.
+    // A new baseline ("Use the server's copy" where the stored manifest is wrong): the
+    // next version, naming the manifest it replaces, like any other write.
     let first_seen = seen(&sync, vault.0);
     let baseline = |sync: &Value, seq: u64, prev: Option<&str>| {
         let w = manifest::start(vault.1, vault.0, 0, seq, prev, &entries(sync, vault.0)).unwrap();
@@ -457,19 +493,23 @@ async fn a_manifest_starts_only_from_the_vaults_current_state() {
     };
     let v = row(&sync, vault.0);
     for off_chain in [None, Some(b64(&[5; 32]))] {
-        let body = baseline(&sync, 9, off_chain.as_deref());
+        let body = baseline(&sync, 2, off_chain.as_deref());
         assert_eq!(code_of(&put(body).await), CONFLICT, "{off_chain:?}");
     }
+    // Review fix (round 2): never a jump, however small or large. A device that
+    // remembers a higher version doesn't need one: it takes the baseline, or the
+    // server's copy as it is, in place of its memory.
+    let link = link_of(&sync, vault.0);
+    for jump in [3, 9, 1_000_001, 9_007_199_254_740_991] {
+        let (s, v) = put(baseline(&sync, jump, Some(&link))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{jump}: {v}");
+    }
     assert_eq!(manifest_seq(&synced(&app, &t).await, vault.0), 1);
-    let answer = ok(
-        &app,
-        Method::PUT,
-        &path,
-        &t,
-        baseline(&sync, 9, Some(&link_of(&sync, vault.0))),
-    )
-    .await;
-    assert_eq!(answer["manifest_seq"], 9);
+    let body = baseline(&sync, 2, Some(&link));
+    let wrote = manifest::row_link(2, &link, body["sealed"].as_str().unwrap()).unwrap();
+    let answer = ok(&app, Method::PUT, &path, &t, body).await;
+    assert_eq!(answer["manifest_seq"], 2);
+    assert_eq!(answer["manifest_link"], json!(wrote));
     assert_eq!(
         answer["vault_seq"].as_i64().unwrap(),
         v["seq"].as_i64().unwrap() + 1
@@ -479,58 +519,193 @@ async fn a_manifest_starts_only_from_the_vaults_current_state() {
         row(&sync, vault.0)["manifest_prev"],
         json!(b64(&first_seen.link))
     );
+    assert_eq!(link_of(&sync, vault.0), wrote);
     assert_eq!(verdict(&sync, vault, None), Status::Ok);
-    // A device on the history it replaced follows it; one that saw another history
-    // is told (it asks for the log, which doesn't lead to what it saw); one that saw
-    // a later version calls it a rollback.
+    // Its writer (which remembers what it wrote) and a device on the history it
+    // replaced follow it. One that saw another history is told at once (the very
+    // next version names something else), one further back after asking for the
+    // log, and one that saw a later version calls it a rollback…
+    let writer = Seen::parse(2, &wrote).unwrap();
+    assert_eq!(verdict(&sync, vault, Some(&writer)), Status::Ok);
     assert_eq!(verdict(&sync, vault, Some(&first_seen)), Status::Ok);
-    assert_eq!(verdict(&sync, vault, Some(&stranger(8))), Status::NeedLog);
-    assert_eq!(
-        followed(&app, &t, &sync, vault, &stranger(8)).await,
-        Status::Mismatch
-    );
+    assert_eq!(verdict(&sync, vault, Some(&stranger(1))), Status::Mismatch);
+    assert_eq!(verdict(&sync, vault, Some(&stranger(2))), Status::Mismatch);
     assert_eq!(verdict(&sync, vault, Some(&stranger(10))), Status::Rollback);
-    assert_eq!(logged(&app, &t, vault.0).await, [1, 9]);
+    // …and each of those clears its warning without a request: the vault as served
+    // checks out on its own, so the device takes the served manifest as its memory.
+    let taken = accepted(&sync, vault).expect("the served vault stands on its own");
+    assert_eq!(taken, writer);
+    assert_eq!(verdict(&sync, vault, Some(&taken)), Status::Ok);
+    assert_eq!(logged(&app, &t, vault.0).await, [1, 2]);
 
-    // Review fix: a baseline may not jump further than any device could be ahead, so
-    // nobody can push the version to its ceiling and stop every later write.
-    let link = link_of(&sync, vault.0);
-    for too_far in [9 + 1_000_001, 9_007_199_254_740_991] {
-        let (s, v) = put(baseline(&sync, too_far, Some(&link))).await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "{too_far}: {v}");
-    }
-    // The refused attempts changed nothing: the vault still takes a write.
-    let sync = checked(&app, &t, vault).await;
-    assert_eq!(manifest_seq(&sync, vault.0), 9);
-    let (id, mut body) = new_item(vault, "after the attempt");
+    // Writes go on from the baseline, and the devices that accepted follow them.
+    let (id, mut body) = new_item(vault, "after the baseline");
     body["manifests"] = json!([next(&sync, vault, &[], &[entry(&id, false, &body)])]);
     let made = ok(&app, Method::POST, "/api/items", &t, body).await;
-    assert_eq!(made["manifest_seq"], 10);
-    // The largest jump allowed is taken, and writes go on from there.
+    assert_eq!(made["manifest_seq"], 3);
     let sync = checked(&app, &t, vault).await;
-    let far = 10 + 1_000_000;
-    let answer = ok(
-        &app,
-        Method::PUT,
-        &path,
-        &t,
-        baseline(&sync, far, Some(&link_of(&sync, vault.0))),
-    )
-    .await;
-    assert_eq!(answer["manifest_seq"], far);
-    let sync = checked(&app, &t, vault).await;
-    let (id, mut body) = new_item(vault, "after the jump");
-    body["manifests"] = json!([next(&sync, vault, &[], &[entry(&id, false, &body)])]);
-    let made = ok(&app, Method::POST, "/api/items", &t, body).await;
-    assert_eq!(made["manifest_seq"], far + 1);
-    let sync = checked(&app, &t, vault).await;
-    assert_eq!(logged(&app, &t, vault.0).await, [1, 9, 10, far, far + 1]);
-    // The device from the very beginning follows all of it through the log.
+    assert_eq!(verdict(&sync, vault, Some(&taken)), Status::Ok);
     assert_eq!(verdict(&sync, vault, Some(&first_seen)), Status::NeedLog);
     assert_eq!(
         followed(&app, &t, &sync, vault, &first_seen).await,
         Status::Ok
     );
+    assert_eq!(
+        followed(&app, &t, &sync, vault, &stranger(1)).await,
+        Status::Mismatch
+    );
+    let events = stored_events(&state).await;
+    assert_eq!(
+        of_type(&events, "vault.manifest_reset")[0]["data"],
+        json!({ "from": 1, "to": 2 })
+    );
+}
+
+/// A writer stores a manifest nobody can open through an ordinary write (the server
+/// can't tell). Nobody can accept that locally; a baseline gets the vault back, also
+/// when the device that writes it remembers a version the server no longer has.
+#[tokio::test]
+async fn a_baseline_repairs_a_manifest_that_does_not_open() {
+    let app = app().await;
+    let (c, t) = member(&app, "mb@example.com").await;
+    let vault = (c.vault_id.as_str(), &c.vault_key);
+    started(&app, &t, vault).await;
+    let sync = checked(&app, &t, vault).await;
+    let before = seen(&sync, vault.0);
+    let (_, mut body) = new_item(vault, "x");
+    body["manifests"] = json!([{ "vault_id": vault.0, "seq": 2, "prev": link_of(&sync, vault.0), "sealed": "AAAA" }]);
+    ok(&app, Method::POST, "/api/items", &t, body).await;
+    let sync = synced(&app, &t).await;
+    assert_eq!(verdict(&sync, vault, None), Status::Mismatch);
+    assert_eq!(verdict(&sync, vault, Some(&before)), Status::Mismatch);
+    assert_eq!(accepted(&sync, vault), None, "nothing to accept");
+    // The baseline: one version above the served row and naming it, whatever the
+    // device remembers (here: version 40 of a history the server doesn't have).
+    let far = stranger(40);
+    assert_eq!(verdict(&sync, vault, Some(&far)), Status::Rollback);
+    let v = row(&sync, vault.0);
+    let w = manifest::start(
+        vault.1,
+        vault.0,
+        0,
+        3,
+        Some(&link_of(&sync, vault.0)),
+        &entries(&sync, vault.0),
+    )
+    .unwrap();
+    let path = format!("/api/vaults/{}/manifest", vault.0);
+    let answer = ok(
+        &app,
+        Method::PUT,
+        &path,
+        &t,
+        json!({ "base_seq": 2, "seq": 3, "prev": w.prev, "sealed": w.sealed, "vault_seq": v["seq"] }),
+    )
+    .await;
+    assert_eq!(answer["manifest_link"], json!(w.link));
+    // Its writer replaces its memory with what it wrote and is fine from then on;
+    // the device from before the broken manifest follows by the log.
+    let wrote = Seen::parse(w.seq, &w.link).unwrap();
+    let sync = checked(&app, &t, vault).await;
+    assert_eq!(verdict(&sync, vault, Some(&wrote)), Status::Ok);
+    assert_eq!(followed(&app, &t, &sync, vault, &before).await, Status::Ok);
+    // Had it kept the old memory, the warning would have stayed.
+    assert_eq!(verdict(&sync, vault, Some(&far)), Status::Rollback);
+}
+
+/// Review fix (round 2): baselines are limited per member and vault, so nobody floods
+/// a vault's log or its members' activity list with them; a member who used up their
+/// own budget doesn't take away anyone else's, and requests that are refused anyway
+/// cost nothing.
+#[tokio::test]
+async fn baselines_are_limited_for_each_member_of_a_vault() {
+    let app = app().await;
+    let (c, ta) = member(&app, "mq-a@example.com").await;
+    let (_b, tb) = member(&app, "mq-b@example.com").await;
+    let home = (c.vault_id.as_str(), &c.vault_key);
+    let (id, key) = new_vault(&app, &c, &ta).await;
+    let vault = (id.as_str(), &key);
+    assert_eq!(
+        share_vault(&app, vault, &ta, "mq-b@example.com", "write", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    accept(&app, &tb, vault.0).await;
+    started(&app, &ta, home).await;
+    started(&app, &ta, vault).await;
+    // No key is needed for the server to take a baseline: any text of the right
+    // shape, each built on the last without syncing (the re-review's flood).
+    let put = |t: &str, vault: &str, base: u64, prev: &str, vault_seq: u64| {
+        let (app, t) = (app.clone(), t.to_owned());
+        let path = format!("/api/vaults/{vault}/manifest");
+        let body = json!({ "base_seq": base, "seq": base + 1, "prev": prev, "sealed": "AAAA", "vault_seq": vault_seq });
+        async move { call(&app, Method::PUT, &path, Some(&t), body).await }
+    };
+    let sync = synced(&app, &ta).await;
+    let mut seq = 1;
+    let mut vault_seq = row(&sync, vault.0)["seq"].as_u64().unwrap();
+    let mut prev = link_of(&sync, vault.0);
+    let limit = u64::from(crate::vault::BASELINES_PER_HOUR);
+    // Refused requests don't count: a stale sync, another base, a jump.
+    for _ in 0..limit {
+        let stale = put(&ta, vault.0, seq, &prev, vault_seq - 1).await;
+        assert_eq!(code_of(&stale), CONFLICT);
+        let off = put(&ta, vault.0, seq, &b64(&[5; 32]), vault_seq).await;
+        assert_eq!(code_of(&off), CONFLICT);
+    }
+    for _ in 0..limit {
+        let (s, v) = put(&ta, vault.0, seq, &prev, vault_seq).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        seq += 1;
+        vault_seq += 1;
+        prev = manifest::row_link(seq, &prev, "AAAA").unwrap();
+        assert_eq!(v["manifest_link"], json!(prev));
+    }
+    let over = put(&ta, vault.0, seq, &prev, vault_seq).await;
+    assert_eq!(
+        (over.0, over.1["error"].as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited")),
+        "{}",
+        over.1
+    );
+    // Nothing was stored by the refused one, and ordinary writes aren't touched.
+    let sync = synced(&app, &ta).await;
+    assert_eq!(manifest_seq(&sync, vault.0), 1 + limit);
+    assert_eq!(link_of(&sync, vault.0), prev);
+    // The other member repairs the vault all the same (their own budget)…
+    let v = row(&sync, vault.0);
+    let w = manifest::start(
+        vault.1,
+        vault.0,
+        0,
+        seq + 1,
+        Some(&prev),
+        &entries(&sync, vault.0),
+    )
+    .unwrap();
+    let repaired = call(
+        &app,
+        Method::PUT,
+        &format!("/api/vaults/{}/manifest", vault.0),
+        Some(&tb),
+        json!({ "base_seq": seq, "seq": seq + 1, "prev": w.prev, "sealed": w.sealed, "vault_seq": v["seq"] }),
+    )
+    .await;
+    assert_eq!(repaired.0, StatusCode::OK, "{}", repaired.1);
+    let sync = checked(&app, &tb, vault).await;
+    // …the first member's writes go on (only baselines are counted)…
+    let (item, mut body) = new_item(vault, "still writable");
+    body["manifests"] = json!([next(&sync, vault, &[], &[entry(&item, false, &body)])]);
+    ok(&app, Method::POST, "/api/items", &ta, body).await;
+    // …and so do that member's baselines in another vault.
+    let sync = synced(&app, &ta).await;
+    let home_seq = row(&sync, home.0)["seq"].as_u64().unwrap();
+    let (s, v) = put(&ta, home.0, 1, &link_of(&sync, home.0), home_seq).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // A first manifest is never counted: a vault made now still starts.
+    let (id, key) = new_vault(&app, &c, &ta).await;
+    started(&app, &ta, (id.as_str(), &key)).await;
 }
 
 #[tokio::test]
@@ -1608,7 +1783,12 @@ async fn a_device_moved_onto_another_history_is_told() {
         sync = write_from_b(sync, name).await;
         let joined = synced(&app, &ta).await;
         assert_eq!(joined["vaults"], sync["vaults"]);
-        assert_eq!(verdict(&joined, vault, Some(&a_seen)), Status::NeedLog);
+        // (The very next version is settled without the log, later ones with it.)
+        let first_look = match manifest_seq(&joined, vault.0) - a_seen.version {
+            1 => Status::Mismatch,
+            _ => Status::NeedLog,
+        };
+        assert_eq!(verdict(&joined, vault, Some(&a_seen)), first_look);
         assert_eq!(
             followed(&app, &ta, &joined, vault, &a_seen).await,
             Status::Mismatch
@@ -1633,11 +1813,26 @@ async fn a_device_moved_onto_another_history_is_told() {
         );
     }
 
-    // A's user looks and takes the server's copy: a baseline above everything A saw,
-    // built on the manifest the server shows.
+    // A's user looks and takes the server's copy. The vault as served stands on its
+    // own (B's manifest records B's items), so this is A's decision alone and needs no
+    // request: A's memory becomes the served manifest, and A follows B's history from
+    // there, while its old memory would still be told.
+    let joined = synced(&app, &ta).await;
+    let taken = accepted(&joined, vault).expect("B's history stands on its own");
+    assert_eq!(taken, seen(&joined, vault.0));
+    assert_eq!(verdict(&joined, vault, Some(&taken)), Status::Ok);
+    let b5 = write_from_b(synced(&app, &tb).await, "after A accepted").await;
+    assert_eq!(verdict(&b5, vault, Some(&taken)), Status::Ok);
+    assert_eq!(
+        followed(&app, &ta, &b5, vault, &a_seen).await,
+        Status::Mismatch
+    );
+    // A baseline does the same for every device on the served history at once (it is
+    // what a member writes when the served manifest itself is wrong): one version
+    // up, built on the manifest the server shows.
     let joined = synced(&app, &ta).await;
     let v = row(&joined, vault.0);
-    let seq = manifest_seq(&joined, vault.0).max(a_seen.version) + 1;
+    let seq = manifest_seq(&joined, vault.0) + 1;
     let w = manifest::start(
         vault.1,
         vault.0,
@@ -1673,7 +1868,7 @@ async fn a_device_moved_onto_another_history_is_told() {
     let events = stored_events(&state).await;
     assert_eq!(
         of_type(&events, "vault.manifest_reset")[0]["data"],
-        json!({ "from": 4, "to": 5 })
+        json!({ "from": 5, "to": 6 })
     );
 }
 
@@ -1776,14 +1971,30 @@ async fn the_manifest_log_follows_every_stored_manifest() {
     let sync = synced(&app, &tr).await;
     assert_eq!(followed(&app, &tr, &sync, vault, at(2)).await, Status::Ok);
 
-    // Only the newest entries are kept. With the three newest left, a device at
-    // version 4 still follows (the oldest entry names it), one further behind can't
-    // tell a pruned log from a withheld one and is warned.
-    let mut conn = state.db.acquire().await.unwrap();
-    crate::vault::prune_manifest_log(&mut conn, vault.0, 3)
-        .await
-        .unwrap();
-    drop(conn);
+    // The log keeps what is recent by count or by age. With the three newest left
+    // (and nothing young enough to stay for its age), a device at version 4 still
+    // follows (the oldest entry names it), one further behind can't tell a pruned
+    // log from a withheld one and is warned, until its user accepts the server's
+    // copy on that device, which the vault as served always allows here.
+    let keep = |newest, age, most| crate::vault::ManifestLogKeep { newest, age, most };
+    let prune = |keep, at: i64| {
+        let (state, vault) = (state.clone(), vault.0.to_owned());
+        async move {
+            let mut conn = state.db.acquire().await.unwrap();
+            crate::vault::prune_manifest_log(&mut conn, &vault, 7, keep, at)
+                .await
+                .unwrap();
+        }
+    };
+    let t0 = crate::db::now();
+    // Every entry is younger than the age kept: nothing goes, however few "newest".
+    prune(keep(1, 3600, 100), t0).await;
+    assert_eq!(logged(&app, &t, vault.0).await, [1, 2, 3, 4, 5, 6, 7]);
+    // …except beyond the hard cap, which counts whatever the age.
+    prune(keep(1, 3600, 6), t0).await;
+    assert_eq!(logged(&app, &t, vault.0).await, [2, 3, 4, 5, 6, 7]);
+    // Old entries (here: seen from two hours on) go, but for the newest three.
+    prune(keep(3, 3600, 100), t0 + 7200).await;
     assert_eq!(logged(&app, &t, vault.0).await, [5, 6, 7]);
     assert_eq!(logged(&app, &t, home.0).await, [1], "another vault's stays");
     for (version, expected) in [
@@ -1800,20 +2011,26 @@ async fn the_manifest_log_follows_every_stored_manifest() {
             "a device at version {version}"
         );
     }
+    let taken = accepted(&sync, vault).expect("the vault stands on its own");
+    assert_eq!(followed(&app, &t, &sync, vault, &taken).await, Status::Ok);
 
-    // A write prunes in its own transaction: fill the log to the brim behind the
-    // real entries, write once, and the oldest entry makes room.
-    let kept = crate::vault::MANIFEST_LOG_KEPT;
-    sqlx::query(
-        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i - 1 FROM n WHERE i > $2)
-         INSERT INTO vault_manifest_log (vault_id, seq, prev, digest)
-         SELECT $1, i, 'x', 'x' FROM n",
+    // A write stores its entry with the time, and every 64th version of a vault
+    // prunes in its own transaction by the real rule: bring the vault to version 63
+    // with old entries, add entries far behind the newest 5000 (old ones and young
+    // ones), write version 64, and see what stays.
+    let stored_at: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT seq, created_at FROM vault_manifest_log WHERE vault_id = $1 ORDER BY seq",
     )
     .bind(vault.0)
-    .bind(4 - kept)
-    .execute(&state.db)
+    .fetch_all(&state.db)
     .await
     .unwrap();
+    assert!(stored_at.iter().all(|(_, at)| (t0 - 60..=t0).contains(at)));
+    let keep = crate::vault::MANIFEST_LOG_KEEP;
+    assert_eq!(
+        (keep.newest, keep.age, keep.most),
+        (5000, 90 * 86_400, 200_000)
+    );
     let count = || {
         let (state, vault) = (state.clone(), vault.0.to_owned());
         async move {
@@ -1826,14 +2043,133 @@ async fn the_manifest_log_follows_every_stored_manifest() {
             .unwrap()
         }
     };
-    assert_eq!(count().await, (kept, 4 - kept));
+    // The test moves the vault's manifest to version 63 directly, with the rows the
+    // log would hold (version n names n − 1), all a hundred days old.
+    sqlx::query("UPDATE vault_manifest_log SET created_at = $2 WHERE vault_id = $1")
+        .bind(vault.0)
+        .bind(t0 - 100 * 86_400)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let head = row(&sync, vault.0);
+    let mut prev = link_of(&sync, vault.0);
+    let mut sealed = head["manifest"].as_str().unwrap().to_owned();
+    for seq in 8..=63_i64 {
+        sealed = format!("AAAA{seq}");
+        sqlx::query(
+            "INSERT INTO vault_manifest_log (vault_id, seq, prev, digest, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(vault.0)
+        .bind(seq)
+        .bind(&prev)
+        .bind(b64(&manifest::sealed_digest(&sealed)))
+        .bind(t0 - 100 * 86_400)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        if seq < 63 {
+            prev = manifest::row_link(seq as u64, &prev, &sealed).unwrap();
+        }
+    }
+    sqlx::query(
+        "UPDATE vaults SET manifest = $2, manifest_seq = 63, manifest_prev = $3 WHERE id = $1",
+    )
+    .bind(vault.0)
+    .bind(&sealed)
+    .bind(&prev)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(count().await, (59, 5));
+    // Entries more than 5000 versions behind (the test gives them the versions
+    // below −4936 that a longer history would have left there): three old, two
+    // young.
+    let behind = |seqs: [i64; 5]| {
+        let (state, vault) = (state.clone(), vault.0.to_owned());
+        async move {
+            for (n, seq) in seqs.into_iter().enumerate() {
+                let at = if n < 3 {
+                    t0 - 100 * 86_400
+                } else {
+                    t0 - 86_400
+                };
+                sqlx::query(
+                    "INSERT INTO vault_manifest_log (vault_id, seq, prev, digest, created_at)
+                     VALUES ($1, $2, 'x', 'x', $3)",
+                )
+                .bind(&vault)
+                .bind(seq)
+                .bind(at)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+        }
+    };
+    behind([-5000, -4999, -4936, -4998, -4997]).await;
+    assert_eq!(count().await, (64, -5000));
+    // The stored manifest is one nobody can open: a baseline (version 64) repairs
+    // it, and prunes: the old entries behind the newest 5000 go, the young ones
+    // stay for their age, and the 60 newest stay, old as they are.
+    let sync = synced(&app, &t).await;
+    assert_eq!(accepted(&sync, vault), None);
+    let v = row(&sync, vault.0);
+    let w = manifest::start(
+        vault.1,
+        vault.0,
+        0,
+        64,
+        Some(&link_of(&sync, vault.0)),
+        &entries(&sync, vault.0),
+    )
+    .unwrap();
+    ok(
+        &app,
+        Method::PUT,
+        &format!("/api/vaults/{}/manifest", vault.0),
+        &t,
+        json!({ "base_seq": 63, "seq": 64, "prev": w.prev, "sealed": w.sealed, "vault_seq": v["seq"] }),
+    )
+    .await;
+    assert_eq!(count().await, (62, -4998));
     let sync = checked(&app, &t, vault).await;
-    let (item, mut body) = new_item(vault, "item 8");
+    // The device that accepted at version 7 follows the whole way by the log.
+    assert_eq!(followed(&app, &t, &sync, vault, &taken).await, Status::Ok);
+    // Version 65 doesn't prune (only every 64th does): the same kind of rows stay.
+    behind([-5010, -5009, -5008, -5007, -5006]).await;
+    let (item, mut body) = new_item(vault, "item 65");
     body["manifests"] = json!([next(&sync, vault, &[], &[entry(&item, false, &body)])]);
-    ok(&app, Method::POST, "/api/items", &t, body).await;
-    assert_eq!(count().await, (kept, 5 - kept));
-    let sync = checked(&app, &t, vault).await;
-    assert_eq!(followed(&app, &t, &sync, vault, at(4)).await, Status::Ok);
+    let made = ok(&app, Method::POST, "/api/items", &t, body).await;
+    assert_eq!(made["manifest_seq"], 65);
+    assert_eq!(count().await, (68, -5010));
+    // By the real rule at a later time and a higher version: what is old and not
+    // among the newest goes, what is young stays, the cap holds.
+    let mut conn = state.db.acquire().await.unwrap();
+    sqlx::query("UPDATE vault_manifest_log SET created_at = $2 WHERE vault_id = $1 AND seq > 60 AND seq < 64")
+        .bind(vault.0)
+        .bind(t0)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let small = crate::vault::ManifestLogKeep { newest: 2, ..keep };
+    crate::vault::prune_manifest_log(&mut conn, vault.0, 65, small, t0)
+        .await
+        .unwrap();
+    drop(conn);
+    // Young: 61…65 and the four from a day ago; old but among the newest two: none.
+    assert_eq!(
+        logged_all(&state, vault.0).await,
+        [-5007, -5006, -4998, -4997, 61, 62, 63, 64, 65]
+    );
+    // The cap counts whatever the age.
+    let mut conn = state.db.acquire().await.unwrap();
+    let capped = crate::vault::ManifestLogKeep { most: 3, ..keep };
+    crate::vault::prune_manifest_log(&mut conn, vault.0, 65, capped, t0)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(logged_all(&state, vault.0).await, [63, 64, 65]);
 
     // The log goes with its vault.
     ok(
@@ -1846,4 +2182,374 @@ async fn the_manifest_log_follows_every_stored_manifest() {
     .await;
     assert_eq!(count().await.0, 0);
     assert_eq!(logged(&app, &t, home.0).await, [1]);
+}
+
+/// The link of a manifest entry as a write sent it.
+fn link_sent(m: &Value) -> String {
+    manifest::row_link(
+        m["seq"].as_u64().unwrap(),
+        m["prev"].as_str().unwrap(),
+        m["sealed"].as_str().unwrap(),
+    )
+    .unwrap()
+}
+
+/// Review fix (round 2): every answer of a write that can carry a manifest names the
+/// link of the vault's manifest after the request. An app applies its write to its
+/// own copy only when that is the link of what it sent; the version alone can't tell
+/// a stored write from a retried one that found its item under another sealing.
+#[tokio::test]
+async fn every_write_answer_names_the_link_of_the_vaults_manifest() {
+    let app = app().await;
+    let (c, t) = member(&app, "mk@example.com").await;
+    let (_bob, tb) = member(&app, "mk-b@example.com").await;
+    let vault = (c.vault_id.as_str(), &c.vault_key);
+    let (other_id, other_key) = new_vault(&app, &c, &t).await;
+    let other = (other_id.as_str(), &other_key);
+    let (plain_id, plain_key) = new_vault(&app, &c, &t).await;
+    let plain = (plain_id.as_str(), &plain_key);
+
+    // Without a manifest: version 0 and no link, on every answer.
+    let (p, body) = new_item(plain, "plain");
+    let made = ok(&app, Method::POST, "/api/items", &t, body.clone()).await;
+    assert_eq!(
+        (&made["manifest_seq"], &made["manifest_link"]),
+        (&json!(0), &Value::Null)
+    );
+    let again = ok(&app, Method::POST, "/api/items", &t, body).await;
+    assert_eq!(again["manifest_link"], Value::Null);
+    let trashed = ok(
+        &app,
+        Method::DELETE,
+        &format!("/api/items/{p}"),
+        &t,
+        json!(null),
+    )
+    .await;
+    assert!(trashed.as_object().unwrap().contains_key("manifest_link"));
+    assert_eq!(trashed["manifest_link"], Value::Null);
+
+    // The first manifest's answer names it.
+    let (s, first) = start(&app, &t, vault).await;
+    assert_eq!(s, StatusCode::OK, "{first}");
+    started(&app, &t, other).await;
+    let sync = checked(&app, &t, vault).await;
+    assert_eq!(first["manifest_link"], json!(link_of(&sync, vault.0)));
+    // After every write: the answer's link is the link of what was sent, and of
+    // what the next sync shows.
+    let same = |answer: &Value, m: &Value, sync: &Value, vault: &str| {
+        assert_eq!(answer["manifest_seq"], m["seq"], "{answer}");
+        assert_eq!(answer["manifest_link"], json!(link_sent(m)), "{answer}");
+        assert_eq!(link_sent(m), link_of(sync, vault));
+    };
+
+    // Create.
+    let before_x = sync.clone();
+    let (x, mut x_body) = new_item(vault, "x");
+    let m = next(&sync, vault, &[], &[entry(&x, false, &x_body)]);
+    x_body["manifests"] = json!([m]);
+    let made = ok(&app, Method::POST, "/api/items", &t, x_body.clone()).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&made, &m, &sync, vault.0);
+    // The same create again (its answer was lost), with the same manifest: stored
+    // nothing, and the link says the vault's manifest is the one sent.
+    let again = ok(&app, Method::POST, "/api/items", &t, x_body.clone()).await;
+    assert_eq!(again["manifest_link"], made["manifest_link"]);
+    assert_eq!(again["vault_seq"], made["vault_seq"]);
+    // The re-review's case: the retry seals the manifest afresh (the same base, the
+    // same content, another nonce). The version and the vault's number answer
+    // exactly as for a stored write; only the link shows that the vault holds
+    // another sealing (the first attempt's), so the app must not remember what it
+    // sent this time.
+    let m2 = next(&before_x, vault, &[], &[entry(&x, false, &x_body)]);
+    assert_eq!((&m2["seq"], &m2["prev"]), (&m["seq"], &m["prev"]));
+    assert_ne!(link_sent(&m2), link_sent(&m), "another sealing");
+    let mut retry = x_body.clone();
+    retry["manifests"] = json!([m2]);
+    let again = ok(&app, Method::POST, "/api/items", &t, retry).await;
+    assert_eq!(again["manifest_seq"], m2["seq"]);
+    assert_eq!(again["vault_seq"], made["vault_seq"]);
+    assert_ne!(again["manifest_link"], json!(link_sent(&m2)));
+    assert_eq!(again["manifest_link"], json!(link_sent(&m)));
+    // A device that remembered the second sealing would be on a history the server
+    // never had; one that goes by the answer's link is right.
+    let now = synced(&app, &t).await;
+    let wrong = Seen::parse(m2["seq"].as_u64().unwrap(), &link_sent(&m2)).unwrap();
+    assert_eq!(verdict(&now, vault, Some(&wrong)), Status::Mismatch);
+    let right = Seen::parse(
+        again["manifest_seq"].as_u64().unwrap(),
+        again["manifest_link"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verdict(&now, vault, Some(&right)), Status::Ok);
+    // A retry after the vault moved on: the link is the current manifest's, which is
+    // neither attempt's.
+    let (y, mut y_body) = new_item(vault, "y");
+    let my = next(&sync, vault, &[], &[entry(&y, false, &y_body)]);
+    y_body["manifests"] = json!([my]);
+    let made_y = ok(&app, Method::POST, "/api/items", &t, y_body.clone()).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&made_y, &my, &sync, vault.0);
+    let late = ok(&app, Method::POST, "/api/items", &t, x_body.clone()).await;
+    assert_eq!(late["manifest_link"], json!(link_sent(&my)));
+
+    // Import into two vaults, one of them without a manifest; then the same again.
+    let (i1, b1) = new_item(vault, "imported");
+    let (_, b2) = new_item(plain, "imported too");
+    let mi = next(&sync, vault, &[], &[entry(&i1, false, &b1)]);
+    let import = json!({ "items": [b1, b2], "manifests": [mi] });
+    let done = ok(&app, Method::POST, "/api/items/import", &t, import.clone()).await;
+    let sync = checked(&app, &t, vault).await;
+    assert_eq!(done["manifest_seqs"][vault.0], mi["seq"]);
+    assert_eq!(done["manifest_links"][vault.0], json!(link_sent(&mi)));
+    assert_eq!(done["manifest_links"][plain.0], Value::Null);
+    assert!(
+        done.get("manifest_link").is_none(),
+        "two vaults: no single one"
+    );
+    assert_eq!(link_sent(&mi), link_of(&sync, vault.0));
+    let replay = ok(&app, Method::POST, "/api/items/import", &t, import).await;
+    assert_eq!(replay["manifest_links"], done["manifest_links"]);
+    // Into one vault: the single fields too.
+    let (i3, b3) = new_item(vault, "imported alone");
+    let mi = next(&sync, vault, &[], &[entry(&i3, false, &b3)]);
+    let import = json!({ "items": [b3], "manifests": [mi] });
+    let done = ok(&app, Method::POST, "/api/items/import", &t, import).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &mi, &sync, vault.0);
+    assert_eq!(done["manifest_links"][vault.0], done["manifest_link"]);
+
+    // Edit.
+    let edited = item_body(&x, vault, "x edited");
+    let m = next(
+        &sync,
+        vault,
+        &[entry(&x, false, &x_body)],
+        &[entry(&x, false, &edited)],
+    );
+    let mut body = edited.clone();
+    body["manifests"] = json!([m]);
+    let done = ok(&app, Method::PUT, &format!("/api/items/{x}"), &t, body).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &m, &sync, vault.0);
+    assert!(done.get("manifest_links").is_none(), "not a move");
+
+    // Move to the other vault: the answer's single fields are the new vault's, and
+    // `manifest_links` names both.
+    let in_other = item_body(&x, other, "x edited");
+    let leave = next(&sync, vault, &[entry(&x, false, &edited)], &[]);
+    let enter = next(&sync, other, &[], &[entry(&x, false, &in_other)]);
+    let mut body = in_other.clone();
+    body["manifests"] = json!([leave, enter]);
+    let done = ok(&app, Method::PUT, &format!("/api/items/{x}"), &t, body).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &enter, &sync, other.0);
+    assert_eq!(done["manifest_links"][other.0], json!(link_sent(&enter)));
+    assert_eq!(done["manifest_links"][vault.0], json!(link_sent(&leave)));
+    assert_eq!(link_sent(&leave), link_of(&sync, vault.0));
+    // …and on to the vault without a manifest: null for that one.
+    let in_plain = item_body(&x, plain, "x edited");
+    let leave = next(&sync, other, &[entry(&x, false, &in_other)], &[]);
+    let mut body = in_plain.clone();
+    body["manifests"] = json!([leave]);
+    let done = ok(&app, Method::PUT, &format!("/api/items/{x}"), &t, body).await;
+    assert_eq!(
+        (&done["manifest_seq"], &done["manifest_link"]),
+        (&json!(0), &Value::Null)
+    );
+    assert_eq!(done["manifest_links"][plain.0], Value::Null);
+    assert_eq!(done["manifest_links"][other.0], json!(link_sent(&leave)));
+
+    // Trash, restore, delete for good (the three requests without a body).
+    let sync = checked(&app, &t, vault).await;
+    let m = next(
+        &sync,
+        vault,
+        &[entry(&y, false, &y_body)],
+        &[entry(&y, true, &y_body)],
+    );
+    let path = format!("/api/items/{y}?{}", query(&m));
+    let done = ok(&app, Method::DELETE, &path, &t, json!(null)).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &m, &sync, vault.0);
+    let m = next(
+        &sync,
+        vault,
+        &[entry(&y, true, &y_body)],
+        &[entry(&y, false, &y_body)],
+    );
+    let path = format!("/api/items/{y}/restore?{}", query(&m));
+    let done = ok(&app, Method::POST, &path, &t, json!(null)).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &m, &sync, vault.0);
+    let m = next(&sync, vault, &[entry(&y, false, &y_body)], &[]);
+    let path = format!("/api/items/{y}/permanent?{}", query(&m));
+    let done = ok(&app, Method::DELETE, &path, &t, json!(null)).await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &m, &sync, vault.0);
+
+    // Trash and bulk purge.
+    let i1_row = item_in(&sync, &i1).unwrap().clone();
+    let m = next(
+        &sync,
+        vault,
+        &[entry(&i1, false, &i1_row)],
+        &[entry(&i1, true, &i1_row)],
+    );
+    let path = format!("/api/items/{i1}?{}", query(&m));
+    ok(&app, Method::DELETE, &path, &t, json!(null)).await;
+    let sync = checked(&app, &t, vault).await;
+    let m = next(&sync, vault, &[entry(&i1, true, &i1_row)], &[]);
+    let done = ok(
+        &app,
+        Method::POST,
+        &format!("/api/vaults/{}/trash/purge", vault.0),
+        &t,
+        json!({ "items": [{ "id": i1 }], "manifests": [m] }),
+    )
+    .await;
+    let sync = checked(&app, &t, vault).await;
+    same(&done, &m, &sync, vault.0);
+
+    // Key replacement, and removing a member with one.
+    assert_eq!(
+        share(&app, &c, &t, "mk-b@example.com", "write").await.0,
+        StatusCode::OK
+    );
+    accept(&app, &tb, vault.0).await;
+    let (a, b) = (user_id(&app, &t).await, user_id(&app, &tb).await);
+    let sync = checked(&app, &t, vault).await;
+    assert_eq!(ids_of(&sync, vault.0), [i3.as_str()], "the one item left");
+    let keys = |members: &[&str]| -> Value {
+        members
+            .iter()
+            .map(|u| json!({ "user_id": u, "wrapped_key": "a2V5", "key_kind": if *u == a { "account" } else { "sealed" } }))
+            .collect()
+    };
+    let mut link = link_of(&sync, vault.0);
+    let mut seq = manifest_seq(&sync, vault.0);
+    for (epoch, path, members) in [
+        (1, format!("/api/vaults/{}/rotate", vault.0), vec![&a, &b]),
+        (
+            2,
+            format!("/api/vaults/{}/members/{b}/remove", vault.0),
+            vec![&a],
+        ),
+    ] {
+        let new_key = SymmetricKey::generate().unwrap();
+        let rekeyed = (vault.0, &new_key);
+        let items = json!([item_body(&i3, rekeyed, "imported alone")]);
+        let fresh = vec![entry(&i3, false, &items[0])];
+        let w = manifest::start(&new_key, vault.0, epoch, seq + 1, Some(&link), &fresh).unwrap();
+        let members: Vec<&str> = members.iter().map(|m| m.as_str()).collect();
+        let body = json!({ "keys": keys(&members), "items": items, "key_epoch": epoch - 1, "manifests": [sent(vault.0, &w)] });
+        let done = ok(&app, Method::POST, &path, &t, body).await;
+        assert_eq!(done["manifest_seq"], w.seq, "{path}");
+        assert_eq!(done["manifest_link"], json!(w.link), "{path}");
+        let sync = checked(&app, &t, rekeyed).await;
+        assert_eq!(link_of(&sync, vault.0), w.link);
+        (link, seq) = (w.link, w.seq);
+    }
+}
+
+/// An item nobody can open (its wrapped key is rubbish; a member with write access
+/// can store one, and the manifest only covers `data`): the vault's manifest checks
+/// out, but apps can't show the item and warn. Any member who can write removes it
+/// with ordinary requests, without opening it: the row counts by its id, state and
+/// `data`, which every app has.
+#[tokio::test]
+async fn an_item_nobody_can_open_is_deleted_like_any_other() {
+    let app = app().await;
+    let (c, t) = member(&app, "mu@example.com").await;
+    let vault = (c.vault_id.as_str(), &c.vault_key);
+    let (good, good_body) = new_item(vault, "good");
+    ok(&app, Method::POST, "/api/items", &t, good_body).await;
+    started(&app, &t, vault).await;
+    let unopenable = |name: &str| {
+        let (id, mut body) = new_item(vault, name);
+        body["key"] = json!(b64(&[7; 72]));
+        (id, body)
+    };
+    let opens = |sync: &Value, id: &str| {
+        let row = item_in(sync, id).unwrap();
+        let enc: EncryptedItem = serde_json::from_value(json!({
+            "id": id, "vault_id": vault.0, "key": row["item_key"], "data": row["data"],
+        }))
+        .unwrap();
+        enc.decrypt(vault.1).is_ok()
+    };
+    // Stored with a correct manifest: the server can't tell, the manifest checks out.
+    let sync = checked(&app, &t, vault).await;
+    let (live, mut live_body) = unopenable("live");
+    live_body["manifests"] = json!([next(&sync, vault, &[], &[entry(&live, false, &live_body)])]);
+    ok(&app, Method::POST, "/api/items", &t, live_body).await;
+    let sync = checked(&app, &t, vault).await;
+    let (other, mut other_body) = unopenable("for the trash");
+    other_body["manifests"] = json!([next(
+        &sync,
+        vault,
+        &[],
+        &[entry(&other, false, &other_body)]
+    )]);
+    ok(&app, Method::POST, "/api/items", &t, other_body).await;
+    let sync = checked(&app, &t, vault).await;
+    assert!(opens(&sync, &good));
+    assert!(!opens(&sync, &live) && !opens(&sync, &other));
+
+    // One request: delete the live row for good. The manifest's `removed` entry is
+    // the row as synced (id, `deleted_at`, `data`); nothing of it was opened.
+    let rows = entries(&sync, vault.0);
+    let as_synced = |id: &str| rows.iter().find(|e| e.id == id).unwrap().clone();
+    let revision = item_in(&sync, &live).unwrap()["revision"].as_i64().unwrap();
+    let m = next(&sync, vault, &[as_synced(&live)], &[]);
+    let done = ok(
+        &app,
+        Method::DELETE,
+        &format!(
+            "/api/items/{live}/permanent?revision={revision}&{}",
+            query(&m)
+        ),
+        &t,
+        json!(null),
+    )
+    .await;
+    assert_eq!(done["manifest_link"], json!(link_sent(&m)));
+    let sync = checked(&app, &t, vault).await;
+    assert!(item_in(&sync, &live).is_none());
+
+    // Or two: into the trash, then out of it with the batch request.
+    let row = item_in(&sync, &other).unwrap().clone();
+    let m = next(
+        &sync,
+        vault,
+        &[entry(&other, false, &row)],
+        &[entry(&other, true, &row)],
+    );
+    ok(
+        &app,
+        Method::DELETE,
+        &format!("/api/items/{other}?{}", query(&m)),
+        &t,
+        json!(null),
+    )
+    .await;
+    let sync = checked(&app, &t, vault).await;
+    let trashed: Vec<Entry> = entries(&sync, vault.0)
+        .into_iter()
+        .filter(|e| e.id == other)
+        .collect();
+    assert_eq!(trashed.len(), 1);
+    let m = next(&sync, vault, &trashed, &[]);
+    ok(
+        &app,
+        Method::POST,
+        &format!("/api/vaults/{}/trash/purge", vault.0),
+        &t,
+        json!({ "items": [{ "id": other }], "manifests": [m] }),
+    )
+    .await;
+    // The vault is whole again: one item, which opens.
+    let sync = checked(&app, &t, vault).await;
+    assert_eq!(ids_of(&sync, vault.0), [good.as_str()]);
+    assert!(opens(&sync, &good));
 }

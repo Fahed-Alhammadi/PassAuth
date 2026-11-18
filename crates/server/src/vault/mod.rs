@@ -55,7 +55,10 @@ pub use history::trim_versions;
 pub use items::purge_trash;
 use manifest::ManifestIn;
 #[cfg(test)]
-pub(crate) use manifest::{LOG_KEPT as MANIFEST_LOG_KEPT, prune_log as prune_manifest_log};
+pub(crate) use manifest::{
+    BASELINES_PER_HOUR, LOG_KEEP as MANIFEST_LOG_KEEP, LogKeep as ManifestLogKeep,
+    prune_log as prune_manifest_log,
+};
 #[cfg(test)]
 pub(crate) use sharing::KEY_REPLACEMENTS_PER_HOUR;
 pub use sharing::insert_vault;
@@ -494,6 +497,17 @@ impl VaultWrite {
     /// [`Self::manifests`] stored (0 = the vault has none).
     fn manifest_seq(&self, vault: &str) -> i64 {
         self.locked(vault).manifest_seq
+    }
+
+    /// The link of that manifest in base64url (`None` = the vault has none): what
+    /// the answer of a write that can carry a manifest returns as `manifest_link`. The
+    /// app that sent a manifest compares it with the link of what it sent: equal, and
+    /// the vault's manifest is the very one it made (then it may apply its write to
+    /// its own copy); anything else (another write got in, or this was a retry that
+    /// found its item stored with another sealing of the manifest), and it syncs.
+    fn manifest_link(&self, vault: &str) -> Option<String> {
+        let l = self.locked(vault);
+        (l.manifest_seq > 0).then(|| passauth_core::item::b64(&l.manifest_link))
     }
 
     /// This write changed the items of `changed` (vaults it has locked): each of them

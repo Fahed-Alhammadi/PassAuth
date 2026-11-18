@@ -206,9 +206,49 @@ public final class SecureStore {
 
     public func deleteCache(_ id: String) {
         try? FileManager.default.removeItem(at: cacheURL(id))
-        try? FileManager.default.removeItem(at: revsURL(id))
-        try? FileManager.default.removeItem(at: manifestsURL(id))
-        try? FileManager.default.removeItem(at: trashSeenURL(id))
+        try? FileManager.default.removeItem(at: refreshedURL(id))
+        for file in [revsURL(id), manifestsURL(id), trashSeenURL(id)] {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.removeItem(at: asideURL(file))
+        }
+    }
+
+    // MARK: What a background refresh fetched (not checked yet)
+    //
+    // Background App Refresh runs without the account's keys, so it can't check what the server
+    // sent. Its result never replaces the offline copy: it is kept next to it (sealed the same
+    // way, under its own name) until the next unlock, which checks it with the keys like any
+    // server answer and only then makes it the copy (`VaultRepository.adoptRefreshed`).
+
+    private func refreshedURL(_ id: String) -> URL { memoryFile(id, "next") }
+
+    public func hasRefreshed(_ id: String) -> Bool { FileManager.default.fileExists(atPath: refreshedURL(id).path) }
+
+    public func deleteRefreshed(_ id: String) { try? FileManager.default.removeItem(at: refreshedURL(id)) }
+
+    public func writeRefreshedInBackground(_ id: String, _ json: Data) async {
+        guard let k = storeKey() else { return }
+        let keyData = k.withUnsafeBytes { Data($0) }
+        let url = refreshedURL(id), dir = cacheDir, aad = Data("next:\(id)".utf8)
+        await Task.detached(priority: .utility) {
+            guard let blob = try? ChaChaPoly.seal(json, using: SymmetricKey(data: keyData), authenticating: aad).combined else { return }
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
+            try? blob.write(to: url, options: SharedConfig.writeOptions)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var u = url
+            try? u.setResourceValues(values)
+        }.value
+    }
+
+    public func readRefreshedInBackground(_ id: String) async -> Data? {
+        guard let k = storeKey() else { return nil }
+        let keyData = k.withUnsafeBytes { Data($0) }
+        let url = refreshedURL(id), aad = Data("next:\(id)".utf8)
+        return await Task.detached(priority: .userInitiated) { () -> Data? in
+            guard let blob = try? Data(contentsOf: url), let box = try? ChaChaPoly.SealedBox(combined: blob) else { return nil }
+            return try? ChaChaPoly.open(box, using: SymmetricKey(data: keyData), authenticating: aad)
+        }.value
     }
 
     // MARK: Device memory next to the offline copy (item edit counters, manifest marks, trash first seen)
@@ -298,8 +338,9 @@ public final class SecureStore {
         }
     }
 
-    /// Store `marks` merged into what is on the device: per vault the higher version; a link is
-    /// never replaced at its version. Nothing is written while the stored ones can't be read.
+    /// Store `marks` merged into what is on the device (`VaultManifest.merged`: per vault the
+    /// entry with more acceptances, then the higher version; a link is never replaced at its
+    /// version). Nothing is written while the stored ones can't be read.
     public func writeManifestMemory(_ id: String, _ marks: [String: ManifestMark]) {
         updateMemoryFile(manifestsURL(id), aad: "manifests:\(id)") { stored in
             let disk = stored.flatMap(VaultManifest.readMemory) ?? [:]
@@ -307,6 +348,53 @@ public final class SecureStore {
             guard merged != disk else { return nil }
             return try? JSONEncoder().encode(merged)
         }
+    }
+
+    /// "Use the server's copy": replace what is remembered for `vault` with `mark` (nil: forget
+    /// it), whatever is stored, also when the version goes down, and count the acceptance
+    /// (`VaultManifest.replaced`). Read, changed and written under the cross-process lock.
+    /// Returns the memory as stored afterwards; nil when it can't be read or written now
+    /// (nothing changed).
+    public func replaceManifestMark(_ id: String, vault: String, with mark: ManifestMark?) -> [String: ManifestMark]? {
+        var out: [String: ManifestMark]?
+        updateMemoryFile(manifestsURL(id), aad: "manifests:\(id)") { stored in
+            var disk = stored.flatMap(VaultManifest.readMemory) ?? [:]
+            disk[vault] = VaultManifest.replaced(disk[vault], with: mark)
+            guard let data = try? JSONEncoder().encode(disk) else { return nil }
+            out = disk
+            return data
+        }
+        // Only what is on the device counts as done.
+        guard let wanted = out, readManifestMemory(id) == wanted else { return nil }
+        return wanted
+    }
+
+    // A memory file that stays unreadable
+
+    private func asideURL(_ url: URL) -> URL { url.appendingPathExtension("unreadable") }
+
+    /// The manifest marks or the item edit counters are stored but can't be read now.
+    public func memoryUnreadable(_ id: String) -> Bool {
+        if case .unreadable = readMemoryFile(manifestsURL(id), aad: "manifests:\(id)") { return true }
+        if case .unreadable = readMemoryFile(revsURL(id), aad: "revs:\(id)") { return true }
+        return false
+    }
+
+    /// "Reset on this device": move the account's memory files that can't be read out of the
+    /// way (kept next to them as `….unreadable`, deleted with the account's copy), so this
+    /// device goes on as one that remembers nothing. Files that read are left alone. Returns
+    /// whether every memory file reads (or is missing) afterwards.
+    @discardableResult
+    public func setAsideUnreadableMemory(_ id: String) -> Bool {
+        guard let lock = FileLock.acquireSync(memoryLockURL) else { return false }
+        defer { lock.release() }
+        for (url, aad) in [(manifestsURL(id), "manifests:\(id)"), (revsURL(id), "revs:\(id)"), (trashSeenURL(id), "trashed:\(id)")] {
+            guard case .unreadable = readMemoryFile(url, aad: aad) else { continue }
+            let aside = asideURL(url)
+            try? FileManager.default.removeItem(at: aside)
+            do { try FileManager.default.moveItem(at: url, to: aside) } catch { try? FileManager.default.removeItem(at: url) }
+        }
+        return !memoryUnreadable(id)
     }
 
     // Trashed items first seen (old trash is only deleted after this device watched it wait)

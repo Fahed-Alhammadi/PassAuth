@@ -13,7 +13,7 @@ import type { Snapshot, SyncNotice } from "@web/lib/delta";
 import { readInvitations } from "@web/lib/invitations";
 import { isSyncResponse, isSyncVaultRow, type SyncInvitation, type SyncItemRow, type SyncResponse } from "@web/lib/types";
 import type { StoredRevMemory } from "./item-revs";
-import { stripPrivate } from "./manifests";
+import { type Standing, stripPrivate } from "./manifests";
 import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
 
 /**
@@ -36,6 +36,12 @@ export interface StoredSync extends SyncResponse, StoredRevMemory {
   own?: Record<string, number>;
   served?: Record<string, string>;
   stash?: SyncItemRow[];
+  /**
+   * Vault manifests: the vaults that show their warning, each with its verdict, cause and the vault row it was judged
+   * on (manifests.ts `Standing`), from a server's whole answer. Read at unlock, so a worker start finds the same
+   * warning without fetching everything again. Only warnings: an "ok" is never read from the copy.
+   */
+  warnings?: Record<string, Standing>;
   /**
    * Signed sharing: each vault's last verdict with the row it was made for (signed-sharing.ts `stampOf`), so an
    * offline unlock or a service-worker restart never uses a vault that failed, and checks only rows it has no verdict for.
@@ -101,7 +107,7 @@ export function readExtras(v: { served?: unknown; stash?: unknown; items?: unkno
 }
 
 /** A snapshot as one IndexedDB record (`extras`: what goes beside its rows). */
-export function toStored(s: Snapshot, extras?: RowExtras): StoredSync {
+export function toStored(s: Snapshot, extras?: RowExtras, warnings?: ReadonlyMap<string, Standing>): StoredSync {
   const own = Object.keys(s.own).length ? { own: { ...s.own } } : {};
   const beside = {
     ...(extras?.served.size ? { served: Object.fromEntries(extras.served) } : {}),
@@ -117,6 +123,7 @@ export function toStored(s: Snapshot, extras?: RowExtras): StoredSync {
     invitations: s.invitations,
     ...own,
     ...beside,
+    ...(warnings?.size ? { warnings: Object.fromEntries(warnings) } : {}),
   };
 }
 

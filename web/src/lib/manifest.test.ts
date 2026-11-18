@@ -11,9 +11,16 @@ import {
   CLOCK_SLACK,
   MANIFESTS_PREFIX,
   ManifestMemory,
+  TRASH_FLOOR_DAYS,
   TRASH_SEEN_PREFIX,
   TrashSeen,
+  ZERO_LINK,
+  acceptVault,
+  acceptable,
   asRemembered,
+  linkStored,
+  manifestsAsideKey,
+  manifestsFailedKey,
   VIEW_UNCHECKED,
   baselineSeq,
   checkApplies,
@@ -64,6 +71,8 @@ interface Vectors {
   manifests: Record<string, Row>;
   checks: { name: string; manifest: string; key: "main" | "rotated"; keyEpoch: number; remembered: Remembered | null; log: unknown[] | null; items: string; expected: Record<string, unknown> }[];
   writes: { name: string; removed: unknown[]; added: unknown[]; after: SyncItemRow[]; expected: { seq: number; prev: string } }[];
+  accepts: { name: string; manifest: string; key: "main" | "rotated"; keyEpoch: number; items: string; expected: Record<string, unknown> }[];
+  badMemories: { version: number; link: string }[];
   starts: { name: string; key: "main" | "rotated"; keyEpoch: number; version: number; prev: string | null; items: string; remembered: Remembered | null; expected: { seq: number; prev: string } }[];
 }
 
@@ -113,6 +122,46 @@ describe("golden vectors (vaultManifest)", () => {
       const got = keyOf(c.key).manifestVerify(v.vaultId, c.keyEpoch, m.manifest_seq, m.manifest_prev, m.manifest, c.remembered?.version, c.remembered?.link, c.log, v.items[c.items]);
       expect(got, c.name).toEqual(c.expected);
     }
+  });
+
+  it("every check with a log gets it as the vectors hold it (rubbish included): rubbish is skipped, never fatal", () => {
+    const rubbish = v.checks.filter((c) => c.log?.some((e) => e === null || typeof e !== "object" || Array.isArray(e)));
+    expect(rubbish.length).toBeGreaterThanOrEqual(2);
+    expect(rubbish.map((c) => c.expected.status).sort()).toEqual(expect.arrayContaining(["mismatch", "ok"]));
+    for (const c of rubbish) {
+      // Through this app's own call the entries reach the core untouched as well.
+      const got = verifyVault(keyOf(c.key), { id: v.vaultId, key_epoch: c.keyEpoch, ...v.manifests[c.manifest] }, c.remembered ?? undefined, v.items[c.items], c.log);
+      expect(got.status, c.name).toBe(c.expected.status);
+    }
+  });
+
+  it("every acceptance check (nothing remembered) gives the expected result as a whole", () => {
+    expect(v.accepts.length).toBeGreaterThan(12);
+    for (const a of v.accepts) {
+      const m = v.manifests[a.manifest];
+      const got = keyOf(a.key).manifestAccept(v.vaultId, a.keyEpoch, m.manifest_seq, m.manifest_prev, m.manifest, v.items[a.items]);
+      expect(got, a.name).toEqual(a.expected);
+      // This app's call: "ok" with the head's version and link, "none", or not acceptable. Summary rows are never
+      // counted by a hash the server sent (the web vault asks for whole rows).
+      const mine = acceptVault(keyOf(a.key), { id: v.vaultId, key_epoch: a.keyEpoch, ...m }, v.items[a.items]);
+      const summary = v.items[a.items].some((r) => typeof r.data !== "string");
+      if (a.expected.status === "ok" && !summary) expect(mine, a.name).toEqual({ status: "ok", version: a.expected.version, link: a.expected.link });
+      else if (a.expected.status === "none" && m.manifest_seq === 0) expect(mine, a.name).toEqual({ status: "none" });
+      else expect(mine, a.name).toEqual({ status: "mismatch" });
+      expect(acceptable(mine), a.name).toBe(mine.status !== "mismatch");
+    }
+  });
+
+  it("every bad memory is refused by the core, and is nothing this app would ever store", () => {
+    expect(v.badMemories.length).toBeGreaterThan(3);
+    const m = v.manifests.current;
+    for (const bad of v.badMemories) {
+      expect(() => key.manifestVerify(v.vaultId, v.keyEpoch, m.manifest_seq, m.manifest_prev, m.manifest, bad.version, bad.link, null, v.items.full), JSON.stringify(bad)).toThrow();
+      expect(asRemembered(bad), JSON.stringify(bad)).toBeUndefined();
+      // Through this app's call a throw is a mismatch, never "ok".
+      expect(verifyVault(key, row(), bad, v.items.full).status, JSON.stringify(bad)).toBe("mismatch");
+    }
+    expect(asRemembered({ version: 2, link: ZERO_LINK })).toBeUndefined();
   });
 
   it("every malformed item set is refused by the check and by a new manifest", () => {
@@ -195,9 +244,12 @@ describe("verifyVault", () => {
     expect(verifyVault(key, row(), first, v.items.full, logOf("second", "current"))).toEqual({ status: "ok", ...mem("current") });
     // An empty log, or the other history's, doesn't connect; a second "need_log" is never returned once a log was given.
     expect(verifyVault(key, row(), first, v.items.full, [])).toEqual({ status: "mismatch", ...first });
-    // The fork joined one version later: the device that saw `current` is on another history.
-    expect(verifyVault(key, row("forkFourth"), mem("current"), v.items.full).status).toBe("need_log");
+    // The fork joined one version later: the device that saw `current` is on another history. One version above the
+    // remembered one with another predecessor is a mismatch at once (round 2: no log is asked for).
+    expect(verifyVault(key, row("forkFourth"), mem("current"), v.items.full)).toEqual({ status: "mismatch", ...mem("current") });
     expect(verifyVault(key, row("forkFourth"), mem("current"), v.items.full, logOf("forkThird", "forkFourth"))).toEqual({ status: "mismatch", ...mem("current") });
+    // Two versions later: the log is needed, and doesn't connect.
+    expect(verifyVault(key, row("forkFifth"), mem("current"), v.items.full).status).toBe("need_log");
     // Garbage in a log is never trusted: it is a mismatch at worst, never a crash.
     expect(verifyVault(key, row(), first, v.items.full, [null, 5, { seq: "2" }, ...logOf("second", "current"), { seq: 2, prev: "x", digest: "y" }]).status).toMatch(/^(ok|mismatch)$/);
   });
@@ -209,8 +261,13 @@ describe("verifyVault", () => {
     expect(verifyVault(key, row("baseline"), onIt, v.items.full)).toEqual({ status: "ok", ...mem("baseline") });
     // A device on the other history keeps its warning after someone else's baseline: its log never connects.
     const other = v.checks.find((c) => c.name === "a baseline, a device on the other history")!;
-    expect(verifyVault(key, row("baseline"), other.remembered!, v.items.full).status).toBe("need_log");
-    expect(verifyVault(key, row("baseline"), other.remembered!, v.items.full, other.log)).toEqual({ status: "mismatch", ...other.remembered! });
+    expect(verifyVault(key, row("baseline"), other.remembered!, v.items.full)).toEqual({ status: "mismatch", ...other.remembered! });
+    const further = v.checks.find((c) => c.name === "a baseline, a device further back on the other history, no log yet")!;
+    expect(verifyVault(key, row("baseline"), further.remembered!, v.items.full).status).toBe("need_log");
+    const withLog = v.checks.find((c) => c.name === "a baseline, a device further back on the other history")!;
+    expect(verifyVault(key, row("baseline"), withLog.remembered!, v.items.full, withLog.log)).toEqual({ status: "mismatch", ...withLog.remembered! });
+    // Its way out: the baseline matches the served items, so it can be accepted on that device alone.
+    expect(acceptVault(key, row("baseline"), v.items.full)).toEqual({ status: "ok", ...mem("baseline") });
   });
 
   it("mismatch: an item changed, missing, added, or moved in or out of the trash", () => {
@@ -386,11 +443,124 @@ describe("device memory", () => {
     memory.raise("v1", 3, L("b"));
     memory.flush();
     expect(stored(m)).toEqual({ v1: { version: 3, link: L("a") } });
-    // Nor does another tab's entry at the same version replace the one held here.
+  });
+
+  it("PoC 4 (rereview 7): at the same version the stored link stays, and the tab that held another one takes it (its next check says so)", () => {
+    const { m, store } = mapStore();
+    const tabA = new ManifestMemory(store, scope);
+    const tabB = new ManifestMemory(store, scope);
+    tabA.raise("v", 5, L("a"));
+    tabA.flush();
+    tabB.raise("v", 5, L("b"));
+    tabB.flush();
+    // The stored one is never written over at its version...
+    expect(stored(m)).toEqual({ v: { version: 5, link: L("a") } });
+    // ...and the tab that was on another history now holds the stored link: checking its copy against it fails.
+    expect(tabB.get("v")).toEqual({ version: 5, link: L("a") });
+    expect(tabA.refresh().size).toBe(0);
+    expect(tabA.get("v")).toEqual({ version: 5, link: L("a") });
+    // `refresh` names what changed under a tab.
+    m.set(manifestsKey(scope), JSON.stringify({ v: { version: 5, link: L("z") }, w: { version: 1, link: L("w") } }));
+    expect([...tabA.refresh()].sort()).toEqual(["v", "w"]);
+    expect(tabA.get("v")).toEqual({ version: 5, link: L("z") });
+  });
+
+  it("an acceptance replaces the entry whatever it held (also downwards) and counts `accepts`; a stale tab can't bring the old one back", () => {
+    const { m, store } = mapStore();
+    const one = new ManifestMemory(store, scope);
+    const stale = new ManifestMemory(store, scope);
+    one.raise("v", 9, L("a"));
+    one.flush();
+    stale.refresh();
+    expect(stale.get("v")).toEqual({ version: 9, link: L("a") });
+    expect(one.replace("v", 4, L("b"))).toBe(true);
+    expect(stored(m)).toEqual({ v: { version: 4, link: L("b"), accepts: 1 } });
+    // The stale tab writes its whole map: the accepted entry stays, and the tab takes it over.
+    stale.raise("other", 1, L("o"));
+    stale.flush();
+    expect(stored(m)).toEqual({ v: { version: 4, link: L("b"), accepts: 1 }, other: { version: 1, link: L("o") } });
+    expect(stale.get("v")).toEqual({ version: 4, link: L("b") });
+    // Ordinary use goes on from the accepted entry and keeps the count.
+    stale.raise("v", 5, L("c"));
+    stale.flush();
+    expect(stored(m).v).toEqual({ version: 5, link: L("c"), accepts: 1 });
+    // A second acceptance, made by a tab that hadn't seen the first: read, changed and written on top of what is stored.
+    const third = new ManifestMemory(store, scope);
+    m.set(manifestsKey(scope), JSON.stringify({ v: { version: 7, link: L("d"), accepts: 3 } }));
+    expect(third.replace("v", 2, L("e"))).toBe(true);
+    expect(stored(m).v).toEqual({ version: 2, link: L("e"), accepts: 4 });
+    // Never anything that is no manifest's version and link.
+    expect(third.replace("v", 0, L("e"))).toBe(false);
+    expect(third.replace("v", 3, ZERO_LINK)).toBe(false);
+    expect(stored(m).v).toEqual({ version: 2, link: L("e"), accepts: 4 });
+  });
+
+  it("forgetting (the server shows no manifest, accepted) keeps only the count: nothing remembered, and no older copy brings the version back", () => {
+    const { m, store } = mapStore();
+    const one = new ManifestMemory(store, scope);
+    const stale = new ManifestMemory(store, scope);
+    one.raise("v", 6, L("a"));
+    one.flush();
+    stale.refresh();
+    expect(one.forget("v")).toBe(true);
+    expect(stored(m)).toEqual({ v: { accepts: 1 } });
+    expect(one.get("v")).toBeUndefined();
+    expect([...readManifestMemory(store, scope)!]).toEqual([]);
+    stale.raise("x", 1, L("x"));
+    stale.flush();
+    expect(stored(m).v).toEqual({ accepts: 1 });
+    expect(stale.get("v")).toBeUndefined();
+    // A first manifest later is remembered as usual.
+    one.raise("v", 1, L("n"));
+    one.flush();
+    expect(stored(m).v).toEqual({ version: 1, link: L("n"), accepts: 1 });
+    expect(new ManifestMemory(store, scope).get("v")).toEqual({ version: 1, link: L("n") });
+  });
+
+  it("the all-zero link is never remembered (the core refuses it as a memory)", () => {
+    const { m, store } = mapStore();
+    const memory = new ManifestMemory(store, scope);
+    memory.raise("v", 2, ZERO_LINK);
+    memory.flush();
+    expect(m.size).toBe(0);
+    m.set(manifestsKey(scope), JSON.stringify({ v: { version: 2, link: ZERO_LINK } }));
+    expect(new ManifestMemory(store, scope).get("v")).toBeUndefined();
+    expect(isLink(ZERO_LINK)).toBe(true);
+  });
+
+  it("an unreadable record: acceptances write nothing; failed reads are counted across reloads; the reset moves it aside", () => {
+    const { m, store } = mapStore();
+    m.set(manifestsKey(scope), "{broken");
+    const memory = new ManifestMemory(store, scope);
+    expect(memory.replace("v", 2, L("a"))).toBe(false);
+    expect(memory.forget("v")).toBe(false);
+    expect(m.get(manifestsKey(scope))).toBe("{broken");
+    expect(memory.noteRead(true)).toBe(1);
+    expect(new ManifestMemory(store, scope).noteRead(true)).toBe(2);
+    expect(memory.noteRead(true)).toBe(3);
+    expect(isTrustMemoryKey(manifestsFailedKey(scope))).toBe(true);
+    expect(isTrustMemoryKey(manifestsAsideKey(scope))).toBe(true);
+    memory.reset();
+    expect(memory.unreadable).toBe(false);
+    expect(m.get(manifestsKey(scope))).toBeUndefined();
+    expect(m.get(manifestsAsideKey(scope))).toBe("{broken");
+    expect(m.get(manifestsFailedKey(scope))).toBeUndefined();
+    expect(memory.noteRead(false)).toBe(0);
+    memory.raise("v", 1, L("a"));
+    memory.flush();
+    expect(stored(m)).toEqual({ v: { version: 1, link: L("a") } });
+    // A record that reads is never reset.
+    memory.reset();
+    expect(stored(m)).toEqual({ v: { version: 1, link: L("a") } });
+    // It becomes readable again by another tab's doing: this one goes on.
     const other = new ManifestMemory(store, scope);
-    m.set(manifestsKey(scope), JSON.stringify({ v1: { version: 3, link: L("z") } }));
+    m.set(manifestsKey(scope), "{broken");
     other.refresh();
-    expect(other.get("v1")).toEqual({ version: 3, link: L("a") });
+    expect(other.unreadable).toBe(true);
+    m.set(manifestsKey(scope), JSON.stringify({ v: { version: 2, link: L("b") } }));
+    other.refresh();
+    expect(other.unreadable).toBe(false);
+    expect(other.get("v")).toEqual({ version: 2, link: L("b") });
   });
 
   it("merges with another tab's writes: the higher version wins with its link, nothing is dropped", () => {
@@ -474,14 +644,21 @@ describe("starting a first manifest", () => {
 });
 
 describe("a new baseline", () => {
-  it("is one above the server's version and the remembered one, whichever is higher", () => {
-    const at = (version: number): Remembered => ({ version, link: ZERO });
-    expect(baselineSeq({ manifest_seq: 3 }, undefined)).toBe(4);
-    expect(baselineSeq({ manifest_seq: 3 }, at(9))).toBe(10);
-    expect(baselineSeq({ manifest_seq: 9 }, at(3))).toBe(10);
-    expect(baselineSeq({ manifest_seq: 0 }, at(5))).toBe(6);
-    expect(baselineSeq({}, undefined)).toBe(1);
+  it("is always exactly one above the row's version, whatever the device remembers (the server refuses anything else)", () => {
+    expect(baselineSeq({ manifest_seq: 3 })).toBe(4);
+    expect(baselineSeq({ manifest_seq: 9 })).toBe(10);
+    expect(baselineSeq({ manifest_seq: 0 })).toBe(1);
+    expect(baselineSeq({})).toBe(1);
     expect(manifestSeq({ manifest_seq: -2 })).toBe(0);
+  });
+
+  it("an answer names the manifest sent only by its link", () => {
+    const L = "a".repeat(43);
+    expect(linkStored({ link: L }, L)).toBe(true);
+    expect(linkStored({ link: L }, "b".repeat(43))).toBe(false);
+    expect(linkStored({ link: L }, undefined)).toBe(false);
+    expect(linkStored({ link: L }, null)).toBe(false);
+    expect(linkStored(null, L)).toBe(false);
   });
 });
 
@@ -503,9 +680,12 @@ describe("old trash", () => {
   it("and only what this device itself has seen in the trash for that long, by its own clock", () => {
     // Never seen trashed here: nothing, whatever the server says (also right after this update).
     expect(dueTrash(rows, T, 1, () => undefined, T)).toEqual([]);
-    // Seen for less than the retention.
-    expect(dueTrash(rows, T, 1, () => T - DAY + 1, T)).toEqual([]);
-    expect(ids(dueTrash(rows, T, 1, () => T - DAY, T))).toEqual(["old"]);
+    // Seen for less than the retention, and never for less than seven days whatever retention the server names (S5).
+    expect(TRASH_FLOOR_DAYS).toBe(7);
+    expect(dueTrash(rows, T, 1, () => T - DAY, T)).toEqual([]);
+    expect(dueTrash(rows, T, 1, () => T - 7 * DAY + 1, T)).toEqual([]);
+    expect(ids(dueTrash(rows, T, 1, () => T - 7 * DAY, T))).toEqual(["old"]);
+    expect(dueTrash(rows, T, 30, () => T - 30 * DAY + 1, T)).toEqual([]);
     expect(ids(dueTrash(rows, T, 1, (id) => (id === "old" ? undefined : 1), T + 5))).toEqual([]);
     // A server that claims a far future (or a `deleted_at` long past) deletes nothing the device hasn't watched.
     const fresh = [item("just", 5)];
@@ -673,6 +853,14 @@ describe("delta sync carries the manifest", () => {
     expect(afterWrite(5, 5, true, { sent: 3, answered: 9 })).toBe("none");
     expect(afterWrite(4, 6, true, { sent: 3, answered: 3 })).toBe("sync");
     expect(afterWrite(4, 5, false, { sent: 3, answered: 3 })).toBe("sync");
+    // With the link of the manifest sent (S6): the answer's link must be that one too. A request sent again, stored
+    // under its first try's manifest, answers with the same version and another link.
+    const L = "a".repeat(43);
+    expect(afterWrite(4, 5, true, { sent: 3, answered: 3, sentLink: L, answeredLink: L })).toBe("apply");
+    expect(afterWrite(4, 5, true, { sent: 3, answered: 3, sentLink: L, answeredLink: "b".repeat(43) })).toBe("sync");
+    expect(afterWrite(4, 5, true, { sent: 3, answered: 3, sentLink: L, answeredLink: undefined })).toBe("sync");
+    expect(afterWrite(4, 5, true, { sent: 3, answered: 3, sentLink: L, answeredLink: null })).toBe("sync");
+    expect(afterWrite(5, 5, true, { sent: 3, answered: 3, sentLink: L, answeredLink: undefined })).toBe("none");
   });
 
   it("showing an own write puts its manifest on the vault row, and the next answer replaces it", () => {

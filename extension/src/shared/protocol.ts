@@ -121,6 +121,13 @@ export interface PopupApi {
   "sharing:trust": Rpc<{ userId: string; fingerprint: string }, void>;
   /** Accept a shared vault waiting for consent: `token` = what was shown (the signer's fingerprint, or the key id of an unsigned one). */
   "sharing:accept": Rpc<{ vaultId: string; token: string }, void>;
+  /**
+   * "Use the server's copy" for a vault that shows the manifest warning: this browser accepts the vault as the server
+   * has it now (after one fresh whole fetch, and only if that copy checks out on its own). Nothing is sent.
+   */
+  "manifest:accept": Rpc<{ vaultId: string }, void>;
+  /** "Reset on this device": what this browser remembers of the account's vaults can't be read; it is put aside and started anew. */
+  "memory:reset": Rpc<None, void>;
   /** What the server's policies still ask of the active account (`GET /account` `policy_violations`), as notices linking to the web vault. */
   policyNotices: Rpc<None, PolicyNotices>;
   /** Sign-ins on other devices waiting for the active account's approval, each with the five words worked out here. */

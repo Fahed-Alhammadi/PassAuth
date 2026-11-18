@@ -5,7 +5,8 @@
  * to open, as with the real core. The site logic (host names, matching, the save
  * rule, passkey targets, RP IDs, sign-in phrases, the item edit counter check) is the real core's; item writes raise
  * the item's edit counter `rev` like the core's. Vault manifests are the real core's too (test/manifest-key.ts): the
- * chain included (`prev`, links, `need_log`).
+ * chain included (`prev`, links, `need_log` only for a manifest two or more versions ahead), and `manifestAccept`
+ * (the check with nothing remembered, for "Use the server's copy").
  * Signed sharing (which every server this app talks to has) is a stand-in that finds nothing wrong: the account opens
  * or makes a signing identity, every vault row passes its check, nothing is pinned. Its rules are tested with the real
  * core in signed-sharing.test.ts. Used through
@@ -64,6 +65,9 @@ export class FakeVaultKey {
     items: unknown,
   ) {
     return manifestKey(this.tag).manifestVerify(vaultId, epoch, seq, prev, sealed, rememberedVersion, rememberedLink, log, items);
+  }
+  manifestAccept(vaultId: string, epoch: number, seq: number, prev: string | null | undefined, sealed: string | null | undefined, items: unknown) {
+    return manifestKey(this.tag).manifestAccept(vaultId, epoch, seq, prev, sealed, items);
   }
   manifestStart(vaultId: string, epoch: number, version: number, prev: string | null | undefined, items: unknown) {
     return manifestKey(this.tag).manifestStart(vaultId, epoch, version, prev, items);

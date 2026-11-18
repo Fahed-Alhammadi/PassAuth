@@ -333,6 +333,10 @@ extension VaultRepository {
     /// listing the feature.
     public nonisolated static let sendPasswordNeedsV2 = "Update your PassAuth server to protect a Send with a password."
 
+    /// A Send from before v2 that has a password, on a server with `send_v2`: its name or text
+    /// is changed only together with its password.
+    public nonisolated static let sendPasswordNeeded = "Enter this Send's password to change its text."
+
     /// The fields say what the Send is, not the list: name (and text, when held) in the v2
     /// format exactly when it has a content key. Anything else can't be read here and is never
     /// "repaired" by writing it again.
@@ -455,6 +459,10 @@ extension VaultRepository {
             }
         } else {
             if edit.name != nil || edit.text != nil {
+                // A Send in the link-only format that the server says has a password: its name
+                // and text are only written again together with the password (which makes it
+                // v2, encrypted with the password too), never v1 beside a password.
+                if !v2 && s.hasPassword && !removing && sendV2Enabled { throw UserError(Self.sendPasswordNeeded) }
                 let key = try sendKey(s)
                 if v2 {
                     guard let ck = try sendContentKey(s) else { throw UserError("This Send can't be opened here, so it can't be changed.") }

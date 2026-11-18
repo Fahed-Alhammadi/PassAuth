@@ -518,14 +518,7 @@ struct MacList: View {
                 }
             }
             .listStyle(.inset)
-            // Vault manifests: logins still fill; nothing is saved into such a vault from here.
-            if let v = model.repo.vault?.manifestWarnings.first {
-                Divider()
-                Text("\(v.name): \(ManifestText.warning)").font(.caption).foregroundStyle(Color.paDanger)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
-            }
+            MacManifestNotice(repo: model.repo)
             if model.repo.vault?.offline == true {
                 Divider()
                 Text("Showing the copy on this Mac.").font(.caption).foregroundStyle(.secondary)
@@ -932,6 +925,85 @@ struct MacSettings: View {
             busy = false
             onBack?()
             model.screen = .signedOut
+        }
+    }
+}
+
+/// Vault manifests in the AutoFill window: logins still fill; nothing is saved into a warned
+/// vault from here. This extension keeps its own record of the vaults (nothing the desktop app
+/// does reaches it), so the two ways out that only change that record are offered here too:
+/// "Use the server's copy" when the server's record does describe what it sent (every member),
+/// and "Reset on this device" when the record on this Mac can't be read. Anything that has to be
+/// written to the server (a new record over the server's copy, deleting an item that can't be
+/// opened) is done in the web vault or the desktop app.
+private struct MacManifestNotice: View {
+    let repo: VaultRepository
+    @State private var accepting: VaultInfo?
+    @State private var resetting = false
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        let warned = repo.vault?.manifestWarnings.first
+        if repo.memoryProblem {
+            Divider()
+            row(ManifestText.memoryUnreadable) {
+                Button(ManifestText.memoryReset) { resetting = true }.disabled(busy).accessibilityIdentifier("memoryReset")
+            }
+            .confirmationDialog(ManifestText.memoryReset + "?", isPresented: $resetting) {
+                Button(ManifestText.memoryReset, role: .destructive) { run { try await repo.resetDeviceMemory() } }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(ManifestText.memoryResetConfirm)
+            }
+        }
+        if let v = warned {
+            Divider()
+            row("\(v.name): \(Self.text(v))") {
+                if !v.unopenable && v.manifestAcceptable {
+                    Button(ManifestText.action) { accepting = v }.disabled(busy).accessibilityIdentifier("manifestAction")
+                }
+            }
+            .confirmationDialog(ManifestText.confirmTitle, isPresented: Binding(get: { accepting != nil }, set: { if !$0 { accepting = nil } }),
+                                presenting: accepting) { v in
+                Button(ManifestText.action, role: .destructive) { run { try await repo.useServerCopy(v.id) } }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text(ManifestText.confirmBody)
+            }
+        }
+        if let error {
+            Text(error).font(.caption).foregroundStyle(Color.paDanger)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, PA.Space.l).padding(.bottom, 6)
+        }
+    }
+
+    /// What the warning says and, where nothing can be done from here, who or where can.
+    static func text(_ v: VaultInfo) -> String {
+        if v.unopenable { return v.role == .read ? ManifestText.unopenableReader : ManifestText.unopenable }
+        if v.manifestAcceptable { return ManifestText.warning }
+        return ManifestText.warning + " " + (v.role == .read ? ManifestText.reader : ManifestText.reviewElsewhere)
+    }
+
+    private func row(_ text: String, @ViewBuilder action: () -> some View) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: PA.Space.m) {
+            Text(text).font(.caption).foregroundStyle(Color.paDanger)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            action().controlSize(.small)
+        }
+        .padding(.horizontal, PA.Space.l).padding(.vertical, 6)
+    }
+
+    private func run(_ work: @escaping @MainActor () async throws -> Void) {
+        guard !busy else { return }
+        busy = true
+        error = nil
+        Task { @MainActor in
+            do { try await work() } catch { self.error = errorMessage(error) }
+            busy = false
         }
     }
 }

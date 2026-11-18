@@ -225,7 +225,7 @@ class AttachmentManager(private val context: Context, private val repo: VaultRep
     /** Worth trying the save again after a sync: not an answer that will stay the same (a full storage, a gone item). */
     private fun retrySave(e: Exception) = when {
         // A vault held back for its manifest warning stays held until the user resolves it.
-        e is UserException && e.message == Manifests.HELD -> false
+        e is UserException && (e.message == Manifests.HELD || e.message == Manifests.UNCHECKED) -> false
         else -> e !is ApiException || e.status == 409 || e.status == 429 || (e.status >= 500 && e.status != 507)
     }
 

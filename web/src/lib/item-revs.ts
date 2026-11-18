@@ -70,6 +70,8 @@ export class RevMemory {
   private readonly store: KeyValueStore;
   private revs: Map<string, number>;
   private dropped = new Set<string>();
+  /** Ids whose counter the user accepted lower (`accept`): the next write keeps this tab's value. */
+  private lowered = new Set<string>();
   private dirty = false;
 
   constructor(store: KeyValueStore, scope: string) {
@@ -112,14 +114,31 @@ export class RevMemory {
     }
   }
 
-  /** Write back, merged with what another tab wrote meanwhile (the higher counter wins; ids forgotten here stay forgotten). */
+  /**
+   * The user accepted the server's copy of a vault ("Use the server's copy"), with anything in it that is out of
+   * date: the item's counter becomes the served one, also when that is lower. The only place a counter goes down.
+   */
+  accept(id: string, served: number) {
+    if (!Number.isSafeInteger(served) || served < 0 || this.revs.get(id) === served) return;
+    this.revs.delete(id);
+    this.revs.set(id, served);
+    this.lowered.add(id);
+    this.dropped.delete(id);
+    this.dirty = true;
+  }
+
+  /**
+   * Write back, merged with what another tab wrote meanwhile (the higher counter wins; ids forgotten here stay
+   * forgotten, and a counter accepted lower here stays as accepted).
+   */
   flush() {
     if (!this.dirty) return;
     const stored = readRevs(this.store, this.scope);
     const merged = new Map<string, number>();
     // Ids only the other tab holds come first (older by this tab's reckoning), then this tab's in their order.
     for (const [id, rev] of stored) if (!this.dropped.has(id) && !this.revs.has(id)) merged.set(id, rev);
-    for (const [id, rev] of this.revs) merged.set(id, Math.max(rev, stored.get(id) ?? 0));
+    for (const [id, rev] of this.revs) merged.set(id, this.lowered.has(id) ? rev : Math.max(rev, stored.get(id) ?? 0));
+    this.lowered.clear();
     const over = merged.size - REVS_MAX;
     if (over > 0) for (const id of [...merged.keys()].slice(0, over)) merged.delete(id);
     this.revs = merged;

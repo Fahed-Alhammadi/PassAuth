@@ -72,7 +72,7 @@ Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign i
 - open or close sign-ups, or limit them to email domains,
 - set up email delivery and send a test email,
 - choose whether new accounts must confirm their email, whether the server fetches website icons, and how much it logs,
-- empty the trash automatically after 30, 60 or 90 days (off by default: deleted items stay in the trash until someone empties it). In vaults that keep a record of their changes (every vault once all its members' apps are up to date) the apps do this, not the server, so old trash stays until someone who can edit the vault opens it in an app,
+- empty the trash automatically after 30, 60 or 90 days (off by default: deleted items stay in the trash until someone empties it). In vaults that keep a record of their changes (every vault once the apps of all members who can edit it are up to date) the apps do this, not the server, so old trash stays until someone who can edit the vault opens it in an app; an app never empties sooner than 7 days after it first saw an item in the trash, whatever is set here,
 - set limits: how long a sign-in lasts and how long a device may stay offline or skip two-step login, sign-in and two-step attempt limits, the largest item and import, an item or storage quota per user (off by default), live-sync connection checks, and how long deletions are kept for apps that sync only changes,
 - see the server's activity log (sign-ins and failed attempts, admin actions, vault, sharing and item changes; ids only, never vault contents), kept 365 days by default (30 days to 10 years), and choose whether it records IP addresses (on by default; turning it off also erases the ones kept),
 - keep earlier versions of items so users can restore them (10 per item by default, up to 100; 0 turns history off). Versions count toward storage quotas,
@@ -162,6 +162,12 @@ To restore: stop the container, replace `data/passauth.db` with the backup and `
 ```bash
 docker compose run --rm passauth reset-sync
 ```
+
+After any restore, apps that had synced something newer than the backup show a warning on the vaults concerned ("Your server's copy of this vault doesn't match its record of changes."). That is the check working: the server now holds an older state than those devices saw. Each user confirms "Use the server's copy" once on each device (every member can, also with view-only access; nothing is sent to the server for it). Tell your users before you restore.
+
+### Vaults that don't start keeping a record of changes
+
+A vault starts its record of changes (which lets the apps notice a missing, restored or outdated item) only when every signed-in app of every member who can edit it is recent enough: web vault 0.15.0, desktop app 0.13.0, browser extension 0.12.0, iOS and Android 0.12.0. Until then the vault works as before, without the record. One old device that is still signed in, of any member who can edit the vault, holds this off, and nobody is shown which device or whose it is: not the vault's owner, and not you on the admin page. Ask the vault's members to update their apps and to sign out devices they no longer use (Settings → Signed-in devices → Sign out, or "Sign out all other devices"). Sign-ins that have run out don't count; members with view-only access don't count either.
 
 ### Run one instance
 

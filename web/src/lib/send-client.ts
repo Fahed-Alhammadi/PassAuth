@@ -13,6 +13,8 @@ const LOCKED = "The vault is locked. Unlock it and try again.";
 /** A password asked for on a server that can't encrypt the text with it (no `send_v2`): never written as a v1 Send. */
 export const SEND_PASSWORD_NEEDS_V2 = "Update your PassAuth server to protect a Send with a password.";
 /** A Send whose fields and content key don't belong together: shown as unreadable, never "repaired" by rewriting it. */
+/** A text or name edit of a v1 Send that the server says has a password, on a server that takes v2 (see `updateSend`). */
+export const SEND_PASSWORD_TO_EDIT = "Enter this Send's password to change its text.";
 export const SEND_UNREADABLE = "This Send can't be read, so it can't be changed. Delete it and make a new one.";
 const UNEXPECTED = "The server sent an unexpected response. Try again.";
 
@@ -170,7 +172,9 @@ export interface SendEdit {
  * link has it), v2 with its content key. Setting or changing the password makes it v2 with a new salt and content key
  * (on a server without `send_v2` that is refused, `SEND_PASSWORD_NEEDS_V2`: a password is never written v1, and a v2
  * Send is never rewritten as v1 while it keeps a password). Removing the password makes it v1. Both encrypt name and
- * text again, so both are sent with it. A Send whose fields and content key disagree is never rewritten.
+ * text again, so both are sent with it. A Send whose fields and content key disagree is never rewritten. A v1 Send
+ * that the server lists with a password takes a new name or text only together with the password, on a server with
+ * `send_v2` (`SEND_PASSWORD_TO_EDIT`).
  */
 export async function updateSend(s: OwnedSend, edit: SendEdit): Promise<OwnedSend> {
   const changes: SendChanges = {
@@ -207,6 +211,11 @@ export async function updateSend(s: OwnedSend, edit: SendEdit): Promise<OwnedSen
     }
   } else {
     if (edit.name !== undefined || edit.text !== undefined) {
+      // A v1 Send that the server says has a password, on a server that takes v2: its fields may be an earlier state
+      // served again (the Send got its password, and v2 text, later). Text sealed with the link's key alone would then
+      // open without the password, so name and text are only written together with the password (which makes it v2),
+      // or with the password taken away.
+      if (!v2 && s.hasPassword && edit.password !== null && (await sendV2On())) throw new Error(SEND_PASSWORD_TO_EDIT);
       const ck = v2 ? contentKeyOf(s) : null;
       const seal = (field: "name" | "data", plaintext: string) => (ck ? core.sendEncryptV2(ck, field, plaintext) : core.sendEncrypt(sendKeyOf(s), field, plaintext));
       if (edit.name !== undefined) changes.name = seal("name", edit.name);

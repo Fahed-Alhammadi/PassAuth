@@ -2,8 +2,9 @@
  * Vault manifests through `vault.ts` against a fake server that keeps manifests like the real one (real core): every
  * write carries the vault's next manifest, own writes are shown without asking only when the answer agrees, conflicts
  * are retried at most three times, every sync answer is checked (warning, writes held back, device memory), a first
- * manifest is started when the server says every app is ready, "Use the server's copy" writes a new baseline, and due
- * trash is deleted by the app. Vaults without a manifest get exactly the requests from before.
+ * manifest is started when the server says every app is ready, "Use the server's copy" accepts a consistent copy on
+ * this device alone or writes a new baseline (always one version up), rows that can't be opened are listed and
+ * deleted for good, and due trash is deleted by the app. Vaults without a manifest get exactly the requests from before.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as core from "../wasm/passauth_core";
@@ -45,7 +46,19 @@ vi.stubGlobal("localStorage", {
 
 import { ApiError, UnreachableError } from "./api";
 import { ROLLBACK_SHOWN } from "./item-revs";
-import { MANIFEST_BUSY, MANIFEST_HELD, MANIFEST_HIDDEN, MANIFEST_NOT_READY, MANIFEST_UNCHECKED, manifestsKey } from "./manifest";
+import { friendlyError } from "./api";
+import {
+  ACCEPT_NO_ANSWER,
+  MANIFEST_BUSY,
+  MANIFEST_HELD,
+  MANIFEST_HIDDEN,
+  MANIFEST_UNCHECKED,
+  ManifestMemory,
+  VAULT_UNOPENABLE,
+  VAULT_WARNING_READER,
+  manifestsAsideKey,
+  manifestsKey,
+} from "./manifest";
 import { emptyItem, type Item } from "./types";
 import {
   acceptServerCopy,
@@ -55,6 +68,8 @@ import {
   importItems,
   lock,
   purgeItem,
+  purgeUnopenable,
+  resetDeviceRecord,
   restoreItem,
   restoreItemVersion,
   restoreUnlocked,
@@ -130,6 +145,8 @@ interface World {
   bare: Set<string>;
   /** Entries a manifest-log answer holds at most. */
   logPage: number;
+  /** Baselines stored for each vault (the rate limit counts them). */
+  baselines: Map<string, number>;
 }
 let w: World;
 const A = () => v.vault.id;
@@ -279,26 +296,26 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     const have = w.items.get(b.id as string);
     if (have) {
       if (have.data !== b.data || have.item_key !== b.key) throw err(409, "item_exists");
-      return { revision: have.revision, vault_seq: vault.seq, manifest_seq: vault.manifestSeq };
+      return { revision: have.revision, vault_seq: vault.seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
     }
     checkManifests([vaultId], entriesOf(b));
     const seq = bump(vaultId);
     storeManifests(entriesOf(b));
     w.items.set(b.id as string, { id: b.id as string, vault_id: vaultId, item_key: b.key as string, data: b.data as string, revision: w.clock * 1000, deleted_at: null, created_at: 1, updated_at: 1, at: w.clock });
-    return { revision: w.clock * 1000, vault_seq: seq, manifest_seq: vault.manifestSeq };
+    return { revision: w.clock * 1000, vault_seq: seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
   }
   if (path === "/items/import") {
     const items = b.items as { id: string; vault_id: string; key: string; data: string }[];
     const vaultId = items[0].vault_id;
     const vault = w.vaults.get(vaultId)!;
     const stored = items.filter((it) => w.items.has(it.id));
-    if (stored.length === items.length && stored.every((it) => w.items.get(it.id)!.data === it.data)) return { imported: items.length, vault_seqs: { [vaultId]: vault.seq }, manifest_seqs: { [vaultId]: vault.manifestSeq }, vault_seq: vault.seq, manifest_seq: vault.manifestSeq };
+    if (stored.length === items.length && stored.every((it) => w.items.get(it.id)!.data === it.data)) return { imported: items.length, vault_seqs: { [vaultId]: vault.seq }, manifest_seqs: { [vaultId]: vault.manifestSeq }, manifest_links: { [vaultId]: linkOf(vault) }, vault_seq: vault.seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
     if (stored.length) throw err(409, "item_exists");
     checkManifests([vaultId], entriesOf(b));
     const seq = bump(vaultId);
     storeManifests(entriesOf(b));
     for (const it of items) w.items.set(it.id, { id: it.id, vault_id: vaultId, item_key: it.key, data: it.data, revision: w.clock * 1000, deleted_at: null, created_at: 1, updated_at: 1, at: w.clock });
-    return { imported: items.length, vault_seqs: { [vaultId]: seq }, manifest_seqs: { [vaultId]: vault.manifestSeq }, vault_seq: seq, manifest_seq: vault.manifestSeq };
+    return { imported: items.length, vault_seqs: { [vaultId]: seq }, manifest_seqs: { [vaultId]: vault.manifestSeq }, manifest_links: { [vaultId]: linkOf(vault) }, vault_seq: seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
   }
   const put = /^\/items\/([^/?]+)$/.exec(path);
   if (put && method === "PUT") {
@@ -313,7 +330,7 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     storeManifests(entriesOf(b));
     if (have.vault_id !== to) w.tombs.push({ id: have.id, vault_id: have.vault_id, at: w.clock });
     w.items.set(have.id, { ...have, vault_id: to, item_key: b.key as string, data: b.data as string, revision: w.clock * 1000, at: w.clock });
-    return { revision: w.clock * 1000, vault_seq: w.vaults.get(to)!.seq, manifest_seq: w.vaults.get(to)!.manifestSeq };
+    return { revision: w.clock * 1000, vault_seq: w.vaults.get(to)!.seq, manifest_seq: w.vaults.get(to)!.manifestSeq, manifest_link: linkOf(w.vaults.get(to)!), manifest_links: Object.fromEntries(affected.map((id) => [id, linkOf(w.vaults.get(id)!)])) };
   }
   const state = /^\/items\/([^/?]+)(\/restore|\/permanent)?(\?.*)?$/.exec(path);
   if (state && ((method === "DELETE" && state[2] !== "/restore") || (method === "POST" && state[2] === "/restore"))) {
@@ -328,7 +345,7 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
       w.items.delete(have.id);
       w.tombs.push({ id: have.id, vault_id: have.vault_id, at: w.clock });
     } else w.items.set(have.id, { ...have, deleted_at: state[2] === "/restore" ? null : w.serverTime, revision: w.clock * 1000, at: w.clock });
-    return { revision: w.clock * 1000, vault_seq: seq, manifest_seq: w.vaults.get(have.vault_id)!.manifestSeq };
+    return { revision: w.clock * 1000, vault_seq: seq, manifest_seq: w.vaults.get(have.vault_id)!.manifestSeq, manifest_link: linkOf(w.vaults.get(have.vault_id)!) };
   }
   const purge = /^\/vaults\/([^/]+)\/trash\/purge$/.exec(path);
   if (purge) {
@@ -344,19 +361,25 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
       w.items.delete(it.id);
       w.tombs.push({ id: it.id, vault_id: purge[1], at: w.clock });
     }
-    return { purged: items.length, revision: w.revision, vault_seq: seq, manifest_seq: w.vaults.get(purge[1])!.manifestSeq };
+    return { purged: items.length, revision: w.revision, vault_seq: seq, manifest_seq: w.vaults.get(purge[1])!.manifestSeq, manifest_link: linkOf(w.vaults.get(purge[1])!) };
   }
   const manifest = /^\/vaults\/([^/]+)\/manifest$/.exec(path);
   if (manifest && method === "PUT") {
     const vault = w.vaults.get(manifest[1])!;
     if (vault.role === "read") throw err(403, "forbidden");
     if (typeof b.prev !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(b.prev)) throw err(400, "bad_request");
-    if (vault.manifestSeq !== b.base_seq || vault.seq !== b.vault_seq || !((b.seq as number) > (b.base_seq as number)) || b.prev !== (linkOf(vault) ?? ZERO)) throw err(409, "manifest_conflict");
-    if ((b.seq as number) - (b.base_seq as number) > 1_000_000) throw err(400, "bad_request");
+    // Every manifest is exactly one version up (a first one: 0 → 1).
+    if (b.seq !== (b.base_seq as number) + 1) throw err(400, "bad_request");
+    if (vault.manifestSeq !== b.base_seq || vault.seq !== b.vault_seq || b.prev !== (linkOf(vault) ?? ZERO)) throw err(409, "manifest_conflict");
     if (vault.manifestSeq === 0 && !vault.manifestOk) throw err(409, "manifest_not_ready");
+    // Baselines: 10 an hour for each member and vault (only stored ones count; first manifests never).
+    if (vault.manifestSeq > 0) {
+      if ((w.baselines.get(vault.id) ?? 0) >= 10) throw new ApiError(429, "rate_limited", "rate_limited", 1800, undefined, { error: "rate_limited" });
+      w.baselines.set(vault.id, (w.baselines.get(vault.id) ?? 0) + 1);
+    }
     const seq = bump(vault.id);
     setManifest(vault, b as unknown as Entry);
-    return { revision: w.revision, vault_seq: seq, manifest_seq: vault.manifestSeq };
+    return { revision: w.revision, vault_seq: seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
   }
   const rotate = /^\/vaults\/([^/]+)\/rotate$/.exec(path);
   if (rotate) {
@@ -371,7 +394,7 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     vault.wrapped = (b.keys as { wrapped_key: string }[])[0].wrapped_key;
     if (typeof b.meta === "string") vault.meta = b.meta;
     vault.epoch++;
-    return { revision: w.revision, key_epoch: vault.epoch, vault_seq: seq, manifest_seq: vault.manifestSeq };
+    return { revision: w.revision, key_epoch: vault.epoch, vault_seq: seq, manifest_seq: vault.manifestSeq, manifest_link: linkOf(vault) };
   }
   throw new ApiError(404, "not_found", `no route ${method} ${path}`);
 }
@@ -432,6 +455,7 @@ function newWorld(opts: { manifests?: boolean; ok?: boolean } = {}) {
     trashDays: 30,
     bare: new Set(),
     logPage: 2000,
+    baselines: new Map(),
   };
   first.free();
   second.free();
@@ -1491,27 +1515,142 @@ describe("warnings come from the server's answer, not from this app's bookkeepin
     expect(names()).toEqual(["Mail"]);
   });
 
-  it("memory that can't be read is not 'nothing remembered': nothing is checked against it, written over it or started; writes wait", async () => {
-    newWorld({ ok: true });
+  it("memory that can't be read is not 'nothing remembered': nothing is checked against it, written over it or started; vaults with a manifest wait", async () => {
     await signIn();
     expect(remembered()).toEqual({ [A()]: 1, [B]: 1 });
     lock();
     storage.set(manifestsKey(SCOPE()), "{broken");
-    // The server takes the chance: no manifest any more (a device with readable memory would call that a rollback).
-    for (const x of w.vaults.values()) Object.assign(x, { manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: true });
+    // The server takes the chance with one vault: no manifest any more (readable memory would call that a rollback).
+    Object.assign(w.vaults.get(B)!, { manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: true });
     await signIn();
     await syncNow();
     await settled();
     expect(storage.get(manifestsKey(SCOPE()))).toBe("{broken");
     expect(getState().vaults.some((x) => x.manifestWarning)).toBe(false);
-    // No first manifest is started over what the server shows, and nothing is written into the unchecked vaults.
+    // No first manifest is started over what the server shows, and nothing is written into the vault that has one.
     expect(calls((c) => c.path.endsWith("/manifest"))).toEqual([]);
     w.calls = [];
     await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_UNCHECKED);
     await expect(trashItem("item-1")).rejects.toThrow(MANIFEST_UNCHECKED);
     await expect(rotateVaultKey(A())).rejects.toThrow(MANIFEST_UNCHECKED);
+    await expect(acceptServerCopy(A())).resolves.toBeUndefined();
     expect(calls((c) => c.method !== "GET")).toEqual([]);
     expect(names()).toEqual(["Bank", "Mail"]);
+  });
+
+  it("PoC 3 (rereview 5a, S4): unreadable memory doesn't block vaults that have no manifest; the stored value is left alone", async () => {
+    newWorld({ manifests: false });
+    h.config = { features: FEATURES.filter((f) => f !== "vault_manifest"), limits: {} };
+    storage.set(manifestsKey(SCOPE()), "{broken");
+    await signIn();
+    await createItem(A(), login("Shop"));
+    await signIn();
+    await createItem(A(), login("Shop 2"));
+    await trashItem("item-1");
+    expect(names()).toEqual(["Bank", "Mail", "Shop", "Shop 2"]);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe("{broken");
+    for (const c of w.calls) expect((c.body as { manifests?: unknown } | undefined)?.manifests, c.path).toBeUndefined();
+  });
+
+  it("rereview 5b (S4): memory that becomes unreadable mid-session leaves vaults with a manifest unchecked, never an earlier 'ok' over new rows", async () => {
+    await signIn();
+    await createItem(A(), login("Before"));
+    storage.set(manifestsKey(SCOPE()), "{broken");
+    // The server serves an older copy of an item meanwhile: nothing can say so without the record.
+    otherCreates(A(), "New row");
+    await syncNow();
+    await settled();
+    expect(names()).toContain("New row");
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    w.calls = [];
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_UNCHECKED);
+    await expect(updateItem(entry("Before"), { ...entry("Before").item, name: "After" })).rejects.toThrow(MANIFEST_UNCHECKED);
+    await expect(rotateVaultKey(A())).rejects.toThrow(MANIFEST_UNCHECKED);
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe("{broken");
+    // The record reads again (another tab repaired it): checked and writable at the next sync.
+    storage.set(manifestsKey(SCOPE()), "{}");
+    await syncNow();
+    await createItem(A(), login("Shop"));
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("S4: after three failed reads with a whole sync among them the reset is offered; it moves the record aside and starts a new one", async () => {
+    await signIn();
+    storage.set(manifestsKey(SCOPE()), "{broken");
+    await signIn();
+    // The first sync with an unreadable record fetches the whole account.
+    expect(getState().deviceRecordUnreadable).toBe(false);
+    await syncNow();
+    expect(getState().deviceRecordUnreadable).toBe(false);
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_UNCHECKED);
+    await syncNow();
+    expect(getState().deviceRecordUnreadable).toBe(true);
+    // Counted across a reload too: still offered after the next unlock's sync.
+    await signIn();
+    expect(getState().deviceRecordUnreadable).toBe(true);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe("{broken");
+    w.calls = [];
+    await resetDeviceRecord();
+    await settled();
+    expect(getState().deviceRecordUnreadable).toBe(false);
+    expect(storage.get(manifestsAsideKey(SCOPE()))).toBe("{broken");
+    expect(synced()[0].path).toBe("/sync");
+    expect(remembered()).toEqual({ [A()]: 1, [B]: 1 });
+    await createItem(A(), login("Shop"));
+    expect(remembered()[A()]).toBe(2);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    // A record that reads resets the count: nothing is offered when it breaks once later.
+    storage.set(manifestsKey(SCOPE()), "{broken");
+    await syncNow();
+    expect(getState().deviceRecordUnreadable).toBe(false);
+  });
+
+  it("rereview 6 (S7): two tabs, a WHOLE answer read before the other tab's write: one more fetch, no warning", async () => {
+    await signIn();
+    lock();
+    await boot();
+    // This tab's first sync fetches the whole account (its delta can't be used): the answer was read before the other
+    // tab's write...
+    const early = await handle("/sync", {});
+    let pending = true;
+    let broken = true;
+    h.handler = async (path, opts) => {
+      if (broken && path.startsWith("/sync?since=")) {
+        broken = false;
+        return { ...(early as Record<string, unknown>), delta: true, deleted: "no list" };
+      }
+      if (pending && path === "/sync") {
+        pending = false;
+        w.calls.push({ method: "GET", path, body: undefined });
+        // ...which the other tab makes and remembers while this tab waits for its answer.
+        otherCreates(A(), "From the other tab");
+        const row = w.vaults.get(A())!;
+        storage.set(manifestsKey(SCOPE()), JSON.stringify({ ...JSON.parse(storage.get(manifestsKey(SCOPE()))!), [A()]: { version: row.manifestSeq, link: linkOf(row) } }));
+        return early;
+      }
+      return handle(path, opts);
+    };
+    w.calls = [];
+    const a = v.accounts.find((x) => x.name === "alice")!;
+    await restoreUnlocked(a.id, unb64(a.sessionBytes));
+    await settled();
+    h.handler = handle;
+    expect(pending).toBe(false);
+    expect(synced().map((c) => c.path)).toEqual(["/sync", "/sync"]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(getState().warnings).toEqual([]);
+    expect(names()).toEqual(["Bank", "From the other tab", "Mail"]);
+    // A server that really went back keeps its warning: the extra fetch happens once, then the answer counts.
+    const backup = { ...w.vaults.get(A())! };
+    await createItem(A(), login("Shop"));
+    tamper(() => {
+      Object.assign(w.vaults.get(A())!, { manifest: backup.manifest, manifestSeq: backup.manifestSeq, manifestPrev: backup.manifestPrev });
+      for (const [id, row] of w.items) if (row.vault_id === A() && entry("Shop")?.id === id) w.items.delete(id);
+      return A();
+    });
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
   });
 });
 
@@ -1586,24 +1725,215 @@ describe("Use the server's copy", () => {
     expect(vaultState(A()).manifestWarning).toBeUndefined();
   });
 
-  it("jumps above a higher remembered version after the server went back to an earlier state", async () => {
-    await signIn();
-    const before = { ...w.vaults.get(A())! };
-    await createItem(A(), login("Shop"));
-    await createItem(A(), login("Shop 2"));
+  /** The server goes back to the state of `before` (a restored backup): its manifest, its log and its items. */
+  function restoreBackup(before: { vault: VaultState; items: Map<string, ItemRow> }) {
     tamper(() => {
-      Object.assign(w.vaults.get(A())!, { manifest: before.manifest, manifestSeq: before.manifestSeq, manifestPrev: before.manifestPrev });
-      for (const [id, row] of w.items) if (row.at > 3 && id !== "item-1" && id !== "item-2") w.items.delete(id);
+      Object.assign(w.vaults.get(A())!, { manifest: before.vault.manifest, manifestSeq: before.vault.manifestSeq, manifestPrev: before.vault.manifestPrev, log: [...before.vault.log] });
+      for (const [id, row] of w.items) if (row.vault_id === A()) w.items.delete(id);
+      for (const [id, row] of before.items) w.items.set(id, { ...row, at: w.clock });
       return A();
     });
+  }
+  const backupOf = () => ({ vault: { ...w.vaults.get(A())!, log: [...w.vaults.get(A())!.log] }, items: new Map(rowsOf(A()).map((r) => [r.id, { ...r }])) });
+  const stored = (): Record<string, { version?: number; link?: string; accepts?: number }> => JSON.parse(storage.get(manifestsKey(SCOPE())) ?? "{}");
+
+  it("after a restored backup the server's copy is consistent: accepted on this device alone, no request, the memory goes DOWN to the served manifest (S1a)", async () => {
+    await signIn();
+    const before = backupOf();
+    await createItem(A(), login("Shop"));
+    await createItem(A(), login("Shop 2"));
+    expect(remembered()[A()]).toBe(3);
+    restoreBackup(before);
     await syncNow();
-    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestAcceptable: true });
+    await expect(createItem(A(), login("Held"))).rejects.toThrow(MANIFEST_HELD);
     w.calls = [];
     await acceptServerCopy(A());
-    expect(calls((c) => c.path === `/vaults/${A()}/manifest`)[0].body).toMatchObject({ base_seq: 1, seq: 4 });
-    expect(remembered()[A()]).toBe(4);
+    expect(synced()[0].path).toBe("/sync");
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(stored()[A()]).toEqual({ version: 1, link: linkOf(w.vaults.get(A())!), accepts: 1 });
     expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(vaultState(A()).manifestAcceptable).toBeUndefined();
     expect(names()).toEqual(["Bank", "Mail"]);
+    // Clean and writable, across a lock too; versions go on one by one from the served manifest.
+    await createItem(A(), login("After"));
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 3 });
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(stored()[A()]).toMatchObject({ version: 2, accepts: 1 });
+  });
+
+  it("a baseline is always the row's version + 1, also when this device remembered a higher one, and replaces the memory", async () => {
+    await signIn();
+    const before = backupOf();
+    await createItem(A(), login("Shop"));
+    await createItem(A(), login("Shop 2"));
+    restoreBackup(before);
+    // ...and the restored copy isn't consistent in itself either (an item is missing from it).
+    w.items.delete("item-2");
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(vaultState(A()).manifestAcceptable).toBeUndefined();
+    w.calls = [];
+    await acceptServerCopy(A());
+    expect(calls((c) => c.path === `/vaults/${A()}/manifest`).map((c) => c.body)).toMatchObject([{ base_seq: 1, seq: 2 }]);
+    expect(stored()[A()]).toEqual({ version: 2, link: linkOf(w.vaults.get(A())!), accepts: 1 });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names()).toEqual(["Mail"]);
+    await createItem(A(), login("After"));
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 2 });
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("PoC 2 (rereview 2): after a restore and one device's baseline, a second device and a read-only member accept locally and are clean and writable", async () => {
+    await signIn();
+    const before = backupOf();
+    await createItem(A(), login("Shop"));
+    await settled();
+    expect(remembered()[A()]).toBe(2);
+    const deviceX = new Map(storage); // a second device: it saw version 2 too
+    restoreBackup(before);
+    w.items.delete("item-2"); // not consistent: the first device has to write a baseline
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    await acceptServerCopy(A());
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    const vault = w.vaults.get(A())!;
+    expect(vault.manifestSeq).toBe(2);
+    // Device X remembers another manifest at version 2: still warned after the other device's baseline, but the
+    // served copy is consistent now, so it clears the warning by itself, without a request.
+    storage.clear();
+    for (const [k, val] of deviceX) storage.set(k, val);
+    await signIn();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestAcceptable: true });
+    w.calls = [];
+    await acceptServerCopy(A());
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    await createItem(A(), login("From device X"));
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3 });
+    // The same device as someone who can only read: the same way out.
+    storage.clear();
+    for (const [k, val] of deviceX) storage.set(k, val);
+    vault.role = "read";
+    w.clock++;
+    w.revision++;
+    await signIn();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestAcceptable: true });
+    w.calls = [];
+    await acceptServerCopy(A());
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("a reader can't accept a copy that isn't consistent in itself: told who can, nothing written or remembered", async () => {
+    await unresolved();
+    w.vaults.get(A())!.role = "read";
+    w.clock++;
+    w.revision++;
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(vaultState(A()).manifestAcceptable).toBeUndefined();
+    const was = storage.get(manifestsKey(SCOPE()));
+    w.calls = [];
+    await expect(acceptServerCopy(A())).rejects.toThrow(VAULT_WARNING_READER);
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe(was);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+  });
+
+  it("the baseline rate limit (429): the usual message, the warning stays, nothing is retried or remembered", async () => {
+    await unresolved();
+    w.baselines.set(A(), 10);
+    const was = storage.get(manifestsKey(SCOPE()));
+    const e = await acceptServerCopy(A()).then(
+      () => null,
+      (x: unknown) => x,
+    );
+    expect(e).toBeInstanceOf(ApiError);
+    expect(friendlyError(e)).toBe("Too many attempts. Wait 30 minutes, then try again.");
+    expect(calls((c) => c.path === `/vaults/${A()}/manifest`)).toHaveLength(1);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe(was);
+    // Later it goes through.
+    w.baselines.clear();
+    await acceptServerCopy(A());
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("an answer that isn't this device's baseline (another link at the same version) is never remembered", async () => {
+    await unresolved();
+    const real = h.handler!;
+    h.handler = async (path, opts) => {
+      const answer = (await real(path, opts)) as Record<string, unknown>;
+      return path.endsWith("/manifest") && opts.method === "PUT" ? { ...answer, manifest_link: "x".repeat(43) } : answer;
+    };
+    const was = remembered()[A()];
+    await acceptServerCopy(A());
+    h.handler = real;
+    // Nothing was remembered from the answer; the sync that followed judged what the server holds (this device's
+    // own baseline, which is on its history: "ok").
+    expect(stored()[A()].accepts).toBeUndefined();
+    expect(remembered()[A()]).toBe(was + 1);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("items the device had seen newer are accepted as served with the copy (their marks go)", async () => {
+    await signIn();
+    const before = backupOf();
+    await updateItem(entry("Mail"), { ...entry("Mail").item, notes: "newer" });
+    restoreBackup(before);
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(entry("Mail").rollback).toBe(true);
+    await acceptServerCopy(A());
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(entry("Mail").rollback).toBeUndefined();
+    expect(entry("Mail").item.notes).toBe("");
+    expect(getState().warnings).toEqual([]);
+    await signIn();
+    expect(entry("Mail").rollback).toBeUndefined();
+    await updateItem(entry("Mail"), { ...entry("Mail").item, notes: "again" });
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2 });
+  });
+
+  it("rereview 12: without a fresh whole answer nothing is accepted", async () => {
+    await unresolved();
+    const real = h.handler!;
+    // The answer is dropped (its revision is below the one shown): no fresh copy to accept.
+    h.handler = async (path, opts) => {
+      const answer = (await real(path, opts)) as Record<string, unknown>;
+      return path === "/sync" ? { ...answer, revision: 0 } : answer;
+    };
+    const was = storage.get(manifestsKey(SCOPE()));
+    await expect(acceptServerCopy(A())).rejects.toThrow(ACCEPT_NO_ANSWER);
+    h.handler = real;
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(storage.get(manifestsKey(SCOPE()))).toBe(was);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+  });
+
+  it("a tab that still holds the memory from before an acceptance can't bring it back (the `accepts` counter)", async () => {
+    await signIn();
+    const before = backupOf();
+    await createItem(A(), login("Shop"));
+    await createItem(A(), login("Shop 2"));
+    // Another tab of this device, loaded now: it holds version 3.
+    const tab = new ManifestMemory({ get: (k) => storage.get(k) ?? null, set: (k, val) => void (val === null ? storage.delete(k) : storage.set(k, val)) }, SCOPE());
+    restoreBackup(before);
+    await syncNow();
+    await acceptServerCopy(A());
+    expect(stored()[A()]).toMatchObject({ version: 1, accepts: 1 });
+    // The other tab remembers something for another vault and writes its whole map back.
+    tab.raise(B, 2, "b".repeat(43));
+    tab.flush();
+    expect(stored()[A()]).toMatchObject({ version: 1, accepts: 1 });
+    expect(tab.get(A())).toEqual({ version: 1, link: linkOf(w.vaults.get(A())!) });
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
   });
 
   it("tries again when the vault changed meanwhile, and says so after three tries", async () => {
@@ -1630,30 +1960,377 @@ describe("Use the server's copy", () => {
     w.calls = [];
   }
 
-  it("a manifest that vanished can't be replaced while some member's app is too old", async () => {
+  it("a manifest that vanished: accepted on this device by forgetting it (no request, also while some member's app is too old); a first manifest follows by the ordinary rule", async () => {
     await signIn();
     tamper(() => {
-      Object.assign(w.vaults.get(A())!, { manifest: null, manifestSeq: 0, manifestOk: false });
+      Object.assign(w.vaults.get(A())!, { manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: false, log: [] });
+      return A();
+    });
+    await syncNow();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestAcceptable: true });
+    w.calls = [];
+    await acceptServerCopy(A());
+    await settled();
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    // Nothing remembered, but the count stays (an older copy of the memory can't bring the version back).
+    expect(stored()[A()]).toEqual({ accepts: 1 });
+    expect(remembered()[A()]).toBeUndefined();
+    // Written like any vault without a manifest.
+    await createItem(A(), login("Shop"));
+    expect(lastBody((c) => c.path === "/items").manifests).toBeUndefined();
+    // Once every member's apps are ready, the first manifest is version 1 again.
+    w.vaults.get(A())!.manifestOk = true;
+    tamper(() => A());
+    await syncNow();
+    await settled();
+    expect(calls((c) => c.path === `/vaults/${A()}/manifest`).map((c) => c.body)).toMatchObject([{ base_seq: 0, seq: 1 }]);
+    expect(stored()[A()]).toMatchObject({ version: 1, accepts: 1 });
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 1 });
+  });
+
+  it("does nothing when the fresh answer checks out", async () => {
+    await signIn();
+    await acceptServerCopy(A());
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(stored()[A()].accepts).toBeUndefined();
+  });
+});
+
+describe("items that can't be opened never lock a vault for good (rereview 1, S2)", () => {
+  /** The server (or a member's broken app) breaks a row's item key: the manifest doesn't cover it and still checks out. */
+  function breakKey(id: string) {
+    tamper(() => {
+      const row = w.items.get(id)!;
+      const other = [...w.items.values()].find((r) => r.id !== id)!;
+      w.items.set(id, { ...row, item_key: other.item_key, at: w.clock });
+      return row.vault_id;
+    });
+  }
+
+  it("the row is listed as an item that can't be opened; 'Delete for good' removes it with an ordinary manifest write and the vault is ok and writable again", async () => {
+    await signIn();
+    breakKey("item-1");
+    await syncNow();
+    await settled();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true });
+    expect(vaultState(A()).manifestAcceptable).toBeUndefined();
+    expect(getState().unopenable).toEqual([{ id: "item-1", vaultId: A(), deletedAt: null, deletable: true }]);
+    expect(names()).toEqual(["Bank"]);
+    // Other writes stay held, and accepting the server's copy isn't the way out.
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_HELD);
+    await expect(acceptServerCopy(A())).rejects.toThrow(VAULT_UNOPENABLE);
+    const rev = w.items.get("item-1")!.revision;
+    w.calls = [];
+    await purgeUnopenable("item-1");
+    await settled();
+    const del = calls((c) => c.method === "DELETE");
+    expect(del).toHaveLength(1);
+    expect(del[0].path).toContain(`/items/item-1/permanent?revision=${rev}&manifest_seq=2&manifest_prev=`);
+    expect(w.items.has("item-1")).toBe(false);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 1 });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(vaultState(A()).manifestUnopenable).toBeUndefined();
+    expect(getState().unopenable).toEqual([]);
+    expect(remembered()[A()]).toBe(2);
+    await createItem(A(), login("Shop"));
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 2 });
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("a trashed row that doesn't open counts the same, is listed as trashed and deleted the same way", async () => {
+    await signIn();
+    await trashItem("item-1");
+    breakKey("item-1");
+    await syncNow();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true });
+    expect(getState().unopenable).toMatchObject([{ id: "item-1", deletedAt: expect.any(Number), deletable: true }]);
+    await purgeUnopenable("item-1");
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(serverCheck(A())).toMatchObject({ status: "ok", live: 1, trashed: 0 });
+  });
+
+  it("while the row is there, other devices' writes are followed (the record itself is what this device saw)", async () => {
+    await signIn();
+    breakKey("item-1");
+    await syncNow();
+    otherCreates(A(), "One");
+    otherCreates(A(), "Two");
+    otherCreates(A(), "Three");
+    await syncNow();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true });
+    expect(remembered()[A()]).toBe(4);
+    await purgeUnopenable("item-1");
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names()).toEqual(["Bank", "One", "Three", "Two"]);
+  });
+
+  it("someone who can only read is told who can delete it, and can't", async () => {
+    await signIn();
+    w.vaults.get(A())!.role = "read";
+    breakKey("item-1");
+    await syncNow();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true, role: "read" });
+    expect(getState().unopenable).toEqual([{ id: "item-1", vaultId: A(), deletedAt: null, deletable: false }]);
+    w.calls = [];
+    await expect(purgeUnopenable("item-1")).rejects.toThrow("Only someone who can edit");
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("PoC 6 (web side): no first manifest is started over a vault with such a row; it is deleted with a plain request, then the manifest starts", async () => {
+    newWorld({ ok: true });
+    breakKey("item-1");
+    await signIn();
+    await syncNow();
+    await settled();
+    expect(calls((c) => c.path === `/vaults/${A()}/manifest`)).toEqual([]);
+    expect(w.vaults.get(A())!.manifestSeq).toBe(0);
+    // No manifest, so no vault warning and no hold: the row is listed, and the vault is used as before.
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(getState().unopenable).toEqual([{ id: "item-1", vaultId: A(), deletedAt: null, deletable: true }]);
+    expect(getState().warnings).toEqual([`An item in "Personal" can't be opened.`]);
+    await createItem(A(), login("Shop"));
+    w.calls = [];
+    await purgeUnopenable("item-1");
+    await settled();
+    expect(calls((c) => c.method === "DELETE").map((c) => c.path)).toEqual(["/items/item-1/permanent"]);
+    expect(getState().unopenable).toEqual([]);
+    expect(calls((c) => c.path === `/vaults/${A()}/manifest`).map((c) => c.body)).toMatchObject([{ base_seq: 0, seq: 1 }]);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 1, live: 2 });
+  });
+
+  it("with a record that is wrong as well: the server's copy is accepted first (the row is counted by its data), the vault stays warned until the row is deleted (S2 iv)", async () => {
+    await signIn();
+    breakKey("item-1");
+    tamper(() => {
+      w.items.delete("item-2");
+      w.tombs.push({ id: "item-2", vault_id: A(), at: w.clock });
       return A();
     });
     await syncNow();
     expect(vaultState(A()).manifestWarning).toBe(true);
-    w.calls = [];
-    await expect(acceptServerCopy(A())).rejects.toThrow(MANIFEST_NOT_READY);
-    expect(calls((c) => c.path === `/vaults/${A()}/manifest`)[0].body).toMatchObject({ base_seq: 0, seq: 2 });
-    expect(vaultState(A()).manifestWarning).toBe(true);
-    expect(remembered()[A()]).toBe(1);
+    expect(vaultState(A()).manifestUnopenable).toBeUndefined();
+    // Not deletable yet: the vault's record doesn't check out.
+    expect(getState().unopenable).toMatchObject([{ id: "item-1", deletable: false }]);
+    await expect(purgeUnopenable("item-1")).rejects.toThrow(MANIFEST_HELD);
+    await acceptServerCopy(A());
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 1 });
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true });
+    expect(getState().unopenable).toMatchObject([{ id: "item-1", deletable: true }]);
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_HELD);
+    await signIn();
+    expect(vaultState(A())).toMatchObject({ manifestWarning: true, manifestUnopenable: true });
+    await purgeUnopenable("item-1");
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 0 });
+    await createItem(A(), login("Shop"));
   });
 
-  it("does nothing when the fresh answer checks out, and isn't offered to someone who can only read", async () => {
+  it("the delete meets another device's write: built again from a fresh sync", async () => {
     await signIn();
-    await acceptServerCopy(A());
-    expect(calls((c) => c.path.endsWith("/manifest"))).toEqual([]);
-    await unresolvedAgain();
-    w.vaults.get(A())!.role = "read";
-    await expect(acceptServerCopy(A())).rejects.toThrow("Only someone who can edit");
-    expect(calls((c) => c.path.endsWith("/manifest"))).toEqual([]);
-    await expect(trashItem("item-2")).rejects.toThrow(MANIFEST_HELD);
+    breakKey("item-1");
+    await syncNow();
+    w.next.push({ path: "/items/item-1/permanent", run: () => void otherCreates(A(), "Meanwhile") });
+    await purgeUnopenable("item-1");
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names()).toEqual(["Bank", "Meanwhile"]);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 2 });
+  });
+});
+
+describe("write answers: an own write is shown and remembered only when the answer names the manifest sent (S6)", () => {
+  it("a create answered with the version sent but another manifest's link (a retried request stored under its first try's manifest): sync, no false mismatch", async () => {
+    await signIn();
+    const real = h.handler!;
+    let lost = true;
+    let sentLink = "";
+    // An earlier try of this request was stored under the manifest it carried, and its answer got lost. This try
+    // carries the same item with the manifest sealed again (same version, another text); the server answers the
+    // repeat with what it holds: that version, and the first try's link.
+    h.handler = async (path, opts) => {
+      if (lost && path === "/items" && opts.method === undefined) {
+        lost = false;
+        const b = opts.body as Record<string, unknown> & { manifests: Entry[] };
+        const vault = w.vaults.get(A())!;
+        const first = withKey(A(), (key) => key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifestPrev!, vault.manifest!, [], [{ id: b.id as string, deleted_at: null, data: b.data as string }]) as Built);
+        expect(first.seq).toBe(b.manifests[0].seq);
+        expect(first.sealed).not.toBe(b.manifests[0].sealed);
+        sentLink = core.manifestLink(b.manifests[0].seq, b.manifests[0].prev, b.manifests[0].sealed);
+        expect(first.link).not.toBe(sentLink);
+        await real(path, { ...opts, body: { ...b, manifests: [{ vault_id: A(), seq: first.seq, prev: first.prev, sealed: first.sealed }] } });
+        // The repeat: the same item is there already.
+        return real(path, opts);
+      }
+      return real(path, opts);
+    };
+    w.calls = [];
+    await createItem(A(), login("Shop"));
+    h.handler = real;
+    // What this device remembers is the stored manifest (from the sync that followed), never the one it sealed again.
+    expect(sentLink).not.toBe("");
+    expect(synced().length).toBeGreaterThan(0);
+    expect(rememberedLinks()[A()]).toBe(linkOf(w.vaults.get(A())!));
+    expect(rememberedLinks()[A()]).not.toBe(sentLink);
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names()).toEqual(["Bank", "Mail", "Shop"]);
+  });
+
+  it("an answer whose link is not the one sent is never remembered: the old rule (the version alone) would have kept a manifest the server doesn't hold", async () => {
+    await signIn();
+    const real = h.handler!;
+    h.handler = async (path, opts) => {
+      const answer = (await real(path, opts)) as Record<string, unknown>;
+      return path === "/items" ? { ...answer, manifest_link: "y".repeat(43) } : answer;
+    };
+    w.calls = [];
+    await createItem(A(), login("Shop"));
+    h.handler = real;
+    expect(synced()).toHaveLength(1);
+    expect(rememberedLinks()[A()]).toBe(linkOf(w.vaults.get(A())!));
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+
+  it("an import batch chains only on the link of the manifest it sent", async () => {
+    h.config = { features: [...FEATURES], limits: { max_import_items: 1 } };
+    await signIn();
+    const real = h.handler!;
+    let n = 0;
+    h.handler = async (path, opts) => {
+      const answer = (await real(path, opts)) as Record<string, unknown>;
+      // The second batch's answer names another manifest: the app syncs before the third.
+      return path === "/items/import" && ++n === 2 ? { ...answer, manifest_links: { [A()]: "z".repeat(43) }, manifest_link: "z".repeat(43) } : answer;
+    };
+    w.calls = [];
+    await importItems(A(), [login("One"), login("Two"), login("Three")], undefined, { max_import_items: 1 });
+    h.handler = real;
+    const order = w.calls.filter((c) => c.path === "/items/import" || c.path.startsWith("/sync?")).map((c) => (c.path === "/items/import" ? "import" : "sync"));
+    expect(order).toEqual(["import", "import", "sync", "import", "sync"]);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 4, live: 5 });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+});
+
+describe("no false warning from this app's own writes racing a sync (rereview 4 and 11, S7)", () => {
+  it("PoC 5: an import in batches with one sync running beside it (each /sync answer slower than one batch) ends with NO warning", async () => {
+    h.config = { features: [...FEATURES], limits: { max_import_items: 1 } };
+    await signIn();
+    const real = h.handler!;
+    const total = 30;
+    let stored = 0;
+    const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+    h.handler = async (path, opts) => {
+      const answer = await real(path, opts);
+      if (path === "/items/import") {
+        stored++;
+        await tick();
+        return answer;
+      }
+      if (path.startsWith("/sync") && path !== "/sync/revision" && stored > 0 && stored < total - 1) {
+        // Read now (the server's state at this moment), delivered after the next batch was stored and shown.
+        const until = stored + 1;
+        for (let n = 0; n < 40 && stored < until; n++) await tick();
+        await tick();
+      }
+      return answer;
+    };
+    const items = Array.from({ length: total }, (_, n) => login(`Imported ${n}`));
+    let warnedDuring = false;
+    const watch = setInterval(() => {
+      if (getState().vaults.find((x) => x.id === A())?.manifestWarning) warnedDuring = true;
+    }, 0);
+    const result = await importItems(
+      A(),
+      items,
+      (done) => {
+        // Something asks for a sync while the import runs (a live notice, a second tab's write, the periodic check).
+        if (done === 2) void syncNow().catch(() => {});
+      },
+      { max_import_items: 1 },
+    ).then(
+      () => "done",
+      (e: Error) => e.message,
+    );
+    clearInterval(watch);
+    h.handler = real;
+    await settled();
+    expect(serverCheck(A()).status).toBe("ok"); // the server was honest throughout
+    expect({ result, warnedDuring }).toStrictEqual({ result: "done", warnedDuring: false });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names().filter((n) => n.startsWith("Imported"))).toHaveLength(total);
+    expect(remembered()[A()]).toBe(1 + total);
+  });
+
+  it("PoC 5b: the same over a sweep of timings: never a warning, never a stopped import", async () => {
+    const bad: string[] = [];
+    for (const extra of [0, 1, 3])
+      for (const startAt of [1, 2, 3])
+        for (const lag of [1, 2])
+          for (const sub of [0, 2]) {
+            newWorld({ manifests: true });
+            h.config = { features: [...FEATURES], limits: { max_import_items: 1 } };
+            await signIn();
+            const real = h.handler!;
+            const total = 14;
+            let stored = 0;
+            const micro = async (n: number) => {
+              for (let i = 0; i < n; i++) await Promise.resolve();
+            };
+            const tick = () => new Promise<void>((r) => setTimeout(r, 0));
+            h.handler = async (path, opts) => {
+              const answer = await real(path, opts);
+              if (path === "/items/import") {
+                stored++;
+                await tick();
+                return answer;
+              }
+              if (path.startsWith("/sync") && path !== "/sync/revision" && stored > 0 && stored < total - 1) {
+                const until = stored + lag;
+                for (let n = 0; n < 60 && stored < until; n++) await tick();
+                for (let n = 0; n < extra; n++) await tick();
+                await micro(sub);
+              }
+              return answer;
+            };
+            let warnedDuring = false;
+            const watch = setInterval(() => {
+              if (getState().vaults.find((x) => x.id === A())?.manifestWarning) warnedDuring = true;
+            }, 0);
+            const result = await importItems(
+              A(),
+              Array.from({ length: total }, (_, n) => login(`Imported ${n}`)),
+              (done) => {
+                if (done === startAt) void syncNow().catch(() => {});
+              },
+              { max_import_items: 1 },
+            ).then(
+              () => "done",
+              (e: Error) => e.message,
+            );
+            clearInterval(watch);
+            h.handler = real;
+            await settled();
+            const imported = names().filter((n) => n.startsWith("Imported")).length;
+            if (result !== "done" || warnedDuring || vaultState(A()).manifestWarning || serverCheck(A()).status !== "ok" || imported !== total)
+              bad.push(`extra=${extra} start=${startAt} lag=${lag} sub=${sub}: ${result} warned=${warnedDuring} after=${!!vaultState(A()).manifestWarning} imported=${imported}`);
+          }
+    expect(bad).toEqual([]);
+  }, 60000);
+
+  it("a server that really serves an older state during an import still gets its warning from the sync that ends it", async () => {
+    h.config = { features: [...FEATURES], limits: { max_import_items: 1 } };
+    await signIn();
+    const backup = { vault: { ...w.vaults.get(A())! }, items: new Map(rowsOf(A()).map((r) => [r.id, { ...r }])) };
+    await importItems(A(), [login("One"), login("Two")], undefined, { max_import_items: 1 });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    tamper(() => {
+      Object.assign(w.vaults.get(A())!, { manifest: backup.vault.manifest, manifestSeq: backup.vault.manifestSeq, manifestPrev: backup.vault.manifestPrev });
+      for (const [id, row] of w.items) if (row.vault_id === A() && !backup.items.has(id)) w.items.delete(id);
+      return A();
+    });
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
   });
 });
 
@@ -1746,9 +2423,13 @@ describe("old trash", () => {
     expect(purges()).toEqual([]);
     w.serverTime = real;
     deviceAhead = 0;
-    // The shortest retention: still only after the device watched a day.
+    // The shortest retention the server can name: still only after the device itself watched for 7 days (S5).
     w.trashDays = 1;
     await later(0);
+    expect(purges()).toEqual([]);
+    await later(1);
+    expect(purges()).toEqual([]);
+    await later(5);
     expect(purges()).toEqual([]);
     expect(w.items.has(id)).toBe(true);
     await later(1);

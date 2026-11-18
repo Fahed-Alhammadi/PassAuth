@@ -181,10 +181,20 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(forkSecond.seq, 2)
         XCTAssertNotEqual(forkSecond.link, second.link, "sealed again: another manifest at the same version")
         XCTAssertEqual(try check(forkSecond, mark(second)), .mismatch, "the same version with another link")
-        // A later manifest of the other history: one step ahead, but not on this device's.
+        // A later manifest of the other history: one step ahead, but not on this device's. No
+        // log can connect a manifest one version above the remembered one: a mismatch at once.
         let forkThird = try w.next(forkSecond)
-        XCTAssertEqual(try check(forkThird, mark(second)), .needLog)
+        XCTAssertEqual(try check(forkThird, mark(second)), .mismatch)
         XCTAssertEqual(try check(forkThird, mark(second), log: log([forkSecond, forkThird])), .mismatch, "the log doesn't lead back to what this device saw")
+        XCTAssertEqual(try check(third, mark(second)), .ok, "one step ahead on this device's history needs no log")
+        // Two steps ahead on the other history: only then the log is asked for, and it doesn't connect.
+        let forkFourth = try w.next(forkThird)
+        XCTAssertEqual(try check(forkFourth, mark(second)), .needLog)
+        XCTAssertEqual(try check(forkFourth, mark(second), log: log([forkSecond, forkThird, forkFourth])), .mismatch)
+        // Entries that aren't entries are skipped, never fatal (the log goes to the core as it came).
+        let rubbish = #"[null,7,"text",{"seq":3},{"seq":"4","prev":1,"digest":2},"# + String(log([second, third, fourth]).dropFirst())
+        XCTAssertEqual(try check(fourth, mark(first), log: rubbish), .ok)
+        XCTAssertEqual(try check(fourth, mark(first), log: #"{"entries":[]}"#), .mismatch, "a log that isn't a list")
         XCTAssertEqual(try check(forkThird, mark(second), log: "[]"), .mismatch)
         // More than one step ahead on this device's own history: the log connects it.
         XCTAssertEqual(try check(fourth, mark(first)), .needLog)
@@ -244,6 +254,31 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(VaultManifest.merged(stored, ["a": ManifestMark(version: 7, link: other)])["a"]?.link, l7)
         XCTAssertEqual(VaultManifest.merged(stored, ["a": ManifestMark(version: 8, link: other)])["a"], ManifestMark(version: 8, link: other))
         XCTAssertEqual(VaultManifest.merged(stored, ["a": ManifestMark(version: 8, link: "half")])["a"]?.version, 7)
+        // An acceptance ("Use the server's copy") replaces the entry, also downwards, and counts.
+        // The count orders the merge first, so a process that still holds the memory from before
+        // (a higher version) can't bring it back.
+        let accepted = VaultManifest.replaced(stored["a"], with: ManifestMark(version: 3, link: l2))
+        XCTAssertEqual(accepted, ManifestMark(version: 3, link: l2, accepts: 1))
+        XCTAssertEqual(VaultManifest.merged(["a": accepted], ["a": ManifestMark(version: 7, link: l7)])["a"], accepted, "the stale higher version loses")
+        XCTAssertEqual(VaultManifest.merged(["a": ManifestMark(version: 7, link: l7)], ["a": accepted])["a"], accepted)
+        XCTAssertEqual(VaultManifest.merged(["a": accepted], ["a": ManifestMark(version: 4, link: l5, accepts: 1)])["a"], ManifestMark(version: 4, link: l5, accepts: 1),
+                       "with as many acceptances the higher version wins, as before")
+        XCTAssertEqual(VaultManifest.merged(["a": accepted], ["a": ManifestMark(version: 3, link: other, accepts: 1)])["a"], accepted, "never another link at the same version")
+        // Forgetting (the server shows no manifest) keeps the count and nothing else.
+        let forgotten = VaultManifest.replaced(accepted, with: nil)
+        XCTAssertEqual(forgotten, ManifestMark.forgotten(accepts: 2))
+        XCTAssertFalse(forgotten.valid)
+        XCTAssertEqual(VaultManifest.merged(["a": forgotten], ["a": ManifestMark(version: 9, link: l7, accepts: 1)])["a"], forgotten)
+        XCTAssertEqual(VaultManifest.merged(["a": forgotten], ["a": ManifestMark(version: 1, link: l7, accepts: 2)])["a"], ManifestMark(version: 1, link: l7, accepts: 2),
+                       "a first manifest started after it")
+        XCTAssertEqual(VaultManifest.replaced(nil, with: ManifestMark(version: 2, link: l2)), ManifestMark(version: 2, link: l2, accepts: 1))
+        XCTAssertEqual(VaultManifest.replaced(forgotten, with: ManifestMark(version: 2, link: "half")), ManifestMark.forgotten(accepts: 3), "never half an entry")
+        // An ordinary `ok` after an acceptance raises the version and keeps the count.
+        var later = ["a": accepted, "f": forgotten]
+        VaultManifest.remember(&later, vault: "a", status: .ok, mark: ManifestMark(version: 4, link: l5))
+        VaultManifest.remember(&later, vault: "a", status: .ok, mark: ManifestMark(version: 2, link: l7))
+        VaultManifest.remember(&later, vault: "f", status: .ok, mark: ManifestMark(version: 1, link: l7))
+        XCTAssertEqual(later, ["a": ManifestMark(version: 4, link: l5, accepts: 1), "f": ManifestMark(version: 1, link: l7, accepts: 2)])
         // Which verdicts warn, which hold writes back, which wait for the next sync.
         XCTAssertTrue(ManifestStatus.rollback.unresolved && ManifestStatus.mismatch.unresolved)
         XCTAssertTrue(ManifestStatus.rollback.warns && ManifestStatus.mismatch.warns)
@@ -260,6 +295,18 @@ final class VaultManifestTests: XCTestCase {
         let link = String(repeating: "x", count: 43)
         let text = #"{"v1":{"version":4,"link":"\#(link)"},"old":7,"half":{"version":3},"nolink":{"version":3,"link":"abc"},"zero":{"version":0,"link":"\#(link)"},"text":{"version":"4","link":"\#(link)"}}"#
         XCTAssertEqual(VaultManifest.readMemory(Data(text.utf8)), ["v1": ManifestMark(version: 4, link: link)])
+        // With the count of acceptances; an entry that is only a count remembers no manifest;
+        // the all-zero link (a first manifest's predecessor) is never a remembered one.
+        let counted = #"{"a":{"version":4,"link":"\#(link)","accepts":2},"f":{"accepts":3},"z":{"version":2,"link":"\#(zeroLink)"},"zc":{"version":2,"link":"\#(zeroLink)","accepts":1},"n":{"accepts":-1},"t":{"accepts":"2"}}"#
+        let read = VaultManifest.readMemory(Data(counted.utf8))
+        XCTAssertEqual(read, ["a": ManifestMark(version: 4, link: link, accepts: 2), "f": .forgotten(accepts: 3), "zc": .forgotten(accepts: 1)])
+        // Written and read back the same, a forgotten entry without version and link.
+        let written = try? JSONEncoder().encode(read)
+        XCTAssertEqual(written.flatMap(VaultManifest.readMemory), read)
+        XCTAssertEqual(written.map { String(decoding: $0, as: UTF8.self).contains("\"version\":0") }, false)
+        let plain = (try? JSONEncoder().encode(["v": ManifestMark(version: 4, link: link)])).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        XCTAssertFalse(plain.contains("accepts"), "as before for a device that never accepted anything")
+        XCTAssertEqual(VaultManifest.readMemory(Data(plain.utf8)), ["v": ManifestMark(version: 4, link: link)])
         XCTAssertEqual(VaultManifest.readMemory(Data(#"{"v1":5,"v2":2}"#.utf8)), [:], "the first format")
         XCTAssertNil(VaultManifest.readMemory(Data("[1,2]".utf8)))
         XCTAssertTrue(VaultManifest.isLink(link))
@@ -279,7 +326,7 @@ final class VaultManifestTests: XCTestCase {
         let w = try world()
         let m3 = try w.start(3)
         let m4 = try w.next(m3), m5 = try w.next(m4)
-        let other = ManifestMark(version: 2, link: zeroLink)
+        let other = ManifestMark(version: 2, link: String(repeating: "o", count: 43))
         var o = open(w, try w.header(m3), w.rows, [:])
         XCTAssertEqual(o.data.vaults.first?.manifest, .ok)
         XCTAssertEqual(o.manifests, [w.vaultId: mark(m3)])
@@ -331,13 +378,81 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(o.unreadable, [w.vaultId])
         XCTAssertEqual(o.data.entries.count, 1, "the item isn't shown")
         XCTAssertEqual(o.data.vaults.first?.manifest, .mismatch)
-        XCTAssertEqual(o.manifests, [:], "nothing is remembered")
-        // Also after "Use the server's copy" wrote a baseline over it: the manifest is this
-        // device's (remembered), the item is still hidden, the warning stays.
-        let mine = ManifestMark(version: 4, link: zeroLink)
+        // The manifest itself matches: it is remembered, the item is the vault's one problem,
+        // and it is listed so it can be deleted. "Use the server's copy" has nothing to accept.
+        XCTAssertEqual(o.manifests, [w.vaultId: mark(m)])
+        XCTAssertEqual(o.data.vaults.first?.unopenable, true)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, false)
+        XCTAssertEqual(o.data.unopenable, [UnopenableItem(id: rows[0].id, vaultId: w.vaultId, revision: 3, deletedAt: nil)])
+        // Also after this device wrote a manifest over it: the manifest is this device's
+        // (remembered), the item is still hidden, the warning stays.
+        let mine = ManifestMark(version: 4, link: String(repeating: "m", count: 43))
         let after = open(w, try w.header(m), rows, [:], source: .local(wrote: [w.vaultId: mine], gone: []), previous: o)
         XCTAssertEqual(after.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(after.data.vaults.first?.unopenable, true)
         XCTAssertEqual(after.manifests, [w.vaultId: mine])
+        // A row that has its data but came without its key can't be opened either (it used to be
+        // skipped, with no warning and nothing in the trash).
+        var keyless = w.rows
+        keyless[2].itemKey = nil
+        let k = open(w, try w.header(m), keyless, [:], fullRows: true)
+        XCTAssertEqual(k.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(k.data.vaults.first?.unopenable, true)
+        XCTAssertEqual(k.data.unopenable.map(\.id), [keyless[2].id])
+        XCTAssertEqual(k.data.unopenable.first?.deletedAt, keyless[2].deletedAt)
+        XCTAssertTrue(k.data.trash.isEmpty)
+        // Where the trash is kept as a summary, a row with neither key nor data is as asked for.
+        let s = open(w, try w.header(m), [w.rows[0], w.rows[1], summary(w.rows[2])], [:])
+        XCTAssertEqual(s.data.vaults.first?.manifest, .ok)
+        XCTAssertTrue(s.data.unopenable.isEmpty)
+        // The manifest is wrong as well (an item is missing): an ordinary warning; the item is
+        // still listed, and the record has to be settled first.
+        let both = open(w, try w.header(m), Array(rows.dropLast()), [:])
+        XCTAssertEqual(both.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(both.data.vaults.first?.unopenable, false)
+        XCTAssertEqual(both.data.unopenable.count, 1)
+        // A vault without a manifest stays as it was (writable); the item is listed, and no
+        // first manifest is started over it.
+        let bare = open(w, try w.header(seq: 0, sealed: nil, ok: true), rows, [:])
+        XCTAssertEqual(bare.data.vaults.first?.manifest, ManifestStatus.none)
+        XCTAssertEqual(bare.data.unopenable.count, 1)
+        XCTAssertFalse(VaultManifest.mayStart(try w.header(seq: 0, sealed: nil, ok: true), role: .owner, status: .none, remembered: nil, rows: rows,
+                                              features: [vaultManifestFeature], unopenable: true))
+    }
+
+    /// A warned vault is also checked with nothing remembered: when the served manifest
+    /// describes the served items (or none is served), "Use the server's copy" only changes this
+    /// device's memory, which every member may do.
+    func testAWarnedVaultKnowsWhetherItsServedCopyCanBeAccepted() throws {
+        let w = try world()
+        let m3 = try w.start(3)
+        let m4 = try w.next(m3), m5 = try w.next(m4)
+        // A restored backup: an older manifest that matches its items. Rollback, acceptable.
+        var o = open(w, try w.header(m3), w.rows, [w.vaultId: mark(m5)])
+        XCTAssertEqual(o.data.vaults.first?.manifest, .rollback)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, true)
+        XCTAssertEqual(VaultManifest.accept(try w.header(m3), key: w.key, rows: w.rows).mark, mark(m3))
+        // The manifest vanished: acceptable too (the memory is forgotten).
+        o = open(w, try w.header(seq: 0, sealed: nil), w.rows, [w.vaultId: mark(m5)])
+        XCTAssertEqual(o.data.vaults.first?.manifest, .rollback)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, true)
+        XCTAssertEqual(VaultManifest.accept(try w.header(seq: 0, sealed: nil), key: w.key, rows: w.rows).status, ManifestStatus.none)
+        // Items that aren't the ones recorded: nothing to accept without a new record.
+        o = open(w, try w.header(m3), Array(w.rows.dropLast()), [:])
+        XCTAssertEqual(o.data.vaults.first?.manifest, .mismatch)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, false)
+        XCTAssertEqual(VaultManifest.accept(try w.header(m3), key: w.key, rows: Array(w.rows.dropLast())).status, .mismatch)
+        XCTAssertNil(VaultManifest.accept(try w.header(m3), key: w.key, rows: Array(w.rows.dropLast())).mark)
+        XCTAssertEqual(VaultManifest.accept(try w.header(seq: 3, sealed: "doesn't open", prev: m3.prev), key: w.key, rows: w.rows).status, .mismatch)
+        // A vault that is fine carries neither flag; a verdict that is kept keeps them.
+        o = open(w, try w.header(m3), w.rows, [:])
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, false)
+        let warned = open(w, try w.header(m3), w.rows, [w.vaultId: mark(m5)])
+        o = open(w, try w.header(m3), w.rows, nil, previous: warned)
+        XCTAssertEqual(o.data.vaults.first?.manifest, .rollback)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, true, "kept with the warning while the memory can't be read")
+        o = open(w, try w.header(m3), w.rows, [w.vaultId: mark(m5)], source: .local(wrote: [:], gone: []), previous: warned)
+        XCTAssertEqual(o.data.vaults.first?.manifestAcceptable, true)
     }
 
     /// The copy on the device never warns by itself and this device's own write only touches the
@@ -379,6 +494,21 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertNil(o.manifests)
         XCTAssertEqual(open(w, try w.header(m3), w.rows, nil, previous: warned).data.vaults.first?.manifest, .mismatch)
         XCTAssertEqual(open(w, try w.header(m3), w.rows, nil, previous: shown).data.vaults.first?.manifest, .unchecked, "an earlier ok isn't carried over to new rows")
+        // A vault without a manifest stays as writable as it was while the memory can't be read.
+        o = open(w, try w.header(seq: 0, sealed: nil), w.rows, nil)
+        XCTAssertEqual(o.data.vaults.first?.manifest, ManifestStatus.none)
+        XCTAssertNil(o.manifests)
+        // What a background refresh kept is checked like an answer (its caller adopts it only
+        // when every vault is ok or none); a vault that would need the log is never ok there.
+        o = open(w, try w.header(m3), Array(w.rows.dropLast()), [:], source: .refreshed)
+        XCTAssertEqual(o.data.vaults.first?.manifest, .mismatch)
+        o = open(w, try w.header(m3), w.rows, [w.vaultId: mark(m4)], source: .refreshed)
+        XCTAssertEqual(o.data.vaults.first?.manifest, .rollback)
+        o = open(w, try w.header(m5), w.rows, [w.vaultId: mark(m3)], source: .refreshed)
+        XCTAssertEqual(o.data.vaults.first?.manifest, .unchecked)
+        XCTAssertTrue(o.needLog.isEmpty)
+        o = open(w, try w.header(m4), w.rows, [w.vaultId: mark(m3)], source: .refreshed)
+        XCTAssertEqual(o.data.vaults.first?.manifest, .ok)
     }
 
     /// The log decides a vault that was more than a step ahead; a server without a log for it,
@@ -548,7 +678,7 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertFalse(start(try w.header(seq: 0, sealed: nil, ok: nil)))
         XCTAssertFalse(start(try w.header(seq: 2, sealed: "x", ok: true)), "it has one")
         XCTAssertFalse(start(ready, features: ["delta_sync"]), "the server doesn't keep manifests")
-        XCTAssertFalse(start(ready, remembered: ManifestMark(version: 4, link: zeroLink)), "this device saw one: that is a rollback, not a start")
+        XCTAssertFalse(start(ready, remembered: ManifestMark(version: 4, link: String(repeating: "o", count: 43))), "this device saw one: that is a rollback, not a start")
         XCTAssertFalse(start(ready, status: .rollback))
         XCTAssertFalse(start(ready, status: .unchecked))
         XCTAssertFalse(start(try w.header(seq: 0, sealed: nil, ok: true, vaultSeq: nil)), "pinned to the vault's number")
@@ -557,15 +687,20 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertFalse(start(ready, rows: bare), "every row must be in it")
         bare[2].dataSha256 = "h"
         XCTAssertTrue(start(ready, rows: bare))
+        // A memory that was forgotten by an acceptance remembers no manifest: a start is fine.
+        XCTAssertTrue(start(ready, remembered: .forgotten(accepts: 1)))
+        XCTAssertFalse(VaultManifest.mayStart(ready, role: .owner, status: .none, remembered: nil, rows: w.rows, features: features, unopenable: true),
+                       "never over an item that can't be opened")
     }
 
-    func testABaselineIsAboveTheRowAndAboveWhatThisDeviceRemembers() throws {
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 5, remembered: nil), 6)
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 5, remembered: 3), 6)
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 5, remembered: 9), 10)
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 0, remembered: 4), 5, "the manifest vanished")
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 0, remembered: nil), 1)
-        XCTAssertEqual(VaultManifest.baselineSeq(row: 5, remembered: UInt64.max), VaultManifest.maxNumber, "no overflow on a number from a file")
+    /// A baseline is always the served version + 1, whatever this device remembers (the server
+    /// takes nothing else, so no version can be pushed out of reach).
+    func testABaselineIsOneAboveTheServedRow() throws {
+        XCTAssertEqual(VaultManifest.baselineSeq(row: 5), 6)
+        XCTAssertEqual(VaultManifest.baselineSeq(row: 0), 1)
+        XCTAssertEqual(VaultManifest.baselineSeq(row: Int64(VaultManifest.maxNumber) - 1), VaultManifest.maxNumber)
+        XCTAssertNil(VaultManifest.baselineSeq(row: Int64(VaultManifest.maxNumber)), "nothing above the last number")
+        XCTAssertNil(VaultManifest.baselineSeq(row: -1))
         // It names the manifest the server shows now, by its link (it needn't open).
         let w = try world()
         let m = try w.start(3)
@@ -592,7 +727,11 @@ final class VaultManifestTests: XCTestCase {
             VaultManifest.dueTrash(rows, serverTime: time, trashDays: days, firstSeen: seen ?? watched, now: clock ?? now).map(\.id)
         }
         XCTAssertEqual(due(now, 30), ["old"], "strictly older than the retention")
-        XCTAssertEqual(due(now, 1), ["old", "edge", "new"])
+        XCTAssertEqual(due(now, 1), ["old", "edge"], "never before this device saw it wait a week, whatever retention the server names")
+        XCTAssertEqual(due(now, 1, seen: ["new": now - 7 * day + 1]), [])
+        XCTAssertEqual(due(now, 1, seen: ["new": now - 7 * day]), ["new"], "a week at the least")
+        XCTAssertEqual(due(now, 3, seen: ["new": now - 7 * day]), [], "the server's rule is strict: deleted exactly the retention ago isn't due")
+        XCTAssertEqual(VaultManifest.trashFloorDays, 7)
         XCTAssertEqual(due(now, 0), [], "0 = kept forever")
         XCTAssertEqual(due(nil, 30), [], "never without the server's clock")
         XCTAssertEqual(due(now, nil), [])
@@ -601,13 +740,14 @@ final class VaultManifestTests: XCTestCase {
         // What a server can say isn't enough: a far-off clock, a short retention, early
         // `deleted_at`s. Nothing goes before this device saw it wait that long itself.
         XCTAssertEqual(due(now, 30, seen: [:]), [], "right after the update nothing is deleted")
-        XCTAssertEqual(due(now, 1, seen: ["old": now - 2 * day, "edge": now - 3600, "new": now]), ["old"])
+        XCTAssertEqual(due(now, 1, seen: ["old": now - 2 * day, "edge": now - 3600, "new": now]), [], "a day's retention and early deleted_at empty nothing")
+        XCTAssertEqual(due(now, 1, seen: ["old": now - 8 * day, "edge": now - 3600, "new": now]), ["old"])
         XCTAssertEqual(due(now, 30, seen: ["old": now - 29 * day]), [], "seen for less than the retention")
         XCTAssertEqual(due(now, 30, seen: ["old": now - 30 * day]), ["old"])
         XCTAssertEqual(due(9_000_000_000_000_000_000, 1), [], "a server clock far from this device's")
         XCTAssertEqual(due(now + 2 * day, 1), [])
         XCTAssertEqual(due(now - 2 * day, 1), [])
-        XCTAssertEqual(due(now + day, 1), ["old", "edge", "new"], "within a day")
+        XCTAssertEqual(due(now + day, 1), ["old", "edge"], "within a day")
         XCTAssertEqual(due(now, 30, clock: 0), [])
         XCTAssertEqual(due(Int64.max, 1, clock: -5), [], "no arithmetic overflows on these numbers")
         XCTAssertEqual(due(Int64.max, 1, clock: Int64.min), [])
@@ -689,8 +829,11 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertNil(answer(item: #""deleted_at":9007199254740992"#))
         XCTAssertNil(answer(item: #""deleted_at":1.5"#))
         XCTAssertNil(answer(item: #""deleted_at":"soon""#))
-        // 0 and below reach the check as they are, where the core refuses them (a mismatch).
+        // 0 reaches the check as it is, where the core refuses it (a mismatch); a time below 0
+        // isn't an answer at all, as in the Android app.
         XCTAssertEqual(answer(item: #""deleted_at":0"#)?.items.first?.deletedAt, 0)
+        XCTAssertNil(answer(item: #""deleted_at":-1"#))
+        XCTAssertNil(answer(item: #""deleted_at":-9223372036854775808"#))
         // A write's answer far from the copy's number is never "the next one" (and nothing traps).
         XCTAssertEqual(SyncDecision.afterWrite(known: Int64.max, vaultSeq: Int64.min), .sync)
         XCTAssertEqual(SyncDecision.afterWrite(known: Int64.max, vaultSeq: Int64.max), .nothing)
@@ -832,5 +975,15 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(ItemRollback.itemWarning, "Your server sent an older version of this item.")
         XCTAssertEqual(ManifestText.unchecked, "PassAuth couldn't check this vault with your server yet. Try again in a moment.")
         XCTAssertEqual(ManifestText.viewUnchecked, "This vault has no record of changes yet, so PassAuth couldn't check that nothing is missing or out of date.")
+        XCTAssertEqual(ManifestText.reviewElsewhere, "Open the web vault or the desktop app to review this vault.")
+        XCTAssertEqual(ManifestText.unopenable, "An item in this vault can't be opened. Delete it to keep using the vault.")
+        XCTAssertEqual(ManifestText.unopenableReader, "An item in this vault can't be opened. Someone who can edit this vault can delete it.")
+        XCTAssertEqual(ManifestText.unopenableItem, "Item that can't be opened")
+        XCTAssertEqual(ManifestText.deleteForGood, "Delete for good")
+        XCTAssertEqual(ManifestText.deleteConfirm, "This item can't be opened on this device. Deleting it removes it for everyone.")
+        XCTAssertEqual(ManifestText.memoryUnreadable, "PassAuth can't read this device's record of your vaults.")
+        XCTAssertEqual(ManifestText.memoryReset, "Reset on this device")
+        XCTAssertEqual(ManifestText.memoryResetConfirm, "PassAuth will trust what your server shows now and start a new record on this device.")
+        XCTAssertEqual(VaultRepository.sendPasswordNeeded, "Enter this Send's password to change its text.")
     }
 }

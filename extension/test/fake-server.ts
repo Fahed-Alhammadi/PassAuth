@@ -16,7 +16,10 @@
  * answers carry `server_time` and `trash_days`, trash summaries carry `data_sha256`, every item write into a vault
  * with a manifest must bring the next one, which must name the vault's current one as its predecessor (400
  * `manifest_required`; 409 `manifest_conflict` for another version or another `prev`; 400 for a `prev` that is no
- * link), `PUT /vaults/{id}/manifest` starts one, `POST /vaults/{id}/trash/purge` deletes trashed items for good, and
+ * link), `PUT /vaults/{id}/manifest` starts one or writes a baseline (always exactly one version above the vault's:
+ * anything else is 400), `POST /vaults/{id}/trash/purge` deletes trashed items for good, every write answer names the
+ * vault's manifest after it (`manifest_seq` and `manifest_link`; a create sent again is answered as a repeat, with the
+ * manifest the server holds), and
  * `GET /vaults/{id}/manifest-log?after=` lists every manifest stored (`{seq, prev, digest}`, `logPage` an answer). A manifest a client sends is checked with the real
  * core against the items the server then holds (test/manifest-key.ts): one that doesn't describe them is listed in
  * `manifestErrors` and answered 500. Writes "elsewhere" (the helpers below) bring their own manifest, like another device.
@@ -153,13 +156,13 @@ export function fakeServer(base = "https://vault.test") {
     },
 
     /**
-     * Another device (with the vault's key) writes the vault's manifest for the items as they are now: version `seq`
-     * (default: the next), naming the manifest the server holds now as its predecessor (what a write, a key
-     * replacement and "Use the server's copy" all do).
+     * Another device (with the vault's key) writes the vault's manifest for the items as they are now: always the
+     * next version (the server takes no other), naming the manifest the server holds now as its predecessor (what a
+     * write, a key replacement and a baseline, "Use the server's copy" by someone with write access, all do).
      */
-    remanifest(vaultId: string, seq?: number) {
+    remanifest(vaultId: string) {
       const v = s.vaults.find((x) => x.id === vaultId)!;
-      const w = manifestKey(v.wrapped_key).manifestStart(v.id, v.key_epoch, seq ?? (v.manifest_seq ?? 0) + 1, s.linkOf(vaultId), s.manifestRows(vaultId));
+      const w = manifestKey(v.wrapped_key).manifestStart(v.id, v.key_epoch, (v.manifest_seq ?? 0) + 1, s.linkOf(vaultId), s.manifestRows(vaultId));
       s.setManifest(vaultId, w);
     },
 
@@ -172,7 +175,7 @@ export function fakeServer(base = "https://vault.test") {
     startManifestElsewhere(vaultId: string) {
       s.revision++;
       s.bump(vaultId);
-      s.remanifest(vaultId, 1);
+      s.remanifest(vaultId);
     },
 
     /** The manifest a write must carry for `vaultId`: an error reply, or null when it is in order (`sent`: what came). */
@@ -300,7 +303,7 @@ export function fakeServer(base = "https://vault.test") {
         return v2("key_epoch") && epoch !== undefined && v !== undefined && epoch !== v.key_epoch;
       };
       const keyChanged = { status: 409, body: { error: "vault_key_changed", message: "the vault key was replaced; sync and try again" } };
-      const manifestSeq = (vaultId: string) => (v2("vault_manifest") ? { manifest_seq: s.vaults.find((v) => v.id === vaultId)?.manifest_seq ?? 0 } : {});
+      const manifestSeq = (vaultId: string) => (v2("vault_manifest") ? { manifest_seq: s.vaults.find((v) => v.id === vaultId)?.manifest_seq ?? 0, manifest_link: s.linkOf(vaultId) } : {});
       if (req.method === "GET" && req.path === "/config") {
         if (s.outdated === "old") return { body: { name: "PassAuth", version: "0.3.0" } };
         const features = s.outdated === "unsigned" ? s.features.filter((f) => f !== "signed_sharing") : [...new Set([...s.features, "signed_sharing"])];
@@ -313,7 +316,9 @@ export function fakeServer(base = "https://vault.test") {
         if (!v) return { status: 404, body: { error: "not_found", message: "not found" } };
         if (v.role === "read") return { status: 403, body: { error: "forbidden", message: "read only" } };
         if (typeof b.prev !== "string" || !LINK.test(b.prev)) return { status: 400, body: { error: "bad_request", message: "prev is not a link" } };
-        if ((v.manifest_seq ?? 0) !== b.base_seq || (v.seq ?? 0) !== b.vault_seq || !(b.seq > b.base_seq) || b.prev !== (s.linkOf(v.id) ?? ZERO_LINK)) {
+        // Every manifest is exactly one version above the one it replaces (a first one: 0 → 1).
+        if (b.seq !== b.base_seq + 1) return { status: 400, body: { error: "bad_request", message: "seq must be base_seq + 1" } };
+        if ((v.manifest_seq ?? 0) !== b.base_seq || (v.seq ?? 0) !== b.vault_seq || b.prev !== (s.linkOf(v.id) ?? ZERO_LINK)) {
           return { status: 409, body: { error: "manifest_conflict", message: "the vault changed; sync and try again" } };
         }
         if (b.base_seq === 0 && !v.manifest_ok) return { status: 409, body: { error: "manifest_not_ready", message: "some apps are too old" } };
@@ -321,7 +326,7 @@ export function fakeServer(base = "https://vault.test") {
         const seq = s.bump(v.id);
         const bad = s.storeManifest(v.id, { vault_id: v.id, seq: b.seq, prev: b.prev, sealed: b.sealed });
         if (bad) return bad;
-        return { body: { revision: s.revision, vault_seq: seq, manifest_seq: b.seq } };
+        return { body: { revision: s.revision, vault_seq: seq, ...manifestSeq(v.id) } };
       }
       const purgeOf = /^\/vaults\/([^/]+)\/trash\/purge$/.exec(req.path);
       if (req.method === "POST" && purgeOf) {
@@ -378,7 +383,8 @@ export function fakeServer(base = "https://vault.test") {
         const existing = s.items.find((i) => i.id === b.id);
         if (existing) {
           if (v2("idempotent_create") && existing.vault_id === b.vault_id && existing.item_key === b.key && existing.data === b.data) {
-            return { body: { id: b.id, revision: existing.revision } };
+            // A repeat: nothing is written, the manifest sent is ignored, and the answer names the vault as it is.
+            return { body: { id: b.id, revision: existing.revision, ...(v2("delta_sync") ? { vault_seq: s.vaults.find((v) => v.id === b.vault_id)?.seq } : {}), ...manifestSeq(b.vault_id) } };
           }
           return v2("error_codes")
             ? { status: 409, body: { error: "item_exists", message: "item id already exists" } }

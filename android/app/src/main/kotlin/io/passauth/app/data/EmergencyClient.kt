@@ -118,6 +118,8 @@ data class GrantorVault(
     val failed: Int,
     /** Vaults (names) whose items aren't what their manifest records ([Manifests.WARNING]). */
     val mismatched: List<String> = emptyList(),
+    /** Vaults (names) that have no manifest: nothing could be checked ([Manifests.VIEW_UNCHECKED]). */
+    val unchecked: List<String> = emptyList(),
 )
 
 /**
@@ -641,6 +643,7 @@ class EmergencyClient(private val env: EmergencyEnv) {
         val vaults = mutableListOf<Pair<String, String>>()
         val items = mutableListOf<GrantorEntry>()
         val mismatched = mutableListOf<String>()
+        val unchecked = mutableListOf<String>()
         var failed = 0
         key.use { k ->
             for (v in data.vaults) {
@@ -677,11 +680,13 @@ class EmergencyClient(private val env: EmergencyEnv) {
                             false
                         }
                         if (!ok) mismatched += name
+                    } else {
+                        unchecked += name
                     }
                 }
             }
         }
         items.sortWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.item.name })
-        return GrantorVault(grant, vaults, items, failed, mismatched)
+        return GrantorVault(grant, vaults, items, failed, mismatched, unchecked)
     }
 }

@@ -9609,7 +9609,7 @@
     "data": "AgFgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGC6_cxzj5F59c-YPuZLJqYvImwYxRfFw1Vje5sVsh5So_ip0lX6KaV4WfQQB6RXHQ"
   },
   "vaultManifest": {
-    "about": "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); link = SHA-256(\"passauth/vault-manifest-link/v1\" ‖ 0x00 ‖ version (8 bytes, big-endian) ‖ prev (32 bytes; zero for a first manifest) ‖ SHA-256(sealed text)); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>/<prev in hex>. An item is in the trash exactly when its deleted_at is not null; deleted_at must be null/absent or a whole number above 0 (`malformed`: every entry point throws). Keys: accountFromSessionBytes(accountId, sessionBytes), then openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false) for `main` and openVaultKey(vaultId, rotated.wrappedKey, \"account\", rotated.keyEpoch, false) for `rotated`. `manifests`: vault rows (manifest_seq, manifest_prev, manifest) with their link (manifestLink must give it). `checks`: manifestVerify(vaultId, keyEpoch of the check, the row of `manifest`, remembered version and link or none, log or none, items[`items`]) with that check's key gives `expected` exactly. `writes`: manifestNext on `manifests.current` gives seq and prev of `expected`, opens to its counts and sum, and checks out against `after` for a device that remembers `current`. `starts`: manifestStart(vaultId, keyEpoch, version, prev, items[`items`]) with that key gives seq and prev of `expected` and checks out for `remembered`.",
+    "about": "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); link = SHA-256(\"passauth/vault-manifest-link/v1\" ‖ 0x00 ‖ version (8 bytes, big-endian) ‖ prev (32 bytes; zero for a first manifest) ‖ SHA-256(sealed text)); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>/<prev in hex>. An item is in the trash exactly when its deleted_at is not null; deleted_at must be null/absent or a whole number above 0 (`malformed`: every entry point throws). Keys: accountFromSessionBytes(accountId, sessionBytes), then openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false) for `main` and openVaultKey(vaultId, rotated.wrappedKey, \"account\", rotated.keyEpoch, false) for `rotated`. `manifests`: vault rows (manifest_seq, manifest_prev, manifest) with their link (manifestLink must give it). `checks`: manifestVerify(vaultId, keyEpoch of the check, the row of `manifest`, remembered version and link or none, log or none, items[`items`]) with that check's key gives `expected` exactly. `writes`: manifestNext on `manifests.current` gives seq and prev of `expected`, opens to its counts and sum, and checks out against `after` for a device that remembers `current`. `starts`: manifestStart(vaultId, keyEpoch, version, prev, items[`items`]) with that key gives seq and prev of `expected` and checks out for `remembered`. `accepts`: manifestAccept(vaultId, keyEpoch of the entry, the row of `manifest`, items[`items`]) with that entry's key gives `expected` exactly (ok: replace the device's memory with version and link; none: forget it; else remember nothing). `badMemories`: manifestVerify throws for each as the remembered pair. Log entries in `checks` are passed as they are, rubbish included: no binding may throw on them.",
     "accountId": "00000000-0000-4000-8000-0000000000e1",
     "sessionBytes": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw",
     "vaultId": "00000000-0000-4000-8000-0000000000e2",
@@ -10193,10 +10193,10 @@
         "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E"
       },
       "baseline": {
-        "manifest_seq": 9,
+        "manifest_seq": 6,
         "manifest_prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
-        "manifest": "AV9fX19fX19fX19fX19fX19fX19fX19fX8-v0ktkB2meT-IsFLDkHZg7NoaLY5-18-_99YphdMxaQnIim03CgRBgaq8IkQAGOPH7q3ZWglbjurhgejMv93XNgLe2YBI_-TZ889Ej4tOPnhWIETo7lZ_eAbnPouAU85T8dJnYLA",
-        "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM"
+        "manifest": "AV9fX19fX19fX19fX19fX19fX19fX19fX8-v0ktkB2meT-IsG7DkHZg7NoaLY5-18-_99YphdMxaQnIim03CgRBgaq8IkQAGOPH7q3ZWglbjurhgejMv93XNgLe2YBI_-TZ889Ej4tOPnhWIETo7audtWeMnxBNlstUrwiVbFg",
+        "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk"
       },
       "relabelled": {
         "manifest_seq": 4,
@@ -10720,7 +10720,7 @@
         }
       },
       {
-        "name": "joined one version later, no log yet",
+        "name": "joined one version later, no log needed",
         "manifest": "forkFourth",
         "key": "main",
         "keyEpoch": 2,
@@ -10731,7 +10731,7 @@
         "log": null,
         "items": "full",
         "expected": {
-          "status": "need_log",
+          "status": "mismatch",
           "version": 3,
           "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
@@ -10777,6 +10777,25 @@
         "items": "full",
         "expected": {
           "status": "mismatch",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "joined two versions later, no log yet",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "need_log",
           "version": 3,
           "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
@@ -11178,6 +11197,281 @@
           "status": "mismatch",
           "version": 2,
           "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log with rubbish around the real entries",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          null,
+          true,
+          7,
+          -7,
+          1.5,
+          "text",
+          [],
+          [
+            1,
+            [
+              2
+            ]
+          ],
+          {},
+          {
+            "seq": 3
+          },
+          {
+            "seq": -1,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 0,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 2.5,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": "3",
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": null,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": 4,
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": null
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": [
+              "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+            ]
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": {
+              "n": 3
+            },
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          },
+          null,
+          true,
+          7,
+          -7,
+          1.5,
+          "text",
+          [],
+          [
+            1,
+            [
+              2
+            ]
+          ],
+          {},
+          {
+            "seq": 3
+          },
+          {
+            "seq": -1,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 0,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 2.5,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": "3",
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": null,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": 4,
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": null
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": [
+              "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+            ]
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": {
+              "n": 3
+            },
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log of rubbish alone",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          null,
+          true,
+          7,
+          -7,
+          1.5,
+          "text",
+          [],
+          [
+            1,
+            [
+              2
+            ]
+          ],
+          {},
+          {
+            "seq": 3
+          },
+          {
+            "seq": -1,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 0,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 2.5,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": "3",
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": null,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": 4,
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": null
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": [
+              "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+            ]
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          },
+          {
+            "seq": {
+              "n": 3
+            },
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
           "live": 2,
           "trashed": 1
         }
@@ -11647,15 +11941,15 @@
         "key": "main",
         "keyEpoch": 2,
         "remembered": {
-          "version": 9,
-          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM"
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk"
         },
         "log": null,
         "items": "full",
         "expected": {
           "status": "ok",
-          "version": 9,
-          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk",
           "live": 2,
           "trashed": 1
         }
@@ -11670,8 +11964,8 @@
         "items": "full",
         "expected": {
           "status": "ok",
-          "version": 9,
-          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk",
           "live": 2,
           "trashed": 1
         }
@@ -11689,8 +11983,8 @@
         "items": "full",
         "expected": {
           "status": "ok",
-          "version": 9,
-          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk",
           "live": 2,
           "trashed": 1
         }
@@ -11724,14 +12018,33 @@
         "items": "full",
         "expected": {
           "status": "ok",
-          "version": 9,
-          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk",
           "live": 2,
           "trashed": 1
         }
       },
       {
         "name": "a baseline, a device on the other history",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device on the other history, with the logs",
         "manifest": "baseline",
         "key": "main",
         "keyEpoch": 2,
@@ -11776,23 +12089,353 @@
         }
       },
       {
-        "name": "a baseline, a device on the other history, no log yet",
+        "name": "a baseline, a device further back on the other history, no log yet",
         "manifest": "baseline",
         "key": "main",
         "keyEpoch": 2,
         "remembered": {
-          "version": 5,
-          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo"
         },
         "log": null,
         "items": "full",
         "expected": {
           "status": "need_log",
-          "version": 5,
-          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
           "live": 2,
           "trashed": 1
         }
+      },
+      {
+        "name": "a baseline, a device further back on the other history",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo"
+        },
+        "log": [
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device that saw a later version",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 7,
+          "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 7,
+          "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E",
+          "live": 0,
+          "trashed": 0
+        }
+      }
+    ],
+    "accepts": [
+      {
+        "name": "the served manifest records the served items",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "the same from summary rows",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "summary",
+        "expected": {
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an older state of the vault (a restored backup)",
+        "manifest": "second",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "the other history",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 5,
+          "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 6,
+          "link": "rgJfeBYQmC3PyoK7ibb4LMCrRdVcRKO_ZHhKKQBLZKk",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "after a key replacement",
+        "manifest": "rotatedNext",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "items": "rotated",
+        "expected": {
+          "status": "ok",
+          "version": 7,
+          "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "no manifest served",
+        "manifest": "none",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "none",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "version 0 with a text left over",
+        "manifest": "noneWithText",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "none",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "an item hidden",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "hidden",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an item brought back",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "resurrected",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an older copy of an item",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "older",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a manifest that doesn't open",
+        "manifest": "garbage",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "another predecessor listed",
+        "manifest": "otherPrev",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "no predecessor listed",
+        "manifest": "noPrev",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "another version listed",
+        "manifest": "relabelled",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "the old key after a key replacement",
+        "manifest": "rotated",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "rotated",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "a row without data or hash",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "items": "noHash",
+        "expected": {
+          "status": "incomplete",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      }
+    ],
+    "badMemories": [
+      {
+        "version": 2,
+        "link": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      {
+        "version": 3,
+        "link": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      {
+        "version": 0,
+        "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+      },
+      {
+        "version": 2,
+        "link": "AAAA"
+      },
+      {
+        "version": 2,
+        "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQA"
+      },
+      {
+        "version": 2,
+        "link": ""
       }
     ],
     "writes": [
@@ -12194,7 +12837,7 @@
         "name": "a baseline on the manifest the server shows",
         "key": "main",
         "keyEpoch": 2,
-        "version": 9,
+        "version": 6,
         "prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
         "items": "full",
         "remembered": {
@@ -12202,7 +12845,7 @@
           "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
         },
         "expected": {
-          "seq": 9,
+          "seq": 6,
           "prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
         }
       },
@@ -12210,12 +12853,12 @@
         "name": "a baseline on a manifest that doesn't open",
         "key": "main",
         "keyEpoch": 2,
-        "version": 9,
+        "version": 4,
         "prev": "YHV65xgIDqzlAfumfbF4ImVsNSyNyhvkUNhffp4Kwhc",
         "items": "full",
         "remembered": null,
         "expected": {
-          "seq": 9,
+          "seq": 4,
           "prev": "YHV65xgIDqzlAfumfbF4ImVsNSyNyhvkUNhffp4Kwhc"
         }
       }

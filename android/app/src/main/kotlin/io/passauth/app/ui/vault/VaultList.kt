@@ -221,6 +221,40 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                 v?.unresolved.orEmpty().forEach { u ->
                     item(key = "manifest:${u.id}") { ManifestWarning(ctx, u, named = (v?.vaults?.size ?: 0) > 1) }
                 }
+                // Vaults whose record is fine but that hold an item this phone can't open: said with the way out, the items listed below.
+                v?.withUnopenable.orEmpty().forEach { u ->
+                    item(key = "unopenable:${u.id}") {
+                        val M = io.passauth.app.data.Manifests
+                        WarningCard(ctx, u.name.takeIf { (v?.vaults?.size ?: 0) > 1 }, if (u.role == io.passauth.app.data.Role.Read) M.UNOPENABLE_READERS else M.UNOPENABLE)
+                    }
+                }
+                // Items that don't open: nothing to show of them, but someone who can edit the vault can delete them for good.
+                v?.unopenable.orEmpty().forEach { row ->
+                    val vault = v?.vaults?.firstOrNull { it.id == row.vaultId } ?: return@forEach
+                    item(key = "unopenable-item:${row.id}") {
+                        val M = io.passauth.app.data.Manifests
+                        // A vault whose record doesn't match is reviewed first ("Use the server's copy"); view-only members can't delete.
+                        val canDelete = vault.role != io.passauth.app.data.Role.Read && vault.manifest != io.passauth.app.data.ManifestState.Unresolved
+                        WarningCard(
+                            ctx, M.UNOPENABLE_ITEM, "In ${vault.name}.",
+                            action = M.DELETE_FOR_GOOD.takeIf { canDelete },
+                            confirmTitle = "${M.DELETE_FOR_GOOD}?", confirmSubtitle = vault.name, confirmBody = M.DELETE_FOR_GOOD_CONFIRM,
+                        ) {
+                            ctx.repo.deleteUnopenable(row)
+                            ctx.notify("Item deleted.")
+                        }
+                    }
+                }
+                // This phone's own record of the vaults can't be read, again and again: said, with the way out.
+                if (v?.memoryUnreadable == true) {
+                    item(key = "memory-unreadable") {
+                        val M = io.passauth.app.data.Manifests
+                        WarningCard(
+                            ctx, null, M.MEMORY_UNREADABLE,
+                            action = M.RESET_MEMORY, confirmTitle = "${M.RESET_MEMORY}?", confirmSubtitle = null, confirmBody = M.RESET_MEMORY_CONFIRM,
+                        ) { ctx.repo.resetDeviceMemory() }
+                    }
+                }
                 // The server sent older versions of items than this phone saw (item edit counters).
                 v?.rollbackNotice?.let { notice ->
                     item { Alert(notice, AlertKind.Error, modifier = Modifier.padding(top = 8.dp)) }
@@ -417,45 +451,71 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
 }
 
 /**
- * The warning of a vault whose items don't match its manifest, with the deliberate way out for
- * people who can edit the vault ("Use the server's copy", confirmed in a sheet). Never dismissible:
- * the vault isn't changed while it shows.
+ * The warning of a vault whose items don't match its manifest, with the deliberate way out ("Use the
+ * server's copy", confirmed in a sheet): for everyone when this phone alone can accept what the
+ * server shows, else for people who can edit the vault (a new record is written); view-only members
+ * are told who can. Never dismissible: the vault isn't changed while it shows.
  */
 @Composable
 private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, named: Boolean) {
+    val m = io.passauth.app.data.Manifests
+    val offered = vault.manifestAcceptable || vault.role != io.passauth.app.data.Role.Read
+    WarningCard(
+        ctx, vault.name.takeIf { named }, m.WARNING,
+        note = m.READERS.takeIf { !offered },
+        action = m.USE_SERVER_COPY.takeIf { offered },
+        confirmTitle = m.CONFIRM_TITLE, confirmSubtitle = vault.name, confirmBody = m.CONFIRM_BODY,
+    ) { ctx.repo.useServerCopy(vault.id) }
+}
+
+/**
+ * A standing warning above the items (never dismissible): an optional [heading], the [text], an
+ * optional [note], and an optional [action] that is confirmed in a sheet ([confirmTitle],
+ * [confirmBody]) before [run].
+ */
+@Composable
+private fun WarningCard(
+    ctx: UiCtx,
+    heading: String?,
+    text: String,
+    note: String? = null,
+    action: String? = null,
+    confirmTitle: String = "",
+    confirmSubtitle: String? = null,
+    confirmBody: String = "",
+    run: suspend () -> Unit = {},
+) {
     var confirm by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
-    val canEdit = vault.role != io.passauth.app.data.Role.Read
     Surface(
         color = MaterialTheme.colorScheme.errorContainer,
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
         shape = RoundedCornerShape(Radius.control),
         modifier = Modifier.fillMaxWidth().padding(top = Space.s),
     ) {
-        Column(Modifier.padding(start = Space.m, end = Space.m, top = Space.m, bottom = if (canEdit) Space.xs else Space.m)) {
-            if (named) Text(vault.name, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
-            Text(io.passauth.app.data.Manifests.WARNING, style = MaterialTheme.typography.bodyMedium)
-            if (canEdit) {
+        Column(Modifier.padding(start = Space.m, end = Space.m, top = Space.m, bottom = if (action != null) Space.xs else Space.m)) {
+            if (heading != null) Text(heading, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
+            Text(text, style = MaterialTheme.typography.bodyMedium)
+            if (note != null) Text(note, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = Space.s))
+            if (action != null) {
                 TextButton(onClick = { confirm = true }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Text(io.passauth.app.data.Manifests.USE_SERVER_COPY, color = MaterialTheme.colorScheme.onErrorContainer)
+                    Text(action, color = MaterialTheme.colorScheme.onErrorContainer)
                 }
-            } else {
-                Text(io.passauth.app.data.Manifests.READERS, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = Space.s))
             }
         }
     }
-    if (confirm) {
+    if (confirm && action != null) {
         io.passauth.app.ui.components.DecisionSheet(
             onDismiss = { confirm = false },
-            title = io.passauth.app.data.Manifests.CONFIRM_TITLE,
-            subtitle = vault.name,
+            title = confirmTitle,
+            subtitle = confirmSubtitle,
             actions = {
-                io.passauth.app.ui.components.PrimaryButton(io.passauth.app.data.Manifests.USE_SERVER_COPY, {
+                io.passauth.app.ui.components.PrimaryButton(action, {
                     confirm = false
                     busy = true
                     ctx.launch {
                         try {
-                            ctx.repo.useServerCopy(vault.id)
+                            run()
                         } finally {
                             busy = false
                         }
@@ -463,7 +523,7 @@ private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, n
                 }, danger = true)
                 io.passauth.app.ui.components.QuietActions { io.passauth.app.ui.components.QuietButton("Cancel", { confirm = false }) }
             },
-        ) { io.passauth.app.ui.components.PromptText(io.passauth.app.data.Manifests.CONFIRM_BODY) }
+        ) { io.passauth.app.ui.components.PromptText(confirmBody) }
     }
 }
 

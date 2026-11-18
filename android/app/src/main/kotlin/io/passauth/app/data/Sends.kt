@@ -428,7 +428,10 @@ class SendActions(
      * encrypted again with the new content key (so [s] must have its `data`); removing the password
      * of a v2 Send turns it back into v1 the same way. [v2]: the server takes Send v2; without it a
      * password is neither set nor changed ([NEEDS_V2]): a Send is never written v1 with a password,
-     * and a v2 Send never goes back to v1 while it keeps one.
+     * and a v2 Send never goes back to v1 while it keeps one. A v1 Send that has a password (made
+     * before Send v2) on a server that takes v2 gets a new name or text only together with its
+     * password, which makes it v2 ([NEEDS_PASSWORD]): its text is never again written so that the
+     * link alone opens it.
      */
     fun changesOf(s: OwnedSend, edit: SendEdit, v2: Boolean = false): SendChanges {
         val c = crypto()
@@ -439,6 +442,7 @@ class SendActions(
         val newPassword = edit.password?.takeIf { it.isNotEmpty() }
         val removing = edit.password != null && edit.password.isEmpty()
         if (newPassword != null && !v2) throw UserException(NEEDS_V2)
+        if (needsPassword(c, s, edit, v2)) throw UserException(NEEDS_PASSWORD)
         // The fields say what the Send is: one whose fields and content key disagree isn't rewritten.
         val rewrites = edit.name != null || edit.text != null || edit.password != null
         if (rewrites && (mixed(c, s, s.name) || s.data?.let { mixed(c, s, it) } == true)) throw UserException(UNREADABLE)
@@ -478,9 +482,18 @@ class SendActions(
         }
     }
 
+    /**
+     * [edit] changes the name or text of a v1 Send that has a password, without giving the password,
+     * on a server that takes Send v2 ([v2]): refused ([NEEDS_PASSWORD]).
+     */
+    private fun needsPassword(c: SendCrypto, s: OwnedSend, edit: SendEdit, v2: Boolean): Boolean =
+        v2 && s.hasPassword && edit.password == null && (edit.name != null || edit.text != null) && s.ownerContentKey == null && !isV2(c, s)
+
     /** Save changes to a Send. */
     suspend fun update(s: OwnedSend, edit: SendEdit): OwnedSend {
-        val v2 = !edit.password.isNullOrEmpty() && sendV2()
+        // The server is asked what it takes only when the answer matters: a password given, or a v1 Send with one whose text changes.
+        val asks = !edit.password.isNullOrEmpty() || needsPassword(crypto(), s, edit, true)
+        val v2 = asks && sendV2()
         if (!edit.password.isNullOrEmpty() && !v2) throw UserException(NEEDS_V2)
         // A change of the format needs the text too (the list has none).
         val needsText = edit.password != null && s.data == null && (v2 || s.ownerContentKey != null || isV2(crypto(), s))
@@ -500,6 +513,7 @@ class SendActions(
     companion object {
         const val UNEXPECTED = "The server sent an unexpected response. Try again."
         const val NEEDS_V2 = "Update your PassAuth server to protect a Send with a password."
+        const val NEEDS_PASSWORD = "Enter this Send's password to change its text."
         const val UNREADABLE = "This Send is protected with its password and can't be read on this phone. You can still turn it off, delete it or copy its link."
     }
 }

@@ -132,6 +132,7 @@ private struct VaultList: View {
                 }
             }
             ManifestWarnings()
+            UnopenableItems(trashed: filter.scope == .trash)
             if let r = v?.rollback {
                 Section {
                     Notice(text: r.notice, kind: .error)

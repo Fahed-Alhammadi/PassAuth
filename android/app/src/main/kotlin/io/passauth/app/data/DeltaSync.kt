@@ -105,6 +105,8 @@ data class SyncResponse(
     /** The server's clock when the answer was read (unix seconds) and its trash retention in days (0: forever); servers with vault manifests. */
     @SerialName("server_time") val serverTime: Long? = null,
     @SerialName("trash_days") val trashDays: Long? = null,
+    /** Only in this phone's own stored copy ([SyncSnapshot.unresolved]); never read from a server answer. */
+    val unresolved: List<String>? = null,
 )
 
 /**
@@ -132,10 +134,18 @@ data class SyncSnapshot(
     /** The pending invitations of the answer (every answer replaces them); empty in copies from before. */
     val invitations: List<SyncInvitation> = emptyList(),
     /**
-     * Item versions a locked refresh replaced, kept until an unlocked sync checked their edit
-     * counters ([ItemRevs.withHeld]); empty after every unlocked sync. Local only.
+     * Newer copies this phone kept of items the server stopped sending without that being certain
+     * ([ItemRevs.waiting]), and the item versions an earlier build's locked refresh replaced (builds
+     * up to 0.11 wrote those; a locked refresh no longer touches the checked copy). Compared at the
+     * next unlocked sync. Local only.
      */
     val held: List<SyncItem> = emptyList(),
+    /**
+     * Vaults whose manifest warning stood when this copy was stored ([ManifestState.Unresolved],
+     * raised by a whole answer of the server). Local only: kept with the copy so a restart doesn't
+     * have to fetch everything again to find the same warning; every later sync judges the vault anew.
+     */
+    val unresolved: List<String> = emptyList(),
     /**
      * Of the server answer this copy was just made from (never stored): the server's clock and its
      * trash retention, for deleting old trash of vaults with a manifest ([Manifests.dueTrash]).
@@ -161,7 +171,10 @@ data class SyncSnapshot(
     companion object {
         /** The stored copy, or null when it can't be read as one (also a plain `/sync` answer stored before delta sync). */
         fun decode(text: String): SyncSnapshot? = DeltaSync.parse(text)?.let { r ->
-            SyncMerge.apply(r, null, local = true)?.copy(held = r.held.orEmpty().filter { it.itemKey != null && it.data != null }, serverTime = null, trashDays = null, whole = false)
+            SyncMerge.apply(r, null, local = true)?.copy(
+                held = r.held.orEmpty().filter { it.itemKey != null && it.data != null },
+                unresolved = r.unresolved.orEmpty(), serverTime = null, trashDays = null, whole = false,
+            )
         }
     }
 }

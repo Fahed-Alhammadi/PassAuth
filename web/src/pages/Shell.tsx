@@ -9,10 +9,21 @@ import { SERVER_UPDATE_NEEDED, api, friendlyError, hasFeature, usePolicies, useP
 import { keepDraftFor } from "../lib/drafts";
 import { invitationNotice, invitationsKey } from "../lib/invitations";
 import { getDesktop } from "../lib/platform";
-import { USE_SERVER_COPY, USE_SERVER_COPY_BODY, USE_SERVER_COPY_TITLE, VAULT_WARNING, VAULT_WARNING_READER } from "../lib/manifest";
+import {
+  MEMORY_RESET,
+  MEMORY_RESET_BODY,
+  MEMORY_UNREADABLE,
+  USE_SERVER_COPY,
+  USE_SERVER_COPY_BODY,
+  USE_SERVER_COPY_TITLE,
+  VAULT_UNOPENABLE,
+  VAULT_UNOPENABLE_READER,
+  VAULT_WARNING,
+  VAULT_WARNING_READER,
+} from "../lib/manifest";
 import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
 import { ROSTER_ROLLED_BACK, ROSTER_UNREADABLE } from "../lib/emergency-client";
-import { acceptServerCopy, dismissWarnings, lock, logout, useVault } from "../lib/vault";
+import { acceptServerCopy, dismissWarnings, lock, logout, resetDeviceRecord, useVault } from "../lib/vault";
 import { isTrashed, kindOf, type ItemKind } from "../lib/types";
 
 const KINDS: [ItemKind, string, IconName][] = [
@@ -239,32 +250,50 @@ function writeSession(key: string, value: string) {
 
 /**
  * Vault manifests: one warning for each vault whose items don't match its record of changes (`Vault.manifestWarning`).
- * The vault stays readable and takes no changes; someone who can edit it may accept the server's copy, after a
- * confirmation that says what that means.
+ * The vault stays readable and takes no changes. What it offers:
+ * - an item that can't be opened is the only problem: the text says to delete it (it is listed in the vault);
+ * - the server's copy is consistent in itself: everyone may accept it, on this device alone;
+ * - it isn't: someone who can edit may accept it (a new record is stored); a reader is told so.
+ * Accepting asks first and says what it means. Also the notice for a device record that can't be read, with its reset.
  */
 export function ManifestNotices() {
-  const { vaults } = useVault();
+  const { vaults, deviceRecordUnreadable } = useVault();
   const [asking, setAsking] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
   const flagged = vaults.filter((v) => v.manifestWarning);
   const target = flagged.find((v) => v.id === asking);
-  if (!flagged.length) return null;
+  if (!flagged.length && !deviceRecordUnreadable) return null;
   return (
     <>
+      {deviceRecordUnreadable && (
+        <div className="alert alert-warn small notice" role="alert" data-device-record>
+          <div className="grow">
+            <span>{MEMORY_UNREADABLE}</span>
+            <div className="row">
+              <button type="button" className="link" onClick={() => setResetting(true)}>
+                {MEMORY_RESET}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {flagged.map((v) => (
         <div key={v.id} className="alert alert-warn small notice" role="alert" data-manifest-warning={v.id}>
           <div className="grow">
             <span>
-              <strong>{v.name}:</strong> {VAULT_WARNING}
+              <strong>{v.name}:</strong> {v.manifestUnopenable ? (v.role === "read" ? VAULT_UNOPENABLE_READER : VAULT_UNOPENABLE) : VAULT_WARNING}
             </span>
-            <div className="row">
-              {v.role === "read" ? (
-                <span className="muted">{VAULT_WARNING_READER}</span>
-              ) : (
-                <button type="button" className="link" onClick={() => setAsking(v.id)}>
-                  {USE_SERVER_COPY}
-                </button>
-              )}
-            </div>
+            {!v.manifestUnopenable && (
+              <div className="row">
+                {v.manifestAcceptable || v.role !== "read" ? (
+                  <button type="button" className="link" onClick={() => setAsking(v.id)}>
+                    {USE_SERVER_COPY}
+                  </button>
+                ) : (
+                  <span className="muted">{VAULT_WARNING_READER}</span>
+                )}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -281,6 +310,20 @@ export function ManifestNotices() {
           }}
         >
           <p className="card-text">{USE_SERVER_COPY_BODY}</p>
+        </ConfirmDialog>
+      )}
+      {resetting && (
+        <ConfirmDialog
+          title={`${MEMORY_RESET}?`}
+          icon="shield"
+          action={MEMORY_RESET}
+          onClose={() => setResetting(false)}
+          onConfirm={async () => {
+            await resetDeviceRecord();
+            setResetting(false);
+          }}
+        >
+          <p className="card-text">{MEMORY_RESET_BODY}</p>
         </ConfirmDialog>
       )}
     </>

@@ -67,6 +67,8 @@ export function manifestKey(tag: string) {
       log: unknown,
       items: unknown,
     ): Check => realKey().manifestVerify(id(vaultId), epoch, seq, prev, sealed, rememberedVersion, rememberedLink, log, items),
+    manifestAccept: (vaultId: string, epoch: number, seq: number, prev: string | null | undefined, sealed: string | null | undefined, items: unknown): Check =>
+      realKey().manifestAccept(id(vaultId), epoch, seq, prev, sealed, items),
     manifestStart: (vaultId: string, epoch: number, version: number, prev: string | null | undefined, items: unknown): Written => realKey().manifestStart(id(vaultId), epoch, version, prev, items),
     manifestNext: (vaultId: string, epoch: number, seq: number, prev: string, sealed: string, removed: unknown, added: unknown): Written =>
       realKey().manifestNext(id(vaultId), epoch, seq, prev, sealed, removed, added),
