@@ -43,7 +43,7 @@ enum SettingsPage: String, Hashable, CaseIterable {
         case .permissions: "Permissions"
         case .vault: "Vault options"
         case .appearance: "Appearance"
-        case .about: "About"
+        case .about: "About PassAuth"
         case .export: "Export vault"
         }
     }
@@ -51,49 +51,85 @@ enum SettingsPage: String, Hashable, CaseIterable {
     var symbol: String {
         switch self {
         case .account: "person.crop.circle"
-        case .security: "lock.shield"
-        case .autofill: "key.viewfinder"
-        case .permissions: "hand.raised"
-        case .vault: "archivebox"
-        case .appearance: "paintpalette"
-        case .about: "info.circle"
+        case .security: "lock.shield.fill"
+        case .autofill: "key.fill"
+        case .permissions: "hand.raised.fill"
+        case .vault: "archivebox.fill"
+        case .appearance: "paintpalette.fill"
+        case .about: "info"
         case .export: "square.and.arrow.up"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .security, .account: Color.Tile.blue
+        case .autofill: Color.Tile.orange
+        case .permissions, .about: Color.Tile.gray
+        case .vault, .export: Color.Tile.purple
+        case .appearance: Color.Tile.pink
         }
     }
 }
 
-/// Settings: a list of categories, each opening its own page (like the Android app and extension).
+/// A settings row label: white symbol on a coloured rounded square (growing with the text size, like the Settings
+/// app), the title, and an optional trailing accessory (a count or a warning).
+struct TileLabel<Trailing: View>: View {
+    let title: String
+    let symbol: String
+    let tint: Color
+    @ViewBuilder var trailing: Trailing
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
+
+    var body: some View {
+        HStack(spacing: 14) {
+            let side = 29 * min(scale, 1.5)
+            Image(systemName: symbol)
+                .font(.system(size: side * 0.5, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: side, height: side)
+                .background(RoundedRectangle(cornerRadius: side * 0.24, style: .continuous).fill(tint))
+                .accessibilityHidden(true)
+            Text(title).foregroundStyle(Color.paInk)
+            Spacer(minLength: 8)
+            trailing
+        }
+    }
+}
+
+extension TileLabel where Trailing == EmptyView {
+    init(title: String, symbol: String, tint: Color) {
+        self.init(title: title, symbol: symbol, tint: tint) { EmptyView() }
+    }
+}
+
+/// "Needs attention" mark at the end of a row.
+private struct AttentionMark: View {
+    var body: some View {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.paDanger)
+            .accessibilityLabel("Needs attention")
+    }
+}
+
+/// Settings: the account on top, then one group per job without header labels (like the Settings app): what you do
+/// with the vault, how it's protected and filled, how the app looks and what it may use, and About. Everything about
+/// the account itself (switching, adding, locking, logging out, deleting) is on the Account page behind the card.
 struct SettingsTab: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let s = model.state
         NavigationStack {
             List {
                 Section {
-                    NavigationLink(value: SettingsPage.account) {
-                        HStack(spacing: 14) {
-                            Avatar(text: initials(s.name, s.email), size: 44)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(s.name.isEmpty ? s.email : s.name).font(.headline).foregroundStyle(Color.paInk)
-                                if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted) }
-                                Text(hostOf(s.server)).font(.footnote).foregroundStyle(Color.paMuted)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .accessibilityIdentifier("settings.account")
-                    .paRow()
-                }
-                Section {
+                    NavigationLink(value: SettingsPage.account) { AccountCard() }
+                        .accessibilityIdentifier("settings.account")
+                        .paRow()
                     // Vaults shared with the user and waiting for an answer (only while there are any).
                     if let waiting = model.repo.vault?.invitations.count, waiting > 0 {
                         NavigationLink {
                             InvitationsPage()
                         } label: {
-                            HStack {
-                                Label { Text(InvitationText.pageTitle).foregroundStyle(Color.paInk) } icon: { Image(systemName: "envelope.badge").foregroundStyle(Color.paAccent) }
-                                Spacer()
+                            TileLabel(title: InvitationText.pageTitle, symbol: "envelope.badge.fill", tint: Color.Tile.blue) {
                                 Text("\(waiting)")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.white)
@@ -106,61 +142,52 @@ struct SettingsTab: View {
                         .accessibilityIdentifier("settings.invitations")
                         .paRow()
                     }
+                }
+                Section {
+                    NavigationLink { HealthView() } label: {
+                        TileLabel(title: "Password health", symbol: "checkmark.shield.fill", tint: Color.Tile.green)
+                    }
+                    .accessibilityIdentifier("settings.health")
+                    NavigationLink { SendsPage() } label: {
+                        TileLabel(title: "Send", symbol: "paperplane.fill", tint: Color.Tile.teal)
+                    }
+                    .accessibilityIdentifier("settings.send")
                     // Signed sharing: the shared vaults and who signed them (only while there are any).
                     if let v = model.repo.vault, v.vaults.contains(where: { !$0.personal }) || !v.refused.isEmpty {
-                        NavigationLink {
-                            SharedVaultsPage()
-                        } label: {
-                            HStack {
-                                Label { Text(SharingText.sharedVaultsTitle).foregroundStyle(Color.paInk) } icon: { Image(systemName: "person.2").foregroundStyle(Color.paAccent) }
-                                if !v.refused.isEmpty {
-                                    Spacer()
-                                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.paDanger)
-                                        .accessibilityLabel("Needs attention")
-                                }
+                        NavigationLink { SharedVaultsPage() } label: {
+                            TileLabel(title: SharingText.sharedVaultsTitle, symbol: "person.2.fill", tint: Color.Tile.indigo) {
+                                if !v.refused.isEmpty { AttentionMark() }
                             }
                         }
                         .accessibilityIdentifier("settings.sharedVaults")
-                        .paRow()
                     }
-                    NavigationLink {
-                        HealthView()
-                    } label: {
-                        Label { Text("Password health").foregroundStyle(Color.paInk) } icon: { Image(systemName: "checkmark.shield").foregroundStyle(Color.paAccent) }
-                    }
-                    .accessibilityIdentifier("settings.health")
-                    .paRow()
-                    NavigationLink {
-                        SendsPage()
-                    } label: {
-                        Label { Text("Send").foregroundStyle(Color.paInk) } icon: { Image(systemName: "paperplane").foregroundStyle(Color.paAccent) }
-                    }
-                    .accessibilityIdentifier("settings.send")
-                    .paRow()
-                    NavigationLink {
-                        EmergencyPage()
-                    } label: {
-                        HStack {
-                            Label { Text("Emergency access").foregroundStyle(Color.paInk) } icon: { Image(systemName: "lifepreserver").foregroundStyle(Color.paAccent) }
-                            if model.repo.emergencyNotice != nil {
-                                Spacer()
-                                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Color.paDanger)
-                                    .accessibilityLabel("Needs attention")
-                            }
+                    NavigationLink { EmergencyPage() } label: {
+                        TileLabel(title: "Emergency access", symbol: "lifepreserver.fill", tint: Color.Tile.red) {
+                            if model.repo.emergencyNotice != nil { AttentionMark() }
                         }
                     }
                     .accessibilityIdentifier("settings.emergency")
-                    .paRow()
+                    pageLink(.vault)
                 }
+                .paRow()
                 Section {
-                    ForEach([SettingsPage.security, .autofill, .permissions, .vault, .appearance, .about], id: \.self) { p in
-                        NavigationLink(value: p) {
-                            Label { Text(p.title).foregroundStyle(Color.paInk) } icon: { Image(systemName: p.symbol).foregroundStyle(Color.paAccent) }
-                        }
-                        .accessibilityIdentifier("settings.\(p.rawValue)")
-                        .paRow()
-                    }
+                    pageLink(.security)
+                    pageLink(.autofill)
                 }
+                .paRow()
+                Section {
+                    pageLink(.appearance)
+                    pageLink(.permissions)
+                }
+                .paRow()
+                Section {
+                    pageLink(.about)
+                } footer: {
+                    Text("Version \(AppVersion.current.name)")
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, PA.Space.s)
+                }
+                .paRow()
             }
             .listStyle(.insetGrouped)
             .paList()
@@ -169,12 +196,39 @@ struct SettingsTab: View {
             .paNavBar()
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { LogoMark(height: 26) }
-                ToolbarItem(placement: .topBarTrailing) { AccountMenu() }
             }
             .navigationDestination(for: SettingsPage.self) { p in
                 SettingsPageView(page: p)
             }
         }
+    }
+
+    private func pageLink(_ p: SettingsPage) -> some View {
+        NavigationLink(value: p) { TileLabel(title: p.title, symbol: p.symbol, tint: p.tint) }
+            .accessibilityIdentifier("settings.\(p.rawValue)")
+    }
+}
+
+/// The account card at the top of Settings: avatar, name, email and server.
+private struct AccountCard: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let s = model.state
+        HStack(spacing: 14) {
+            Avatar(text: initials(s.name, s.email), size: 52)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(s.name.isEmpty ? s.email : s.name).font(.title3.weight(.semibold)).foregroundStyle(Color.paInk).lineLimit(1)
+                if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted).lineLimit(1) }
+                HStack(spacing: 4) {
+                    Image(systemName: "server.rack").imageScale(.small)
+                    Text(hostOf(s.server)).lineLimit(1)
+                }
+                .font(.footnote).foregroundStyle(Color.paMuted)
+            }
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -215,16 +269,30 @@ private struct Help: View {
 
 // MARK: Account
 
+/// Settings → Account: everything about the signed-in account in one place. Who and where, the sharing identity,
+/// the accounts on this device (switch, add), then Lock and Log out, then Delete account at the bottom.
 private struct AccountPage: View {
     @Environment(AppModel.self) private var model
     @State private var confirmLogout = false
 
     var body: some View {
         let s = model.state
-        Section("Signed in") {
-            LabeledContent("Email", value: s.email)
-            if !s.name.isEmpty { LabeledContent("Name", value: s.name) }
-            LabeledContent("Server", value: hostOf(s.server))
+        Section {
+            VStack(spacing: PA.Space.s) {
+                Avatar(text: initials(s.name, s.email), size: 72)
+                Text(s.name.isEmpty ? s.email : s.name).font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
+                    .multilineTextAlignment(.center)
+                if !s.name.isEmpty { Text(s.email).font(.subheadline).foregroundStyle(Color.paMuted) }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, PA.Space.s)
+            .accessibilityElement(children: .combine)
+            .listRowBackground(Color.clear)
+        }
+        Section {
+            LabeledContent("Server") { Text(s.server).textSelection(.enabled).lineLimit(2) }
+        } footer: {
+            Text("To use another PassAuth server, add an account or log out and choose \"Change server\" on the sign-in screen.")
         }
         .paRow()
         SigningIdentitySection()
@@ -235,26 +303,28 @@ private struct AccountPage: View {
                 } label: {
                     HStack {
                         AccountRow(account: a)
-                        if a.id == s.activeId { Image(systemName: "checkmark").foregroundStyle(Color.paAccent) }
+                        if a.id == s.activeId { Image(systemName: "checkmark").foregroundStyle(Color.paAccent).accessibilityLabel("Current account") }
                     }
                 }
                 .buttonStyle(.plain)
             }
             if s.accounts.count < maxAccounts {
                 Button { model.run { try await model.repo.addAccount() } } label: { Label("Add account", systemImage: "person.badge.plus") }
+                    .accessibilityIdentifier("account.add")
             }
         } header: {
             Text("Accounts on this device")
         } footer: {
-            Text("Up to \(maxAccounts) accounts, on the same or different PassAuth servers.")
+            Text("Up to \(maxAccounts) accounts, on the same or different PassAuth servers. Tap one to switch.")
         }
         .paRow()
         Section {
             Button { model.run { await model.repo.lockActive() } } label: { Label("Lock", systemImage: "lock") }
+                .accessibilityIdentifier("account.lock")
             Button(role: .destructive) { confirmLogout = true } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
                 .accessibilityIdentifier("logout")
         } footer: {
-            Text("Logging out removes this account's vault from this device.")
+            Text("Locking keeps the encrypted vault on this device. Logging out removes it.")
         }
         .paRow()
         .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
@@ -263,6 +333,17 @@ private struct AccountPage: View {
         } message: {
             Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
         }
+        Section {
+            NavigationLink {
+                DeleteAccountPage()
+            } label: {
+                Label("Delete account", systemImage: "person.crop.circle.badge.xmark").foregroundStyle(Color.paDanger)
+            }
+            .accessibilityIdentifier("deleteAccount")
+        } footer: {
+            Text("Permanently deletes \(s.email) from \(hostOf(s.server)), with every vault you own and every item in them.")
+        }
+        .paRow()
     }
 }
 
@@ -636,55 +717,112 @@ private struct AppearancePage: View {
 
 // MARK: About
 
+private enum AboutLinks {
+    static let website = URL(string: "https://fahed-alhammadi.github.io/PassAuth/")!
+    static let help = URL(string: "https://fahed-alhammadi.github.io/PassAuth/support.html")!
+    static let feedback = URL(string: "https://github.com/Fahed-Alhammadi/PassAuth/issues")!
+    static let privacy = URL(string: "https://fahed-alhammadi.github.io/PassAuth/privacy.html")!
+    /// The App Store's review sheet (6829616391 = the App Store Connect id of io.passauth.app).
+    static let rate = URL(string: "https://apps.apple.com/app/id6829616391?action=write-review")!
+}
+
+/// Settings → About PassAuth (same layout as the Cloudy app's About): one bold element, the brand panel with the
+/// app icon, name, copyright line and version; below it what you do (help, feedback, rating), then what you read
+/// (website, privacy policy).
 private struct AboutPage: View {
-    @Environment(AppModel.self) private var model
-    @State private var confirmLogout = false
+    var body: some View {
+        Section {
+            BrandPanel()
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.Brand.navy)
+        }
+        Section {
+            Link(destination: AboutLinks.help) { AboutRow(title: "Help", detail: nil, icon: "questionmark.circle") }
+            Link(destination: AboutLinks.feedback) { AboutRow(title: "Send feedback", detail: nil, icon: "bubble.left") }
+            Link(destination: AboutLinks.rate) { AboutRow(title: "Rate PassAuth", detail: nil, icon: "star") }
+        }
+        .paRow()
+        Section {
+            Link(destination: AboutLinks.website) { AboutRow(title: "Website", detail: "fahed-alhammadi.github.io/PassAuth", icon: "globe") }
+            Link(destination: AboutLinks.privacy) { AboutRow(title: "Privacy policy", detail: nil, icon: "hand.raised") }
+        } footer: {
+            Text("Open source under the MIT License.")
+                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(.center)
+                .padding(.top, PA.Space.l)
+        }
+        .paRow()
+    }
+}
+
+/// The brand panel: navy into the brand blue (the shield's own gradient), a large faint shield behind, and the app
+/// icon (shield on its pale tile), "PassAuth", the copyright line (the README's footer) and the version.
+private struct BrandPanel: View {
+    var body: some View {
+        let v = AppVersion.current
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(LinearGradient(colors: [.white, Color(red: 0xDC / 255, green: 0xE7 / 255, blue: 0xFD / 255)], startPoint: .top, endPoint: .bottom))
+                .frame(width: 88, height: 88)
+                .overlay(LogoMark(height: 56))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(.white.opacity(0.25), lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 14, y: 8)
+                .accessibilityHidden(true)
+            Text(verbatim: "PassAuth")
+                .font(.largeTitle.bold()).foregroundStyle(.white)
+                .padding(.top, 18)
+            Text(verbatim: "© 2026 Fahed Alhammadi. All rights reserved.")
+                .font(.subheadline).foregroundStyle(.white.opacity(0.8))
+                .multilineTextAlignment(.center)
+                .padding(.top, 4)
+            Text("Version \(v.name) (\(v.build))")
+                .font(.footnote.weight(.medium).monospacedDigit())
+                .foregroundStyle(Color.Brand.cyan)
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(Capsule().fill(.white.opacity(0.1)))
+                .padding(.top, 16)
+                .accessibilityIdentifier("version")
+        }
+        .padding(.horizontal, PA.Space.xl)
+        .padding(.top, 36).padding(.bottom, 30)
+        .frame(maxWidth: .infinity)
+        .background {
+            ZStack {
+                LinearGradient(colors: [Color.Brand.navy, Color(red: 0x0A / 255, green: 0x3F / 255, blue: 0xA8 / 255)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                GeometryReader { geo in
+                    LogoMark(height: geo.size.height * 1.15)
+                        .opacity(0.05)
+                        .position(x: geo.size.width * 0.9, y: geo.size.height * 0.62)
+                }
+            }
+            .clipped()
+            .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// A link row: icon in the accent colour, the name, an optional address under it, and the "leaves the app" arrow.
+private struct AboutRow: View {
+    let title: String
+    let detail: String?
+    let icon: String
 
     var body: some View {
-        let s = model.state
-        let v = AppVersion.current
-        Section {
-            VStack(spacing: 8) {
-                LogoMark(height: 72)
-                Wordmark(size: 26)
-                Text("Version \(v.name) (\(v.build))").font(.subheadline).foregroundStyle(Color.paMuted)
-                    .accessibilityIdentifier("version")
-                Text("© Fahed Alhammadi").font(.subheadline).foregroundStyle(Color.paMuted)
+        HStack(spacing: 14) {
+            Image(systemName: icon).font(.body.weight(.medium)).foregroundStyle(Color.paAccent).frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(Color.paInk)
+                if let detail { Text(verbatim: detail).font(.footnote).foregroundStyle(Color.paMuted) }
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
+            Spacer(minLength: 8)
+            Image(systemName: "arrow.up.forward").font(.footnote.weight(.semibold)).foregroundStyle(Color.paMuted)
+                .accessibilityHidden(true)
         }
-        .paRow()
-        Section {
-            LabeledContent("Signed in as", value: s.email)
-            LabeledContent("Server", value: s.server)
-        } footer: {
-            Text("To use another PassAuth server, log out and choose \"Change server\" on the sign-in screen.")
-        }
-        .paRow()
-        Section {
-            Button("Log out", role: .destructive) { confirmLogout = true }
-        }
-        .paRow()
-        .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
-        }
-        Section {
-            NavigationLink {
-                DeleteAccountPage()
-            } label: {
-                Label("Delete account…", systemImage: "person.crop.circle.badge.xmark").foregroundStyle(Color.paDanger)
-            }
-            .accessibilityIdentifier("deleteAccount")
-        } header: {
-            Text("Delete account")
-        } footer: {
-            Text("Permanently delete \(s.email) from \(hostOf(s.server)), with every vault you own and every item in them.")
-        }
-        .paRow()
+        .padding(.vertical, 2)
+        .accessibilityHint("Opens in the browser")
     }
 }
 

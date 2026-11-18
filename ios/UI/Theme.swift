@@ -57,6 +57,20 @@ extension Color {
         static let blue = Color.fixed(0x0866ED)
         static let cyan = Color.fixed(0x23D5F4)
     }
+
+    /// Settings row tiles (white symbol on a coloured rounded square, like the Settings app): fixed, deep tones in
+    /// light and dark mode so the white symbol keeps ≥3:1 contrast.
+    enum Tile {
+        static let blue = Color.fixed(0x0866ED)
+        static let green = Color.fixed(0x248A3D)
+        static let teal = Color.fixed(0x12869C)
+        static let orange = Color.fixed(0xD96C00)
+        static let red = Color.fixed(0xD7302A)
+        static let indigo = Color.fixed(0x5856D6)
+        static let purple = Color.fixed(0x9A45C9)
+        static let pink = Color.fixed(0xD62D5A)
+        static let gray = Color.fixed(0x7C7C82)
+    }
 }
 
 extension PlatformColor {

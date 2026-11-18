@@ -240,10 +240,10 @@ final class Phase3UITests: UITestBase {
         wait(button("15 minutes")).tap()
 
         // Delete account: master password checked by the server, then the account is gone.
-        settingsPage("about")
+        settingsPage("account")
         let del = app.buttons["deleteAccount"]
         scrollTo(del)
-        shot("p3-19-about-delete")
+        shot("p3-19-account-delete")
         del.tap()
         wait(app.navigationBars["Delete account"])
         type(app.secureTextFields["delete.password"], "wrong-password-1")
@@ -311,10 +311,10 @@ final class Phase3UITests: UITestBase {
         shot("big-08-export")
         app.swipeUp(velocity: .slow)
         shot("big-09-export-bottom")
-        settingsPage("about")
+        settingsPage("account")
         let del = app.buttons["deleteAccount"]
         scrollTo(del)
-        shot("big-10-about")
+        shot("big-10-account")
         del.tap()
         wait(app.navigationBars["Delete account"])
         shot("big-11-delete")
