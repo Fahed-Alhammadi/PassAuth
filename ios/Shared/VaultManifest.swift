@@ -126,6 +126,9 @@ public enum ManifestText {
     /// "Use the server's copy" where the server shows no manifest for a vault that had one:
     /// accepting forgets what this device remembered, so the confirmation says what that means.
     public static let confirmNoRecord = "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started."
+    /// Shown with the confirmation when it is asked again because the server's answer changed
+    /// between the confirmation and the fresh fetch.
+    public static let askAgain = "The server's copy of this vault changed just now, so it wasn't accepted. Read the message again before you continue."
     /// The quiet note on such a vault afterwards, until it has a manifest again.
     public static let notChecked = "This vault isn't being checked for missing or restored items."
     /// The vault holds a row this device can't decrypt (a notice; nothing is held back for it).
@@ -149,6 +152,15 @@ public enum ManifestText {
     /// Three attempts each met another device's write.
     public static let busy = "This vault changed on another device. Try again."
     public static let notReady = "This can't be done until every member's apps are up to date."
+}
+
+/// What "Use the server's copy" did (`VaultRepository.useServerCopy`).
+public enum ServerCopyOutcome: Equatable, Sendable {
+    /// The vault follows the server's copy now (or needed nothing).
+    case done
+    /// Nothing was accepted: the server's fresh answer isn't what the confirmation described.
+    /// Ask again, with `ManifestText.confirmNoRecord` when `noRecord`, else the ordinary text.
+    case askAgain(noRecord: Bool)
 }
 
 /// A vault's next manifest, as a write carries it.

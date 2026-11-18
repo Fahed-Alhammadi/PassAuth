@@ -85,6 +85,12 @@ private struct ServerCopySheet: View {
     let vault: VaultInfo
     @State private var busy = false
     @State private var error: String?
+    /// Which text is shown, once the server's fresh answer differed from what the sheet opened
+    /// for (nothing was accepted then and the user is asked again with the other text).
+    @State private var asked: Bool?
+
+    /// The confirmation shown is the one for a vault the server shows no record for.
+    private var noRecord: Bool { asked ?? vault.manifestGone }
 
     var body: some View {
         NavigationStack {
@@ -96,7 +102,7 @@ private struct ServerCopySheet: View {
                 Section {
                     // The server shows no record for a vault that had one: accepting means the
                     // vault is no longer checked, and the text says so.
-                    Text(vault.manifestGone ? ManifestText.confirmNoRecord : ManifestText.confirmBody).foregroundStyle(Color.paInk)
+                    Text(noRecord ? ManifestText.confirmNoRecord : ManifestText.confirmBody).foregroundStyle(Color.paInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("manifest.confirmText")
                 }
@@ -121,9 +127,16 @@ private struct ServerCopySheet: View {
         error = nil
         Task {
             do {
-                try await model.repo.useServerCopy(vault.id)
-                model.notify(ManifestText.accepted)
-                dismiss()
+                // The text confirmed goes with the request: an answer it doesn't describe is
+                // not accepted, and the other text is shown for a new confirmation.
+                switch try await model.repo.useServerCopy(vault.id, noRecord: noRecord) {
+                case .done:
+                    model.notify(ManifestText.accepted)
+                    dismiss()
+                case .askAgain(let other):
+                    asked = other
+                    self.error = ManifestText.askAgain
+                }
             } catch {
                 self.error = errorMessage(error)
             }
@@ -240,8 +253,10 @@ struct UnopenableItems: View {
                         Image(systemName: "arrow.down.app").foregroundStyle(Color.paMuted)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(ManifestText.newerItem)
-                            Text("\(ManifestText.newerItemNote) \(v?.vaultName(item.vaultId) ?? "Vault")")
+                            Text(ManifestText.newerItemNote)
                                 .font(.footnote).foregroundStyle(Color.paMuted)
+                            Text(v?.vaultName(item.vaultId) ?? "Vault")
+                                .font(.footnote).foregroundStyle(Color.paMuted).lineLimit(1)
                         }
                         Spacer(minLength: 0)
                     }

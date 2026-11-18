@@ -1109,10 +1109,12 @@ class ManifestsTest {
         fun useServerCopy(noRecord: Boolean = this.noRecord): Manifests.ServerCopy? {
             if (sync() != ManifestState.Unresolved) return null
             val plan = Manifests.serverCopy(s.key, s.header(), role, s.rows)
+            // Rule T3: only the case the user confirmed is carried out.
+            if (!Manifests.asConfirmed(plan, noRecord)) throw UserException(Manifests.SERVER_COPY_CHANGED)
             when (plan) {
                 is Manifests.ServerCopy.Accept -> memory = Manifests.replaced(memory, vaultId, plan.mark)
-                // Rule T3: forgotten only on the confirmation that says so; then marked "not checked".
-                Manifests.ServerCopy.Forget -> if (noRecord) memory = Manifests.replaced(memory, vaultId, null, notChecked = true) else throw UserException(Manifests.CHANGED_ELSEWHERE)
+                // Forgotten only on the confirmation that says so; then marked "not checked".
+                Manifests.ServerCopy.Forget -> memory = Manifests.replaced(memory, vaultId, null, notChecked = true)
                 is Manifests.ServerCopy.Baseline -> {
                     val answer = s.putManifest(plan.body)
                     if (Manifests.stored(plan.entry, answer)) memory = Manifests.replaced(memory, vaultId, plan.entry.mark)
@@ -1183,9 +1185,21 @@ class ManifestsTest {
         // Review round 3, rule T3: this acceptance has its own confirmation, and isn't done on the ordinary one.
         assertTrue("the warning offers the \"no record\" text", phone.noRecord)
         val before = phone.memory
-        assertEquals(Manifests.CHANGED_ELSEWHERE, assertThrows(UserException::class.java) { phone.useServerCopy(noRecord = false) }.message)
+        assertEquals(
+            "The server's copy of this vault changed just now, so it wasn't accepted. Check what the app shows now.",
+            assertThrows(UserException::class.java) { phone.useServerCopy(noRecord = false) }.message,
+        )
         assertEquals("nothing was forgotten on the ordinary confirmation", before, phone.memory)
         assertEquals(ManifestState.Unresolved, phone.state)
+        assertTrue("the warning still offers the \"no record\" text", phone.noRecord)
+        // The other way round (final review C5): "no record" confirmed, the fresh answer has a record: nothing accepted or sent.
+        val mark = phone.memory.getValue(vaultId).mark!!
+        val header = s.header()
+        assertFalse(Manifests.asConfirmed(Manifests.ServerCopy.Accept(mark), noRecord = true))
+        assertFalse(Manifests.asConfirmed(Manifests.ServerCopy.Baseline(kotlinx.serialization.json.JsonObject(emptyMap()), ManifestEntry(header.id, 1, "", "", "")), noRecord = true))
+        assertTrue(Manifests.asConfirmed(Manifests.ServerCopy.Accept(mark), noRecord = false))
+        assertTrue(Manifests.asConfirmed(Manifests.ServerCopy.Readers, noRecord = true))
+        assertTrue(Manifests.asConfirmed(Manifests.ServerCopy.Broken, noRecord = false))
         assertEquals(Manifests.ServerCopy.Forget, phone.useServerCopy())
         assertEquals(Remembered(null, 1, notChecked = true), phone.memory[vaultId])
         assertEquals(ManifestState.None, phone.state)
@@ -1318,6 +1332,40 @@ class ManifestsTest {
         // The versions that waited for the accepted vault's items go too; another vault's stay.
         assertEquals(listOf("y"), ItemRevs.waiting(mine, served, accepted).map { it.id })
         assertTrue(served.items.any { it.id == "x" })
+    }
+
+    /**
+     * Final review C3: an item moved from vault W to V and edited since; the user accepts V while the
+     * answer lists the item under W again in its old ciphertext. Its counter and its newer copy are
+     * not among what the acceptance forgets, so the served version is still judged older.
+     */
+    @Test
+    fun acceptingKeepsTheCounterOfAnItemTheAnswerListsUnderAnotherVault() {
+        val vaults = listOf(SyncVault("w", role = "owner", keyKind = "account"), SyncVault("v", role = "owner", keyKind = "account"))
+        // This phone's copy: "x" now in V (moved and edited), "a" in V, "h" a version of V that waits.
+        val mine = SyncSnapshot(
+            7, vaults = vaults,
+            items = listOf(row("x", "new-x", vault = "v"), row("a", "d-a", vault = "v")),
+            held = listOf(row("h", "d-h", vault = "v")),
+        )
+        // The answer fetched for the acceptance: "x" back under W in its old ciphertext.
+        val served = SyncSnapshot(8, vaults = vaults, items = listOf(row("x", "old-x", vault = "w"), row("a", "old-a", vault = "v")))
+        val accepted = ItemRevs.acceptedIds(mine, setOf("v"), served)
+        assertEquals(setOf("a", "h"), accepted)
+        assertEquals("without the answer, every prior id of the vault", setOf("x", "a", "h"), ItemRevs.acceptedIds(mine, setOf("v")))
+        val revs = mapOf("x" to 9L, "a" to 5L, "h" to 2L)
+        assertEquals(mapOf("x" to 9L), revs - accepted)
+        val check = { r: Long?, n: Long -> io.passauth.core.itemRevCheck(r?.toULong(), n.toULong()) }
+        assertTrue("x is still judged older", ItemRevs.judge((revs - accepted)["x"], 1, null, check) is ItemRevs.Verdict.Rollback)
+        assertTrue(ItemRevs.judge((revs - accepted)["a"], 1, null, check) is ItemRevs.Verdict.Accept)
+        // The newer copy of "x" is still there to be kept in place of the served one; the accepted vault's other copies aren't.
+        assertEquals(listOf("x"), ItemRevs.priorsFor(mine.items + mine.held, served, setOf("v")).map { it.id })
+        assertEquals("new-x", ItemRevs.priorsFor(mine.items + mine.held, served, setOf("v")).single().data)
+        // An item the answer lists in the accepted vault itself is forgotten as before; no acceptance changes nothing.
+        assertEquals(mine.items + mine.held, ItemRevs.priorsFor(mine.items + mine.held, served, emptySet()))
+        assertEquals(setOf("x"), ItemRevs.listedElsewhere(served, setOf("v")))
+        // The counter stays in the memory afterwards.
+        assertEquals(9L, ItemRevs.merged(revs - accepted, mapOf("a" to 1L), emptySet(), served.items.map { it.id }.toSet())["x"])
     }
 
     /**

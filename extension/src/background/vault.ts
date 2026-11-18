@@ -3101,9 +3101,11 @@ interface Prepared {
  *
  * A row that doesn't open (final review T1), three cases:
  * (a) this browser holds a row of the same id, vault and `data` that it opened before (the copy shown, a trashed row,
- *     a row kept aside), and only the served `item_key` fails: it goes on with its own row, whose key stays in the
- *     copy. Nothing is wrong with the item (the vault's record covers its data, not its key), nothing is listed,
- *     warned or held: a server can't make a member delete a good item by damaging its key in an answer.
+ *     a row kept aside, the server's row behind a kept newer copy), and only the served `item_key` fails: it goes on
+ *     with its own row, whose key stays in the copy. Nothing is wrong with the item (the vault's record covers its
+ *     data, not its key), nothing is listed, warned or held for the key: a server can't make a member delete a good
+ *     item by damaging its key in an answer. The item's edit counter is checked like that of any row that opened
+ *     (final review C1): an old version is marked, and a newer copy this browser has is kept.
  * (b) the row decrypts but isn't an item this version reads (a type or format from a newer app): listed as "Item from
  *     a newer version of PassAuth"; no notice, it blocks nothing, and it counts in the record like any row.
  * (c) anything else: listed as "Item that can't be opened" (with the name the last opened copy had: that copy stays
@@ -3181,7 +3183,8 @@ function prepare(snap: Snapshot, arrived: ReadonlySet<string> | "all" | null): P
     if (typeof row.data !== "string") return null;
     const shown = decrypted.get(row.id);
     const inTrash = trashOpens.get(row.id);
-    for (const prior of [shown?.entry ? shown.row : undefined, inTrash?.opens ? inTrash.row : undefined, stash.get(row.id)]) {
+    // (`servedRows`: the older version a server sent before, behind the newer copy this browser kept and shows.)
+    for (const prior of [shown?.entry ? shown.row : undefined, inTrash?.opens ? inTrash.row : undefined, stash.get(row.id), servedRows.get(row.id)]) {
       if (!prior || prior.vault_id !== row.vault_id || prior.data !== row.data || typeof prior.item_key !== "string" || prior.item_key === row.item_key) continue;
       const mine: SyncItemRow = { ...row, item_key: prior.item_key };
       const entry = decryptRow(vault.key, mine);
@@ -3189,7 +3192,8 @@ function prepare(snap: Snapshot, arrived: ReadonlySet<string> | "all" | null): P
     }
     return null;
   };
-  for (const row of snap.items.values()) {
+  for (const sent of snap.items.values()) {
+    let row = sent;
     const vault = byId.get(row.vault_id);
     if (!vault) continue;
     if (isTrashed(row)) {
@@ -3228,14 +3232,13 @@ function prepare(snap: Snapshot, arrived: ReadonlySet<string> | "all" | null): P
       if (opened === "locked") {
         const own = withOwnKey(vault, row);
         if (own) {
-          // Case (a): only the served key fails. This browser's row for the same data goes on, key and all.
-          snap.items.set(row.id, own.row);
-          copies.set(row.id, own);
-          list.push(own.entry);
-          if (checkRevs && extras.served.has(row.id) && !served.has(row.id)) revs.rolledBack.delete(row.id);
-          continue;
-        }
-        fail = "locked";
+          // Case (a): only the served key fails. This browser's row for the same data goes on, key and all, and is
+          // judged below exactly as if the served key had opened it: its own row may be one from the trash, where
+          // no edit counter is checked, so a damaged key must not be a way round the "older version" mark.
+          row = own.row;
+          entry = own.entry;
+          snap.items.set(row.id, row);
+        } else fail = "locked";
       } else if (opened === "newer") fail = "newer";
       else entry = opened;
       if (entry && checkRevs) {

@@ -140,6 +140,9 @@ object Manifests {
     /** The link a first manifest names (32 zero bytes): never a remembered link. */
     const val ZERO_LINK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     const val CHANGED_ELSEWHERE = "This vault changed on another device. Try again."
+
+    /** "Use the server's copy": the answer fetched after the confirmation isn't the case the user was shown ([asConfirmed]). */
+    const val SERVER_COPY_CHANGED = "The server's copy of this vault changed just now, so it wasn't accepted. Check what the app shows now."
     const val NOT_READY = "This can't be done until every member's apps are up to date."
 
     /** A write is sent at most this often when the vault changed elsewhere meanwhile. */
@@ -544,6 +547,18 @@ object Manifests {
 
         /** No baseline can be made from what the server sent (a row without data, a version without its manifest). */
         data object Broken : ServerCopy
+    }
+
+    /**
+     * Whether [plan], made from the answer fetched after the confirmation, is the case the user
+     * confirmed (rule T3): "no record" ([noRecord], [CONFIRM_NO_RECORD]) only forgets, and the
+     * ordinary text ([CONFIRM_BODY]) never does. Otherwise nothing is accepted ([SERVER_COPY_CHANGED]).
+     * [ServerCopy.Readers] and [ServerCopy.Broken] accept nothing either way and keep their own words.
+     */
+    fun asConfirmed(plan: ServerCopy, noRecord: Boolean): Boolean = when (plan) {
+        ServerCopy.Forget -> noRecord
+        is ServerCopy.Accept, is ServerCopy.Baseline -> !noRecord
+        ServerCopy.Readers, ServerCopy.Broken -> true
     }
 
     /**

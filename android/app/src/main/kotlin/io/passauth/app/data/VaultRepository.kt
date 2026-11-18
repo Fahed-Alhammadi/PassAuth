@@ -1599,9 +1599,10 @@ class VaultRepository(
         if (refreshed && revs == null) throw NotAdopted()
         val priorCopy = copy?.takeIf { it.first == id }?.second ?: if (fromServer) readSnapshot(id) else null
         // "Use the server's copy": nothing this phone remembers or kept of the accepted vaults' items counts.
-        // Only the vault's items as this phone's own copy has them (never ids the answer just fetched places there).
-        val acceptedIds = ItemRevs.acceptedIds(priorCopy, accepting)
-        val priors = (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held).filter { it.vaultId !in accepting }.groupBy { it.id }
+        // Only the vault's items as this phone's own copy has them (never ids the answer just fetched places there),
+        // and not the ones the answer lists under another vault (moved here: counter and newer copy stay).
+        val acceptedIds = ItemRevs.acceptedIds(priorCopy, accepting, served)
+        val priors = ItemRevs.priorsFor(priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held, served, accepting).groupBy { it.id }
         // Rule T1: every row this phone has of an item, whatever was accepted: a key it holds for the very data served still opens it.
         val own = (priorCopy?.items.orEmpty() + priorCopy?.held.orEmpty() + served.held).groupBy { it.id }
         val opened = core { decryptVault(session.account, served, previous, names, checks, revs.orEmpty() - acceptedIds, priors, own) }
@@ -2037,7 +2038,8 @@ class VaultRepository(
      * [noRecord]: the user confirmed [Manifests.CONFIRM_NO_RECORD] (rule T3). Forgetting a vault's
      * memory because the server shows no manifest any more is done only on that confirmation: when
      * the answer fetched here turns out to be that case and the user was shown the ordinary text,
-     * nothing is accepted (the warning now offers the other text) and [Manifests.CHANGED_ELSEWHERE] is said.
+     * nothing is accepted (the warning now offers the other text) and [Manifests.SERVER_COPY_CHANGED] is said.
+     * The same the other way round: "no record" was confirmed and the answer fetched here has a record.
      */
     suspend fun useServerCopy(vaultId: String, noRecord: Boolean = false) = mutex.withLock {
         val id = activeId()
@@ -2059,9 +2061,12 @@ class VaultRepository(
             val rows = copy?.second?.items.orEmpty().filter { it.vaultId == vaultId }
             // What this phone remembers is about to be replaced: not while it can't be read.
             manifestMemoryOf(id) ?: throw UserException(Manifests.MEMORY_UNREADABLE)
-            val accepted: ManifestMark? = when (val plan = core { Manifests.serverCopy(key, v, role, rows) }) {
+            val plan = core { Manifests.serverCopy(key, v, role, rows) }
+            // Not what the user was shown and confirmed (rule T3, both directions): nothing accepted, nothing sent.
+            if (!Manifests.asConfirmed(plan, noRecord)) throw UserException(Manifests.SERVER_COPY_CHANGED)
+            val accepted: ManifestMark? = when (plan) {
                 is Manifests.ServerCopy.Accept -> plan.mark
-                Manifests.ServerCopy.Forget -> if (noRecord) null else throw UserException(Manifests.CHANGED_ELSEWHERE)
+                Manifests.ServerCopy.Forget -> null
                 Manifests.ServerCopy.Readers -> throw UserException(Manifests.READERS)
                 Manifests.ServerCopy.Broken -> throw DeltaSync.unreadable()
                 is Manifests.ServerCopy.Baseline -> {

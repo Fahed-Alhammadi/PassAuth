@@ -152,10 +152,27 @@ object ItemRevs {
      * vault's items as this phone's own copy had them ([prior]: its rows and the versions that wait)
      * and nothing else: never the ids the answer fetched for the acceptance places in that vault
      * (final review N7: a server could list another vault's item there to have its counter forgotten).
+     * And not the ids the accepted answer ([served]) lists under a vault that isn't being accepted
+     * ([listedElsewhere]; final review C3): an item that was moved into the vault and edited keeps its
+     * counter and its newer copy when the server lists it under its old vault again.
      */
-    fun acceptedIds(prior: SyncSnapshot?, accepting: Set<String>): Set<String> {
+    fun acceptedIds(prior: SyncSnapshot?, accepting: Set<String>, served: SyncSnapshot? = null): Set<String> {
         if (prior == null || accepting.isEmpty()) return emptySet()
-        return (prior.items + prior.held).filter { it.vaultId in accepting }.map { it.id }.toSet()
+        return (prior.items + prior.held).filter { it.vaultId in accepting }.map { it.id }.toSet() - listedElsewhere(served, accepting)
+    }
+
+    /** The ids [served] lists under a vault other than the ones in [accepting]. */
+    fun listedElsewhere(served: SyncSnapshot?, accepting: Set<String>): Set<String> =
+        served?.items.orEmpty().filter { it.vaultId !in accepting }.map { it.id }.toSet()
+
+    /**
+     * The copies this phone has ([rows]) that an older served version is compared with at an
+     * acceptance: not the accepted vaults' own, except those of an item the answer lists elsewhere.
+     */
+    fun priorsFor(rows: List<SyncItem>, served: SyncSnapshot?, accepting: Set<String>): List<SyncItem> {
+        if (accepting.isEmpty()) return rows
+        val elsewhere = listedElsewhere(served, accepting)
+        return rows.filter { it.vaultId !in accepting || it.id in elsewhere }
     }
 
     /** [snap] with the rows in [kept] (by item id) in place of the ones served. */

@@ -939,6 +939,10 @@ struct MacSettings: View {
 private struct MacManifestNotice: View {
     let repo: VaultRepository
     @State private var accepting: VaultInfo?
+    /// Which confirmation is shown for `accepting`: the one for a vault the server shows no
+    /// record for, or the ordinary one. Set when the dialog opens, and again when the server's
+    /// fresh answer differed from it (nothing was accepted; the user is asked with the other).
+    @State private var noRecord = false
     @State private var resetting = false
     @State private var busy = false
     @State private var error: String?
@@ -961,15 +965,26 @@ private struct MacManifestNotice: View {
             Divider()
             row("\(v.name): \(Self.text(v))") {
                 if v.manifestAcceptable {
-                    Button(ManifestText.action) { accepting = v }.disabled(busy).accessibilityIdentifier("manifestAction")
+                    Button(ManifestText.action) { noRecord = v.manifestGone; accepting = v }.disabled(busy).accessibilityIdentifier("manifestAction")
                 }
             }
             .confirmationDialog(ManifestText.confirmTitle, isPresented: Binding(get: { accepting != nil }, set: { if !$0 { accepting = nil } }),
                                 presenting: accepting) { v in
-                Button(ManifestText.action, role: .destructive) { run { try await repo.useServerCopy(v.id) } }
+                Button(ManifestText.action, role: .destructive) {
+                    let confirmed = noRecord
+                    run {
+                        // The text confirmed goes with the request: an answer it doesn't describe
+                        // is not accepted, and the dialog opens again with the other text.
+                        if case .askAgain(let other) = try await repo.useServerCopy(v.id, noRecord: confirmed) {
+                            noRecord = other
+                            error = ManifestText.askAgain
+                            accepting = v
+                        }
+                    }
+                }
                 Button("Cancel", role: .cancel) {}
-            } message: { v in
-                Text(v.manifestGone ? ManifestText.confirmNoRecord : ManifestText.confirmBody)
+            } message: { _ in
+                Text(noRecord ? ManifestText.confirmNoRecord : ManifestText.confirmBody)
             }
         } else if let older = repo.vault?.fillWarning {
             // The server sent older versions of some logins and this Mac has no newer copy.

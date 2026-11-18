@@ -1979,6 +1979,152 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(w.problems, [])
     }
 
+    /// T3 is enforced, not only worded: the confirmation the user gave goes with the request.
+    /// The ordinary text was confirmed and the server drops the vault's record behind the
+    /// sheet: nothing is accepted or forgotten, the vault stays warned, and the next
+    /// confirmation is the "no record" one.
+    func testNoRecordIsNeverAcceptedUnderTheOrdinaryConfirmation() async throws {
+        let (w, v) = try world()
+        v.manifestSeq = 9
+        try v.add("Shop")
+        w.liveSync = true
+        let repo = try await repo(w, app: true)
+        let before = try XCTUnwrap(remembered(v))
+        XCTAssertEqual(before.version, 9)
+        // Restored from a backup: an older record that describes the items (acceptable).
+        v.manifestSeq = 6
+        v.seq = 2
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .rollback)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestAcceptable, true)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, false, "the sheet opens with the ordinary text")
+        // Behind the sheet the server stops showing a record at all.
+        v.manifestSeq = 0
+        w.revision += 1
+        let outcome = try await repo.useServerCopy(v.id, noRecord: false)
+        XCTAssertEqual(outcome, .askAgain(noRecord: true))
+        XCTAssertEqual(remembered(v), before, "nothing forgotten")
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest.warns, true, "still warned")
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 1)
+        XCTAssertEqual(repo.vault?.notCheckedVaults.count, 0)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, true, "the next confirmation is the no-record one")
+        XCTAssertTrue(sent("PUT", "/manifest").isEmpty)
+        // A new process sees the same: warned, with its memory.
+        let again = try await self.repo(w, app: true, in: store())
+        await settled(again)
+        XCTAssertEqual(again.vault?.manifestWarnings.count, 1)
+        XCTAssertEqual(remembered(v), before)
+        // Confirmed with the text that says what it means: forgotten now.
+        v.manifestOk = false
+        let second = try await repo.useServerCopy(v.id, noRecord: true)
+        XCTAssertEqual(second, .done)
+        XCTAssertEqual(remembered(v), .forgotten(accepts: 1, noRecord: true))
+        XCTAssertEqual(repo.vault?.notCheckedVaults.map(\.id), [v.id])
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        XCTAssertEqual(w.problems, [])
+    }
+
+    /// The reverse: the "no record" text was confirmed and the server shows a record again
+    /// behind the sheet. Nothing is accepted; the next confirmation is the ordinary one.
+    func testARecordIsNeverAcceptedUnderTheNoRecordConfirmation() async throws {
+        for baseline in [false, true] {
+            tearDownStore()
+            ScriptedServer.requests = []
+            let (w, v) = try world()
+            v.manifestSeq = 9
+            try v.add("Shop")
+            let second = try v.add("Second")
+            w.liveSync = true
+            let repo = try await repo(w, app: true)
+            let before = try XCTUnwrap(remembered(v))
+            XCTAssertEqual(before.version, 9, "\(baseline)")
+            v.manifestSeq = 0
+            try await repo.sync()
+            XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, true, "\(baseline): the sheet opens with the no-record text")
+            // Behind the sheet: an older record again (and, for the baseline case, an item lost).
+            v.manifestSeq = 6
+            v.seq = 2
+            w.revision += 1
+            if baseline { w.hidden = [second] }
+            let outcome = try await repo.useServerCopy(v.id, noRecord: true)
+            XCTAssertEqual(outcome, .askAgain(noRecord: false), "\(baseline)")
+            XCTAssertEqual(remembered(v), before, "\(baseline): the memory is as it was")
+            XCTAssertEqual(repo.vault?.manifestWarnings.count, 1, "\(baseline): still warned")
+            XCTAssertEqual(repo.vault?.vaults.first?.manifestGone, false, "\(baseline): the next confirmation is the ordinary one")
+            XCTAssertTrue(sent("PUT", "/manifest").isEmpty, "\(baseline): nothing written")
+            let next = try await repo.useServerCopy(v.id, noRecord: false)
+            XCTAssertEqual(next, .done, "\(baseline)")
+            XCTAssertEqual(sent("PUT", "/manifest").count, baseline ? 1 : 0, "\(baseline)")
+            XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok, "\(baseline)")
+            XCTAssertEqual(remembered(v)?.version, baseline ? 7 : 6, "\(baseline)")
+            XCTAssertEqual(remembered(v)?.accepts, 1, "\(baseline)")
+            XCTAssertEqual(w.problems, [], "\(baseline)")
+        }
+    }
+
+    /// T4 lets go of the edit counters of the accepted vault's items only where the accepted
+    /// copy doesn't list them under another vault. An item moved from Work to Personal and
+    /// edited; Personal is accepted while the answer lists the item under Work again in its old
+    /// ciphertext: its counter is kept, so it is still marked as an older version there.
+    func testAcceptingKeepsTheCounterOfAnItemServedInAnotherVault() async throws {
+        let (w, v) = try world()
+        let work = try Vault(w.created.account, name: "Work")
+        work.manifestOk = false
+        w.vaults = [v, work]
+        v.manifestSeq = 4
+        let stays = try v.add("Stays")
+        let moved = try work.add("Moved")
+        w.liveSync = true
+        let shared = store()
+        seed(shared, w)
+        let repo = try await repo(w, app: true, in: shared)
+        let backup = (rows: v.rows, workRows: work.rows, manifestSeq: v.manifestSeq)
+        // Moved into Personal and edited there (and another item edited, for the contrast).
+        try await repo.moveItem(try XCTUnwrap(repo.vault?.get(moved)), to: v.id)
+        try await repo.updateItem(try XCTUnwrap(repo.vault?.get(moved)), named("Moved 2"))
+        try await repo.updateItem(try XCTUnwrap(repo.vault?.get(stays)), named("Stays 2"))
+        XCTAssertEqual(repo.vault?.get(moved)?.vaultId, v.id)
+        let counter = try XCTUnwrap(shared.readItemRevs("acc")?[moved])
+        XCTAssertGreaterThan(counter, 1)
+        XCTAssertEqual(w.problems, [])
+        // Other devices write on; then the server serves an older record of Personal over the
+        // same items: warned, acceptable, the item still in Personal on this device.
+        let at = v.manifestSeq
+        v.manifestSeq = at + 3
+        w.revision += 1
+        try await repo.sync()
+        XCTAssertEqual(remembered(v)?.version, UInt64(at + 3))
+        v.manifestSeq = at
+        w.revision += 1
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .rollback)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifestAcceptable, true)
+        XCTAssertEqual(repo.copyOf("acc")?.items.first { $0.id == moved }?.vaultId, v.id)
+        // Behind the sheet: everything as the backup had it, the item in Work in its old ciphertext.
+        v.rows = backup.rows
+        v.manifestSeq = backup.manifestSeq
+        work.rows = backup.workRows
+        w.revision += 1
+        let outcome = try await repo.useServerCopy(v.id, noRecord: false)
+        XCTAssertEqual(outcome, .done)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(repo.vault?.get(stays)?.item.name, "Stays", "Personal's own item is as the server has it")
+        XCTAssertEqual(repo.vault?.get(stays)?.rolledBack, false)
+        XCTAssertEqual(shared.readItemRevs("acc")?[stays], 1, "and its counter is the served one")
+        // The item that is in Work again keeps its counter and its mark.
+        XCTAssertEqual(repo.vault?.get(moved)?.vaultId, work.id)
+        XCTAssertEqual(shared.readItemRevs("acc")?[moved], counter, "the counter of an item listed under another vault is kept")
+        XCTAssertEqual(repo.vault?.get(moved)?.rolledBack, true, "still marked as an older version")
+        XCTAssertEqual(repo.vault?.rollback?.items, [moved])
+        // Also after a sync and in a new process.
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.get(moved)?.rolledBack, true)
+        let again = try await self.repo(w, app: true, in: store())
+        await settled(again)
+        XCTAssertEqual(again.vault?.get(moved)?.rolledBack, true)
+        XCTAssertEqual(again.vault?.get(stays)?.rolledBack, false)
+    }
+
     /// The served items aren't the ones the served manifest records: there is nothing to accept
     /// as it is. A member who can edit writes a new baseline over what is served: exactly one
     /// version above the served one and naming it, whatever this device remembers (the server
@@ -3303,5 +3449,15 @@ final class ManifestContractTests: XCTestCase {
         // Signing out removes the file that was moved aside too.
         shared.deleteCache("acc")
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.appendingPathExtension("unreadable").path))
+    }
+}
+
+private extension VaultRepository {
+    /// "Use the server's copy" as the views call it: with the confirmation the vault's state
+    /// picks when the sheet opens, and nothing changing behind it.
+    func useServerCopy(_ vaultId: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let noRecord = vault?.vaults.first { $0.id == vaultId }?.manifestGone ?? false
+        let outcome = try await useServerCopy(vaultId, noRecord: noRecord)
+        XCTAssertEqual(outcome, .done, file: file, line: line)
     }
 }

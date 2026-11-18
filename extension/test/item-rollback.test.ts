@@ -260,6 +260,74 @@ test("a kept newer copy stays marked: across later syncs, other writes, a lock, 
   expect((await stored())?.served).toBeUndefined();
 });
 
+test("FINAL REVIEW C1: an old version served first in the trash (valid key), then live with a damaged key, is marked 'older' like the same answer with a good key; a damaged key on the current version marks nothing", async () => {
+  const item = () => server.items.find((i) => i.id === "i1")!;
+  const again = () => ({ revision: ++server.revision, seq: server.bump("v-own") });
+  for (const key of ["damaged", "good"] as const) {
+    // A server that sends the trash whole (as any server can, whatever was asked for).
+    await signedIn(OLD);
+    server.editElsewhere("i1", { rev: 5, login: JSON.parse(login("newest", 5)).login });
+    await vault.sync();
+    expect((await memory()).itemRevs?.i1).toBe(5);
+    const mine = item().item_key;
+    // Step 1: the item is in the trash, in an old version that its key opens. Nothing to show, the counter stays.
+    Object.assign(item(), { data: login("old-password", 3), deleted_at: 1_700_000_000, ...again() });
+    await vault.sync();
+    expect(vault.getEntry("i1"), key).toBeUndefined();
+    expect((await memory()).itemRevs?.i1, key).toBe(5);
+    // Step 2: live again, the same old data.
+    Object.assign(item(), { deleted_at: null, ...(key === "damaged" ? { item_key: "not-the-key" } : {}), ...again() });
+    await vault.sync();
+    expect(password("i1"), `${key}: no newer copy is left to show`).toBe("old-password");
+    expect(vault.rolledBack("i1"), key).toBe(true);
+    expect(vault.rollbackSummary()?.text, key).toBe(ROLLBACK_TEXT);
+    expect((await memory()).rolledBack, key).toStrictEqual({ i1: "older" });
+    expect((await memory()).itemRevs?.i1, `${key}: never lowered`).toBe(5);
+    expect((await stored())?.items.find((r) => r.id === "i1")?.item_key, `${key}: the copy keeps a key that opens the row`).toBe(mine);
+    expect(vault.otherItems(), key).toStrictEqual([]);
+    // Still marked after a lock and unlock, and after the same answer again.
+    await vault.lockAll();
+    await fake.session.set({ "unlocked:a1": sessionKeys() });
+    expect(await vault.ensureUnlocked()).toBe(true);
+    await vault.sync();
+    expect([vault.rolledBack("i1"), password("i1")], key).toStrictEqual([true, "old-password"]);
+  }
+});
+
+test("FINAL REVIEW C1: a damaged key still can't lose a newer copy this browser kept, and clears no mark the data doesn't clear", async () => {
+  await signedIn(OLD);
+  const item = () => server.items.find((i) => i.id === "i1")!;
+  // Honest T1(a): the current version with a damaged key. Shown with this browser's key, not marked, not listed.
+  Object.assign(item(), { item_key: "not-the-key", revision: ++server.revision });
+  await vault.sync();
+  expect([password("i1"), vault.rolledBack("i1"), vault.rollbackSummary()]).toStrictEqual(["new-password", false, null]);
+  expect(vault.otherItems()).toStrictEqual([]);
+  expect([(await memory()).itemRevs, (await memory()).rolledBack]).toStrictEqual([{ i1: 3, i2: 1 }, undefined]);
+  // An older version (good key): the newer copy is kept and marked.
+  await signedIn(OLD);
+  rollBack("i1", login("old-password", 2));
+  await vault.sync();
+  expect([password("i1"), vault.rollbackSummary()?.text]).toStrictEqual(["new-password", ROLLBACK_KEPT_TEXT]);
+  // The same old version again with a damaged key: the kept copy stays, and stays marked.
+  Object.assign(item(), { item_key: "not-the-key", revision: ++server.revision });
+  await vault.sync();
+  expect(password("i1")).toBe("new-password");
+  expect(vault.rolledBack("i1")).toBe(true);
+  expect(vault.rollbackSummary()?.text).toBe(ROLLBACK_KEPT_TEXT);
+  expect(vault.otherItems()).toStrictEqual([]);
+  expect([(await memory()).itemRevs?.i1, (await memory()).rolledBack]).toStrictEqual([3, { i1: "kept" }]);
+  // An older version shown marked (no newer copy: the vault key was replaced), then served with a damaged key: marked still.
+  await signedIn(OLD);
+  server.rotate("v-own");
+  rollBack("i1", login("old-password", 2));
+  await vault.sync();
+  expect([password("i1"), vault.rolledBack("i1")]).toStrictEqual(["old-password", true]);
+  Object.assign(item(), { item_key: "not-the-key", revision: ++server.revision });
+  await vault.sync();
+  expect([password("i1"), vault.rolledBack("i1")]).toStrictEqual(["old-password", true]);
+  expect((await memory()).rolledBack).toStrictEqual({ i1: "older" });
+});
+
 test("the popup's item page and list carry the warnings", () => {
   expect(ROLLBACK_ITEM_TEXT).toBe("Your server sent an older version of this item.");
   expect(ROLLBACK_KEPT_TEXT).toBe("Your server sent older versions of some items. PassAuth kept the newer copies it had.");

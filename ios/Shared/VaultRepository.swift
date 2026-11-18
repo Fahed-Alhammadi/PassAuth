@@ -2962,15 +2962,23 @@ public final class VaultRepository {
     /// With either, in the same confirmed step and for this vault only, the device also lets go
     /// of what it held against the server's copy of the vault's items: the newer copies it kept
     /// and the edit counters it remembered, for the items this device's copy had in the vault
-    /// when the user confirmed (never ids the fetch below places there). So no "older versions"
-    /// notice is left for a vault the user took as the server has it.
+    /// when the user confirmed (never ids the fetch below places there, and never ids the
+    /// accepted copy lists under another vault: an item that moved keeps its counter). So no
+    /// "older versions" notice is left for a vault the user took as the server has it.
     ///
     /// Forgetting (the server shows no manifest where this device remembered one) leaves a
     /// marker in the memory: the vault says it isn't being checked until it has a manifest again.
     ///
     /// An item that can't be opened is neither a reason for the warning nor in the way: its
     /// notice stays while the row does.
-    public func useServerCopy(_ vaultId: String) async throws {
+    ///
+    /// `noRecord` says which confirmation the user gave: the one for a vault the server shows
+    /// no manifest for (`ManifestText.confirmNoRecord`, true) or the ordinary one. The fresh
+    /// answer may differ from what the confirmation was opened for; then nothing is accepted,
+    /// nothing is forgotten and nothing is written, and the caller asks again with the other
+    /// text (`.askAgain`), in both directions.
+    @discardableResult
+    public func useServerCopy(_ vaultId: String, noRecord: Bool) async throws -> ServerCopyOutcome {
         try await lock.run {
             let id = activeId
             guard let session = sessions[id], vault != nil else { throw UserError("Your vault is locked.") }
@@ -2979,14 +2987,14 @@ public final class VaultRepository {
             for _ in 0..<VaultManifest.attempts {
                 let memory = readMemory(id)
                 let full = try await fetchSnapshot(id, full: true)
-                guard sessions[id] === session, activeId == id else { return }
+                guard sessions[id] === session, activeId == id else { return .done }
                 let checked: Checked?
                 do {
                     checked = try await evaluate(id, session, full, source: .server, memory: memory, finalIncomplete: true)
                 } catch let e as ManifestLogUnavailable {
                     throw e.error
                 }
-                guard let checked else { return }
+                guard let checked else { return .done }
                 try await commit(id, session, checked, offline: false, store: .synced)
                 guard sessions[id] === session, activeId == id, let info = vault?.vaults.first(where: { $0.id == vaultId }) else {
                     throw UserError("Vault not found.")
@@ -2994,7 +3002,7 @@ public final class VaultRepository {
                 // The fresh answer matches its manifest after all: nothing to accept.
                 if !info.manifest.unresolved {
                     if info.manifest.pending { throw UserError(ManifestText.unchecked) }
-                    return
+                    return .done
                 }
                 guard let c = copyOf(id), let row = c.vaults.first(where: { $0.id == vaultId }), let key = vaultKeys[vaultId] else {
                     throw UserError("Vault not found.")
@@ -3011,13 +3019,21 @@ public final class VaultRepository {
                     return next
                 }
                 let accepted = try await core { VaultManifest.accept(row, key: key, rows: rows) }
-                guard sessions[id] === session, activeId == id, copyOf(id) == c else { return }
+                guard sessions[id] === session, activeId == id, copyOf(id) == c else { return .done }
+                // The confirmation given must be the one for what the fresh answer shows: no
+                // record is never accepted under the ordinary text, nor a record under the other.
+                let none = accepted.status == .none
+                if none != noRecord { return .askAgain(noRecord: none) }
+                // The edit counters let go of: the vault's items as this device had them, without
+                // the ids the accepted copy lists under another vault (an item that moved keeps
+                // its counter, so an older version of it there is still told apart).
+                let forgotten = prior.subtracting(c.items.filter { $0.vaultId != vaultId }.map(\.id))
                 if accepted.status == .ok || accepted.status == .none {
                     // Local accept: only this device's memory changes (never one that can't be read).
                     guard store.replaceManifestMark(id, vault: vaultId, with: accepted.mark) != nil else { throw UserError(ManifestText.unchecked) }
-                    store.forgetItemRevs(id, prior)
+                    store.forgetItemRevs(id, forgotten)
                     try await reshow(id, session, asServed(c))
-                    return
+                    return .done
                 }
                 if info.role == .read { throw UserError(ManifestText.reader) }
                 // Nothing is written over the server's copy from an AutoFill extension.
@@ -3051,7 +3067,7 @@ public final class VaultRepository {
                     // The warning stays; nothing is tried again by itself.
                     throw UserError(tooManyAttemptsMessage(e) ?? "Too many attempts. Try again later.")
                 }
-                guard sessions[id] === session, activeId == id else { return }
+                guard sessions[id] === session, activeId == id else { return .done }
                 // Stored as the vault's manifest (by its link): the memory is replaced by it, also
                 // when this device remembered a higher version, and the copy takes it.
                 var next = c
@@ -3063,14 +3079,14 @@ public final class VaultRepository {
                     next.vaults[i].manifestSeq = Int64(clamping: w.seq)
                     next.vaults[i].manifestPrev = w.prev
                     next.vaults[i].seq = after
-                    store.forgetItemRevs(id, prior)
+                    store.forgetItemRevs(id, forgotten)
                     do {
                         try await reshow(id, session, asServed(next))
-                        return
+                        return .done
                     } catch {}
                 }
                 await syncAfterWrite()
-                return
+                return .done
             }
             throw UserError(ManifestText.busy)
         }

@@ -238,9 +238,8 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                         val M = io.passauth.app.data.Manifests
                         // A vault whose record doesn't match is reviewed first ("Use the server's copy"); view-only members can't delete.
                         val canDelete = vault.role != io.passauth.app.data.Role.Read && vault.manifest != io.passauth.app.data.ManifestState.Unresolved
-                        val place = if (row.trashed) "In the trash of ${vault.name}." else "In ${vault.name}."
                         WarningCard(
-                            ctx, M.UNOPENABLE_ITEM, row.name?.let { "Last saved here as $it. $place" } ?: place,
+                            ctx, M.UNOPENABLE_ITEM, listOfNotNull(row.name, vault.name).joinToString(" · "),
                             action = M.DELETE_FOR_GOOD.takeIf { canDelete },
                             confirmTitle = "${M.DELETE_FOR_GOOD}?", confirmSubtitle = vault.name, confirmBody = M.DELETE_FOR_GOOD_CONFIRM,
                         ) {
@@ -254,7 +253,7 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                     val vault = v?.vaults?.firstOrNull { it.id == row.vaultId } ?: return@forEach
                     item(key = "newer-item:${row.id}") {
                         val O = io.passauth.app.data.ItemOpening
-                        QuietCard(O.NEWER_ITEM, if ((v?.vaults?.size ?: 0) > 1) "${O.NEWER_NOTE} In ${vault.name}." else O.NEWER_NOTE)
+                        QuietCard(O.NEWER_ITEM, O.NEWER_NOTE, second = vault.name.takeIf { (v?.vaults?.size ?: 0) > 1 })
                     }
                 }
                 // This phone's own record of the vaults can't be read, again and again: said, with the way out.
@@ -483,7 +482,7 @@ private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, n
 
 /** A quiet standing line above the items (not a warning, nothing to do about it here): an optional [heading] and the [text]. */
 @Composable
-private fun QuietCard(heading: String?, text: String) {
+private fun QuietCard(heading: String?, text: String, second: String? = null) {
     Surface(
         shape = RoundedCornerShape(Radius.card),
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -493,6 +492,7 @@ private fun QuietCard(heading: String?, text: String) {
         Column(Modifier.padding(Space.m)) {
             if (heading != null) Text(heading, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
             Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (second != null) Text(second, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
