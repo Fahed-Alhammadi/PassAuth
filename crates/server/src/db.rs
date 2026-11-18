@@ -156,6 +156,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (13, SCHEMA_V13),
     (14, SCHEMA_V14),
     (15, SCHEMA_V15),
+    (16, SCHEMA_V16),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -442,6 +443,11 @@ const SCHEMA_V15: &[&str] = &[
     "ALTER TABLE users ADD COLUMN avatar TEXT",
     "ALTER TABLE users ADD COLUMN avatar_seq BIGINT NOT NULL DEFAULT 0",
 ];
+
+/// Send v2: a Send with a password may have its name and text encrypted with a key
+/// made from the link's key and the password; its owner keeps that key wrapped by
+/// their account key (`owner_content_key`, NULL = a v1 Send).
+const SCHEMA_V16: &[&str] = &["ALTER TABLE sends ADD COLUMN owner_content_key TEXT"];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still
 /// names them (their activity log above all), go into `vault_ids` too.

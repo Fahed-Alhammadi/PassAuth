@@ -58,9 +58,45 @@ pub struct Item {
     /// Unix seconds.
     pub created_at: i64,
     pub updated_at: i64,
+    /// Edit counter, inside the encrypted data (so the server can't change it): 1 for a
+    /// new item, one more with every re-encryption by the core ([`EncryptedItem::encrypt`]
+    /// writes `rev + 1` of the item it is given, [`EncryptedItem::update`] one more than
+    /// the higher of the stored and the given item's). 0 = written before it existed.
+    /// Apps remember the highest per item and flag a lower one ([`item_rev_check`]): a
+    /// server serving an older copy of the item. Apps from before keep it unchanged
+    /// through an edit (as an unknown field), which is never flagged.
+    pub rev: u64,
     /// Fields from newer clients, kept so they survive an edit by an older one.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// [`item_rev_check`]'s verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevCheck {
+    /// Nothing remembered for the item (a new device or a new item): remember `served`.
+    New,
+    /// The remembered edit counter (equal: also when the content differs, an edit by an
+    /// app from before that keeps the counter).
+    Same,
+    /// Newer than remembered: remember `served`.
+    Newer,
+    /// Lower than remembered: the server sent an older version of the item. Keep the
+    /// newer copy if the app has one, show the item with a warning, never remember the
+    /// lower number.
+    Rollback,
+}
+
+/// Compare an item's edit counter (`Item::rev` of what the server sent now) with the
+/// highest this device remembers for it.
+pub fn item_rev_check(remembered: Option<u64>, served: u64) -> RevCheck {
+    match remembered {
+        None => RevCheck::New,
+        Some(r) if served > r => RevCheck::Newer,
+        Some(r) if served == r => RevCheck::Same,
+        Some(_) => RevCheck::Rollback,
+    }
 }
 
 impl Item {
@@ -275,6 +311,9 @@ fn item_data_aad(vault_id: &str, item_id: &str) -> Vec<u8> {
 }
 
 impl EncryptedItem {
+    /// Encrypt with a new Item Key: a new item (its `rev` 0 → 1), or an item moved to
+    /// another vault or re-encrypted after a key replacement (the decrypted item, so
+    /// `rev` + 1). Always `item.rev + 1`.
     pub fn encrypt(
         item: &Item,
         id: &str,
@@ -282,23 +321,22 @@ impl EncryptedItem {
         vault_key: &SymmetricKey,
     ) -> Result<Self> {
         let item_key = SymmetricKey::generate()?;
-        Self::encrypt_with_key(item, id, vault_id, vault_key, &item_key)
+        Self::encrypt_with_key(item, item.rev, id, vault_id, vault_key, &item_key)
     }
 
+    /// Writes `rev` + 1 as the item's edit counter.
     fn encrypt_with_key(
         item: &Item,
+        rev: u64,
         id: &str,
         vault_id: &str,
         vault_key: &SymmetricKey,
         item_key: &SymmetricKey,
     ) -> Result<Self> {
-        let mut json = if item.format >= ITEM_FORMAT {
-            serde_json::to_vec(item)?
-        } else {
-            let mut item = item.clone();
-            item.upgrade();
-            serde_json::to_vec(&item)?
-        };
+        let mut item = item.clone();
+        item.upgrade();
+        item.rev = rev.checked_add(1).ok_or(Error::Malformed("item rev"))?;
+        let mut json = serde_json::to_vec(&item)?;
         let data = item_key.encrypt(&json, &item_data_aad(vault_id, id));
         json.zeroize();
         Ok(Self {
@@ -311,6 +349,10 @@ impl EncryptedItem {
 
     pub fn decrypt(&self, vault_key: &SymmetricKey) -> Result<Item> {
         let item_key = self.item_key(vault_key)?;
+        self.decrypt_with_key(&item_key)
+    }
+
+    fn decrypt_with_key(&self, item_key: &SymmetricKey) -> Result<Item> {
         let mut json = item_key.decrypt(
             &unb64(&self.data)?,
             &item_data_aad(&self.vault_id, &self.id),
@@ -322,14 +364,25 @@ impl EncryptedItem {
         Ok(item)
     }
 
-    /// Re-encrypt after an edit, keeping the same Item Key.
+    /// Re-encrypt after an edit, keeping the same Item Key. The edit counter becomes one
+    /// more than the higher of the stored item's (`self`, decrypted here, so apps needn't
+    /// carry it) and `item`'s: restoring an earlier version (whose `rev` is lower) counts
+    /// up from the current one.
     pub fn update(&self, item: &Item, vault_key: &SymmetricKey) -> Result<Self> {
         let item_key = self.item_key(vault_key)?;
-        Self::encrypt_with_key(item, &self.id, &self.vault_id, vault_key, &item_key)
+        let stored = self.decrypt_with_key(&item_key)?;
+        Self::encrypt_with_key(
+            item,
+            stored.rev.max(item.rev),
+            &self.id,
+            &self.vault_id,
+            vault_key,
+            &item_key,
+        )
     }
 
     /// Move to another vault. Re-encrypts with a fresh Item Key, since both the
-    /// key and the data AAD name the vault.
+    /// key and the data AAD name the vault (edit counter + 1).
     pub fn move_to(
         &self,
         vault_key: &SymmetricKey,
@@ -373,8 +426,114 @@ mod tests {
         let vk = SymmetricKey::generate().unwrap();
         let enc = EncryptedItem::encrypt(&sample(), "i1", "v1", &vk).unwrap();
         assert!(!enc.data.contains("GitHub"));
-        assert_eq!(enc.decrypt(&vk).unwrap(), sample());
+        let back = enc.decrypt(&vk).unwrap();
+        assert_eq!(back.rev, 1, "a new item starts at 1");
+        assert_eq!(Item { rev: 0, ..back }, sample());
         assert_eq!(sample().item_type(), ItemType::Login);
+    }
+
+    #[test]
+    fn rev_counts_every_reencryption() {
+        let vk = SymmetricKey::generate().unwrap();
+        let vk2 = SymmetricKey::generate().unwrap();
+        let enc = EncryptedItem::encrypt(&sample(), "i1", "v1", &vk).unwrap();
+        let first = enc.decrypt(&vk).unwrap();
+        assert_eq!(first.rev, 1);
+        // An edit: one more than the stored item's, whatever the app passed.
+        let mut edited = first.clone();
+        edited.name = "GitHub work".into();
+        let upd = enc.update(&edited, &vk).unwrap();
+        assert_eq!(upd.decrypt(&vk).unwrap().rev, 2);
+        // An app that dropped the counter (rev 0) still counts up from the stored one.
+        let stale = Item {
+            rev: 0,
+            ..edited.clone()
+        };
+        let upd2 = upd.update(&stale, &vk).unwrap();
+        assert_eq!(upd2.decrypt(&vk).unwrap().rev, 3);
+        // Restoring an earlier version (a lower rev) counts up from the current one.
+        let restored = upd2.update(&first, &vk).unwrap().decrypt(&vk).unwrap();
+        assert_eq!((restored.rev, restored.name.as_str()), (4, "GitHub"));
+        // A move (fresh key, other vault) counts too, and so does re-encrypting the
+        // decrypted item with `encrypt` (moves and key replacements in the apps).
+        let moved = upd2.move_to(&vk, "v2", &vk2).unwrap();
+        assert_eq!(moved.decrypt(&vk2).unwrap().rev, 4);
+        let rekeyed =
+            EncryptedItem::encrypt(&moved.decrypt(&vk2).unwrap(), "i1", "v2", &vk).unwrap();
+        assert_eq!(rekeyed.decrypt(&vk).unwrap().rev, 5);
+        // The counter is inside the authenticated data: the server can't change it.
+        let json = serde_json::to_value(rekeyed.decrypt(&vk).unwrap()).unwrap();
+        assert_eq!(json["rev"], 5);
+        assert!(!rekeyed.data.contains("rev"));
+        // It can't overflow into 0.
+        let maxed = Item {
+            rev: u64::MAX,
+            ..sample()
+        };
+        assert!(EncryptedItem::encrypt(&maxed, "i", "v", &vk).is_err());
+    }
+
+    /// An app from before the counter keeps it as an unknown field through an edit (equal
+    /// rev, other content: never flagged), and items written before it read as 0.
+    #[test]
+    fn rev_survives_an_edit_by_an_app_from_before() {
+        #[derive(Serialize, Deserialize)]
+        struct OldItem {
+            name: String,
+            #[serde(flatten)]
+            extra: Extra,
+        }
+        let vk = SymmetricKey::generate().unwrap();
+        let enc = EncryptedItem::encrypt(&sample(), "i1", "v1", &vk).unwrap();
+        let enc = enc.update(&enc.decrypt(&vk).unwrap(), &vk).unwrap();
+        // What an older core does: decrypt into its own model, edit, encrypt the JSON.
+        let item_key = enc.item_key(&vk).unwrap();
+        let plain = item_key
+            .decrypt(&unb64(&enc.data).unwrap(), &item_data_aad("v1", "i1"))
+            .unwrap();
+        let mut old: OldItem = serde_json::from_slice(&plain).unwrap();
+        old.name = "Edited by an older app".into();
+        let data = item_key
+            .encrypt(
+                &serde_json::to_vec(&old).unwrap(),
+                &item_data_aad("v1", "i1"),
+            )
+            .unwrap();
+        let by_old = EncryptedItem {
+            data: b64(&data),
+            ..enc.clone()
+        };
+        let back = by_old.decrypt(&vk).unwrap();
+        assert_eq!(
+            (back.rev, back.name.as_str()),
+            (2, "Edited by an older app")
+        );
+        assert_eq!(item_rev_check(Some(2), back.rev), RevCheck::Same);
+        // The next edit by a current app counts on from there.
+        assert_eq!(
+            by_old.update(&back, &vk).unwrap().decrypt(&vk).unwrap().rev,
+            3
+        );
+        // Items from before the counter read as 0 and count from there.
+        let mut legacy = serde_json::to_value(sample()).unwrap();
+        legacy.as_object_mut().unwrap().remove("rev");
+        let item: Item = serde_json::from_value(legacy).unwrap();
+        assert_eq!(item.rev, 0);
+    }
+
+    #[test]
+    fn rev_check_flags_only_a_lower_counter() {
+        assert_eq!(item_rev_check(None, 0), RevCheck::New);
+        assert_eq!(item_rev_check(None, 7), RevCheck::New);
+        assert_eq!(item_rev_check(Some(3), 4), RevCheck::Newer);
+        assert_eq!(item_rev_check(Some(3), 3), RevCheck::Same);
+        assert_eq!(item_rev_check(Some(3), 2), RevCheck::Rollback);
+        assert_eq!(item_rev_check(Some(1), 0), RevCheck::Rollback);
+        assert_eq!(item_rev_check(Some(0), 0), RevCheck::Same);
+        assert_eq!(
+            serde_json::to_value(RevCheck::Rollback).unwrap(),
+            serde_json::json!("rollback")
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{
     self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
-use passauth_core::send::{self, SendField, SendKey};
+use passauth_core::send::{self, SendContentKey, SendField, SendKey};
 use passauth_core::{Error, device_login, export, generator, import, opaque, totp};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -104,10 +104,32 @@ impl Account {
         })
     }
 
+    /// A new vault key and its epoch-bound v2 `account` wrap at `keyEpoch` (0 for a new
+    /// vault): when `/sync` `user.account_wraps_v2` is true; else `newVaultKey` (v1).
+    #[wasm_bindgen(js_name = newVaultKeyBound)]
+    pub fn new_vault_key_bound(
+        &self,
+        #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+        #[wasm_bindgen(js_name = "keyEpoch")] key_epoch: f64,
+    ) -> R<NewVaultKey> {
+        let vault_id = string(vault_id)?;
+        let key_epoch =
+            sharing::whole(key_epoch).ok_or_else(|| JsError::new("invalid key epoch"))?;
+        let (key, wrapped) = self
+            .0
+            .new_vault_key_bound(&vault_id, key_epoch)
+            .map_err(js_err)?;
+        Ok(NewVaultKey {
+            key: Some(VaultKey(key)),
+            wrapped,
+        })
+    }
+
     /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to
     /// us). `keyEpoch` = the row's `key_epoch`: an epoch-bound v2 `account` wrap opens only
-    /// for it; a v1 wrap (what the apps write for now) only with `legacyAllowed`
-    /// (`pinsLegacyWrapAllowed`, true while v1 is written). Both are ignored for "sealed".
+    /// for it; a v1 wrap only with `legacyAllowed` (`pinsLegacyWrapAllowed(pins, vaultId,
+    /// keyEpoch)`). Both are ignored for "sealed". After a v2 wrap opened
+    /// (`accountWrapIsBound(wrapped)`), observe the row with `bound_wrap: true`.
     #[wasm_bindgen(js_name = openVaultKey)]
     pub fn open_vault_key(
         &self,
@@ -222,6 +244,31 @@ impl Account {
     ) -> R<String> {
         let key = SendKey::from_b64(&string(key)?).map_err(js_err)?;
         self.0.wrap_send_key(&key).map_err(js_err)
+    }
+
+    /// Wrap a v2 Send's content key (`sendPasswordKeys(…).contentKey`) for this account:
+    /// the Send's `owner_content_key`.
+    #[wasm_bindgen(js_name = wrapSendContentKey)]
+    pub fn wrap_send_content_key(
+        &self,
+        #[wasm_bindgen(js_name = "contentKey", unchecked_param_type = "string")]
+        content_key: JsValue,
+    ) -> R<String> {
+        let key = SendContentKey::from_b64(&string(content_key)?).map_err(js_err)?;
+        self.0.wrap_send_content_key(&key).map_err(js_err)
+    }
+
+    /// A v2 Send's content key (base64url, for `sendEncryptV2` / `sendOpen`) from its
+    /// `owner_content_key`.
+    #[wasm_bindgen(js_name = unwrapSendContentKey)]
+    pub fn unwrap_send_content_key(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] wrapped: JsValue,
+    ) -> R<String> {
+        self.0
+            .unwrap_send_content_key(&string(wrapped)?)
+            .map(|k| k.to_b64())
+            .map_err(js_err)
     }
 
     /// The send key (base64url, for the link's fragment) from a Send's `owner_key`.
@@ -659,7 +706,10 @@ impl VaultKey {
         to_js(&EncryptedItem::encrypt(&item, &id, &vault_id, &self.0).map_err(js_err)?)
     }
 
-    /// Re-encrypt an edited item, keeping its Item Key.
+    /// Re-encrypt an edited item, keeping its Item Key. Its edit counter (`rev`) becomes
+    /// one more than the higher of the stored item's and `item`'s (restoring an earlier
+    /// version counts up from the current one). `encryptItem` writes `item.rev + 1` (1 for
+    /// a new item; pass the decrypted item, with its `rev`, when moving or re-keying).
     #[wasm_bindgen(js_name = updateItem)]
     pub fn update_item(&self, encrypted: JsValue, item: JsValue) -> R<JsValue> {
         let enc: EncryptedItem = from_js(encrypted)?;
@@ -710,8 +760,8 @@ impl VaultKey {
     }
 
     /// Wrap this key for the owner's own account (`key_kind` `account`; used after a key
-    /// replacement). The v1 format every released app reads (epoch-bound v2 wraps are
-    /// read by `Account.openVaultKey` but not written yet).
+    /// replacement) in the v1 format (no epoch): while `/sync` `user.account_wraps_v2` is
+    /// not true. Else `wrapForBound`.
     #[wasm_bindgen(js_name = wrapFor)]
     pub fn wrap_for(
         &self,
@@ -720,6 +770,25 @@ impl VaultKey {
     ) -> R<String> {
         let vault_id = string(vault_id)?;
         account.0.wrap_vault_key(&self.0, &vault_id).map_err(js_err)
+    }
+
+    /// Wrap this key for the owner's own account in the epoch-bound v2 format at
+    /// `keyEpoch`: the epoch the vault has after the write (a key replacement: the row's
+    /// `key_epoch` + 1). When `/sync` `user.account_wraps_v2` is true.
+    #[wasm_bindgen(js_name = wrapForBound)]
+    pub fn wrap_for_bound(
+        &self,
+        account: &Account,
+        #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+        #[wasm_bindgen(js_name = "keyEpoch")] key_epoch: f64,
+    ) -> R<String> {
+        let vault_id = string(vault_id)?;
+        let key_epoch =
+            sharing::whole(key_epoch).ok_or_else(|| JsError::new("invalid key epoch"))?;
+        account
+            .0
+            .wrap_vault_key_bound(&self.0, &vault_id, key_epoch)
+            .map_err(js_err)
     }
 }
 
@@ -891,6 +960,31 @@ pub fn create_account_with_kdf(
         .map_err(js_err)
 }
 
+/// Compare an item's edit counter (`rev` of the decrypted item the server sent now) with
+/// the highest this device remembers for it (`null`/`undefined`: none): "new" or "newer"
+/// (remember `served`), "same" (also with other content: an app from before edited it),
+/// "rollback" (lower: the server sent an older version of the item; keep the newer copy,
+/// warn, never remember the lower number).
+#[wasm_bindgen(js_name = itemRevCheck)]
+pub fn item_rev_check(remembered: Option<f64>, served: f64) -> R<String> {
+    let num = |n: f64| sharing::whole(n).ok_or_else(|| JsError::new("invalid item rev"));
+    let remembered = remembered.map(num).transpose()?;
+    let verdict = passauth_core::item::item_rev_check(remembered, num(served)?);
+    match serde_json::to_value(verdict) {
+        Ok(serde_json::Value::String(s)) => Ok(s),
+        _ => Err(JsError::new("unexpected value")),
+    }
+}
+
+/// Whether an `account` wrap is the epoch-bound v2 format (`0x02` first): after it opened,
+/// observe the vault row with `bound_wrap: true`.
+#[wasm_bindgen(js_name = accountWrapIsBound)]
+pub fn account_wrap_is_bound(
+    #[wasm_bindgen(unchecked_param_type = "string")] wrapped: JsValue,
+) -> R<bool> {
+    Ok(keys::wrap_is_bound(&string(wrapped)?))
+}
+
 // -------------------------------------------------------------------- Send
 
 /// A new random send key: base64url of 32 bytes, for the link's fragment
@@ -926,6 +1020,93 @@ pub fn send_decrypt(
     let field = SendField::parse(&field).map_err(js_err)?;
     let bytes = key.decrypt(field, &ciphertext).map_err(js_err)?;
     String::from_utf8(bytes).map_err(|_| JsError::new("send text is not UTF-8"))
+}
+
+/// Encrypt a v2 Send's `field` ("name" or "data") with its content key
+/// (`sendPasswordKeys(…).contentKey` or `Account.unwrapSendContentKey`): for Sends with
+/// a password on servers with `send_v2`.
+#[wasm_bindgen(js_name = sendEncryptV2)]
+pub fn send_encrypt_v2(
+    #[wasm_bindgen(js_name = "contentKey", unchecked_param_type = "string")] content_key: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] field: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] plaintext: JsValue,
+) -> R<String> {
+    let (key, field, plaintext) = (string(content_key)?, string(field)?, string(plaintext)?);
+    let key = SendContentKey::from_b64(&key).map_err(js_err)?;
+    let field = SendField::parse(&field).map_err(js_err)?;
+    key.encrypt(field, plaintext.as_bytes()).map_err(js_err)
+}
+
+/// Decrypt a Send's `field` of either format: v1 with the link's send `key`, v2 with
+/// `contentKey` (throws `password_required` when it is a v2 field and `contentKey` is
+/// null). Needs no account (visitors).
+#[wasm_bindgen(js_name = sendOpen)]
+pub fn send_open(
+    #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
+    #[wasm_bindgen(
+        js_name = "contentKey",
+        unchecked_param_type = "string | null | undefined"
+    )]
+    content_key: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] field: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] ciphertext: JsValue,
+) -> R<String> {
+    let (key, field, ciphertext) = (string(key)?, string(field)?, string(ciphertext)?);
+    let content = opt_string(content_key)?
+        .map(|c| SendContentKey::from_b64(&c))
+        .transpose()
+        .map_err(js_err)?;
+    let key = SendKey::from_b64(&key).map_err(js_err)?;
+    let field = SendField::parse(&field).map_err(js_err)?;
+    let bytes = send::open_field(&key, content.as_ref(), field, &ciphertext).map_err(js_err)?;
+    String::from_utf8(bytes).map_err(|_| JsError::new("send text is not UTF-8"))
+}
+
+/// 1 or 2: the format of a Send's `name` or `data` (2 = encrypted with the password too).
+#[wasm_bindgen(js_name = sendFieldVersion)]
+pub fn send_field_version(
+    #[wasm_bindgen(unchecked_param_type = "string")] ciphertext: JsValue,
+) -> R<u8> {
+    send::field_version(&string(ciphertext)?).map_err(js_err)
+}
+
+/// What a Send password gives: `{verifier, contentKey}` from one Argon2id run over
+/// `salt` (the Send's `access_salt`; same bounds as `sendPasswordVerifier`) and the link's
+/// send `key`. `verifier` = `access_verifier` (also of v1 Sends); `contentKey` opens a v2
+/// Send's fields (`sendOpen`) and encrypts them (`sendEncryptV2`). Keep `contentKey` in
+/// memory only.
+#[wasm_bindgen(js_name = sendPasswordKeys)]
+pub fn send_password_keys(
+    #[wasm_bindgen(unchecked_param_type = "string")] password: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] salt: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
+) -> R<SendPasswordKeys> {
+    let (password, salt, key) = (string(password)?, string(salt)?, string(key)?);
+    let key = SendKey::from_b64(&key).map_err(js_err)?;
+    let secrets = send::password_secrets(&password, &salt).map_err(js_err)?;
+    Ok(SendPasswordKeys {
+        content_key: key.content_key(&secrets).to_b64(),
+        verifier: secrets.verifier.clone(),
+    })
+}
+
+#[wasm_bindgen]
+pub struct SendPasswordKeys {
+    verifier: String,
+    content_key: String,
+}
+
+#[wasm_bindgen]
+impl SendPasswordKeys {
+    #[wasm_bindgen(getter)]
+    pub fn verifier(&self) -> String {
+        self.verifier.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = contentKey)]
+    pub fn content_key(&self) -> String {
+        self.content_key.clone()
+    }
 }
 
 /// A new `access_salt` for a Send's password (Argon2id parameters + random salt).

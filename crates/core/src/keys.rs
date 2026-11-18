@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::{KeyPair, SymmetricKey, seal_to};
 use crate::item::{b64, unb64};
 use crate::kdf::{KdfParams, MasterKeys, SecretKey};
-use crate::send::SendKey;
+use crate::send::{SendContentKey, SendKey};
 use crate::{Error, Result};
 
 fn aad(kind: &str, id: &str) -> Vec<u8> {
@@ -24,6 +24,9 @@ fn aad(kind: &str, id: &str) -> Vec<u8> {
 /// Associated data of a send key wrapped by the Account Key. Sends get their id
 /// from the server after the app encrypted, so there is no id to bind.
 const SEND_KEY_AAD: &[u8] = b"passauth/send-key/v1";
+/// Associated data of a v2 Send's content key wrapped by the Account Key
+/// (`owner_content_key`; unbound to the id like [`SEND_KEY_AAD`]).
+const SEND_CONTENT_KEY_AAD: &[u8] = b"passauth/send-content-key/v1";
 
 /// Emergency access (v2) kinds: an emergency key wrapped by the grantor's Account
 /// Key (bound to grantor and access), sealed to the contact (the same), a personal
@@ -254,14 +257,14 @@ fn derive(pw: &str, kdf: &KdfParams, sk: Option<&SecretKey>, id: &str) -> Result
     }
 }
 
-/// Whether apps write epoch-bound (v2) account wraps. Off until every client reads
-/// them (planned for a later release): released apps open only v1 wraps, and the apps
-/// of one account update days apart, so a personal vault re-keyed by a new app would
-/// become unreadable on the account's older apps. Old-key replay is stopped by key ids
-/// and retired key ids in the account's key pins (`sharing`), which don't depend on the
-/// wrap format.
-pub const ACCOUNT_WRAPS_BOUND: bool = false;
-
+/// Which account-wrap format apps write is a runtime choice since migration 16: v2
+/// (epoch-bound) when the server's `/sync` says every app signed in to the account reads
+/// it (`user.account_wraps_v2`, a compatibility hint only: a server that lies can only
+/// make apps write v1, as before), else v1 ([`UnlockedAccount::wrap_vault_key`]). Old-key
+/// replay is stopped by key ids and retired key ids in the account's key pins (`sharing`)
+/// either way; v1 wraps of an epoch at or below the highest epoch this account opened
+/// from a v2 wrap are refused (`KeyPins::legacy_wrap_allowed`).
+///
 /// The marker byte before a v2 account wrap (`0x02 ‖ version ‖ nonce ‖ ciphertext`);
 /// a v1 wrap starts with the cipher's version byte (`0x01`).
 const BOUND_WRAP: u8 = 0x02;
@@ -271,6 +274,14 @@ const BOUND_WRAP: u8 = 0x02;
 /// the bytes are unambiguous). v1 is `passauth/vault-key/v1/<vault id>`.
 fn vault_key_aad_v2(vault_id: &str, key_epoch: u64) -> Vec<u8> {
     format!("passauth/vault-key/v2/{vault_id}/{key_epoch}").into_bytes()
+}
+
+/// Whether an `account` wrap is in the epoch-bound v2 format (its first byte is the
+/// `0x02` marker). Apps tell the key pins so after opening it (`VaultObservation`
+/// `bound_wrap`), which then refuse v1 wraps of that vault at or below that epoch.
+/// Malformed base64 is `false` (opening it fails anyway).
+pub fn wrap_is_bound(wrapped: &str) -> bool {
+    unb64(wrapped).is_ok_and(|w| w.first() == Some(&BOUND_WRAP))
 }
 
 impl UnlockedAccount {
@@ -303,16 +314,29 @@ impl UnlockedAccount {
         secret.len() == own.len() && bool::from(secret.as_slice().ct_eq(own.as_slice()))
     }
 
-    /// A new vault key and its `account` wrap ([`wrap_vault_key`](Self::wrap_vault_key)).
+    /// A new vault key and its v1 `account` wrap ([`wrap_vault_key`](Self::wrap_vault_key)).
     pub fn new_vault_key(&self, vault_id: &str) -> Result<(SymmetricKey, String)> {
         let key = SymmetricKey::generate()?;
         let wrapped = self.wrap_vault_key(&key, vault_id)?;
         Ok((key, wrapped))
     }
 
+    /// A new vault key and its v2 `account` wrap at `key_epoch`
+    /// ([`wrap_vault_key_bound`](Self::wrap_vault_key_bound)): for a new vault (epoch 0)
+    /// when `/sync` `user.account_wraps_v2` is true.
+    pub fn new_vault_key_bound(
+        &self,
+        vault_id: &str,
+        key_epoch: u64,
+    ) -> Result<(SymmetricKey, String)> {
+        let key = SymmetricKey::generate()?;
+        let wrapped = self.wrap_vault_key_bound(&key, vault_id, key_epoch)?;
+        Ok((key, wrapped))
+    }
+
     /// Wrap `key` as `vault_id`'s key with this account's key (`key_kind` `account`,
-    /// base64url): the v1 format every released app reads, while
-    /// [`ACCOUNT_WRAPS_BOUND`] is off.
+    /// base64url) in the v1 format (no epoch): what apps write while `/sync`
+    /// `user.account_wraps_v2` is not true (some app of the account may read only v1).
     pub fn wrap_vault_key(&self, key: &SymmetricKey, vault_id: &str) -> Result<String> {
         Ok(b64(&self
             .account_key
@@ -320,8 +344,9 @@ impl UnlockedAccount {
     }
 
     /// Wrap `key` as `vault_id`'s key at `key_epoch` in the epoch-bound v2 format
-    /// (`0x02` marker, associated data with the epoch). Not written by the apps yet (see
-    /// [`ACCOUNT_WRAPS_BOUND`]); [`open_vault_key`](Self::open_vault_key) reads it.
+    /// (`0x02` marker, associated data with the epoch): what apps write when `/sync`
+    /// `user.account_wraps_v2` is true. `key_epoch` is the epoch the vault has *after*
+    /// the write: 0 for a new vault, the row's `key_epoch` + 1 for a key replacement.
     pub fn wrap_vault_key_bound(
         &self,
         key: &SymmetricKey,
@@ -339,8 +364,7 @@ impl UnlockedAccount {
     /// Open an `account` wrap of `vault_id`'s key; `key_epoch` is the row's `key_epoch`.
     /// The format is told by its first byte (no trial decryption): a v2 wrap (`0x02`)
     /// opens only for the epoch it was written for; a v1 wrap (no epoch) only with
-    /// `legacy_allowed` (`KeyPins::legacy_wrap_allowed`, always true while
-    /// [`ACCOUNT_WRAPS_BOUND`] is off).
+    /// `legacy_allowed` (`KeyPins::legacy_wrap_allowed(vault_id, key_epoch)`).
     pub fn open_vault_key(
         &self,
         vault_id: &str,
@@ -379,6 +403,21 @@ impl UnlockedAccount {
         self.account_key
             .unwrap_key(&unb64(wrapped)?, SEND_KEY_AAD)
             .map(SendKey::from_key)
+    }
+
+    /// Wrap a v2 Send's content key for its owner (`owner_content_key`, base64url).
+    pub fn wrap_send_content_key(&self, key: &SendContentKey) -> Result<String> {
+        Ok(b64(&self
+            .account_key
+            .wrap(key.key(), SEND_CONTENT_KEY_AAD)?))
+    }
+
+    /// Open an `owner_content_key` from
+    /// [`wrap_send_content_key`](Self::wrap_send_content_key).
+    pub fn unwrap_send_content_key(&self, wrapped: &str) -> Result<SendContentKey> {
+        self.account_key
+            .unwrap_key(&unb64(wrapped)?, SEND_CONTENT_KEY_AAD)
+            .map(SendContentKey::from_key)
     }
 
     /// Emergency access, the grantor's side, when confirming contact `grant_id` (the
@@ -741,6 +780,21 @@ mod tests {
             assert!(alice.open_vault_key("v1", 6, &bound, legacy).is_err());
             assert!(alice.open_vault_key("v2", 7, &bound, legacy).is_err());
         }
+        // What apps write when `/sync` says every app reads v2: a new vault at epoch 0.
+        let (nk, nw) = alice.new_vault_key_bound("v3", 0).unwrap();
+        assert!(wrap_is_bound(&nw));
+        assert!(!wrap_is_bound(&wrapped));
+        assert!(!wrap_is_bound("not base64!"));
+        assert!(!wrap_is_bound(""));
+        assert_eq!(
+            alice
+                .open_vault_key("v3", 0, &nw, false)
+                .unwrap()
+                .as_bytes(),
+            nk.as_bytes()
+        );
+        assert!(alice.open_vault_key("v3", 1, &nw, true).is_err());
+        assert!(bob.open_vault_key("v3", 0, &nw, true).is_err());
         // A v2 ciphertext without its marker is read as v1 and fails.
         let unmarked = b64(&unb64(&bound).unwrap()[1..]);
         assert!(alice.open_vault_key("v1", 7, &unmarked, true).is_err());
@@ -793,6 +847,30 @@ mod tests {
         let mut bad = unb64(&wrapped).unwrap();
         bad[30] ^= 1;
         assert!(alice.unwrap_send_key(&b64(&bad)).is_err());
+    }
+
+    #[test]
+    fn send_content_keys_wrap_for_the_owner_only() {
+        let alice = new(false).unlocked;
+        let bob = new(false).unlocked;
+        let link = SendKey::generate().unwrap();
+        let small = KdfParams {
+            memory_kib: 256,
+            iterations: 3,
+            parallelism: 1,
+            salt: b64(&[5; 16]),
+        };
+        let content = link.content_key(&crate::send::secrets("pw", &small).unwrap());
+        let wrapped = alice.wrap_send_content_key(&content).unwrap();
+        assert_eq!(
+            alice.unwrap_send_content_key(&wrapped).unwrap().to_b64(),
+            content.to_b64()
+        );
+        assert!(bob.unwrap_send_content_key(&wrapped).is_err());
+        // Not interchangeable with the link key's wrap (other associated data).
+        let owner_key = alice.wrap_send_key(&link).unwrap();
+        assert!(alice.unwrap_send_content_key(&owner_key).is_err());
+        assert!(alice.unwrap_send_key(&wrapped).is_err());
     }
 
     /// The grantor confirms contact `grant` (an access's id): (the contact, the

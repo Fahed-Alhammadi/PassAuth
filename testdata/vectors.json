@@ -6088,6 +6088,23 @@
       "grandfathered": null,
       "left": {}
     },
+    "keyPinsBound": {
+      "version": 0,
+      "pins": [],
+      "epochs": {
+        "00000000-0000-4000-8000-0000000000f1": {
+          "key_epoch": 1,
+          "key_id": "b7oV2a1UFfA_lB8xI0KVFYaLVnbq2oooIXj20at142Y",
+          "retired": [],
+          "signed_since": null,
+          "own": true,
+          "bound_since": 1
+        }
+      },
+      "own_identity": null,
+      "grandfathered": null,
+      "left": {}
+    },
     "admissions": [
       {
         "pins": "none",
@@ -9222,38 +9239,152 @@
     "legacyWraps": [
       {
         "pins": "none",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "none",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "none",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "withEpoch",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "withEpoch",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "withEpoch",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "raised",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "raised",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "raised",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "left",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "left",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "left",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "grandfathered",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "grandfathered",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "grandfathered",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "withheld",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "withheld",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "withheld",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "unsigned",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "unsigned",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "unsigned",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "rosterMax",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "rosterMax",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "rosterMax",
+        "keyEpoch": 2,
         "expected": true
       },
       {
         "pins": "own",
+        "keyEpoch": 0,
+        "expected": true
+      },
+      {
+        "pins": "own",
+        "keyEpoch": 1,
+        "expected": true
+      },
+      {
+        "pins": "own",
+        "keyEpoch": 2,
+        "expected": true
+      },
+      {
+        "pins": "bound",
+        "keyEpoch": 0,
+        "expected": false
+      },
+      {
+        "pins": "bound",
+        "keyEpoch": 1,
+        "expected": false
+      },
+      {
+        "pins": "bound",
+        "keyEpoch": 2,
         "expected": true
       }
     ],
@@ -9309,5 +9440,62 @@
         }
       ]
     }
+  },
+  "itemRev": {
+    "about": "encryptItem writes rev + 1 of the item given (1 for a new item); updateItem one more than the higher of the stored and the given item's rev; a move or key replacement re-encrypts the decrypted item (+1)",
+    "chain": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "checks": [
+      {
+        "remembered": null,
+        "served": 0,
+        "expected": "new"
+      },
+      {
+        "remembered": null,
+        "served": 5,
+        "expected": "new"
+      },
+      {
+        "remembered": 3,
+        "served": 4,
+        "expected": "newer"
+      },
+      {
+        "remembered": 3,
+        "served": 3,
+        "expected": "same"
+      },
+      {
+        "remembered": 3,
+        "served": 2,
+        "expected": "rollback"
+      },
+      {
+        "remembered": 1,
+        "served": 0,
+        "expected": "rollback"
+      },
+      {
+        "remembered": 0,
+        "served": 0,
+        "expected": "same"
+      }
+    ]
+  },
+  "sendV2": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "password": "correct horse battery staple",
+    "salt": "sendpw-v1$m=65536,t=3,p=1$AQIDBAUGBwgJCgsMDQ4PEA",
+    "text": "Hello from PassAuth Send v2 ✓",
+    "nonce": "606060606060606060606060606060606060606060606060",
+    "verifier": "yYJK6m4z3yQyjqzhexV16R2qriF1KgytGMmz9Y5mlWI",
+    "contentKey": "Xf-NN8eCTvkwdD44LM8zUYlFSWNfxGBbI2PebNyt154",
+    "data": "AgFgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGC6_cxzj5F59c-YPuZLJqYvImwYxRfFw1Vje5sVsh5So_ip0lX6KaV4WfQQB6RXHQ"
   }
 }

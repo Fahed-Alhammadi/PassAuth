@@ -45,10 +45,10 @@ export interface Tombstone { pin: EpochPin | null; roster_version: number; left_
 export interface KeyPins { version: number; pins: KeyPin[]; epochs?: Record<string, EpochPin>; own_identity?: string | null; grandfathered?: Record<string, string> | null; left?: Record<string, Tombstone>; [extra: string]: unknown }
 /** A shared vault for `pinsGrandfather`: its id and the key id (`VaultKey.keyId`) of the key it has now. */
 export interface GrandfatherCandidate { vault_id: string; key_id: string }
-/** A vault's key: `{key_epoch, key_id}` as `VaultKey.epochPin` gives it; as a pin also the retired key ids (12-byte prefixes), since which roster version the vault is signed, the highest trusted roster version with its hash (always together), the roster version a re-join (after leaving) accepted with the `left_at` of the tombstone it cleared, and whether the account held it with its own wrap. */
-export interface EpochPin { key_epoch: number; key_id: string; retired?: string[]; signed_since?: number | null; roster_version_max?: number | null; roster_hash?: string | null; rejoined_at?: number | null; rejoined_over?: number | null; own?: boolean }
-/** A vault row (or, with `invitation: true`, an invitation) for `pinsAdmit` / `pinsObserve` / `pinsAccept`, after its key opened and its share and roster chain were checked (`roster_hash`: `rosterHash` of the trusted roster, required with `roster_version` and only with it). `signed_share` and `paused` are required; unknown fields throw. `chain_hashes` (`{"<version>": rosterHash}` of the trusted roster the chain started from and every newer roster verified now): send it whenever a chain was fetched (also an invitation's from version 1); the pinned highest roster must be in it with its hash, else `roster_forked`. */
-export interface VaultObservation { vault_id: string; key_kind: "account" | "sealed"; key: EpochPin | null; roster_version: number | null; roster_hash?: string | null; chain_hashes?: Record<string, string> | null; signed_share: boolean; paused: boolean; invitation?: boolean }
+/** A vault's key: `{key_epoch, key_id}` as `VaultKey.epochPin` gives it; as a pin also the retired key ids (12-byte prefixes), since which roster version the vault is signed, the highest trusted roster version with its hash (always together), the roster version a re-join (after leaving) accepted with the `left_at` of the tombstone it cleared, whether the account held it with its own wrap, and the highest epoch it opened from a v2 (epoch-bound) account wrap (`bound_since`: v1 wraps at or below it are refused). */
+export interface EpochPin { key_epoch: number; key_id: string; retired?: string[]; signed_since?: number | null; roster_version_max?: number | null; roster_hash?: string | null; rejoined_at?: number | null; rejoined_over?: number | null; own?: boolean; bound_since?: number | null }
+/** A vault row (or, with `invitation: true`, an invitation) for `pinsAdmit` / `pinsObserve` / `pinsAccept`, after its key opened and its share and roster chain were checked (`roster_hash`: `rosterHash` of the trusted roster, required with `roster_version` and only with it). `signed_share` and `paused` are required; unknown fields throw. `chain_hashes` (`{"<version>": rosterHash}` of the trusted roster the chain started from and every newer roster verified now): send it whenever a chain was fetched (also an invitation's from version 1); the pinned highest roster must be in it with its hash, else `roster_forked`. `bound_wrap`: the row's `account` wrap was v2 (`accountWrapIsBound`) and opened (only for `account` rows). */
+export interface VaultObservation { vault_id: string; key_kind: "account" | "sealed"; key: EpochPin | null; roster_version: number | null; roster_hash?: string | null; chain_hashes?: Record<string, string> | null; signed_share: boolean; paused: boolean; invitation?: boolean; bound_wrap?: boolean }
 /** `pinsAdmit`'s verdict (`ok.pin`: write what it says to pin; `consent.replaced`: a new key on a vault never seen signed, unsigned or signed by anyone; `consent.own`: the account held this vault with its own key wrap: warn that a personal vault now comes as one someone else sealed; `consent.first_signed`: signed for the first time (the signer becomes the vault's first trusted signer only with the user's OK); `consent.held`: an invitation with a newer signed key for a vault the account holds; `consent.declinable`: Decline may be offered (`pinsDecline`), else "Not now"). Accepting a consent = `pinsAccept` with the same observation. */
 export type Admission =
   | { status: "ok"; epoch: "new" | "same" | "newer"; trust: "own" | "signed" | "unsigned"; pin: boolean }
@@ -790,15 +790,18 @@ pub fn normalize_email(
     Ok(core::normalize_email(&string(email)?))
 }
 
-/// Whether an `account` wrap of `vaultId` may be a legacy v1 wrap (no signed history):
-/// pass it to `Account.openVaultKey`.
+/// Whether an `account` wrap of `vaultId` at `keyEpoch` (the row's) may be a legacy v1
+/// wrap: not at or below the highest epoch the account opened from a v2 wrap
+/// (`bound_since`). Pass it to `Account.openVaultKey`.
 #[wasm_bindgen(js_name = pinsLegacyWrapAllowed)]
 pub fn pins_legacy_wrap_allowed(
     #[wasm_bindgen(unchecked_param_type = "KeyPins | null | undefined")] pins: JsValue,
     #[wasm_bindgen(js_name = "vaultId", unchecked_param_type = "string")] vault_id: JsValue,
+    #[wasm_bindgen(js_name = "keyEpoch")] key_epoch: f64,
 ) -> R<bool> {
     let vault_id = string(vault_id)?;
-    Ok(pins_or_empty(pins)?.legacy_wrap_allowed(&vault_id))
+    let key_epoch = number(key_epoch, "key epoch")?;
+    Ok(pins_or_empty(pins)?.legacy_wrap_allowed(&vault_id, key_epoch))
 }
 
 /// The identity `/sync` lists for the account itself (`SigningIdentity.identityHash()`

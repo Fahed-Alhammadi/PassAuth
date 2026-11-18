@@ -62,6 +62,45 @@ pub fn client_app(headers: &HeaderMap) -> Option<String> {
     (part(name) && part(version)).then(|| value.to_owned())
 }
 
+/// The first release of each app that reads epoch-bound (v2) account wraps (signed
+/// sharing, 2026-11-16): `<name>/<version>` as the apps send it. The web vault is
+/// served by the server (0.12.0 and later read them); the macOS AutoFill extension
+/// carries the desktop app's version. Any other name is unknown here.
+const READS_BOUND_WRAPS: &[(&str, (u64, u64, u64))] = &[
+    ("web", (0, 12, 0)),
+    ("desktop", (0, 9, 0)),
+    ("macos-autofill", (0, 9, 0)),
+    ("extension", (0, 8, 0)),
+    ("ios", (0, 8, 0)),
+    ("android", (0, 8, 0)),
+];
+
+/// Whether the app of a session (its [`CLIENT_HEADER`], `None` when it never said)
+/// reads epoch-bound account wraps: a known app at or above its first such release.
+/// Missing, unknown or unparseable = no (an app from before API 2 sent nothing).
+/// Version: `X[.Y[.Z]]`, anything from the first `-` or `+` on ignored.
+pub fn reads_bound_wraps(client: Option<&str>) -> bool {
+    let Some((name, version)) = client.and_then(|c| c.split_once('/')) else {
+        return false;
+    };
+    let Some(&(_, min)) = READS_BOUND_WRAPS.iter().find(|(n, _)| *n == name) else {
+        return false;
+    };
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.');
+    let mut next = |required: bool| -> Option<u64> {
+        match parts.next() {
+            Some(p) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => p.parse().ok(),
+            None if !required => Some(0),
+            _ => None,
+        }
+    };
+    let (Some(major), Some(minor), Some(patch)) = (next(true), next(false), next(false)) else {
+        return false;
+    };
+    parts.next().is_none() && (major, minor, patch) >= min
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/prelogin", post(prelogin))

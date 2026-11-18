@@ -20,6 +20,16 @@
 //! else from the body is ever logged, and the fragment never reaches the server at
 //! all.
 //!
+//! Send v2 (migration 16, feature `send_v2`): a Send with a password may have its name
+//! and text encrypted with a key made from the link's key *and* the password, so the
+//! link alone doesn't open it. Its owner keeps that key wrapped by their account key
+//! (`owner_content_key`, returned only to the owner). The server can't tell the formats
+//! apart and doesn't need to; it only keeps `owner_content_key` consistent with the
+//! password: none without a password, and while a Send has one, changing or removing
+//! the password must bring the re-encrypted `name`, `data` and `owner_content_key`
+//! (`null` when going back to the link key alone), so an app from before can't leave
+//! the text encrypted with a password visitors no longer have.
+//!
 //! The sweeper deletes Sends once their `delete_at` (at most `send_max_days` ahead)
 //! has passed; their bytes count toward the owner's storage quota until then.
 
@@ -108,6 +118,7 @@ struct Row {
     name: String,
     data: Option<String>,
     owner_key: String,
+    owner_content_key: Option<String>,
     access_salt: Option<String>,
     access_verifier: Option<String>,
     max_views: Option<i64>,
@@ -118,7 +129,7 @@ struct Row {
     hide_email: i64,
     created_at: i64,
     updated_at: i64,
-    /// Bytes counted toward the owner's storage (name + data + owner key).
+    /// Bytes counted toward the owner's storage (name + data + owner keys).
     size: i64,
 }
 
@@ -127,9 +138,10 @@ macro_rules! row_columns {
         concat!(
             "id, kind, name, ",
             $data,
-            ", owner_key, access_salt, access_verifier, max_views, views, expires_at,
-             delete_at, disabled, hide_email, created_at, updated_at,
-             CAST(octet_length(name) + octet_length(data) + octet_length(owner_key) AS BIGINT) AS size"
+            ", owner_key, owner_content_key, access_salt, access_verifier, max_views, views,
+             expires_at, delete_at, disabled, hide_email, created_at, updated_at,
+             CAST(octet_length(name) + octet_length(data) + octet_length(owner_key)
+                  + COALESCE(octet_length(owner_content_key), 0) AS BIGINT) AS size"
         )
     };
 }
@@ -147,6 +159,7 @@ fn owner_json(state: &App, r: Row, t: i64) -> Value {
         "kind": r.kind,
         "name": r.name,
         "owner_key": r.owner_key,
+        "owner_content_key": r.owner_content_key,
         "size": r.size,
         "has_password": r.access_verifier.is_some(),
         "access_salt": r.access_salt,
@@ -255,6 +268,10 @@ async fn check_quota(
     Ok(())
 }
 
+fn content_key_without_password() -> ApiError {
+    ApiError::bad("owner_content_key needs a password (access_salt and access_verifier)")
+}
+
 fn sends_disabled() -> ApiError {
     ApiError::coded(
         StatusCode::FORBIDDEN,
@@ -270,6 +287,8 @@ struct NewSend {
     name: String,
     data: String,
     owner_key: String,
+    /// Send v2: the content key wrapped by the owner's account key (only with a password).
+    owner_content_key: Option<String>,
     access_salt: Option<String>,
     access_verifier: Option<String>,
     max_views: Option<i64>,
@@ -308,21 +327,31 @@ async fn create(
         check_max_views(m)?;
     }
     let password = new_password(b.access_salt, b.access_verifier)?;
+    if let Some(key) = &b.owner_content_key {
+        check_blob("owner_content_key", key, MAX_OWNER_KEY)?;
+        if password.is_none() {
+            return Err(content_key_without_password());
+        }
+    }
     state.limiter.limit(
         Class::Target,
         &format!("send-create:{}", user.user_id),
         CREATES_PER_HOUR,
         3600,
     )?;
-    let size = (b.name.len() + b.data.len() + b.owner_key.len()) as i64;
+    let size = (b.name.len()
+        + b.data.len()
+        + b.owner_key.len()
+        + b.owner_content_key.as_ref().map_or(0, String::len)) as i64;
     crate::disk::ensure_room(&state, size as u64).await?;
     let id = new_id();
     let (salt, verifier) = password.unzip();
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO sends (id, user_id, kind, name, data, owner_key, access_salt, access_verifier,
-           max_views, views, expires_at, delete_at, disabled, hide_email, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12, $13, $14, $14)",
+           max_views, views, expires_at, delete_at, disabled, hide_email, created_at, updated_at,
+           owner_content_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11, $12, $13, $14, $14, $15)",
     )
     .bind(&id)
     .bind(&user.user_id)
@@ -338,6 +367,7 @@ async fn create(
     .bind(b.disabled as i64)
     .bind(b.hide_email as i64)
     .bind(t)
+    .bind(&b.owner_content_key)
     .execute(&mut *tx)
     .await?;
     check_quota(&mut tx, &state, &user.user_id, size).await?;
@@ -407,12 +437,16 @@ fn sent<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T
 /// ignored). `null` clears `max_views` and `expires_at`, and `access_verifier:
 /// null` removes the password; a new password sends `access_salt` and
 /// `access_verifier` together. The text stays encrypted with the same send key
-/// (the link holds it).
+/// (the link holds it). `owner_content_key` (Send v2): `null` clears it; while the Send
+/// has one, a new password or removing it needs `name`, `data` and `owner_content_key`
+/// in the same request (400 otherwise); removing the password clears it.
 #[derive(Deserialize)]
 struct SendChanges {
     name: Option<String>,
     data: Option<String>,
     owner_key: Option<String>,
+    #[serde(default, deserialize_with = "sent")]
+    owner_content_key: Option<Option<String>>,
     access_salt: Option<String>,
     #[serde(default, deserialize_with = "sent")]
     access_verifier: Option<Option<String>>,
@@ -443,6 +477,9 @@ async fn update(
     if let Some(key) = &b.owner_key {
         check_blob("owner_key", key, MAX_OWNER_KEY)?;
     }
+    if let Some(Some(key)) = &b.owner_content_key {
+        check_blob("owner_content_key", key, MAX_OWNER_KEY)?;
+    }
     if let Some(Some(m)) = b.max_views {
         check_max_views(m)?;
     }
@@ -472,6 +509,16 @@ async fn update(
             "send access_salt and access_verifier together",
         ));
     }
+    // Send v2: the text is encrypted with the password too, so a new password (or none)
+    // must come with the text re-encrypted and the new content key (or `null`).
+    if old.owner_content_key.is_some()
+        && password.is_some()
+        && (b.owner_content_key.is_none() || b.name.is_none() || b.data.is_none())
+    {
+        return Err(ApiError::bad(
+            "this Send is encrypted with its password: a new password or none needs name, data and owner_content_key",
+        ));
+    }
     let mut changed: Vec<&str> = Vec::new();
     let mut pick = |field: &'static str, new: Option<String>, old: &str| -> String {
         match new {
@@ -493,6 +540,18 @@ async fn update(
             new.unzip()
         }
     };
+    let content_key = match b.owner_content_key {
+        Some(v) => v,
+        // Removing the password removes the content key (checked above for v2 Sends).
+        None if verifier.is_none() => None,
+        None => old.owner_content_key.clone(),
+    };
+    if content_key.is_some() && verifier.is_none() {
+        return Err(content_key_without_password());
+    }
+    if content_key != old.owner_content_key {
+        changed.push("owner_content_key");
+    }
     let max_views = match b.max_views {
         Some(v) if v != old.max_views => {
             changed.push("max_views");
@@ -533,7 +592,10 @@ async fn update(
         // Nothing to write, nothing to log.
         return Ok(Json(owner_json(&state, old, t)));
     }
-    let growth = (name.len() + data.len() + owner_key.len()) as i64 - old.size;
+    let growth =
+        (name.len() + data.len() + owner_key.len() + content_key.as_ref().map_or(0, String::len))
+            as i64
+            - old.size;
     if growth > 0 {
         crate::disk::ensure_room(&state, growth as u64).await?;
     }
@@ -544,7 +606,8 @@ async fn update(
            max_views = $6, expires_at = $7, delete_at = $8, disabled = $9, hide_email = $10,
            updated_at = $11,
            wrong_passwords = CASE WHEN $13 = 1 THEN 0 ELSE wrong_passwords END,
-           wrong_since = CASE WHEN $13 = 1 THEN 0 ELSE wrong_since END
+           wrong_since = CASE WHEN $13 = 1 THEN 0 ELSE wrong_since END,
+           owner_content_key = $14
          WHERE id = $12",
     )
     .bind(&name)
@@ -560,6 +623,7 @@ async fn update(
     .bind(t)
     .bind(&id)
     .bind(new_password as i64)
+    .bind(&content_key)
     .execute(&mut *tx)
     .await?;
     check_quota(&mut tx, &state, &user.user_id, growth).await?;

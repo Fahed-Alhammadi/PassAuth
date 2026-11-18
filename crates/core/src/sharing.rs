@@ -1648,6 +1648,13 @@ pub struct EpochPin {
     /// turns into one whose key someone else sealed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub own: bool,
+    /// The highest key epoch this account opened from an epoch-bound (v2) `account` wrap
+    /// of the vault (migration 16): a v1 wrap (no epoch in its associated data) of this
+    /// epoch or a lower one is refused from then on
+    /// ([`KeyPins::legacy_wrap_allowed`]); a v1 wrap of a higher epoch (a key an app
+    /// replaced while v2 was off for the account) still opens. Pins from before have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_since: Option<u64>,
 }
 
 impl EpochPin {
@@ -1663,6 +1670,7 @@ impl EpochPin {
             rejoined_at: None,
             rejoined_over: None,
             own: false,
+            bound_since: None,
         })
     }
 
@@ -1949,6 +1957,13 @@ pub struct VaultObservation {
     /// Must be `sealed`.
     #[serde(default)]
     pub invitation: bool,
+    /// The row's `account` wrap was in the epoch-bound v2 format
+    /// ([`wrap_is_bound`](crate::keys::wrap_is_bound) of its `wrapped_key`) and opened for
+    /// its `key_epoch`: the pin remembers that epoch (`bound_since`), so a v1 wrap of it or
+    /// a lower epoch is refused later. Only for `account` rows (a sealed row with it is
+    /// malformed). Missing = false (apps from before: nothing is recorded).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bound_wrap: bool,
 }
 
 /// [`KeyPins::admit`]'s verdict.
@@ -2172,6 +2187,7 @@ fn merge_epoch(base: &EpochPin, other: &EpochPin) -> EpochPin {
         None => (None, None),
     };
     out.own = base.own || other.own;
+    out.bound_since = base.bound_since.max(other.bound_since);
     out
 }
 
@@ -2312,6 +2328,7 @@ impl KeyPins {
             signed_share: key_kind == "sealed" && roster_version.is_some(),
             paused: false,
             invitation: false,
+            bound_wrap: false,
         })
     }
 
@@ -2346,17 +2363,25 @@ impl KeyPins {
             .as_ref()
             .ok_or(Error::Malformed("the vault row has no key epoch"))?;
         let roster = o.roster_version.zip(o.roster_hash.as_deref());
-        self.accept_key(&o.vault_id, key, roster, o.key_kind == "account")
+        self.accept_key(
+            &o.vault_id,
+            key,
+            roster,
+            o.key_kind == "account",
+            o.bound_wrap,
+        )
     }
 
-    /// Pin `current` for `vault_id` with the trusted `roster` (version and hash) and
-    /// (`own`) whether the row was the account's own wrap. Only after `admit` passed.
+    /// Pin `current` for `vault_id` with the trusted `roster` (version and hash),
+    /// (`own`) whether the row was the account's own wrap and (`bound`) whether that wrap
+    /// was epoch-bound (v2). Only after `admit` passed.
     fn accept_key(
         &self,
         vault_id: &str,
         current: &EpochPin,
         roster: Option<(u64, &str)>,
         own: bool,
+        bound: bool,
     ) -> Result<KeyPins> {
         check_id(vault_id)?;
         current.check()?;
@@ -2393,6 +2418,7 @@ impl KeyPins {
                     rejoined_at: old.as_ref().and_then(|o| o.rejoined_at),
                     rejoined_over: old.as_ref().and_then(|o| o.rejoined_over),
                     own: old.as_ref().is_some_and(|o| o.own),
+                    bound_since: old.as_ref().and_then(|o| o.bound_since),
                 }
             }
             EpochStatus::Same => {
@@ -2406,6 +2432,9 @@ impl KeyPins {
         };
         pin.raise_roster(roster);
         pin.own |= own;
+        if bound {
+            pin.bound_since = pin.bound_since.max(Some(current.key_epoch));
+        }
         if let Some(t) = &tomb {
             // rejoin_ok: a roster version above the tombstone's.
             pin.rejoined_at = roster_version;
@@ -2447,19 +2476,20 @@ impl KeyPins {
         }
     }
 
-    /// Whether an `account` wrap of `vault_id` may be in the v1 format (associated data
-    /// without the epoch). Always, while the apps write v1
-    /// ([`ACCOUNT_WRAPS_BOUND`](crate::keys::ACCOUNT_WRAPS_BOUND) off: every wrap is
-    /// v1). Once every client writes v2, only while the vault has no signed history
-    /// (no epoch pin with `signed_since`); tighten further then by remembering, per
-    /// epoch pin, that the key arrived in a v2 wrap and refusing v1 for it. Old-key
-    /// replay is stopped by key ids and retired key ids either way.
-    pub fn legacy_wrap_allowed(&self, vault_id: &str) -> bool {
-        !crate::keys::ACCOUNT_WRAPS_BOUND
-            || !self
-                .epochs
-                .get(vault_id)
-                .is_some_and(|p| p.signed_since.is_some())
+    /// Whether an `account` wrap of `vault_id` at `key_epoch` (the row's) may be in the
+    /// v1 format (associated data without the epoch): not at or below the highest epoch
+    /// this account opened from a v2 wrap of the vault (`bound_since`, recorded through
+    /// [`observe`](Self::observe) / [`accept`](Self::accept) with `bound_wrap`); always
+    /// otherwise, so a vault whose key an app replaced in v1 (while `/sync` said not
+    /// every app reads v2) still opens. Old-key replay is stopped by key ids and retired
+    /// key ids either way; this stops a v1 wrap of an old key relabelled with the epoch
+    /// a v2 wrap was seen at.
+    pub fn legacy_wrap_allowed(&self, vault_id: &str, key_epoch: u64) -> bool {
+        !self
+            .epochs
+            .get(vault_id)
+            .and_then(|p| p.bound_since)
+            .is_some_and(|b| key_epoch <= b)
     }
 
     /// Record that this account left or deleted `vault_id` (instead of forgetting it):
@@ -2596,6 +2626,9 @@ impl KeyPins {
         if o.invitation && !sealed {
             return Err(Error::Malformed("an invitation is sealed"));
         }
+        if o.bound_wrap && sealed {
+            return Err(Error::Malformed("only an account wrap is epoch-bound"));
+        }
         match (o.roster_version, &o.roster_hash) {
             (Some(_), Some(h)) => {
                 key32(h, "roster hash length")?;
@@ -2662,6 +2695,8 @@ impl KeyPins {
         }
         let pin = matches!(status, EpochStatus::New | EpochStatus::Newer)
             || (!sealed && pinned.is_some_and(|p| !p.own))
+            || (o.bound_wrap
+                && pinned.is_some_and(|p| p.bound_since.is_none_or(|b| b < key.key_epoch)))
             || o.roster_version.is_some_and(|v| {
                 pinned.is_some_and(|p| {
                     p.signed_since.is_none() || p.roster_version_max.is_none_or(|m| v > m)
@@ -2746,6 +2781,7 @@ impl KeyPins {
                 key,
                 o.roster_version.zip(o.roster_hash.as_deref()),
                 o.key_kind == "account",
+                o.bound_wrap,
             )?,
             _ => self.clone(),
         };
@@ -3866,7 +3902,7 @@ mod tests {
     impl SetEpoch for KeyPins {
         fn set_epoch(&self, vault: &str, current: &EpochPin, rv: Option<u64>) -> Result<KeyPins> {
             let hash = rv.map(rh);
-            self.accept_key(vault, current, rv.zip(hash.as_deref()), false)
+            self.accept_key(vault, current, rv.zip(hash.as_deref()), false, false)
         }
     }
 
@@ -4015,9 +4051,9 @@ mod tests {
         // Signed since: a later roster-less answer is a downgrade.
         let signed = pins.set_epoch("v", &pin(&k1, 1), Some(3)).unwrap();
         assert_eq!(signed.epochs["v"].signed_since, Some(3));
-        // v1 stays readable while the apps write it.
-        assert!(signed.legacy_wrap_allowed("v"));
-        assert!(pins.legacy_wrap_allowed("v"));
+        // v1 stays readable until a v2 wrap was seen (signed history doesn't matter).
+        assert!(signed.legacy_wrap_allowed("v", 1));
+        assert!(pins.legacy_wrap_allowed("v", 0));
         assert_eq!(
             signed.check_epoch("v", &pin(&k1, 1), None),
             EpochStatus::Downgraded
@@ -4061,7 +4097,122 @@ mod tests {
             paused: false,
             roster_hash: roster.map(rh),
             invitation: false,
+            bound_wrap: false,
         }
+    }
+
+    /// Review item 7: v2 account wraps tighten the legacy rule per epoch, recorded
+    /// through `observe`/`accept` with `bound_wrap`, merged as the higher epoch.
+    #[test]
+    fn bound_wraps_refuse_v1_only_at_or_below_the_recorded_epoch() {
+        let k1 = SymmetricKey::from_bytes([1; 32]);
+        let k2 = SymmetricKey::from_bytes([2; 32]);
+        let k3 = SymmetricKey::from_bytes([3; 32]);
+        let bound = |key: EpochPin| VaultObservation {
+            bound_wrap: true,
+            ..obs("account", Some(key), None, false)
+        };
+        // Nothing recorded: v1 opens at every epoch (also for unknown vaults).
+        let none = KeyPins::default();
+        for e in [0, 1, 9] {
+            assert!(none.legacy_wrap_allowed("v", e));
+        }
+        // A v1 wrap observed: still nothing recorded.
+        let v1 = none
+            .observe(&obs("account", Some(pin(&k1, 0)), None, false))
+            .unwrap();
+        assert!(v1.changed);
+        assert_eq!(v1.pins.epochs["v"].bound_since, None);
+        assert!(v1.pins.legacy_wrap_allowed("v", 0));
+        // The same key at the same epoch, now seen in a v2 wrap: pin says so (pin: true).
+        let seen = v1.pins.observe(&bound(pin(&k1, 0))).unwrap();
+        assert_eq!(
+            seen.admission,
+            Admission::Ok {
+                epoch: EpochStatus::Same,
+                trust: Trust::Own,
+                pin: true
+            }
+        );
+        assert!(seen.changed);
+        let p = seen.pins;
+        assert_eq!(p.epochs["v"].bound_since, Some(0));
+        assert!(!p.legacy_wrap_allowed("v", 0));
+        // A v1 wrap of a later epoch (an app replaced the key while v2 was off) opens…
+        assert!(p.legacy_wrap_allowed("v", 1));
+        // …and pinning it keeps the bound epoch (its key arrived in v1: no new mark).
+        let rekeyed = p
+            .observe(&obs("account", Some(pin(&k2, 1)), None, false))
+            .unwrap()
+            .pins;
+        assert_eq!(rekeyed.epochs["v"].key_epoch, 1);
+        assert_eq!(rekeyed.epochs["v"].bound_since, Some(0));
+        assert!(!rekeyed.legacy_wrap_allowed("v", 0));
+        assert!(rekeyed.legacy_wrap_allowed("v", 1));
+        // A v2 wrap of a new key at epoch 2: v1 refused at 0..=2, allowed above.
+        let v2 = rekeyed.observe(&bound(pin(&k3, 2))).unwrap().pins;
+        assert_eq!(v2.epochs["v"].bound_since, Some(2));
+        for e in 0..=2 {
+            assert!(!v2.legacy_wrap_allowed("v", e), "{e}");
+        }
+        assert!(v2.legacy_wrap_allowed("v", 3));
+        // Seen again: nothing to write.
+        let again = v2.observe(&bound(pin(&k3, 2))).unwrap();
+        assert!(!again.changed);
+        assert_eq!(
+            again.admission,
+            Admission::Ok {
+                epoch: EpochStatus::Same,
+                trust: Trust::Own,
+                pin: false
+            }
+        );
+        // Other vaults are untouched.
+        assert!(v2.legacy_wrap_allowed("other", 0));
+        // Merges keep the higher bound epoch, either way round.
+        assert_eq!(rekeyed.merge(&v2).unwrap().epochs["v"].bound_since, Some(2));
+        assert_eq!(v2.merge(&rekeyed).unwrap().epochs["v"].bound_since, Some(2));
+        assert_eq!(
+            v2.merge_last_known(&rekeyed).unwrap().epochs["v"].bound_since,
+            Some(2)
+        );
+        assert_eq!(
+            v1.pins.merge_last_known(&v2).unwrap().epochs["v"].bound_since,
+            Some(2)
+        );
+        // `accept` records it too.
+        let accepted = none.accept(&bound(pin(&k1, 4))).unwrap();
+        assert_eq!(accepted.epochs["v"].bound_since, Some(4));
+        // Only account rows are epoch-bound.
+        let sealed = VaultObservation {
+            bound_wrap: true,
+            ..obs("sealed", Some(pin(&k1, 0)), None, false)
+        };
+        assert!(matches!(none.admit(&sealed), Err(Error::Malformed(_))));
+        // Kept through sealing; pins (and observations) from before read without it.
+        let me = account("me", 5);
+        let opened = me
+            .open_key_pins(&me.seal_key_pins(&v2, 3).unwrap(), 3)
+            .unwrap();
+        assert_eq!(opened.epochs["v"].bound_since, Some(2));
+        let mut old = serde_json::to_value(&v2).unwrap();
+        old["epochs"]["v"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bound_since");
+        let old: KeyPins = serde_json::from_value(old).unwrap();
+        assert_eq!(old.epochs["v"].bound_since, None);
+        assert!(old.legacy_wrap_allowed("v", 0));
+        let unbound: VaultObservation = serde_json::from_value(serde_json::json!({
+            "vault_id": "v", "key_kind": "account", "key": pin(&k1, 0),
+            "roster_version": null, "signed_share": false, "paused": false
+        }))
+        .unwrap();
+        assert!(!unbound.bound_wrap);
+        // Leaving keeps it in the tombstone's pin, and a v1 wrap is never opened for a
+        // vault the account left anyway (the epochs map no longer has it).
+        let left = v2.leave("v", 0, 100).unwrap();
+        assert_eq!(left.left["v"].pin.as_ref().unwrap().bound_since, Some(2));
     }
 
     #[test]
@@ -4796,6 +4947,7 @@ mod tests {
             rejoined_at: None,
             rejoined_over: None,
             own: false,
+            bound_since: None,
         }
     }
 
@@ -4870,6 +5022,7 @@ mod tests {
             signed_share: true,
             paused: false,
             invitation: false,
+            bound_wrap: false,
         };
         let signed = |mut p: EpochPin, v: u64| {
             p.signed_since = Some(v);
@@ -5088,6 +5241,7 @@ mod tests {
             signed_share: true,
             paused: false,
             invitation: false,
+            bound_wrap: false,
         };
         // A grandfathered share pinned unsigned.
         let grand = KeyPins::default()
@@ -5307,6 +5461,7 @@ mod tests {
             signed_share: signed,
             paused: false,
             invitation: false,
+            bound_wrap: false,
         }
     }
 

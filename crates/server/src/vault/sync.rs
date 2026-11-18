@@ -100,6 +100,12 @@ struct SyncUser {
     /// The version of the account's profile picture (`GET /account/avatar` when it
     /// differs from the copy the app has; 0 = never set).
     avatar_seq: i64,
+    /// Every active session of the account (refresh or access token still valid) comes
+    /// from an app that reads epoch-bound (v2) account wraps
+    /// ([`crate::auth::reads_bound_wraps`]): apps write v2 wraps then, else v1. A
+    /// compatibility hint, not a security decision (a server saying false only keeps
+    /// the v1 format).
+    account_wraps_v2: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -348,6 +354,16 @@ pub(super) async fn sync(
     .bind(&user.user_id)
     .fetch_one(&mut *tx)
     .await?;
+    let clients: Vec<(Option<String>,)> = sqlx::query_as(
+        "SELECT client FROM sessions WHERE user_id = $1 AND (refresh_expires > $2 OR access_expires > $2)",
+    )
+    .bind(&user.user_id)
+    .bind(crate::db::now())
+    .fetch_all(&mut *tx)
+    .await?;
+    let account_wraps_v2 = clients
+        .iter()
+        .all(|(c,)| crate::auth::reads_bound_wraps(c.as_deref()));
     let identity = match (signing_key, identity_signature, x25519, wrapped) {
         (Some(k), Some(s), Some(x), Some(w)) => Some(json!({
             "signing_key": k,
@@ -401,6 +417,7 @@ pub(super) async fn sync(
             identity,
             key_pins_seq: pins_seq,
             avatar_seq,
+            account_wraps_v2,
         },
         bundle: RawValue::from_string(bundle).map_err(anyhow::Error::from)?,
         vaults,

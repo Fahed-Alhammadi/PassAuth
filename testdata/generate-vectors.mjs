@@ -6,7 +6,9 @@
 // (`loginPhraseChoices`), which must be the same on every device and in every binding, and signed
 // sharing (`signedSharing`: identities and their XEdDSA cross-signatures, share signatures, member
 // rosters, reviews and chains, key ids, key pins, key epoch pins and vault admission; byte-exact,
-// cross-checked here independently of the core with node:crypto and BigInt arithmetic).
+// cross-checked here independently of the core with node:crypto and BigInt arithmetic), the item
+// edit counter rule (`itemRev`) and Send v2's password-derived content key (`sendV2`, cross-checked
+// with node:crypto's Argon2id and HKDF).
 //
 // The expected values come from the Rust core (crates/core/src/site) through its WASM build: the
 // one implementation every client calls (the web vault and the extension through WASM, the iOS,
@@ -37,7 +39,7 @@
 // tests) and android/app/src/test/kotlin/io/passauth/app/GoldenVectorsTest.kt.
 
 import { execFileSync } from "node:child_process";
-import { createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, hkdfSync, sign, verify } from "node:crypto";
+import { argon2Sync, createCipheriv, createDecipheriv, createHash, createHmac, createPrivateKey, createPublicKey, hkdfSync, sign, verify } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -558,6 +560,8 @@ function vectors(core) {
     rpId: rpIdCases,
     loginPhraseChoices: phraseChoiceCases,
     signedSharing: signedSharingVectors(core),
+    itemRev: itemRevVectors(core),
+    sendV2: sendV2Vectors(core),
   };
 }
 
@@ -626,7 +630,7 @@ function signedSharingVectors(core) {
       },
     ],
     // Alice's vault and its key wrapped by her account key (`key_kind` "account"): the v1 format
-    // (no epoch; what the apps write for now), the same key as an epoch-bound v2 wrap at epoch 0
+    // (no epoch; what the apps write while some app of the account reads only v1), the same key as an epoch-bound v2 wrap at epoch 0
     // (`0x02` marker), and a second key (v2, epoch 0).
     vault: {
       id: "00000000-0000-4000-8000-0000000000f1",
@@ -781,8 +785,15 @@ function signedSharingVectors(core) {
   const rawKey2 = xopen(aliceKey, fixtures.vault.secondKeyV2, `passauth/vault-key/v2/${vaultId}/0`, true);
   const vaultKey = accounts.alice.openVaultKey(vaultId, fixtures.vault.wrappedKeyV2, "account", 0, false);
   const vaultKey2 = accounts.alice.openVaultKey(vaultId, fixtures.vault.secondKeyV2, "account", 0, false);
-  // The apps write v1 for now (released apps read only that).
+  // v1 while `/sync` says some app of the account reads only that…
   must(xopen(aliceKey, vaultKey.wrapFor(accounts.alice, vaultId), `passauth/vault-key/v1/${vaultId}`).equals(rawKey), "wrapFor doesn't write a v1 wrap");
+  // …and v2 when `/sync` says every app reads it: bound to the epoch given (the one after the write).
+  const boundWrap = vaultKey.wrapForBound(accounts.alice, vaultId, 7);
+  must(xopen(aliceKey, boundWrap, `passauth/vault-key/v2/${vaultId}/7`, true).equals(rawKey), "wrapForBound doesn't write a v2 wrap at its epoch");
+  const fresh = accounts.alice.newVaultKeyBound(vaultId, 0);
+  must(core.accountWrapIsBound(fresh.wrapped) && xopen(aliceKey, fresh.wrapped, `passauth/vault-key/v2/${vaultId}/0`, true).length === 32, "newVaultKeyBound doesn't write a v2 wrap at epoch 0");
+  fresh.free();
+  must(core.accountWrapIsBound(fixtures.vault.wrappedKeyV2) && !core.accountWrapIsBound(fixtures.vault.wrappedKey) && !core.accountWrapIsBound("!"), "accountWrapIsBound differs");
   const openings = [
     ["wrappedKey", 0, false],
     ["wrappedKey", 0, true],
@@ -1158,6 +1169,9 @@ function signedSharingVectors(core) {
   // The account's own vault (pinned from an `account` row: marked `own`).
   const keyPinsOwn = core.pinsObserve(null, { vault_id: vaultId, key_kind: "account", key: ep(k1, 1), roster_version: null, signed_share: false, paused: false }).pins;
   must(keyPinsOwn.epochs[vaultId].own === true, "an own vault wasn't marked");
+  // The same own vault, its key at epoch 1 seen in a v2 (epoch-bound) account wrap: v1 refused at 0 and 1.
+  const keyPinsBound = core.pinsObserve(keyPinsOwn, { vault_id: vaultId, key_kind: "account", key: ep(k1, 1), roster_version: null, signed_share: false, paused: false, bound_wrap: true }).pins;
+  must(keyPinsBound.epochs[vaultId].bound_since === 1, "a v2 wrap's epoch wasn't recorded");
   const pinSets = {
     none: null,
     withEpoch: keyPinsWithEpoch,
@@ -1406,7 +1420,10 @@ function signedSharingVectors(core) {
   const declineCases = declineInputs.map(([set, id, currentRow]) => ({ pins: set, vaultId: id, currentRow, expected: core.pinsDecline(pinSets[set], id, currentRow, 3000) }));
   must(JSON.stringify(declineCases[0].expected) === JSON.stringify(keyPinsWithEpoch) && Object.keys(declineCases[1].expected.left ?? {}).length === 0 && declineCases[3].expected.left[vaultId].roster_version === 0, "a decline gave up a held vault or used a roster version");
 
-  const legacyWraps = Object.entries(pinSets).map(([set, p]) => ({ pins: set, expected: core.pinsLegacyWrapAllowed(p, vaultId) }));
+  const legacyWraps = [...Object.entries(pinSets), ["bound", keyPinsBound]].flatMap(([set, p]) =>
+    [0, 1, 2].map((keyEpoch) => ({ pins: set, keyEpoch, expected: core.pinsLegacyWrapAllowed(p, vaultId, keyEpoch) })),
+  );
+  must(legacyWraps.filter((c) => !c.expected).map((c) => `${c.pins}@${c.keyEpoch}`).join() === "bound@0,bound@1", "v1 wraps are refused other than at or below a recorded v2 epoch");
 
   // The account's own identity, remembered once.
   const own = signers.alice.identityHash();
@@ -1453,6 +1470,7 @@ function signedSharingVectors(core) {
     keyPinsUnsigned,
     keyPinsRosterMax,
     keyPinsOwn,
+    keyPinsBound,
     admissions: admissionCases,
     accepts: acceptCases,
     merges: mergeCases,
@@ -1463,6 +1481,117 @@ function signedSharingVectors(core) {
     legacyWraps,
     ownIdentity: { hash: own, pins: withOwn, checks: ownIdentityCases },
   };
+}
+
+// ------------------------------------------------------------ item edit counters (review item 9)
+
+function itemRevVectors(core) {
+  const must = (cond, what) => {
+    if (!cond) throw new Error(what);
+  };
+  const account = core.accountFromSessionBytes("rev", new Uint8Array(64).fill(3));
+  const key = account.newVaultKey("vault").takeKey();
+  const rev = (enc) => key.decryptItem(enc).rev;
+  const made = key.encryptItem({ name: "x" }, "item", "vault");
+  const edited = key.updateItem(made, { ...key.decryptItem(made), name: "y" });
+  const stale = key.updateItem(edited, { name: "z", rev: 0 });
+  const restored = key.updateItem(stale, key.decryptItem(made));
+  const moved = key.encryptItem(key.decryptItem(restored), "item", "vault");
+  const chain = [made, edited, stale, restored, moved].map(rev);
+  must(JSON.stringify(chain) === "[1,2,3,4,5]", `the edit counter doesn't count every re-encryption: ${chain}`);
+  key.free();
+  account.free();
+  const checks = [
+    [null, 0], [null, 5], [3, 4], [3, 3], [3, 2], [1, 0], [0, 0],
+  ].map(([remembered, served]) => ({ remembered, served, expected: core.itemRevCheck(remembered, served) }));
+  must(checks.filter((c) => c.expected === "rollback").length === 2, "only a lower counter is a rollback");
+  return {
+    about: "encryptItem writes rev + 1 of the item given (1 for a new item); updateItem one more than the higher of the stored and the given item's rev; a move or key replacement re-encrypts the decrypted item (+1)",
+    chain,
+    checks,
+  };
+}
+
+// ------------------------------------------------------------ Send v2 (review item 8)
+
+function sendV2Vectors(core) {
+  const must = (cond, what) => {
+    if (!cond) throw new Error(what);
+  };
+  const fixtures = {
+    key: Buffer.from([...Array(32).keys()]).toString("base64url"),
+    password: "correct horse battery staple",
+    // The core's floor: the cheapest parameters a visitor's app accepts.
+    salt: `sendpw-v1$m=65536,t=3,p=1$${Buffer.from([...Array(16).keys()].map((i) => i + 1)).toString("base64url")}`,
+    text: "Hello from PassAuth Send v2 ✓",
+    nonce: "60".repeat(24),
+  };
+  const saltBytes = Buffer.from(fixtures.salt.split("$")[2], "base64url");
+  const stretched = argon2Sync("argon2id", { message: fixtures.password, nonce: saltBytes, parallelism: 1, tagLength: 32, memory: 65536, passes: 3 });
+  const hk = (ikm, salt, info) => Buffer.from(hkdfSync("sha256", ikm, salt, Buffer.from(info), 32));
+  const verifier = hk(stretched, saltBytes, "passauth/send-password/v1").toString("base64url");
+  const contentKey = hk(Buffer.from(fixtures.key, "base64url"), hk(stretched, saltBytes, "passauth/send-password-key/v2"), "passauth/send-content/v2");
+  const keys = core.sendPasswordKeys(fixtures.password, fixtures.salt, fixtures.key);
+  must(keys.verifier === verifier && keys.contentKey === contentKey.toString("base64url"), "the core's Send v2 keys differ from node:crypto's");
+  must(core.sendPasswordVerifier(fixtures.password, fixtures.salt) === verifier, "sendPasswordKeys' verifier isn't sendPasswordVerifier's");
+  // `0x02 ‖ 0x01 ‖ nonce ‖ ciphertext ‖ tag`, sealed here with a fixed nonce (XChaCha20-Poly1305 via HChaCha20).
+  const nonce = Buffer.from(fixtures.nonce, "hex");
+  const cipher = createCipheriv("chacha20-poly1305", hchacha(contentKey, nonce.subarray(0, 16)), Buffer.concat([Buffer.alloc(4), nonce.subarray(16)]), { authTagLength: 16 });
+  cipher.setAAD(Buffer.from("passauth/send/v2/data"));
+  const sealed = Buffer.concat([cipher.update(Buffer.from(fixtures.text, "utf8")), cipher.final()]);
+  const data = Buffer.concat([Buffer.from([2, 1]), nonce, sealed, cipher.getAuthTag()]).toString("base64url");
+  must(core.sendOpen(fixtures.key, keys.contentKey, "data", data) === fixtures.text, "the core doesn't open a Send v2 field sealed here");
+  must(core.sendFieldVersion(data) === 2, "a v2 field isn't version 2");
+  const fails = (f) => {
+    try {
+      f();
+      return null;
+    } catch (e) {
+      return e.message;
+    }
+  };
+  must(fails(() => core.sendOpen(fixtures.key, null, "data", data)) === "password_required", "a v2 field opened without the password");
+  must(fails(() => core.sendOpen(fixtures.key, keys.contentKey, "name", data)) === "decrypt_failed", "a v2 field opened as the other field");
+  must(fails(() => core.sendDecrypt(fixtures.key, "data", data)) !== null, "the link key alone opened a v2 field");
+  // What the core seals opens here (with the marker and the v2 associated data).
+  const ours = Buffer.from(core.sendEncryptV2(keys.contentKey, "name", "Door code"), "base64url");
+  must(ours[0] === 2 && ours[1] === 1, "sendEncryptV2 doesn't write the v2 layout");
+  const n2 = ours.subarray(2, 26);
+  const d = createDecipheriv("chacha20-poly1305", hchacha(contentKey, n2.subarray(0, 16)), Buffer.concat([Buffer.alloc(4), n2.subarray(16)]), { authTagLength: 16 });
+  d.setAAD(Buffer.from("passauth/send/v2/name"));
+  d.setAuthTag(ours.subarray(ours.length - 16));
+  must(Buffer.concat([d.update(ours.subarray(26, ours.length - 16)), d.final()]).toString("utf8") === "Door code", "sendEncryptV2's output doesn't open here");
+  // v1 fields open with the link key alone, as before.
+  const v1 = core.sendEncrypt(fixtures.key, "data", "plain");
+  must(core.sendFieldVersion(v1) === 1 && core.sendOpen(fixtures.key, null, "data", v1) === "plain", "a v1 field doesn't open as before");
+  // The owner's copy of the content key.
+  const owner = core.accountFromSessionBytes("owner", new Uint8Array(64).fill(4));
+  must(owner.unwrapSendContentKey(owner.wrapSendContentKey(keys.contentKey)) === keys.contentKey, "owner_content_key doesn't round-trip");
+  owner.free();
+  keys.free();
+  return { ...fixtures, verifier, contentKey: contentKey.toString("base64url"), data };
+}
+
+/** HChaCha20 (the XChaCha20 subkey) of a 32-byte key and a 16-byte nonce. */
+function hchacha(key, nonce16) {
+  const s = new Uint32Array(16);
+  s.set([0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]);
+  for (let i = 0; i < 8; i++) s[4 + i] = key.readUInt32LE(4 * i);
+  for (let i = 0; i < 4; i++) s[12 + i] = nonce16.readUInt32LE(4 * i);
+  const rotl = (v, n) => ((v << n) | (v >>> (32 - n))) >>> 0;
+  const qr = (a, b, c, d) => {
+    s[a] += s[b]; s[d] = rotl(s[d] ^ s[a], 16);
+    s[c] += s[d]; s[b] = rotl(s[b] ^ s[c], 12);
+    s[a] += s[b]; s[d] = rotl(s[d] ^ s[a], 8);
+    s[c] += s[d]; s[b] = rotl(s[b] ^ s[c], 7);
+  };
+  for (let i = 0; i < 10; i++) {
+    qr(0, 4, 8, 12); qr(1, 5, 9, 13); qr(2, 6, 10, 14); qr(3, 7, 11, 15);
+    qr(0, 5, 10, 15); qr(1, 6, 11, 12); qr(2, 7, 8, 13); qr(3, 4, 9, 14);
+  }
+  const out = Buffer.alloc(32);
+  [0, 1, 2, 3, 12, 13, 14, 15].forEach((w, i) => out.writeUInt32LE(s[w], 4 * i));
+  return out;
 }
 
 /** A page address of `len` bytes on https://bank.com/. */

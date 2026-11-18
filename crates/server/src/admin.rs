@@ -371,7 +371,8 @@ async fn list_users(State(state): State<AppState>, _: Admin) -> ApiResult<Json<V
                  WHERE m.user_id = u.id AND m.role = 'owner' AND a.state = 'ready')
               + (SELECT COALESCE(SUM(a.size), 0)
                  FROM attachments a WHERE a.created_by = u.id AND a.state = 'pending')
-              + (SELECT COALESCE(SUM(octet_length(s.name) + octet_length(s.data) + octet_length(s.owner_key)), 0)
+              + (SELECT COALESCE(SUM(octet_length(s.name) + octet_length(s.data) + octet_length(s.owner_key)
+                  + COALESCE(octet_length(s.owner_content_key), 0)), 0)
                  FROM sends s WHERE s.user_id = u.id) AS BIGINT) AS storage_bytes,
            (SELECT COUNT(*) FROM two_factor t WHERE t.user_id = u.id AND t.enabled = 1 AND t.provider <> 'recovery') AS two_factor
          FROM users u ORDER BY u.created_at",

@@ -681,7 +681,8 @@ pub(crate) async fn usage(conn: &mut AnyConnection, user_id: &str) -> ApiResult<
                  WHERE m.user_id = $1 AND m.role = 'owner' AND a.state = 'ready')
               + (SELECT COALESCE(SUM(a.size), 0)
                  FROM attachments a WHERE a.created_by = $1 AND a.state = 'pending')
-              + (SELECT COALESCE(SUM(octet_length(s.name) + octet_length(s.data) + octet_length(s.owner_key)), 0)
+              + (SELECT COALESCE(SUM(octet_length(s.name) + octet_length(s.data) + octet_length(s.owner_key)
+                  + COALESCE(octet_length(s.owner_content_key), 0)), 0)
                  FROM sends s WHERE s.user_id = $1) AS BIGINT)",
     )
     .bind(user_id)

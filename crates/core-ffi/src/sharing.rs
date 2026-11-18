@@ -29,7 +29,7 @@ fn info(v: &VerifiedIdentity) -> R<String> {
     }))
 }
 
-fn name<T: serde::Serialize>(v: &T) -> R<String> {
+pub(crate) fn enum_name<T: serde::Serialize>(v: &T) -> R<String> {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::String(s)) => Ok(s),
         _ => Err(CoreError::Invalid("unexpected value".into())),
@@ -202,10 +202,24 @@ impl VaultKey {
     }
 
     /// Wrap this key with the account's own key (`key_kind` `account`, after a key
-    /// replacement by the vault's owner). The v1 format every released app reads
-    /// (epoch-bound v2 wraps are read by `Account.open_vault_key` but not written yet).
+    /// replacement by the vault's owner) in the v1 format (no epoch): while `/sync`
+    /// `user.account_wraps_v2` is not true. Else `wrap_for_bound`.
     pub fn wrap_for(&self, account: Arc<Account>, vault_id: String) -> R<String> {
         Ok(account.0.wrap_vault_key(&self.0, &vault_id)?)
+    }
+
+    /// Wrap this key with the account's own key in the epoch-bound v2 format at
+    /// `key_epoch`: the epoch the vault has after the write (a key replacement: the row's
+    /// `key_epoch` + 1). When `/sync` `user.account_wraps_v2` is true.
+    pub fn wrap_for_bound(
+        &self,
+        account: Arc<Account>,
+        vault_id: String,
+        key_epoch: u64,
+    ) -> R<String> {
+        Ok(account
+            .0
+            .wrap_vault_key_bound(&self.0, &vault_id, key_epoch)?)
     }
 
     /// The key's commitment at `key_epoch` (what a member roster carries).
@@ -352,7 +366,7 @@ pub fn roster_review(
 pub fn epoch_check(pinned_json: Option<String>, current_json: String) -> R<String> {
     let pinned: Option<EpochPin> = pinned_json.map(|j| json_in(&j)).transpose()?;
     let current: EpochPin = json_in(&current_json)?;
-    name(&core::epoch_check(pinned.as_ref(), &current))
+    enum_name(&core::epoch_check(pinned.as_ref(), &current))
 }
 
 /// "new" | "match" | "changed" | "upgraded" | "email_conflict" for an identity against
@@ -364,7 +378,7 @@ pub fn pin_check(
     email: Option<String>,
 ) -> R<String> {
     let identity: PublicIdentity = json_in(&identity_json)?;
-    name(&pins_or_empty(pins_json)?.check_identity(&identity, email.as_deref())?)
+    enum_name(&pins_or_empty(pins_json)?.check_identity(&identity, email.as_deref())?)
 }
 
 /// The key pins (JSON) with the identity pinned (`now`: Unix seconds).
@@ -413,7 +427,7 @@ pub fn pins_epoch_check(
     roster_version: Option<u64>,
 ) -> R<String> {
     let current: EpochPin = json_in(&current_json)?;
-    name(&pins_or_empty(pins_json)?.check_epoch(&vault_id, &current, roster_version))
+    enum_name(&pins_or_empty(pins_json)?.check_epoch(&vault_id, &current, roster_version))
 }
 
 /// The key pins (JSON) with a key this device itself just gave the vault (its own key
@@ -531,17 +545,23 @@ pub fn normalize_email(email: String) -> String {
     core::normalize_email(&email)
 }
 
-/// Whether an `account` wrap of the vault may be a legacy v1 wrap (no signed history).
+/// Whether an `account` wrap of the vault at `key_epoch` (the row's) may be a legacy v1
+/// wrap: not at or below the highest epoch the account opened from a v2 wrap
+/// (`bound_since`).
 #[uniffi::export]
-pub fn pins_legacy_wrap_allowed(pins_json: Option<String>, vault_id: String) -> R<bool> {
-    Ok(pins_or_empty(pins_json)?.legacy_wrap_allowed(&vault_id))
+pub fn pins_legacy_wrap_allowed(
+    pins_json: Option<String>,
+    vault_id: String,
+    key_epoch: u64,
+) -> R<bool> {
+    Ok(pins_or_empty(pins_json)?.legacy_wrap_allowed(&vault_id, key_epoch))
 }
 
 /// "new" | "match" | "mismatch" for the identity `/sync` lists for the account itself
 /// (its hash; none when `user.identity` is null).
 #[uniffi::export]
 pub fn pins_check_own_identity(pins_json: Option<String>, listed: Option<String>) -> R<String> {
-    name(&pins_or_empty(pins_json)?.check_own_identity(listed.as_deref()))
+    enum_name(&pins_or_empty(pins_json)?.check_own_identity(listed.as_deref()))
 }
 
 /// The key pins (JSON) with the account's own identity hash remembered (once; another
@@ -832,8 +852,8 @@ mod tests {
             pins_epoch_check(Some(with_epoch.clone()), vault.clone(), pin.clone(), None).unwrap(),
             "downgraded"
         );
-        // v1 account wraps stay readable while the apps write them.
-        assert!(pins_legacy_wrap_allowed(Some(with_epoch.clone()), vault.clone()).unwrap());
+        // v1 account wraps stay readable until a v2 wrap of the vault was seen.
+        assert!(pins_legacy_wrap_allowed(Some(with_epoch.clone()), vault.clone(), 1).unwrap());
         let other = owner.new_vault_key(vault.clone()).unwrap().key;
         let newer = other.epoch_pin_json(vault.clone(), 2).unwrap();
         let raised = pins_record_rotation(

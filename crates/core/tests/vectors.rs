@@ -399,6 +399,7 @@ fn signed_sharing_vectors() {
             signed_share: true,
             paused: false,
             invitation: false,
+            bound_wrap: false,
         })
         .unwrap()
         .pins;
@@ -414,10 +415,23 @@ fn signed_sharing_vectors() {
             signed_share: false,
             paused: false,
             invitation: false,
+            bound_wrap: false,
         })
         .unwrap()
         .pins;
     assert_eq!(json!(own_vault), s["keyPinsOwn"]);
+    let bound = own_vault
+        .observe(&VaultObservation {
+            bound_wrap: true,
+            ..serde_json::from_value(json!({
+                "vault_id": vault_id, "key_kind": "account", "key": ep(&vault_key, 1),
+                "roster_version": null, "signed_share": false, "paused": false
+            }))
+            .unwrap()
+        })
+        .unwrap()
+        .pins;
+    assert_eq!(json!(bound), s["keyPinsBound"]);
     let sets: BTreeMap<&str, KeyPins> = [
         ("none", KeyPins::default()),
         ("withEpoch", with_epoch),
@@ -428,6 +442,7 @@ fn signed_sharing_vectors() {
         ("unsigned", unsigned),
         ("rosterMax", roster_max),
         ("own", own_vault),
+        ("bound", bound),
     ]
     .into_iter()
     .collect();
@@ -498,7 +513,10 @@ fn signed_sharing_vectors() {
     }
     for c in s["legacyWraps"].as_array().unwrap() {
         assert_eq!(
-            json!(sets[c["pins"].as_str().unwrap()].legacy_wrap_allowed(vault_id)),
+            json!(
+                sets[c["pins"].as_str().unwrap()]
+                    .legacy_wrap_allowed(vault_id, c["keyEpoch"].as_u64().unwrap())
+            ),
             c["expected"]
         );
     }
@@ -765,4 +783,56 @@ fn golden_vectors() {
         diffs.len(),
         diffs.join("\n")
     );
+}
+
+/// The `itemRev` section: the edit counter rule (`item_rev_check`) natively, and the counter
+/// through encrypt / update / move.
+#[test]
+fn item_rev_vectors() {
+    use passauth_core::item::{EncryptedItem, Item, item_rev_check};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let r = &v["itemRev"];
+    for c in r["checks"].as_array().unwrap() {
+        assert_eq!(
+            json!(item_rev_check(
+                c["remembered"].as_u64(),
+                c["served"].as_u64().unwrap()
+            )),
+            c["expected"],
+            "{c}"
+        );
+    }
+    let key = SymmetricKey::generate().unwrap();
+    let made = EncryptedItem::encrypt(&Item::default(), "item", "vault", &key).unwrap();
+    let first = made.decrypt(&key).unwrap();
+    let edited = made.update(&first, &key).unwrap();
+    let stale = edited.update(&Item::default(), &key).unwrap();
+    let restored = stale.update(&first, &key).unwrap();
+    let moved = restored.move_to(&key, "vault", &key).unwrap();
+    let chain: Vec<u64> = [made, edited, stale, restored, moved]
+        .iter()
+        .map(|e| e.decrypt(&key).unwrap().rev)
+        .collect();
+    assert_eq!(json!(chain), r["chain"]);
+}
+
+/// The `sendV2` section: the password-derived content key and a field sealed by the
+/// generator with a fixed nonce, natively.
+#[test]
+fn send_v2_vectors() {
+    use passauth_core::send::{self, SendField, SendKey};
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let s = &v["sendV2"];
+    let link = SendKey::from_b64(str_of(s, "key")).unwrap();
+    let secrets = send::password_secrets(str_of(s, "password"), str_of(s, "salt")).unwrap();
+    assert_eq!(json!(secrets.verifier), s["verifier"]);
+    let content = link.content_key(&secrets);
+    assert_eq!(json!(content.to_b64()), s["contentKey"]);
+    assert_eq!(
+        send::open_field(&link, Some(&content), SendField::Data, str_of(s, "data")).unwrap(),
+        str_of(s, "text").as_bytes()
+    );
+    assert!(send::open_field(&link, None, SendField::Data, str_of(s, "data")).is_err());
 }

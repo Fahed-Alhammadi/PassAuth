@@ -16,7 +16,7 @@ use passauth_core::kdf::{KdfParams, MasterKeys as CoreMaster};
 use passauth_core::keys::{
     self, AccountBundle, EmergencyKey as CoreEmergencyKey, NewAccount as CoreNew, UnlockedAccount,
 };
-use passauth_core::send::{self, SendField, SendKey};
+use passauth_core::send::{self, SendContentKey, SendField, SendKey};
 use passauth_core::{Error, device_login, export, generator, import, opaque, passkey, site, totp};
 
 uniffi::setup_scaffolding!();
@@ -155,11 +155,21 @@ impl Account {
         })
     }
 
+    /// A new vault key and its epoch-bound v2 `account` wrap at `key_epoch` (0 for a new
+    /// vault): when `/sync` `user.account_wraps_v2` is true; else `new_vault_key` (v1).
+    pub fn new_vault_key_bound(&self, vault_id: String, key_epoch: u64) -> R<NewVaultKey> {
+        let (key, wrapped) = self.0.new_vault_key_bound(&vault_id, key_epoch)?;
+        Ok(NewVaultKey {
+            key: Arc::new(VaultKey(key)),
+            wrapped,
+        })
+    }
+
     /// `kind` is the membership's `key_kind`: "account" (own vault) or "sealed" (shared to
     /// us). `key_epoch` = the row's `key_epoch`: an epoch-bound v2 `account` wrap opens
-    /// only for it; a v1 wrap (what the apps write for now) only with `legacy_allowed`
-    /// (`pins_legacy_wrap_allowed`, true while v1 is written). Both are ignored for
-    /// "sealed".
+    /// only for it; a v1 wrap only with `legacy_allowed` (`pins_legacy_wrap_allowed(pins,
+    /// vault_id, key_epoch)`). Both are ignored for "sealed". After a v2 wrap opened
+    /// (`account_wrap_is_bound(wrapped)`), observe the row with `bound_wrap: true`.
     pub fn open_vault_key(
         &self,
         vault_id: String,
@@ -246,6 +256,20 @@ impl Account {
     /// The send key (base64url, for the link's fragment) from a Send's `owner_key`.
     pub fn unwrap_send_key(&self, wrapped: String) -> R<String> {
         Ok(self.0.unwrap_send_key(&wrapped)?.to_b64())
+    }
+
+    /// Wrap a v2 Send's content key (`send_password_keys(…).content_key`) for this
+    /// account: the Send's `owner_content_key`.
+    pub fn wrap_send_content_key(&self, content_key: String) -> R<String> {
+        Ok(self
+            .0
+            .wrap_send_content_key(&SendContentKey::from_b64(&content_key)?)?)
+    }
+
+    /// A v2 Send's content key (base64url, for `send_encrypt_v2` / `send_open`) from its
+    /// `owner_content_key`.
+    pub fn unwrap_send_content_key(&self, wrapped: String) -> R<String> {
+        Ok(self.0.unwrap_send_content_key(&wrapped)?.to_b64())
     }
 
     /// Emergency access, the grantor's side, when confirming contact `grant_id` (the
@@ -562,7 +586,11 @@ impl VaultKey {
         Ok(CoreEncrypted::encrypt(&item, &id, &vault_id, &self.0)?.into())
     }
 
-    /// Re-encrypt an edited item, keeping its Item Key.
+    /// Re-encrypt an edited item, keeping its Item Key. Its edit counter (`rev`) becomes
+    /// one more than the higher of the stored item's and the given item's (restoring an
+    /// earlier version counts up from the current one). `encrypt_item` writes the given
+    /// item's `rev` + 1 (1 for a new item; pass the decrypted item, with its `rev`, when
+    /// moving or re-keying).
     pub fn update_item(&self, encrypted: EncryptedItem, item_json: String) -> R<EncryptedItem> {
         let item: Item = json_in(&item_json)?;
         Ok(CoreEncrypted::from(encrypted)
@@ -777,6 +805,81 @@ pub fn send_decrypt(key: String, field: String, ciphertext: String) -> R<String>
     let key = SendKey::from_b64(&key)?;
     let bytes = key.decrypt(SendField::parse(&field)?, &ciphertext)?;
     String::from_utf8(bytes).map_err(|_| CoreError::Invalid("send text is not UTF-8".into()))
+}
+
+/// Encrypt a v2 Send's `field` ("name" or "data") with its content key
+/// (`send_password_keys(…).content_key` or `Account.unwrap_send_content_key`): for Sends
+/// with a password on servers with `send_v2`.
+#[uniffi::export]
+pub fn send_encrypt_v2(content_key: String, field: String, plaintext: String) -> R<String> {
+    let key = SendContentKey::from_b64(&content_key)?;
+    Ok(key.encrypt(SendField::parse(&field)?, plaintext.as_bytes())?)
+}
+
+/// Decrypt a Send's `field` of either format: v1 with the link's send `key`, v2 with
+/// `content_key` (`PasswordRequired` when it is a v2 field and `content_key` is nil).
+#[uniffi::export]
+pub fn send_open(
+    key: String,
+    content_key: Option<String>,
+    field: String,
+    ciphertext: String,
+) -> R<String> {
+    let key = SendKey::from_b64(&key)?;
+    let content = content_key
+        .map(|c| SendContentKey::from_b64(&c))
+        .transpose()?;
+    let bytes = send::open_field(
+        &key,
+        content.as_ref(),
+        SendField::parse(&field)?,
+        &ciphertext,
+    )?;
+    String::from_utf8(bytes).map_err(|_| CoreError::Invalid("send text is not UTF-8".into()))
+}
+
+/// 1 or 2: the format of a Send's `name` or `data` (2 = encrypted with the password too).
+#[uniffi::export]
+pub fn send_field_version(ciphertext: String) -> R<u8> {
+    Ok(send::field_version(&ciphertext)?)
+}
+
+/// What a Send password gives (one Argon2id run, same bounds as `send_password_verifier`).
+#[derive(uniffi::Record)]
+pub struct SendPasswordKeys {
+    /// `access_verifier` (also of v1 Sends).
+    pub verifier: String,
+    /// Opens a v2 Send's fields (`send_open`) and encrypts them (`send_encrypt_v2`).
+    /// Memory only.
+    pub content_key: String,
+}
+
+/// `{verifier, content_key}` for `password`, a Send's `access_salt` and the link's send
+/// `key`.
+#[uniffi::export]
+pub fn send_password_keys(password: String, salt: String, key: String) -> R<SendPasswordKeys> {
+    let key = SendKey::from_b64(&key)?;
+    let secrets = send::password_secrets(&password, &salt)?;
+    Ok(SendPasswordKeys {
+        content_key: key.content_key(&secrets).to_b64(),
+        verifier: secrets.verifier.clone(),
+    })
+}
+
+/// "new" | "same" | "newer" | "rollback": an item's edit counter (`rev` of the decrypted
+/// item the server sent now) against the highest this device remembers for it (nil:
+/// none). Remember `served` for "new"/"newer"; "rollback" = the server sent an older
+/// version of the item (keep the newer copy, warn, never remember the lower number).
+#[uniffi::export]
+pub fn item_rev_check(remembered: Option<u64>, served: u64) -> R<String> {
+    sharing::enum_name(&passauth_core::item::item_rev_check(remembered, served))
+}
+
+/// Whether an `account` wrap is the epoch-bound v2 format (`0x02` first): after it opened,
+/// observe the vault row with `bound_wrap: true`.
+#[uniffi::export]
+pub fn account_wrap_is_bound(wrapped: String) -> bool {
+    keys::wrap_is_bound(&wrapped)
 }
 
 /// A new `access_salt` for a Send's password (Argon2id parameters + random salt).
@@ -1480,6 +1583,133 @@ mod tests {
         let salt = send_password_salt().unwrap();
         assert!(salt.starts_with("sendpw-v1$"));
         assert!(send_password_verifier("pw".into(), "nonsense".into()).is_err());
+    }
+
+    #[test]
+    fn send_v2_through_ffi_types() {
+        let key = send_new_key().unwrap();
+        // The core's floor (64 MiB), so this also runs without the test KDF feature.
+        let salt = format!("sendpw-v1$m=65536,t=3,p=1${}", b64(&[9; 16]));
+        let keys = send_password_keys("hunter2".into(), salt.clone(), key.clone()).unwrap();
+        assert_eq!(
+            keys.verifier,
+            send_password_verifier("hunter2".into(), salt.clone()).unwrap()
+        );
+        let data =
+            send_encrypt_v2(keys.content_key.clone(), "data".into(), "4711 ✓".into()).unwrap();
+        assert_eq!(send_field_version(data.clone()).unwrap(), 2);
+        assert_eq!(
+            send_open(
+                key.clone(),
+                Some(keys.content_key.clone()),
+                "data".into(),
+                data.clone()
+            )
+            .unwrap(),
+            "4711 ✓"
+        );
+        assert!(matches!(
+            send_open(key.clone(), None, "data".into(), data.clone()),
+            Err(CoreError::PasswordRequired)
+        ));
+        let wrong = send_password_keys("hunter3".into(), salt, key.clone()).unwrap();
+        assert!(matches!(
+            send_open(
+                key.clone(),
+                Some(wrong.content_key),
+                "data".into(),
+                data.clone()
+            ),
+            Err(CoreError::DecryptFailed)
+        ));
+        // v1 fields open with the link key alone, as before.
+        let v1 = send_encrypt(key.clone(), "data".into(), "plain".into()).unwrap();
+        assert_eq!(send_field_version(v1.clone()).unwrap(), 1);
+        assert_eq!(
+            send_open(key.clone(), None, "data".into(), v1).unwrap(),
+            "plain"
+        );
+        // The owner opens it through `owner_content_key`, without the password.
+        let owner = quick_account("owner");
+        let wrapped = owner
+            .wrap_send_content_key(keys.content_key.clone())
+            .unwrap();
+        let ck = owner.unwrap_send_content_key(wrapped.clone()).unwrap();
+        assert_eq!(
+            send_open(key, Some(ck), "data".into(), data).unwrap(),
+            "4711 ✓"
+        );
+        assert!(
+            quick_account("other")
+                .unwrap_send_content_key(wrapped)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bound_wraps_and_item_revs_through_ffi_types() {
+        let owner = quick_account("owner");
+        let vault = "00000000-0000-4000-8000-0000000000aa".to_owned();
+        let made = owner.new_vault_key_bound(vault.clone(), 0).unwrap();
+        assert!(account_wrap_is_bound(made.wrapped.clone()));
+        assert!(
+            owner
+                .open_vault_key(
+                    vault.clone(),
+                    made.wrapped.clone(),
+                    "account".into(),
+                    0,
+                    false
+                )
+                .is_ok()
+        );
+        assert!(
+            owner
+                .open_vault_key(vault.clone(), made.wrapped, "account".into(), 1, true)
+                .is_err()
+        );
+        let rewrapped = made
+            .key
+            .wrap_for_bound(owner.clone(), vault.clone(), 3)
+            .unwrap();
+        assert!(account_wrap_is_bound(rewrapped.clone()));
+        assert!(
+            owner
+                .open_vault_key(vault.clone(), rewrapped, "account".into(), 3, false)
+                .is_ok()
+        );
+        let v1 = made.key.wrap_for(owner.clone(), vault.clone()).unwrap();
+        assert!(!account_wrap_is_bound(v1));
+        // Item edit counters.
+        let item = made
+            .key
+            .encrypt_item(r#"{"name":"x"}"#.into(), "i".into(), vault.clone())
+            .unwrap();
+        let rev = |e: &EncryptedItem| -> u64 {
+            let json: serde_json::Value = serde_json::from_str(
+                &made
+                    .key
+                    .decrypt_item(EncryptedItem {
+                        id: e.id.clone(),
+                        vault_id: e.vault_id.clone(),
+                        key: e.key.clone(),
+                        data: e.data.clone(),
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+            json["rev"].as_u64().unwrap()
+        };
+        assert_eq!(rev(&item), 1);
+        let edited = made
+            .key
+            .update_item(item, r#"{"name":"y","rev":0}"#.into())
+            .unwrap();
+        assert_eq!(rev(&edited), 2);
+        assert_eq!(item_rev_check(None, 2).unwrap(), "new");
+        assert_eq!(item_rev_check(Some(2), 2).unwrap(), "same");
+        assert_eq!(item_rev_check(Some(2), 3).unwrap(), "newer");
+        assert_eq!(item_rev_check(Some(2), 1).unwrap(), "rollback");
     }
 
     #[test]

@@ -21,11 +21,14 @@ mod attachments;
 mod device_login;
 mod emergency;
 mod hardening;
+mod sec789;
 mod signing;
 
-/// Undoes migrations 15 (profile pictures) and 14 (signed sharing), for tests that go
-/// back to an older schema.
+/// Undoes migrations 16 (Send v2), 15 (profile pictures) and 14 (signed sharing), for
+/// tests that go back to an older schema.
 const UNDO_MIGRATION_14: &[&str] = &[
+    "ALTER TABLE sends DROP COLUMN owner_content_key",
+    "DELETE FROM schema_version WHERE version = 16",
     "ALTER TABLE users DROP COLUMN avatar",
     "ALTER TABLE users DROP COLUMN avatar_seq",
     "DELETE FROM schema_version WHERE version = 15",
@@ -317,7 +320,7 @@ async fn items_sync_and_trash() {
     };
     let wk = sync["vaults"][0]["wrapped_key"].as_str().unwrap();
     let vk = c.unlocked.open_vault_key(&c.vault_id, 0, wk, true).unwrap();
-    assert_eq!(back.decrypt(&vk).unwrap(), item);
+    assert_eq!(back.decrypt(&vk).unwrap(), Item { rev: 1, ..item });
 
     let stale = row["revision"].as_i64().unwrap() - 1;
     let (s, _) = call(&app, Method::PUT, &format!("/api/items/{id}"), Some(&t),
@@ -2481,6 +2484,8 @@ async fn config_lists_the_api_version_and_features() {
             "emergency_vault_keys",
             "signed_sharing",
             "avatar",
+            "account_wraps_v2",
+            "send_v2",
             "breach_check",
             "item_history",
             "sends",
@@ -4405,6 +4410,7 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
     assert_eq!(
         keys(&full["user"]),
         [
+            "account_wraps_v2",
             "avatar_seq",
             "email",
             "email_verified",

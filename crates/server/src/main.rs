@@ -567,7 +567,10 @@ const API_VERSION: u32 = 2;
 
 /// What this server supports beyond API 1 (see docs/ARCHITECTURE.md;
 /// `emergency_vault_keys`: emergency contacts get a key of their own over the
-/// personal vaults, not the account key), plus
+/// personal vaults, not the account key; `account_wraps_v2`: `/sync` `user` says
+/// whether every app signed in to the account reads epoch-bound account wraps;
+/// `send_v2`: Sends keep `owner_content_key`, so apps may encrypt a Send with its
+/// password), plus
 /// `breach_check` while the admin allows it, `item_history` while the admin
 /// keeps item versions (`item_versions_kept` above 0), `sends` while Send is on,
 /// `attachments` while attachments are on and have a folder, `emergency_access`
@@ -587,6 +590,8 @@ const FEATURES: &[&str] = &[
     "emergency_vault_keys",
     "signed_sharing",
     "avatar",
+    "account_wraps_v2",
+    "send_v2",
 ];
 
 async fn public_config(State(state): State<AppState>) -> Json<Value> {
