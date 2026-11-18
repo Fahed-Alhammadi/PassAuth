@@ -144,6 +144,8 @@ public struct GrantorVault: Sendable {
     /// Vault manifests: the vaults whose items aren't the ones their manifest records (the vault
     /// warning is shown; the view is read-only either way).
     public var unverified: Set<String> = []
+    /// The vaults that have no manifest: nothing could be checked (said in the view, no warning).
+    public var unchecked: Set<String> = []
 }
 
 public enum EmergencyText {
@@ -762,6 +764,7 @@ extension VaultRepository {
             var items: [GrantorVault.Entry] = []
             var failed = 0
             var unverified = Set<String>()
+            var unchecked = Set<String>()
             for v in data.vaults {
                 let rows = data.items.filter { $0.vaultId == v.id }
                 guard let vk = try? key.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey) else {
@@ -770,10 +773,17 @@ extension VaultRepository {
                 }
                 // The vault's manifest against exactly the rows of this answer (nothing is
                 // remembered for someone else's vault, nothing written).
+                // The rows the core gets are built from the parsed fields only (id, where it is,
+                // data), never the server's objects. A row that came without its key or data
+                // (it couldn't be shown, so it would be a hidden item), or without a vault, is
+                // a mismatch too.
                 if v.manifestSeq > 0 {
-                    let header = SyncVault(id: v.id, keyEpoch: v.keyEpoch, manifest: v.manifest, manifestSeq: v.manifestSeq)
+                    let header = SyncVault(id: v.id, keyEpoch: v.keyEpoch, manifest: v.manifest, manifestSeq: v.manifestSeq, manifestPrev: v.manifestPrev)
                     let all = rows.map { SyncItem(id: $0.id, vaultId: v.id, itemKey: $0.key, data: $0.data, deletedAt: $0.deletedAt) }
-                    if VaultManifest.verify(header, key: vk, remembered: nil, rows: all).status != .ok { unverified.insert(v.id) }
+                    if data.incomplete.contains(v.id) || data.incomplete.contains("")
+                        || VaultManifest.verify(header, key: vk, remembered: nil, rows: all).status != .ok { unverified.insert(v.id) }
+                } else {
+                    unchecked.insert(v.id)
                 }
                 var name = "Vault"
                 if let meta = try? vk.decryptMeta(vaultId: v.id, meta: v.meta), let n = (try? JSON.parse(meta))?["name"]?.string,
@@ -785,13 +795,15 @@ extension VaultRepository {
                     guard let json = try? vk.decryptItem(encrypted: EncryptedItem(id: r.id, vaultId: v.id, key: r.key, data: r.data)),
                           let item = try? ItemCodec.decode(json) else {
                         failed += 1
+                        // An item that doesn't open is hidden: its vault isn't "checked" either.
+                        if v.manifestSeq > 0 { unverified.insert(v.id) }
                         continue
                     }
                     items.append(GrantorVault.Entry(id: r.id, vaultId: v.id, item: item, deletedAt: r.deletedAt))
                 }
             }
             items.sort { $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending }
-            return GrantorVault(grant: grant, vaults: vaults, items: items, failed: failed, unverified: unverified)
+            return GrantorVault(grant: grant, vaults: vaults, items: items, failed: failed, unverified: unverified, unchecked: unchecked)
         }
         return opened
     }

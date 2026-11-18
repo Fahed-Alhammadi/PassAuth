@@ -57,16 +57,76 @@ object ItemRevs {
         }
     }
 
+    /** At most this many items are remembered; beyond it the ones seen longest ago go first. */
+    const val MAX_REMEMBERED = 20_000
+
+    /** At most this many kept newer copies wait for an item the server stopped sending ([waiting]). */
+    const val MAX_WAITING = 200
+
     /**
-     * The memory after a sync: [updates] merged in (never lowered), and, when [present] is given
-     * (a sync's whole copy), ids no longer in it dropped (deleted for good, purged, or moved out of
-     * every vault of the account).
+     * The memory after a sync: [updates] merged in (never lowered; an item updated moves to the
+     * end, so the order is "seen longest ago first"), and the ids in [forget] dropped. An item is
+     * forgotten only when its absence is certain ([gone], or this phone deleted it for good
+     * itself): a server that hides an item for one sync and serves an old version afterwards must
+     * still be noticed. Over [MAX_REMEMBERED] the oldest go, items not in [present] (the copy)
+     * before the others.
      */
-    fun merged(memory: Map<String, Long>, updates: Map<String, Long>, present: Set<String>?): Map<String, Long> {
-        val out = memory.toMutableMap()
-        for ((id, rev) in updates) out[id] = maxOf(rev, out[id] ?: rev)
-        if (present != null) out.keys.retainAll(present)
+    fun merged(memory: Map<String, Long>, updates: Map<String, Long>, forget: Set<String> = emptySet(), present: Set<String> = emptySet()): Map<String, Long> {
+        val out = LinkedHashMap(memory)
+        for ((id, rev) in updates) {
+            val have = out[id]
+            if (have != null && have >= rev) continue
+            out.remove(id)
+            out[id] = rev
+        }
+        out.keys.removeAll(forget)
+        if (out.size > MAX_REMEMBERED) {
+            val oldest = out.keys.toList()
+            var over = out.size - MAX_REMEMBERED
+            for (id in oldest) {
+                if (over == 0) break
+                if (id !in present) {
+                    out.remove(id)
+                    over--
+                }
+            }
+            for (id in oldest) {
+                if (over == 0) break
+                if (out.remove(id) != null) over--
+            }
+        }
         return out
+    }
+
+    /**
+     * The items whose absence from a sync's copy is authenticated: in the copy this phone had
+     * ([before]), in none of the vaults now ([after]), and their vault is still there with a
+     * manifest that passed for this very copy ([states]: [ManifestState.Ok]), which counts every
+     * item of the vault. Anything else (a vault without a manifest, a vault that is gone or
+     * warned) may be the server hiding the item: remembered on.
+     */
+    fun gone(before: SyncSnapshot?, after: SyncSnapshot, states: Map<String, ManifestState>): Set<String> {
+        before ?: return emptySet()
+        val now = after.items.map { it.id }.toSet()
+        val vaults = after.vaults.map { it.id }.toSet()
+        return (before.items + before.held).filter { it.id !in now && it.vaultId in vaults && states[it.vaultId] == ManifestState.Ok }.map { it.id }.toSet()
+    }
+
+    /**
+     * Newer copies this phone kept ([SyncItem.servedSha256]) of items the server no longer sends,
+     * without that being certain ([forget]: the ids whose absence is): they wait in the copy's
+     * `held` rows, unseen, so an old version served later still finds the newer copy to keep.
+     * [before]: the copy this phone had; [after]: the one it has now. At most [MAX_WAITING], the
+     * latest first.
+     */
+    fun waiting(before: SyncSnapshot?, after: SyncSnapshot, forget: Set<String>): List<SyncItem> {
+        before ?: return emptyList()
+        val now = after.items.map { it.id }.toSet()
+        val kept = before.items.filter { it.servedSha256 != null }.map { it.copy(servedSha256 = null) }
+        return (kept + before.held)
+            .filter { it.id !in now && it.id !in forget && it.deletedAt == null && it.itemKey != null && it.data != null }
+            .distinctBy { it.id to it.data }
+            .take(MAX_WAITING)
     }
 
     /**
@@ -78,6 +138,14 @@ object ItemRevs {
     fun keptRow(prior: SyncItem, served: SyncItem, servedHash: String?): SyncItem =
         prior.copy(revision = served.revision, servedSha256 = servedHash, dataSha256 = null)
 
+    /**
+     * [row] is a newer copy this phone kept in place of an older version the server sent: the item
+     * stays marked ([ITEM_WARNING], and the vault's notice) for as long as the row is that copy,
+     * across later syncs, this phone's other writes and lock and unlock, until it is rewritten (an
+     * edit saved, or the server sending that version or a newer one).
+     */
+    fun isKept(row: SyncItem): Boolean = row.servedSha256 != null
+
     /** [snap] with the rows in [kept] (by item id) in place of the ones served. */
     fun keepRows(snap: SyncSnapshot, kept: Map<String, SyncItem>): SyncSnapshot {
         if (kept.isEmpty()) return snap
@@ -88,15 +156,15 @@ object ItemRevs {
      * A locked refresh's [next] copy keeping, in `held`, the versions of each item it replaces:
      * nothing is decrypted while locked, so the next unlocked sync compares them ([judge]) and keeps
      * the newest. Per item at most two: the one held first (the version this phone last checked)
-     * and [cached]'s row (the latest one replaced). Only rows whose ciphertext changed are held;
-     * items gone from [next] drop theirs.
+     * and [cached]'s row (the latest one replaced). Only rows whose ciphertext changed are held.
      */
     fun withHeld(next: SyncSnapshot, cached: SyncSnapshot?): SyncSnapshot {
         if (cached == null) return next
         val now = next.items.associateBy { it.id }
         val first = cached.held.groupBy { it.id }.mapValues { it.value.first() }
         val old = cached.items.associateBy { it.id }
-        val held = mutableListOf<SyncItem>()
+        // Nothing is certain while locked: kept newer copies of items the answer lacks go on waiting ([waiting]).
+        val held = waiting(cached, next, emptySet()).toMutableList()
         val ids = (first.keys + old.keys).filter { it in now }.toSet()
         for (id in ids) {
             val current = now.getValue(id).data

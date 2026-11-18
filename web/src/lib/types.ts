@@ -201,10 +201,12 @@ export interface SyncVaultRow {
   share?: unknown;
   /**
    * Vault manifests (`vault_manifest`, `manifest.ts`): the sealed record of what the vault holds (null: none) and its
-   * version (0: none). `manifest_ok`, while the vault has none: its first one may be started now.
+   * version (0: none), and `manifest_prev`, the link of the manifest it replaced (null while the vault has none): the
+   * three stay together in every copy. `manifest_ok`, while the vault has none: its first one may be started now.
    */
   manifest?: string | null;
   manifest_seq?: number;
+  manifest_prev?: string | null;
   manifest_ok?: boolean;
 }
 
@@ -220,6 +222,13 @@ export interface SyncItemRow {
   created_at: number;
   updated_at: number;
 }
+
+/**
+ * Whether an item is in the trash: exactly when its `deletedAt` (the row's `deleted_at`) is not null. The one rule for
+ * every list, count, export and editor, and the core's rule for vault manifests; never "falsy" (a row a server sends
+ * with `deleted_at: 0` must not show as a live item while its manifest counts it as trashed).
+ */
+export const isTrashed = (e: { deletedAt: number | null }): boolean => e.deletedAt !== null;
 
 /**
  * A vault shared with the account and not accepted yet (servers with `vault_invitations`). Nothing of the vault reaches
@@ -331,7 +340,8 @@ export const isSyncVaultRow = (v: unknown): v is SyncVaultRow =>
   optString(v.member_roster) &&
   optNumber(v.member_roster_seq) &&
   optString(v.manifest) &&
-  optNumber(v.manifest_seq);
+  optNumber(v.manifest_seq) &&
+  optString(v.manifest_prev);
 
 /**
  * Runtime check of the /sync shape, so a server/client mismatch fails loudly instead of half-loading: the revision,

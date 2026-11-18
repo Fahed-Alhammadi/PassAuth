@@ -252,11 +252,15 @@ describe("the grantor's vault", () => {
     })!;
     expect(data.sealedKey).toBe("sealed");
     expect(data.keyVersion).toBe(2);
-    expect(data.vaults).toEqual([{ id: "v1", meta: "m", wrappedKey: "w", keyEpoch: 2, manifest: null, manifestSeq: 0 }]);
+    expect(data.vaults).toEqual([{ id: "v1", meta: "m", wrappedKey: "w", keyEpoch: 2, manifest: null, manifestSeq: 0, manifestPrev: null }]);
     // A row this app can't read is counted: a vault with a manifest then shows its warning.
     expect(data.malformed).toBe(1);
-    const withManifest = readGrantorVault({ sealed_key: "s", vaults: [{ id: "v1", meta: "m", wrapped_key: "w", key_epoch: 1, manifest: "abc", manifest_seq: 4 }, { id: "v2", meta: "m", wrapped_key: "w", manifest_seq: "x" }], items: [] })!;
-    expect(withManifest.vaults.map((v) => [v.manifest, v.manifestSeq])).toEqual([["abc", 4], [null, -1]]);
+    const withManifest = readGrantorVault({ sealed_key: "s", vaults: [{ id: "v1", meta: "m", wrapped_key: "w", key_epoch: 1, manifest: "abc", manifest_seq: 4, manifest_prev: "pp" }, { id: "v2", meta: "m", wrapped_key: "w", manifest_seq: "x" }], items: [] })!;
+    expect(withManifest.vaults.map((v) => [v.manifest, v.manifestSeq, v.manifestPrev])).toEqual([["abc", 4, "pp"], [null, -1, null]]);
+    // A row whose trash time is neither null nor a whole number is no row (the trash state is `deleted_at` not null).
+    const odd = readGrantorVault({ sealed_key: "s", vaults: [], items: [0, 5, 1.5, -1, "7", true, null, undefined].map((at, n) => ({ id: `i${n}`, vault_id: "v1", item_key: "k", data: "d", deleted_at: at })) })!;
+    expect(odd.items.map((i) => i.deletedAt)).toEqual([0, 5, null, null]);
+    expect(odd.malformed).toBe(4);
     expect(data.items).toEqual([
       { row: { id: "i1", vault_id: "v1", key: "ik", data: "d" }, deletedAt: null, updatedAt: 2 },
       { row: { id: "i2", vault_id: "v1", key: "ik2", data: "d2" }, deletedAt: 50, updatedAt: 3 },

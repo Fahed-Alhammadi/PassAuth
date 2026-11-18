@@ -39,21 +39,48 @@ function realKey(): Core.VaultKey {
 export interface Check {
   status: string;
   version: number;
+  link: string | null;
   live: number;
   trashed: number;
 }
 
-/** The manifest methods of the vault key named `tag`. */
+/** What the builders answer: what to send (`seq`, `prev`, `sealed`) and the manifest's own link. */
+export interface Written {
+  seq: number;
+  prev: string;
+  sealed: string;
+  link: string;
+}
+
+/** The manifest methods of the vault key named `tag` (the real core's signatures). */
 export function manifestKey(tag: string) {
   const id = (vaultId: string) => `${vaultId}|${tag}`;
   return {
-    manifestVerify: (vaultId: string, epoch: number, seq: number, sealed: string | null | undefined, remembered: number | null | undefined, items: unknown): Check =>
-      realKey().manifestVerify(id(vaultId), epoch, seq, sealed, remembered, items),
-    manifestStart: (vaultId: string, epoch: number, version: number, items: unknown): string => realKey().manifestStart(id(vaultId), epoch, version, items),
-    manifestNext: (vaultId: string, epoch: number, seq: number, sealed: string, removed: unknown, added: unknown): { seq: number; sealed: string } =>
-      realKey().manifestNext(id(vaultId), epoch, seq, sealed, removed, added),
+    manifestVerify: (
+      vaultId: string,
+      epoch: number,
+      seq: number,
+      prev: string | null | undefined,
+      sealed: string | null | undefined,
+      rememberedVersion: number | null | undefined,
+      rememberedLink: string | null | undefined,
+      log: unknown,
+      items: unknown,
+    ): Check => realKey().manifestVerify(id(vaultId), epoch, seq, prev, sealed, rememberedVersion, rememberedLink, log, items),
+    manifestStart: (vaultId: string, epoch: number, version: number, prev: string | null | undefined, items: unknown): Written => realKey().manifestStart(id(vaultId), epoch, version, prev, items),
+    manifestNext: (vaultId: string, epoch: number, seq: number, prev: string, sealed: string, removed: unknown, added: unknown): Written =>
+      realKey().manifestNext(id(vaultId), epoch, seq, prev, sealed, removed, added),
   };
 }
+
+/** The link of a vault row's manifest (the core's `manifestLink`). */
+export function manifestLink(seq: number, prev: string, sealed: string): string {
+  if (!real) throw new Error("await loadManifests() first");
+  return real.manifestLink(seq, prev, sealed);
+}
+
+/** The predecessor a vault's first manifest names: 32 zero bytes. */
+export const ZERO_LINK = "A".repeat(43);
 
 /** The core's hash of an item's data text (`data_sha256`). */
 export function dataHash(data: string): string {

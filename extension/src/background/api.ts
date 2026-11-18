@@ -6,7 +6,7 @@ import { AppError, INSUFFICIENT_STORAGE, QUOTA_EXCEEDED, signedOutError, TWO_STE
 /** No server address set for the account yet. */
 const NO_SERVER = "no_server";
 
-import { local } from "./storage";
+import { knownFeatures, local } from "./storage";
 
 /**
  * A failed API request. `code` is the server's error code (API v2: `{error,
@@ -306,14 +306,46 @@ export const serverOutdated = (info: Pick<ServerInfo, "features"> | null): boole
 
 export const outdatedError = () => new AppError(SERVER_OUTDATED, SERVER_UPDATE_TEXT, true);
 
-/** Fails with "Update your PassAuth server…" when `server` is one this app refuses (`serverOutdated`). */
+/**
+ * Before anything is asked of `server`: fails with "Update your PassAuth server…" when it is one this app refuses
+ * (`serverOutdated`), and with "Can't reach your PassAuth server…" when its `/api/config` can't be fetched or read
+ * and this browser has never read a feature list with `signed_sharing` from it (`knownFeatures`). So a server can't
+ * get around the check by failing `/api/config` while it answers everything else: no sign-in is started and no sync
+ * answer is asked for or used. With such a list stored, an unreachable config changes nothing (the next answer
+ * decides), which is what working offline needs.
+ */
 export async function refuseOutdated(server: string): Promise<void> {
-  if (server && serverOutdated(await serverInfo(server))) throw outdatedError();
+  if (!server) return;
+  const info = await serverInfo(server);
+  if (info) {
+    if (serverOutdated(info)) throw outdatedError();
+    return;
+  }
+  const known = await knownFeatures.get(server).catch(() => null);
+  if (!known?.includes(REQUIRED_FEATURE)) throw unreachable();
 }
 
 /** Whether the active account's server is one this app refuses, as far as known (for the popup's notice). */
 export async function outdatedServer(server: string): Promise<boolean> {
   return !!server && serverOutdated(await serverInfo(server).catch(() => null));
+}
+
+/** The feature lists already stored in this worker's lifetime (so a config read doesn't write the same list again). */
+const storedLists = new Map<string, string>();
+
+/** Keep the feature list just read for `server` (`knownFeatures`); a failure is only logged by the caller's chain. */
+async function noteFeatures(server: string, info: ServerInfo): Promise<ServerInfo> {
+  const list = [...info.features].sort();
+  const text = JSON.stringify(list);
+  if (storedLists.get(server) !== text) {
+    try {
+      await knownFeatures.set(server, list);
+      storedLists.set(server, text);
+    } catch {
+      /* not stored: asked again with the next config answer */
+    }
+  }
+  return info;
 }
 
 const readInfo = (cfg: ServerConfig): ServerInfo => ({
@@ -340,7 +372,7 @@ export function serverInfo(server: string): Promise<ServerInfo | null> {
       if (infos.get(server)?.p === p) infos.delete(server);
       return null;
     }
-    return readInfo(cfg);
+    return noteFeatures(server, readInfo(cfg));
   });
   infos.set(server, { at: now, p });
   return p;
@@ -356,7 +388,7 @@ export function refreshServerInfo(server: string): Promise<ServerInfo | null> {
   const before = infos.get(server);
   const now = Date.now();
   const p: Promise<ServerInfo | null> = serverConfig(server).then(async (cfg) => {
-    if (cfg) return readInfo(cfg);
+    if (cfg) return noteFeatures(server, readInfo(cfg));
     const old = before ? await before.p : null;
     // Unreachable: keep the earlier answer (with its own age), or ask again next time when there was none.
     if (infos.get(server)?.p === p) {
@@ -394,6 +426,11 @@ export async function serverFeatures(server: string): Promise<ReadonlySet<string
 
 /** Forget what a server supports (its address changed, or it may have been upgraded). */
 export function forgetServerFeatures(server?: string) {
-  if (server) infos.delete(server);
-  else infos.clear();
+  if (server) {
+    infos.delete(server);
+    storedLists.delete(server);
+  } else {
+    infos.clear();
+    storedLists.clear();
+  }
 }

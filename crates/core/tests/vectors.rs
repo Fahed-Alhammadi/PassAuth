@@ -815,6 +815,40 @@ fn item_rev_vectors() {
         .map(|e| e.decrypt(&key).unwrap().rev)
         .collect();
     assert_eq!(json!(chain), r["chain"]);
+
+    // `limits`: items stored with any `rev` at all open, and save again, natively too.
+    let l = &r["limits"];
+    let bytes = unb64(str_of(l, "sessionBytes")).unwrap();
+    let account = UnlockedAccount {
+        account_id: str_of(l, "accountId").into(),
+        account_key: SymmetricKey::from_slice(&bytes[..32]).unwrap(),
+        keypair: KeyPair::from_secret_bytes(bytes[32..].try_into().unwrap()),
+    };
+    let vault_id = str_of(l, "vaultId");
+    let key = account
+        .open_vault_key(
+            vault_id,
+            l["keyEpoch"].as_u64().unwrap(),
+            str_of(l, "wrappedKey"),
+            false,
+        )
+        .unwrap();
+    let top = l["top"].as_u64().unwrap();
+    assert_eq!(top, passauth_core::item::MAX_ITEM_REV);
+    for i in l["items"].as_array().unwrap() {
+        let enc: EncryptedItem = serde_json::from_value(i["encrypted"].clone()).unwrap();
+        let item = enc.decrypt(&key).unwrap();
+        assert_eq!(json!(item.rev), i["reads"], "{i}");
+        let written = i["writes"].as_u64().unwrap();
+        assert_eq!(written, item.rev + 1);
+        for saved in [
+            enc.update(&item, &key).unwrap(),
+            EncryptedItem::encrypt(&item, &enc.id, vault_id, &key).unwrap(),
+            enc.move_to(&key, vault_id, &key).unwrap(),
+        ] {
+            assert_eq!(saved.decrypt(&key).unwrap().rev, written.min(top), "{i}");
+        }
+    }
 }
 
 /// The `sendV2` section: the password-derived content key and a field sealed by the
@@ -837,11 +871,14 @@ fn send_v2_vectors() {
     assert!(send::open_field(&link, None, SendField::Data, str_of(s, "data")).is_err());
 }
 
-/// The `vaultManifest` section natively: the key through the fixture's account wrap, every
-/// term, the sum, the sealed fixtures, every verdict and every write.
+/// The `vaultManifest` section natively: the keys through the fixture's account wraps, every
+/// term, the sum, the links, every verdict (with what the device remembers and the log),
+/// every write and every start, and the rows no entry point may count.
 #[test]
 fn vault_manifest_vectors() {
-    use passauth_core::manifest::{self, Entry, Manifest, ManifestKeys, data_hash};
+    use passauth_core::manifest::{
+        self, Entry, LogEntry, Manifest, ManifestKeys, Row, Seen, data_hash, parse_link,
+    };
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/vectors.json");
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let m = &v["vaultManifest"];
@@ -857,8 +894,34 @@ fn vault_manifest_vectors() {
         .open_vault_key(vault_id, epoch, str_of(m, "wrappedKey"), false)
         .unwrap();
     assert_eq!(hex(key.as_bytes()), str_of(m, "vaultKey"));
+    let rotated_epoch = m["rotated"]["keyEpoch"].as_u64().unwrap();
+    let rotated = account
+        .open_vault_key(
+            vault_id,
+            rotated_epoch,
+            str_of(&m["rotated"], "wrappedKey"),
+            false,
+        )
+        .unwrap();
+    assert_eq!(hex(rotated.as_bytes()), str_of(&m["rotated"], "vaultKey"));
+    let key_of = |c: &Value| match str_of(c, "key") {
+        "main" => (&key, epoch),
+        "rotated" => (&rotated, rotated_epoch),
+        other => panic!("unknown key {other}"),
+    };
     let rows = |name: &Value| -> Vec<Entry> {
         serde_json::from_value(m["items"][name.as_str().unwrap()].clone()).unwrap()
+    };
+    let row_of = |stored: &'_ Value| -> (u64, Option<String>, Option<String>) {
+        (
+            stored["manifest_seq"].as_u64().unwrap(),
+            stored["manifest_prev"].as_str().map(str::to_owned),
+            stored["manifest"].as_str().map(str::to_owned),
+        )
+    };
+    let seen_of = |r: &Value| -> Option<Seen> {
+        (!r.is_null())
+            .then(|| Seen::parse(r["version"].as_u64().unwrap(), str_of(r, "link")).unwrap())
     };
     let keys = ManifestKeys::derive(&key);
     for t in m["terms"].as_array().unwrap() {
@@ -879,53 +942,161 @@ fn vault_manifest_vectors() {
         json!([sum.live, sum.trashed, hex(&sum.acc)]),
         json!([m["live"], m["trashed"], m["acc"]])
     );
-    let current = str_of(&m["sealed"], "current");
-    let opened = Manifest::open(&key, vault_id, epoch, version, current).unwrap();
+    // Every row's link.
+    for (name, stored) in m["manifests"].as_object().unwrap() {
+        let (seq, prev, sealed) = row_of(stored);
+        match (stored["link"].as_str(), prev, sealed) {
+            (Some(link), Some(prev), Some(sealed)) => {
+                assert_eq!(
+                    manifest::row_link(seq, &prev, &sealed).unwrap(),
+                    link,
+                    "{name}"
+                );
+            }
+            (None, ..) => {}
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    let current = &m["manifests"]["current"];
+    let (seq, prev, sealed) = row_of(current);
+    let (prev, sealed) = (prev.unwrap(), sealed.unwrap());
+    assert_eq!(seq, version);
+    let opened = Manifest::open(
+        &key,
+        vault_id,
+        epoch,
+        version,
+        &parse_link(&prev).unwrap(),
+        &sealed,
+    )
+    .unwrap();
     assert_eq!(opened.summary, sum);
+    let current_row = Row {
+        seq,
+        prev: Some(&prev),
+        sealed: Some(&sealed),
+    };
+    let current_seen = Seen::parse(seq, str_of(current, "link")).unwrap();
+
     for c in m["checks"].as_array().unwrap() {
-        let sealed = c["sealed"].as_str().map(|name| str_of(&m["sealed"], name));
+        let (k, e) = key_of(c);
+        assert_eq!(c["keyEpoch"], e, "{c}");
+        let (seq, prev, sealed) = row_of(&m["manifests"][str_of(c, "manifest")]);
+        let log: Option<Vec<LogEntry>> = serde_json::from_value(c["log"].clone()).unwrap();
         let got = manifest::verify(
-            &key,
+            k,
             vault_id,
-            epoch,
-            c["manifestSeq"].as_u64().unwrap(),
-            sealed,
-            c["remembered"].as_u64(),
+            e,
+            Row {
+                seq,
+                prev: prev.as_deref(),
+                sealed: sealed.as_deref(),
+            },
+            seen_of(&c["remembered"]).as_ref(),
+            log.as_deref(),
             &rows(&c["items"]),
         )
         .unwrap();
         assert_eq!(serde_json::to_value(&got).unwrap(), c["expected"], "{c}");
     }
+    for bad in m["malformed"].as_array().unwrap() {
+        let items: Vec<Entry> = serde_json::from_value(bad["items"].clone()).unwrap();
+        let what = &bad["deletedAt"];
+        assert!(
+            manifest::verify(&key, vault_id, epoch, current_row, None, None, &items).is_err(),
+            "{what}"
+        );
+        assert!(
+            manifest::start(&key, vault_id, epoch, 1, None, &items).is_err(),
+            "{what}"
+        );
+        let one = &items[2..];
+        assert!(
+            manifest::advance(&key, vault_id, epoch, current_row, one, &[]).is_err(),
+            "{what}"
+        );
+        assert!(
+            manifest::advance(&key, vault_id, epoch, current_row, &[], one).is_err(),
+            "{what}"
+        );
+    }
     for w in m["writes"].as_array().unwrap() {
         let list = |name: &str| -> Vec<Entry> { serde_json::from_value(w[name].clone()).unwrap() };
-        let (seq, sealed) = manifest::advance(
+        let next = manifest::advance(
             &key,
             vault_id,
             epoch,
-            version,
-            current,
+            current_row,
             &list("removed"),
             &list("added"),
         )
         .unwrap();
-        let next = Manifest::open(&key, vault_id, epoch, seq, &sealed).unwrap();
+        let opened = Manifest::open(
+            &key,
+            vault_id,
+            epoch,
+            next.seq,
+            &parse_link(&next.prev).unwrap(),
+            &next.sealed,
+        )
+        .unwrap();
         assert_eq!(
-            json!({ "seq": seq, "live": next.summary.live, "trashed": next.summary.trashed,
-                    "acc": hex(&next.summary.acc) }),
+            json!({ "seq": next.seq, "prev": next.prev, "live": opened.summary.live,
+                    "trashed": opened.summary.trashed, "acc": hex(&opened.summary.acc) }),
             w["expected"],
             "{w}"
         );
+        assert_eq!(json!(next.prev), current["link"]);
         let after = list("after");
         let check = manifest::verify(
             &key,
             vault_id,
             epoch,
-            seq,
-            Some(&sealed),
-            Some(version),
+            Row {
+                seq: next.seq,
+                prev: Some(&next.prev),
+                sealed: Some(&next.sealed),
+            },
+            Some(&current_seen),
+            None,
             &after,
         )
         .unwrap();
         assert_eq!(check.status, manifest::Status::Ok, "{w}");
+        assert_eq!(check.link.as_deref(), Some(next.link.as_str()));
+    }
+    for s in m["starts"].as_array().unwrap() {
+        let (k, e) = key_of(s);
+        assert_eq!(s["keyEpoch"], e, "{s}");
+        let items = rows(&s["items"]);
+        let w = manifest::start(
+            k,
+            vault_id,
+            e,
+            s["version"].as_u64().unwrap(),
+            s["prev"].as_str(),
+            &items,
+        )
+        .unwrap();
+        assert_eq!(
+            json!({ "seq": w.seq, "prev": w.prev }),
+            s["expected"],
+            "{s}"
+        );
+        let check = manifest::verify(
+            k,
+            vault_id,
+            e,
+            Row {
+                seq: w.seq,
+                prev: Some(&w.prev),
+                sealed: Some(&w.sealed),
+            },
+            seen_of(&s["remembered"]).as_ref(),
+            None,
+            &items,
+        )
+        .unwrap();
+        assert_eq!(check.status, manifest::Status::Ok, "{s}");
     }
 }

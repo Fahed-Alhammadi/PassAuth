@@ -502,10 +502,15 @@ impl UnlockedAccount {
     }
 
     /// The image bytes from what [`seal_avatar`](Self::seal_avatar) made: this
-    /// account's, unchanged, or an error.
+    /// account's, unchanged, or an error. A picture longer than [`MAX_AVATAR_BYTES`]
+    /// (or empty) is refused like one that doesn't open: no app seals one.
     pub fn open_avatar(&self, sealed: &str) -> Result<Vec<u8>> {
         let aad = format!("{AVATAR_AAD}{}", self.account_id);
-        self.account_key.decrypt(&unb64(sealed)?, aad.as_bytes())
+        let image = self.account_key.decrypt(&unb64(sealed)?, aad.as_bytes())?;
+        if image.is_empty() || image.len() > MAX_AVATAR_BYTES {
+            return Err(Error::Malformed("profile picture size"));
+        }
+        Ok(image)
     }
 }
 
@@ -1095,6 +1100,19 @@ mod tests {
         assert!(matches!(bob.open_avatar(&sealed), Err(Error::Decrypt)));
         assert!(alice.seal_avatar(b"").is_err());
         assert!(alice.seal_avatar(&vec![0; MAX_AVATAR_BYTES + 1]).is_err());
+        // The largest picture opens; a longer one sealed by other means doesn't.
+        let largest = vec![7; MAX_AVATAR_BYTES];
+        let sealed = alice.seal_avatar(&largest).unwrap();
+        assert_eq!(alice.open_avatar(&sealed).unwrap(), largest);
+        let aad = format!("{AVATAR_AAD}{}", alice.account_id);
+        let seal = |image: &[u8]| b64(&alice.account_key.encrypt(image, aad.as_bytes()).unwrap());
+        assert_eq!(alice.open_avatar(&seal(b"ok")).unwrap(), b"ok");
+        for image in [vec![0; MAX_AVATAR_BYTES + 1], Vec::new()] {
+            assert!(matches!(
+                alice.open_avatar(&seal(&image)),
+                Err(Error::Malformed("profile picture size"))
+            ));
+        }
         // Not interchangeable with the roster (same key, other AAD).
         let roster = alice.seal_emergency_roster("{}").unwrap();
         assert!(alice.open_avatar(&roster).is_err());

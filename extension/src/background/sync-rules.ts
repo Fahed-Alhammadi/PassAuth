@@ -13,7 +13,7 @@ import type { Snapshot, SyncNotice } from "@web/lib/delta";
 import { readInvitations } from "@web/lib/invitations";
 import { isSyncResponse, isSyncVaultRow, type SyncInvitation, type SyncItemRow, type SyncResponse } from "@web/lib/types";
 import type { StoredRevMemory } from "./item-revs";
-import type { StoredManifestMemory } from "./manifests";
+import { stripPrivate } from "./manifests";
 import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
 
 /**
@@ -22,13 +22,20 @@ import type { SignedInvitation, StoredVerdict } from "./signed-sharing";
  * behind those writes, so the next delta sends their rows again.
  */
 /*
- * `itemRevs` / `rolledBack` (item-revs.ts): the highest item edit counters seen and the items a server sent in an
- * older version, kept with the rows so they share the copy's lifetime. `manifests` (manifests.ts): the highest vault
- * manifest version seen per vault, kept the same way. The rows themselves carry the rest: each vault row its `manifest`
- * and `manifest_seq`, each row without data (a trash summary) the server's `data_sha256`.
+ * What this browser remembers to notice a rollback (item edit counters, manifest versions and links) is NOT in the
+ * copy: it lives in the account's device memory (device-memory.ts), which outlives the copy. `itemRevs` /
+ * `rolledBack` are only read from copies written before that, once, to seed the device memory.
+ * The rows carry the rest: each vault row its `manifest`, `manifest_seq` and `manifest_prev`, each row without data (a
+ * trash summary) the server's `data_sha256`. Two things belong to the rows and are kept beside them, never on them (a
+ * row field could come from a server):
+ * - `served`: item id → the hash of the data the server sent, for rows that hold this browser's kept newer copy;
+ * - `stash`: openable rows the server stopped listing without proof that they are gone (no "ok" manifest said so):
+ *   should an older version of such an item come back, the copy this browser had is still here.
  */
-export interface StoredSync extends SyncResponse, StoredRevMemory, StoredManifestMemory {
+export interface StoredSync extends SyncResponse, StoredRevMemory {
   own?: Record<string, number>;
+  served?: Record<string, string>;
+  stash?: SyncItemRow[];
   /**
    * Signed sharing: each vault's last verdict with the row it was made for (signed-sharing.ts `stampOf`), so an
    * offline unlock or a service-worker restart never uses a vault that failed, and checks only rows it has no verdict for.
@@ -67,9 +74,39 @@ export function withSignedFields(list: SyncInvitation[], raw: unknown): SignedIn
 
 const isRow = (r: unknown): r is SyncItemRow => !!r && typeof r === "object" && typeof (r as SyncItemRow).id === "string" && typeof (r as SyncItemRow).vault_id === "string";
 
-/** A snapshot as one IndexedDB record. */
-export function toStored(s: Snapshot): StoredSync {
+/** Rows kept aside at most (`StoredSync.stash`). */
+export const STASH_CAP = 2000;
+
+/** What belongs to a snapshot's rows without being on them (`StoredSync.served`, `.stash`). */
+export interface RowExtras {
+  served: Map<string, string>;
+  stash: Map<string, SyncItemRow>;
+}
+
+export const emptyExtras = (): RowExtras => ({ served: new Map(), stash: new Map() });
+
+/** The extras an offline copy holds (anything malformed is left out; hashes only for rows the copy has). */
+export function readExtras(v: { served?: unknown; stash?: unknown; items?: unknown } | null | undefined): RowExtras {
+  const out = emptyExtras();
+  const ids = new Set(Array.isArray(v?.items) ? (v.items as unknown[]).filter(isRow).map((r) => r.id) : []);
+  const served = v?.served;
+  if (served && typeof served === "object" && !Array.isArray(served)) {
+    for (const [id, hash] of Object.entries(served)) if (typeof hash === "string" && hash && ids.has(id)) out.served.set(id, hash);
+  }
+  if (Array.isArray(v?.stash)) {
+    stripPrivate(v.stash);
+    for (const r of (v.stash as unknown[]).filter(isRow).slice(-STASH_CAP)) if (typeof r.item_key === "string" && typeof r.data === "string" && !ids.has(r.id)) out.stash.set(r.id, r);
+  }
+  return out;
+}
+
+/** A snapshot as one IndexedDB record (`extras`: what goes beside its rows). */
+export function toStored(s: Snapshot, extras?: RowExtras): StoredSync {
   const own = Object.keys(s.own).length ? { own: { ...s.own } } : {};
+  const beside = {
+    ...(extras?.served.size ? { served: Object.fromEntries(extras.served) } : {}),
+    ...(extras?.stash.size ? { stash: [...extras.stash.values()].slice(-STASH_CAP) } : {}),
+  };
   return {
     revision: s.revision,
     ...(s.cursor ? { cursor: s.cursor } : {}),
@@ -79,6 +116,7 @@ export function toStored(s: Snapshot): StoredSync {
     items: [...s.items.values()],
     invitations: s.invitations,
     ...own,
+    ...beside,
   };
 }
 
@@ -89,6 +127,8 @@ export function toStored(s: Snapshot): StoredSync {
  */
 export function fromStored(v: StoredSync): Snapshot | null {
   if (!isSyncResponse(v)) return null;
+  // A device-private marker is never read from a row (older builds of this version wrote one).
+  stripPrivate(v.items);
   const own: Record<string, number> = {};
   if (v.own && typeof v.own === "object") for (const [id, seq] of Object.entries(v.own)) if (typeof seq === "number" && Number.isSafeInteger(seq)) own[id] = seq;
   return {

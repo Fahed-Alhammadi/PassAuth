@@ -508,14 +508,18 @@ public enum Emergency {
             public var keyEpoch: Int64
             public var manifest: String?
             public var manifestSeq: Int64
+            /// The link of the manifest it replaced (needed to open it); nil: the vault has none.
+            public var manifestPrev: String?
 
-            public init(id: String, meta: String, wrappedKey: String, keyEpoch: Int64 = 0, manifest: String? = nil, manifestSeq: Int64 = 0) {
+            public init(id: String, meta: String, wrappedKey: String, keyEpoch: Int64 = 0, manifest: String? = nil, manifestSeq: Int64 = 0,
+                        manifestPrev: String? = nil) {
                 self.id = id
                 self.meta = meta
                 self.wrappedKey = wrappedKey
                 self.keyEpoch = keyEpoch
                 self.manifest = manifest
                 self.manifestSeq = manifestSeq
+                self.manifestPrev = manifestPrev
             }
         }
 
@@ -541,6 +545,18 @@ public enum Emergency {
         public var sealedKey: String
         public var vaults: [Vault]
         public var items: [Row]
+        /// The vaults (by the id the row named; "" when it named none) of item rows that came
+        /// without their id, key or data and so can't be shown: with a manifest such a vault is
+        /// never "checked" (a row that only carries a hash would hide an item and still add up).
+        public var incomplete: Set<String> = []
+
+        public init(keyVersion: Int?, sealedKey: String, vaults: [Vault], items: [Row], incomplete: Set<String> = []) {
+            self.keyVersion = keyVersion
+            self.sealedKey = sealedKey
+            self.vaults = vaults
+            self.items = items
+            self.incomplete = incomplete
+        }
     }
 
     /// The answer as the core takes it; nil when malformed.
@@ -550,14 +566,19 @@ public enum Emergency {
             guard !str(r["id"]).isEmpty, !str(r["meta"]).isEmpty, !str(r["wrapped_key"]).isEmpty else { return nil }
             return GrantorVaultData.Vault(id: str(r["id"]), meta: str(r["meta"]), wrappedKey: str(r["wrapped_key"]),
                                           keyEpoch: max(0, num(r["key_epoch"]) ?? 0), manifest: r["manifest"]?.string,
-                                          manifestSeq: max(0, num(r["manifest_seq"]) ?? 0))
+                                          manifestSeq: max(0, num(r["manifest_seq"]) ?? 0), manifestPrev: r["manifest_prev"]?.string)
         }
+        var incomplete = Set<String>()
         let rows = items.compactMap { r -> GrantorVaultData.Row? in
-            guard !str(r["id"]).isEmpty, !str(r["vault_id"]).isEmpty, !str(r["item_key"]).isEmpty, !str(r["data"]).isEmpty else { return nil }
+            guard !str(r["id"]).isEmpty, !str(r["vault_id"]).isEmpty, !str(r["item_key"]).isEmpty, !str(r["data"]).isEmpty else {
+                incomplete.insert(str(r["vault_id"]))
+                return nil
+            }
             return GrantorVaultData.Row(id: str(r["id"]), vaultId: str(r["vault_id"]), key: str(r["item_key"]), data: str(r["data"]),
                                         deletedAt: num(r["deleted_at"]), updatedAt: num(r["updated_at"]) ?? 0)
         }
-        return GrantorVaultData(keyVersion: num(v["key_version"]).map { Int(clamping: $0) }, sealedKey: str(v["sealed_key"]), vaults: vaults, items: rows)
+        return GrantorVaultData(keyVersion: num(v["key_version"]).map { Int(clamping: $0) }, sealedKey: str(v["sealed_key"]), vaults: vaults, items: rows,
+                                incomplete: incomplete)
     }
 }
 

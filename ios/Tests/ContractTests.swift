@@ -21,6 +21,10 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var requests: [Request] = []
     /// What `GET /api/config` answers when nothing is queued for it (nil: `{}`, as before).
     nonisolated(unsafe) static var config: String?
+    /// A live server for the tests that need one (state that follows the requests: a vault's
+    /// manifest chain, its log): asked after the queued answers and before the defaults; nil
+    /// from it: not its request.
+    nonisolated(unsafe) static var handler: ((Request) -> (status: Int, body: Data)?)?
     private static let lock = NSLock()
 
     static func reset() {
@@ -29,6 +33,7 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
         answers = [:]
         requests = []
         config = nil
+        handler = nil
         lock.unlock()
     }
 
@@ -54,15 +59,19 @@ final class ScriptedServer: URLProtocol, @unchecked Sendable {
         var body = Data("{}".utf8)
         var headers = ["Content-Type": "application/json"]
         Self.lock.lock()
-        Self.requests.append(Request(method: method, path: path, query: request.url?.query ?? "", body: Self.bodyJSON(request), headers: request.allHTTPHeaderFields ?? [:]))
-        if path == "/api/sync" && (Self.answers["\(method) \(path)"] ?? []).isEmpty {
-            body = Self.syncBodies.count > 1 ? Self.syncBodies.removeFirst() : (Self.syncBodies.first ?? body)
-        } else if var queue = Self.answers["\(method) \(path)"], !queue.isEmpty {
+        let asked = Request(method: method, path: path, query: request.url?.query ?? "", body: Self.bodyJSON(request), headers: request.allHTTPHeaderFields ?? [:])
+        Self.requests.append(asked)
+        if var queue = Self.answers["\(method) \(path)"], !queue.isEmpty {
             let a = queue.removeFirst()
             Self.answers["\(method) \(path)"] = queue
             status = a.status
             body = Data(a.body.utf8)
             headers.merge(a.headers) { _, new in new }
+        } else if let live = Self.handler?(asked) {
+            status = live.status
+            body = live.body
+        } else if path == "/api/sync" {
+            body = Self.syncBodies.count > 1 ? Self.syncBodies.removeFirst() : (Self.syncBodies.first ?? body)
         } else if path.hasPrefix("/api/items") {
             body = Data(#"{"revision":7}"#.utf8)
         } else if path == "/api/config", let config = Self.config {
@@ -1064,15 +1073,53 @@ extension ContractTests {
         XCTAssertEqual(try sendFieldVersion(ciphertext: put["data"] as? String ?? ""), 1)
         XCTAssertEqual(try sendOpen(key: key, contentKey: nil, field: "data", ciphertext: put["data"] as? String ?? ""), "1234")
 
-        // A server without `send_v2`: v1 with a server-checked password, as before.
+        // A server without `send_v2` (or one that stops listing it): no password Send is
+        // written the link-only way; the app says the server needs an update, nothing is sent.
         ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","api":2,"features":["sends"]}"#)
         _ = await repo.sendConfig()
-        ScriptedServer.answer("POST /api/sends", 200, reply)
-        _ = try await repo.createSend(NewSend(name: "Door", text: "1234", password: "open sesame", maxViews: nil, expiresAt: nil,
-                                              deleteAt: 9_999_999_999, hideEmail: false))
-        let v1 = try XCTUnwrap(ScriptedServer.recorded().last { $0.path == "/api/sends" }?.body)
-        XCTAssertNil(v1["owner_content_key"])
-        XCTAssertEqual(try sendFieldVersion(ciphertext: v1["name"] as? String ?? ""), 1)
-        XCTAssertNotNil(v1["access_verifier"] as? String)
+        let posts = ScriptedServer.recorded().filter { $0.path == "/api/sends" }.count
+        do {
+            _ = try await repo.createSend(NewSend(name: "Door", text: "1234", password: "open sesame", maxViews: nil, expiresAt: nil,
+                                                  deleteAt: 9_999_999_999, hideEmail: false))
+            XCTFail("expected the refusal")
+        } catch {
+            XCTAssertEqual(errorMessage(error), "Update your PassAuth server to protect a Send with a password.")
+        }
+        XCTAssertEqual(ScriptedServer.recorded().filter { $0.path == "/api/sends" }.count, posts)
+        // The v2 Send made above: changing its password there is refused (never rewritten v1),
+        // its text is still edited with its own content key (v2), and removing the password is
+        // still possible.
+        var change = SendEdit()
+        change.password = .some("another")
+        do {
+            try await repo.updateSend(owned, change)
+            XCTFail("expected the refusal")
+        } catch {
+            XCTAssertEqual(errorMessage(error), VaultRepository.sendPasswordNeedsV2)
+        }
+        ScriptedServer.answer("PUT /api/sends/s1", 200, reply)
+        var text = SendEdit()
+        text.text = "5678"
+        try await repo.updateSend(owned, text)
+        let edited = try XCTUnwrap(ScriptedServer.recorded().last { $0.method == "PUT" }?.body)
+        XCTAssertEqual(try sendFieldVersion(ciphertext: edited["data"] as? String ?? ""), 2)
+        XCTAssertEqual(try sendOpen(key: key, contentKey: ck, field: "data", ciphertext: edited["data"] as? String ?? ""), "5678")
+        XCTAssertNil(edited["owner_content_key"], "the key stays")
+        // A Send whose fields and content key disagree (v2 text, no key) can't be read here and
+        // isn't "repaired" by writing it again in either format.
+        let broken = try XCTUnwrap(OwnedSend(json: ["id": "s1", "name": .string(name), "owner_key": .string(body["owner_key"] as? String ?? ""),
+                                                    "data": .string(body["data"] as? String ?? ""), "delete_at": 9_999_999_999, "has_password": true]))
+        let puts = ScriptedServer.recorded().filter { $0.method == "PUT" }.count
+        var rewrite = SendEdit()
+        rewrite.name = "New name"
+        rewrite.text = "New text"
+        rewrite.password = .some(nil)
+        do {
+            try await repo.updateSend(broken, rewrite)
+            XCTFail("expected an error")
+        } catch {
+            XCTAssertEqual(errorMessage(error), "This Send can't be opened here, so it can't be changed.")
+        }
+        XCTAssertEqual(ScriptedServer.recorded().filter { $0.method == "PUT" }.count, puts)
     }
 }

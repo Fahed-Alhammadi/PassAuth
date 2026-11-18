@@ -214,69 +214,179 @@ final class GoldenVectorTests: XCTestCase {
 
     // MARK: Vault manifests
 
-    /// `vaultManifest`: every verdict of a check and every kind of write, through the binding
-    /// with the fixture's vault key, and through the app's own wrapper (`VaultManifest`) where it
-    /// builds the rows itself.
+    private func sessionAccount(_ accountId: String, _ sessionBytes: String) throws -> Account {
+        var b64 = sessionBytes.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        return try accountFromSessionBytes(accountId: accountId, bytes: try XCTUnwrap(Data(base64Encoded: b64)))
+    }
+
+    /// `vaultManifest`: the links, every verdict of a check (with what is remembered and the
+    /// manifest log), every kind of write and start, and the item sets every entry point must
+    /// refuse, through the binding with the fixture's vault keys, and through the app's own
+    /// wrapper (`VaultManifest`) where it builds the rows itself.
     func testVaultManifestThroughTheBinding() throws {
         let m = try XCTUnwrap(Self.vectors["vaultManifest"] as? Object, "no vaultManifest vectors")
         let vaultId = m["vaultId"] as? String ?? ""
-        let epoch = UInt64(m["keyEpoch"] as? Int ?? 0)
-        var b64 = (m["sessionBytes"] as? String ?? "").replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        while b64.count % 4 != 0 { b64 += "=" }
-        let bytes = try XCTUnwrap(Data(base64Encoded: b64))
-        let account = try accountFromSessionBytes(accountId: m["accountId"] as? String ?? "", bytes: bytes)
-        let key = try account.openVaultKey(vaultId: vaultId, wrapped: m["wrappedKey"] as? String ?? "", kind: "account", keyEpoch: epoch, legacyAllowed: false)
+        func number(_ any: Any?) -> UInt64? { (any as? NSNumber)?.uint64Value }
+        let epoch = try XCTUnwrap(number(m["keyEpoch"]))
+        let account = try sessionAccount(m["accountId"] as? String ?? "", m["sessionBytes"] as? String ?? "")
+        let rotated = m["rotated"] as? Object ?? [:]
+        let keys: [String: VaultKey] = [
+            "main": try account.openVaultKey(vaultId: vaultId, wrapped: m["wrappedKey"] as? String ?? "", kind: "account", keyEpoch: epoch, legacyAllowed: false),
+            "rotated": try account.openVaultKey(vaultId: vaultId, wrapped: rotated["wrappedKey"] as? String ?? "", kind: "account",
+                                                keyEpoch: try XCTUnwrap(number(rotated["keyEpoch"])), legacyAllowed: false),
+        ]
         let items = m["items"] as? Object ?? [:]
-        let sealed = m["sealed"] as? Object ?? [:]
+        let manifests = m["manifests"] as? [String: Object] ?? [:]
         func text(_ any: Any?) throws -> String {
             String(decoding: try JSONSerialization.data(withJSONObject: any ?? [], options: [.withoutEscapingSlashes]), as: UTF8.self)
         }
-        func number(_ any: Any?) -> UInt64? { (any as? NSNumber)?.uint64Value }
+        func mark(_ any: Any?) -> ManifestMark? {
+            guard let o = any as? Object, let v = number(o["version"]), let link = o["link"] as? String else { return nil }
+            return ManifestMark(version: v, link: link)
+        }
+
+        // A row's link, from its three fields alone.
+        XCTAssertGreaterThanOrEqual(manifests.count, 10)
+        for (name, row) in manifests {
+            guard let link = row["link"] as? String else { continue }
+            XCTAssertEqual(try manifestLink(manifestSeq: number(row["manifest_seq"]) ?? 0, prev: row["manifest_prev"] as? String ?? "",
+                                            sealed: row["manifest"] as? String ?? ""), link, name)
+            let header = SyncVault(id: vaultId, manifest: row["manifest"] as? String, manifestSeq: (row["manifest_seq"] as? NSNumber)?.int64Value,
+                                   manifestPrev: row["manifest_prev"] as? String)
+            XCTAssertEqual(VaultManifest.link(of: header), link, "\(name) through VaultManifest")
+        }
 
         let checks = m["checks"] as? [Object] ?? []
-        XCTAssertGreaterThan(checks.count, 20)
-        for (i, c) in checks.enumerated() {
-            let name = "check \(i) (\(c["items"] ?? ""), \(c["sealed"] ?? "no manifest"))"
-            let seq = number(c["manifestSeq"]) ?? 0
-            let text0 = (c["sealed"] as? String).flatMap { sealed[$0] as? String }
-            let remembered = number(c["remembered"])
+        XCTAssertGreaterThan(checks.count, 40)
+        var statuses = Set<String>()
+        for c in checks {
+            let name = "check '\(c["name"] ?? "")'"
+            let row = manifests[c["manifest"] as? String ?? ""] ?? [:]
+            let key = try XCTUnwrap(keys[c["key"] as? String ?? ""], name)
+            let keyEpoch = try XCTUnwrap(number(c["keyEpoch"]), name)
+            let seq = number(row["manifest_seq"]) ?? 0
+            let prev = row["manifest_prev"] as? String, sealed = row["manifest"] as? String
+            let remembered = mark(c["remembered"])
+            let log: String? = c["log"] is NSNull || c["log"] == nil ? nil : try text(c["log"])
             let rows = items[c["items"] as? String ?? ""]
             let expected = c["expected"] as? Object ?? [:]
-            let got = try key.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: seq, sealed: text0, remembered: remembered, itemsJson: try text(rows))
+            let got = try key.manifestVerify(vaultId: vaultId, keyEpoch: keyEpoch, manifestSeq: seq, prev: prev, sealed: sealed,
+                                             rememberedVersion: remembered?.version, rememberedLink: remembered?.link, logJson: log,
+                                             itemsJson: try text(rows))
+            statuses.insert(got.status)
             XCTAssertEqual(got.status, expected["status"] as? String, name)
             XCTAssertEqual(got.version, number(expected["version"]), name)
+            XCTAssertEqual(got.link, expected["link"] as? String, name)
             XCTAssertEqual(got.live, number(expected["live"]), name)
             XCTAssertEqual(got.trashed, number(expected["trashed"]), name)
             // The app's wrapper, from rows as it holds them (the copy's `SyncItem`).
             if let decoded = try? JSONDecoder().decode([SyncItem].self, from: JSONSerialization.data(withJSONObject: rows ?? [])) {
-                let row = SyncVault(id: vaultId, keyEpoch: Int64(epoch), manifest: text0, manifestSeq: Int64(seq))
-                let mine = VaultManifest.verify(row, key: key, remembered: remembered, rows: decoded)
+                let header = SyncVault(id: vaultId, keyEpoch: Int64(keyEpoch), manifest: sealed, manifestSeq: Int64(seq), manifestPrev: prev)
+                let mine = VaultManifest.verify(header, key: key, remembered: remembered, log: log, rows: decoded)
                 XCTAssertEqual(mine.status.rawValue, expected["status"] as? String, "\(name) through VaultManifest")
-                XCTAssertEqual(mine.version, number(expected["version"]), "\(name) through VaultManifest")
+                if mine.status == .ok {
+                    XCTAssertEqual(mine.mark, mark(expected), "\(name): what to remember")
+                } else {
+                    XCTAssertNil(mine.mark, "\(name): nothing new is remembered")
+                }
+            }
+        }
+        XCTAssertEqual(statuses, ["incomplete", "mismatch", "need_log", "none", "ok", "rollback"])
+
+        // Item sets every entry point refuses (a `deleted_at` that is no time, an id twice, …).
+        let current = try XCTUnwrap(manifests["current"])
+        let version = try XCTUnwrap(number(current["manifest_seq"]))
+        let currentPrev = try XCTUnwrap(current["manifest_prev"] as? String), currentSealed = try XCTUnwrap(current["manifest"] as? String)
+        let currentLink = try XCTUnwrap(current["link"] as? String)
+        let main = try XCTUnwrap(keys["main"])
+        let malformed = m["malformed"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(malformed.count, 6)
+        for (i, bad) in malformed.enumerated() {
+            let rows = try text(bad["items"])
+            XCTAssertThrowsError(try main.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: version, prev: currentPrev, sealed: currentSealed,
+                                                         rememberedVersion: nil, rememberedLink: nil, logJson: nil, itemsJson: rows), "malformed \(i): verify")
+            XCTAssertThrowsError(try main.manifestStart(vaultId: vaultId, keyEpoch: epoch, version: 1, prev: nil, itemsJson: rows), "malformed \(i): start")
+            // The app: such an answer is a mismatch (when its rows decode at all).
+            if let decoded = try? JSONDecoder().decode([SyncItem].self, from: JSONSerialization.data(withJSONObject: bad["items"] ?? [])) {
+                let header = SyncVault(id: vaultId, keyEpoch: Int64(epoch), manifest: currentSealed, manifestSeq: Int64(version), manifestPrev: currentPrev)
+                XCTAssertEqual(VaultManifest.verify(header, key: main, remembered: nil, rows: decoded).status, .mismatch, "malformed \(i) through VaultManifest")
             }
         }
 
-        let version = number(m["version"]) ?? 0
-        let current = try XCTUnwrap(sealed["current"] as? String)
         let writes = m["writes"] as? [Object] ?? []
         XCTAssertGreaterThanOrEqual(writes.count, 8)
         for w in writes {
             let name = w["name"] as? String ?? ""
             let expected = w["expected"] as? Object ?? [:]
-            let next = try key.manifestNext(vaultId: vaultId, keyEpoch: epoch, manifestSeq: version, sealed: current,
-                                            removedJson: try text(w["removed"]), addedJson: try text(w["added"]))
+            let next = try main.manifestNext(vaultId: vaultId, keyEpoch: epoch, manifestSeq: version, prev: currentPrev, sealed: currentSealed,
+                                             removedJson: try text(w["removed"]), addedJson: try text(w["added"]))
             XCTAssertEqual(next.seq, number(expected["seq"]), name)
-            let after = try key.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: next.seq, sealed: next.sealed, remembered: version,
-                                               itemsJson: try text(w["after"]))
+            XCTAssertEqual(next.prev, expected["prev"] as? String, name)
+            XCTAssertEqual(next.prev, currentLink, "\(name): it names the manifest it replaces")
+            let after = try main.manifestVerify(vaultId: vaultId, keyEpoch: epoch, manifestSeq: next.seq, prev: next.prev, sealed: next.sealed,
+                                                rememberedVersion: version, rememberedLink: currentLink, logJson: nil, itemsJson: try text(w["after"]))
             XCTAssertEqual(after.status, "ok", name)
+            XCTAssertEqual(after.link, next.link, "\(name): the written link is what is remembered")
             XCTAssertEqual(after.live, number(expected["live"]), name)
             XCTAssertEqual(after.trashed, number(expected["trashed"]), name)
         }
+
+        let starts = m["starts"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(starts.count, 4)
+        for st in starts {
+            let name = st["name"] as? String ?? ""
+            let key = try XCTUnwrap(keys[st["key"] as? String ?? ""], name)
+            let keyEpoch = try XCTUnwrap(number(st["keyEpoch"]), name)
+            let expected = st["expected"] as? Object ?? [:]
+            let rows = try text(items[st["items"] as? String ?? ""])
+            let w = try key.manifestStart(vaultId: vaultId, keyEpoch: keyEpoch, version: try XCTUnwrap(number(st["version"])), prev: st["prev"] as? String,
+                                          itemsJson: rows)
+            XCTAssertEqual(w.seq, number(expected["seq"]), name)
+            XCTAssertEqual(w.prev, expected["prev"] as? String, name)
+            let remembered = mark(st["remembered"])
+            let check = try key.manifestVerify(vaultId: vaultId, keyEpoch: keyEpoch, manifestSeq: w.seq, prev: w.prev, sealed: w.sealed,
+                                               rememberedVersion: remembered?.version, rememberedLink: remembered?.link, logJson: nil, itemsJson: rows)
+            XCTAssertEqual(check.status, "ok", name)
+            XCTAssertEqual(check.link, w.link, name)
+        }
+
         // The hash of a row's data, as the server sends it for rows without data.
         for t in m["terms"] as? [Object] ?? [] {
             guard let id = t["id"] as? String, let row = (items["full"] as? [Object])?.first(where: { $0["id"] as? String == id }),
                   let data = row["data"] as? String else { continue }
             XCTAssertEqual(manifestDataHash(data: data), t["dataSha256"] as? String, id)
+        }
+    }
+
+    /// `itemRev.limits`: an item whose stored edit counter is huge, a fraction or negative still
+    /// opens (read as at most 2^53 − 2) and can be written again (at most 2^53 − 1); nothing in
+    /// the app breaks on such a number.
+    func testItemRevLimitsThroughTheBinding() throws {
+        let l = try XCTUnwrap((Self.vectors["itemRev"] as? Object)?["limits"] as? Object, "no itemRev.limits vectors")
+        let vaultId = l["vaultId"] as? String ?? ""
+        let account = try sessionAccount(l["accountId"] as? String ?? "", l["sessionBytes"] as? String ?? "")
+        let key = try account.openVaultKey(vaultId: vaultId, wrapped: l["wrappedKey"] as? String ?? "", kind: "account",
+                                           keyEpoch: (l["keyEpoch"] as? NSNumber)?.uint64Value ?? 0, legacyAllowed: true)
+        func whole(_ any: Any?) -> UInt64? { (any as? String).flatMap(UInt64.init) ?? (any as? NSNumber)?.uint64Value }
+        let top = try XCTUnwrap(whole(l["top"]))
+        let cases = l["items"] as? [Object] ?? []
+        XCTAssertGreaterThanOrEqual(cases.count, 8)
+        for c in cases {
+            let name = "rev \(c["rev"] ?? "")"
+            let e = c["encrypted"] as? Object ?? [:]
+            let enc = EncryptedItem(id: e["id"] as? String ?? "", vaultId: e["vault_id"] as? String ?? "", key: e["key"] as? String ?? "",
+                                    data: e["data"] as? String ?? "")
+            let json = try key.decryptItem(encrypted: enc)
+            let item = try ItemCodec.decode(json)
+            XCTAssertEqual(item.rev, whole(c["reads"]), name)
+            let again = try key.updateItem(encrypted: enc, itemJson: ItemCodec.encode(item))
+            let after = try ItemCodec.decode(try key.decryptItem(encrypted: again))
+            XCTAssertEqual(after.rev, min(try XCTUnwrap(whole(c["writes"])), top), name)
+            // The app's own bookkeeping takes such a counter as any other.
+            var memory: [String: UInt64] = [:]
+            XCTAssertEqual(ItemRevCheck.observe(&memory, id: enc.id, served: item.rev), .new, name)
+            XCTAssertEqual(ItemRevCheck.observe(&memory, id: enc.id, served: after.rev), after.rev > item.rev ? .newer : .same, name)
         }
     }
 }

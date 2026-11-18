@@ -1316,15 +1316,9 @@ class SignedSharingTest {
         assertEquals(s.fingerprint, with.fingerprint)
     }
 
-    /** Lead A: an unknown `/api/config` alone turns nothing on (a server without the feature works as before once known). */
+    /** Memory that holds only lists of generated identity hashes is empty (the checks themselves are always on: `ServerSupport`). */
     @Test
-    fun anUnknownConfigTurnsNothingOn() {
-        assertFalse(SignedSharing.checksOn(null, null, hasMemory = false, signals = false))
-        assertFalse(SignedSharing.checksOn(listOf("delta_sync"), listOf("delta_sync"), hasMemory = false, signals = false))
-        assertTrue(SignedSharing.checksOn(null, listOf(SignedSharing.FEATURE), hasMemory = false, signals = false))
-        assertTrue(SignedSharing.checksOn(null, null, hasMemory = true, signals = false))
-        assertTrue(SignedSharing.checksOn(null, null, hasMemory = false, signals = true))
-        // Only lists of generated identity hashes don't make memory "on".
+    fun memoryWithOnlyGeneratedIdentitiesIsEmpty() {
         assertTrue(SigningMemory(generated = listOf("x")).isEmpty)
     }
 

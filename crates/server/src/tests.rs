@@ -28,8 +28,10 @@ mod signing;
 /// Undoes migrations 17 (vault manifests), 16 (Send v2), 15 (profile pictures) and 14
 /// (signed sharing), for tests that go back to an older schema.
 const UNDO_MIGRATION_14: &[&str] = &[
+    "DROP TABLE vault_manifest_log",
     "ALTER TABLE vaults DROP COLUMN manifest",
     "ALTER TABLE vaults DROP COLUMN manifest_seq",
+    "ALTER TABLE vaults DROP COLUMN manifest_prev",
     "DELETE FROM schema_version WHERE version = 17",
     "ALTER TABLE sends DROP COLUMN owner_content_key",
     "DELETE FROM schema_version WHERE version = 16",
@@ -3731,7 +3733,12 @@ async fn avatar_is_stored_sealed_and_versioned_in_sync() {
     .await;
     assert_eq!(v["avatar"], "c2VhbGVk");
     // Only base64url, not empty, not too large.
-    for bad in ["", "not base64!", &"A".repeat(400_000)] {
+    for bad in [
+        "",
+        "not base64!",
+        &"A".repeat(400_000),
+        &"A".repeat(350_001),
+    ] {
         let (s, _) = call(
             &app,
             Method::PUT,
@@ -3746,6 +3753,36 @@ async fn avatar_is_stored_sealed_and_versioned_in_sync() {
             bad.len()
         );
     }
+    // Review fix: a sealed picture is larger than the general body limit (64 KiB); the
+    // route takes one up to its own limit, the largest an app seals (256 KiB of image
+    // is 349,580 characters) included.
+    let mut seq = 1;
+    for size in [70_000, 300_000, 349_580, 350_000] {
+        let big = "A".repeat(size);
+        let (s, v) = call(
+            &app,
+            Method::PUT,
+            "/api/account/avatar",
+            Some(&t),
+            json!({ "avatar": big }),
+        )
+        .await;
+        seq += 1;
+        assert_eq!(
+            (s, &v["avatar_seq"]),
+            (StatusCode::OK, &json!(seq)),
+            "{size}"
+        );
+        let (_, v) = call(
+            &app,
+            Method::GET,
+            "/api/account/avatar",
+            Some(&t),
+            json!(null),
+        )
+        .await;
+        assert_eq!(v["avatar"].as_str().map(str::len), Some(size));
+    }
     let (s, v) = call(
         &app,
         Method::DELETE,
@@ -3755,7 +3792,7 @@ async fn avatar_is_stored_sealed_and_versioned_in_sync() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["avatar_seq"], 2);
+    assert_eq!(v["avatar_seq"], seq + 1);
     let (_, v) = call(
         &app,
         Method::GET,
@@ -3765,7 +3802,7 @@ async fn avatar_is_stored_sealed_and_versioned_in_sync() {
     )
     .await;
     assert!(v["avatar"].is_null());
-    assert_eq!(v["avatar_seq"], 2);
+    assert_eq!(v["avatar_seq"], seq + 1);
     let (s, _) = call(&app, Method::GET, "/api/account/avatar", None, json!({})).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
@@ -4396,6 +4433,7 @@ async fn a_full_sync_keeps_its_shape_for_older_apps() {
             "key_kind",
             "manifest",
             "manifest_ok",
+            "manifest_prev",
             "manifest_seq",
             "member_roster",
             "member_roster_seq",

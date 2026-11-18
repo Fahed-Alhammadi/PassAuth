@@ -65,10 +65,43 @@ pub struct Item {
     /// Apps remember the highest per item and flag a lower one ([`item_rev_check`]): a
     /// server serving an older copy of the item. Apps from before keep it unchanged
     /// through an edit (as an unknown field), which is never flagged.
+    ///
+    /// Never above [`MAX_ITEM_REV`]: a stored number beyond it (anyone with the vault
+    /// key can write one) reads as [`MAX_ITEM_REV`] and the next write stays there, so
+    /// no value of the counter makes an item impossible to open or to save again.
+    #[serde(deserialize_with = "rev_in")]
     pub rev: u64,
     /// Fields from newer clients, kept so they survive an edit by an older one.
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// The highest edit counter an item is read with: 2^53 − 2, so the counter a write
+/// stores (one more) is still a whole number every binding carries exactly.
+pub const MAX_ITEM_REV: u64 = 9_007_199_254_740_990;
+
+/// An item's stored `rev`, whatever number it is: at most [`MAX_ITEM_REV`], and 0 for
+/// what can't be a count (a negative number, NaN). A fraction counts by its whole part.
+fn rev_in<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Error> {
+    struct V;
+    impl serde::de::Visitor<'_> for V {
+        type Value = u64;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a number")
+        }
+        fn visit_u64<E>(self, n: u64) -> std::result::Result<u64, E> {
+            Ok(n.min(MAX_ITEM_REV))
+        }
+        fn visit_i64<E>(self, n: i64) -> std::result::Result<u64, E> {
+            Ok(u64::try_from(n).unwrap_or(0).min(MAX_ITEM_REV))
+        }
+        fn visit_f64<E>(self, n: f64) -> std::result::Result<u64, E> {
+            // `as` saturates and takes NaN to 0.
+            Ok((n as u64).min(MAX_ITEM_REV))
+        }
+    }
+    d.deserialize_any(V)
 }
 
 /// [`item_rev_check`]'s verdict.
@@ -324,7 +357,7 @@ impl EncryptedItem {
         Self::encrypt_with_key(item, item.rev, id, vault_id, vault_key, &item_key)
     }
 
-    /// Writes `rev` + 1 as the item's edit counter.
+    /// Writes `rev` + 1 as the item's edit counter (never above [`MAX_ITEM_REV`] + 1).
     fn encrypt_with_key(
         item: &Item,
         rev: u64,
@@ -335,7 +368,7 @@ impl EncryptedItem {
     ) -> Result<Self> {
         let mut item = item.clone();
         item.upgrade();
-        item.rev = rev.checked_add(1).ok_or(Error::Malformed("item rev"))?;
+        item.rev = rev.min(MAX_ITEM_REV) + 1;
         let mut json = serde_json::to_vec(&item)?;
         let data = item_key.encrypt(&json, &item_data_aad(vault_id, id));
         json.zeroize();
@@ -465,12 +498,84 @@ mod tests {
         let json = serde_json::to_value(rekeyed.decrypt(&vk).unwrap()).unwrap();
         assert_eq!(json["rev"], 5);
         assert!(!rekeyed.data.contains("rev"));
-        // It can't overflow into 0.
+    }
+
+    /// Review fix: no value of the counter makes an item impossible to open, edit, move
+    /// or re-encrypt.
+    #[test]
+    fn no_rev_jams_an_item() {
+        let (vk, vk2) = (
+            SymmetricKey::generate().unwrap(),
+            SymmetricKey::generate().unwrap(),
+        );
+        // What someone with the vault key could store: the item's JSON with any `rev`.
+        let stored = |rev: &str| {
+            let item_key = SymmetricKey::generate().unwrap();
+            let json = serde_json::to_string(&sample())
+                .unwrap()
+                .replace("\"rev\":0", &format!("\"rev\":{rev}"));
+            assert!(json.contains(&format!("\"rev\":{rev}")));
+            EncryptedItem {
+                id: "i".into(),
+                vault_id: "v".into(),
+                key: b64(&vk.wrap(&item_key, &item_key_aad("v", "i")).unwrap()),
+                data: b64(&item_key
+                    .encrypt(json.as_bytes(), &item_data_aad("v", "i"))
+                    .unwrap()),
+            }
+        };
+        for (rev, reads_as) in [
+            ("18446744073709551615", MAX_ITEM_REV),
+            ("18446744073709551616", MAX_ITEM_REV),
+            ("1e300", MAX_ITEM_REV),
+            ("9007199254740993", MAX_ITEM_REV),
+            ("9007199254740991", MAX_ITEM_REV),
+            ("9007199254740990", MAX_ITEM_REV),
+            ("9007199254740989", MAX_ITEM_REV - 1),
+            ("7", 7),
+            ("7.9", 7),
+            ("-3", 0),
+            ("-1e300", 0),
+        ] {
+            let enc = stored(rev);
+            let item = enc.decrypt(&vk).unwrap();
+            assert_eq!(item.rev, reads_as, "{rev}");
+            assert_eq!(item.name, sample().name);
+            let top = (reads_as + 1).min(MAX_ITEM_REV);
+            let edited = enc.update(&item, &vk).unwrap().decrypt(&vk).unwrap();
+            assert_eq!(edited.rev, top, "{rev}: update");
+            let moved = enc.move_to(&vk, "v2", &vk2).unwrap();
+            assert_eq!(moved.decrypt(&vk2).unwrap().rev, top, "{rev}: move");
+            let again = EncryptedItem::encrypt(&item, "i", "v", &vk).unwrap();
+            assert_eq!(again.decrypt(&vk).unwrap().rev, top, "{rev}: encrypt");
+            // An app's own copy of the item with the number as it was stored.
+            let given = Item {
+                rev: u64::MAX,
+                ..item
+            };
+            let saved = enc.update(&given, &vk).unwrap().decrypt(&vk).unwrap();
+            assert_eq!(saved.rev, MAX_ITEM_REV, "{rev}: given");
+        }
+        // At the top the counter stays where it is; the check reads that as unchanged.
+        let top = stored("9007199254740991");
+        assert_eq!(
+            item_rev_check(Some(MAX_ITEM_REV), top.decrypt(&vk).unwrap().rev),
+            RevCheck::Same
+        );
+        // What the core writes at the top is a number JavaScript carries exactly.
         let maxed = Item {
             rev: u64::MAX,
             ..sample()
         };
-        assert!(EncryptedItem::encrypt(&maxed, "i", "v", &vk).is_err());
+        let enc = EncryptedItem::encrypt(&maxed, "i", "v", &vk).unwrap();
+        let item_key = enc.item_key(&vk).unwrap();
+        let json = item_key
+            .decrypt(&unb64(&enc.data).unwrap(), &item_data_aad("v", "i"))
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(raw["rev"], 9_007_199_254_740_991_u64);
+        // A `rev` that is no number at all is as malformed as any other field.
+        assert!(stored("\"x\"").decrypt(&vk).is_err());
     }
 
     /// An app from before the counter keeps it as an unknown field through an edit (equal

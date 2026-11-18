@@ -102,4 +102,25 @@ class AvatarsTest {
         assertEquals(SiteTileContent.Letter, siteTileContent(enabled = true, hasIcon = false, login = true))
         assertEquals(SiteTileContent.Icon, siteTileContent(enabled = true, hasIcon = true, login = true))
     }
+
+    /** Review L8: a very wide or tall picked image is never decoded at full size. */
+    @Test
+    fun aPickedImageIsDecodedBoundedOnBothSides() {
+        // Small enough already.
+        assertNull(AvatarRules.decodeSize(512, 512))
+        assertNull(AvatarRules.decodeSize(4096, 500))
+        // A photo: the short side comes down to twice the picture's side.
+        assertEquals(682 to 512, AvatarRules.decodeSize(8000, 6000))
+        // A strip 100,000 wide and 500 high (its short side alone would let it through at full size): capped by the long side.
+        val strip = AvatarRules.decodeSize(100_000, 500)!!
+        assertTrue("$strip", strip.first in 4095..AvatarRules.MAX_DECODE_SIDE && strip.second in 1..500)
+        val tall = AvatarRules.decodeSize(300, 2_000_000)!!
+        assertTrue("$tall", tall.first == 1 && tall.second in 4095..AvatarRules.MAX_DECODE_SIDE)
+        // Never more than 4096 × 4096 pixels (64 MB as ARGB), whatever the image says.
+        for ((w, h) in listOf(Int.MAX_VALUE to Int.MAX_VALUE, Int.MAX_VALUE to 1, 5000 to 5000, 4097 to 4097)) {
+            val size = AvatarRules.decodeSize(w, h)!!
+            assertTrue("$w×$h → $size", size.first in 1..AvatarRules.MAX_DECODE_SIDE && size.second in 1..AvatarRules.MAX_DECODE_SIDE)
+        }
+        assertNull(AvatarRules.decodeSize(0, 10))
+    }
 }

@@ -44,7 +44,10 @@ vi.stubGlobal("localStorage", {
   removeItem: (k: string) => void storage.delete(k),
 });
 
-import { ApiError, SERVER_UPDATE_NEEDED, serverTooOld } from "./api";
+import { ApiError, SERVER_UPDATE_NEEDED, UnreachableError, serverTooOld } from "./api";
+
+/** Where the feature list this device got from the server is kept. */
+const FEATURES_KEY = "pa.server-features.https://vault.example.test";
 import { emptyItem } from "./types";
 import {
   ReviewNeededError,
@@ -62,11 +65,13 @@ import {
   register,
   removeMember,
   requireCurrentServer,
+  purgeItem,
   resignVault,
   restoreUnlocked,
   rotateVaultKey,
   shareVault,
   sync as syncNow,
+  trashItem,
   updateItem,
 } from "./vault";
 
@@ -343,6 +348,14 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     const have = w.vault.items.get(put[1])!;
     if (b.revision !== have.revision) throw err(409, "revision_conflict");
     w.vault.items.set(put[1], { ...have, item_key: b.key as string, data: b.data as string, revision: have.revision + 1 });
+    w.revision++;
+    return { revision: have.revision + 1 };
+  }
+  const gone = /^\/items\/([^/]+)(\/permanent)?$/.exec(path);
+  if (gone && method === "DELETE") {
+    const have = w.vault.items.get(gone[1])!;
+    if (gone[2]) w.vault.items.delete(gone[1]);
+    else w.vault.items.set(gone[1], { ...have, deleted_at: 5 as number | null, revision: have.revision + 1 } as typeof have);
     w.revision++;
     return { revision: have.revision + 1 };
   }
@@ -756,11 +769,44 @@ describe("final review fixes (web)", () => {
 });
 
 describe("sticky checks (H2)", () => {
-  it("keep running when the server's features can't be read", async () => {
+  it("a device that never saw this server's features and can't fetch them: can't connect, no vault is asked for or used (review 10)", async () => {
+    const saved = h.config;
     h.config = null;
+    w.calls = [];
+    // Start-up asks for nothing and shows "can't reach"; nothing can be unlocked from it.
+    await expect(signIn("alice")).rejects.toThrow();
+    expect(getState().status).toBe("unreachable");
+    expect(w.calls.some((c) => c.path.startsWith("/sync"))).toBe(false);
+    expect(getState().vaults).toEqual([]);
+    expect(getState().items).toEqual([]);
+    await expect(requireCurrentServer()).rejects.toThrow(UnreachableError);
+    // The same for a list that can't be read, and for one that never included signed sharing.
+    for (const stored of ["{broken", JSON.stringify(["delta_sync"]), JSON.stringify({ signed_sharing: true })]) {
+      storage.set(FEATURES_KEY, stored);
+      await expect(signIn("alice")).rejects.toThrow();
+      await expect(requireCurrentServer()).rejects.toThrow(UnreachableError);
+    }
+    // An unlocked app whose page-held config is gone (the desktop app changed server) syncs nothing either.
+    h.config = saved;
+    storage.delete(FEATURES_KEY);
+    await signIn("alice");
+    storage.delete(FEATURES_KEY);
+    h.config = null;
+    w.calls = [];
+    await expect(syncNow()).rejects.toThrow(UnreachableError);
+    expect(w.calls.some((c) => c.path.startsWith("/sync"))).toBe(false);
+  });
+
+  it("keep running when the server's features can't be read, on a device that saw the server list signed sharing", async () => {
+    await signIn("alice");
+    // The list this device got is kept per server.
+    expect(JSON.parse(storage.get(FEATURES_KEY)!)).toContain("signed_sharing");
+    h.config = null;
+    w.calls = [];
     await signIn("alice");
     expect(w.calls.some((c) => c.path === "/account/key-pins" || c.path === "/account/identity")).toBe(true);
     expect(getState().vaults[0].trust).toEqual({ kind: "own" });
+    await expect(requireCurrentServer()).resolves.toBeUndefined();
   });
 
   it("keep running once the account has signed state here, while the server's features can't be read", async () => {
@@ -829,6 +875,8 @@ describe("servers without signed sharing are refused", () => {
   it("features unknown and the server answers that it doesn't sign (404 on the identity): refused, nothing used or made sticky", async () => {
     w.noSigning = true;
     legacyShare("bob", "write");
+    // (The device saw this server list signed sharing once; otherwise it wouldn't even ask: "can't connect".)
+    storage.set(FEATURES_KEY, JSON.stringify(["signed_sharing"]));
     h.config = null;
     await expect(signIn("bob")).rejects.toThrow(SERVER_UPDATE_NEEDED);
     const s = getState();
@@ -845,6 +893,7 @@ describe("servers without signed sharing are refused", () => {
   it("features unknown and vault rows without a key epoch (a server from before signing): the checks still run, nothing opens unchecked", async () => {
     w.noEpoch = true;
     w.noSigning = true;
+    storage.set(FEATURES_KEY, JSON.stringify(["signed_sharing"]));
     h.config = null;
     await expect(signIn("alice")).rejects.toThrow(SERVER_UPDATE_NEEDED);
     expect(getState().vaults).toEqual([]);
@@ -857,8 +906,14 @@ describe("servers without signed sharing are refused", () => {
     await expect(register("new@example.com", "New", "pw", false)).rejects.toThrow(SERVER_UPDATE_NEEDED);
     await expect(requireCurrentServer()).rejects.toThrow(SERVER_UPDATE_NEEDED);
     expect(w.calls).toEqual([]);
-    // A config that can't be fetched decides nothing.
+    // The refused server's list is kept: a config that can't be fetched afterwards is "can't connect", not a way in.
+    expect(JSON.parse(storage.get(FEATURES_KEY)!)).not.toContain("signed_sharing");
     h.config = null;
+    await expect(requireCurrentServer()).rejects.toThrow(UnreachableError);
+    await expect(login("alice@example.com", "pw", null)).rejects.toThrow(UnreachableError);
+    expect(w.calls).toEqual([]);
+    // On a device that saw this server list signed sharing, it decides nothing (as when offline).
+    storage.set(FEATURES_KEY, JSON.stringify(["signed_sharing"]));
     await expect(requireCurrentServer()).resolves.toBeUndefined();
     expect(serverTooOld(null)).toBe(false);
     expect(serverTooOld({ api: 2, features: [] } as never)).toBe(true);
@@ -1032,12 +1087,33 @@ describe("security round 7/9 (web)", () => {
     expect(getState().warnings.some((x) => x.startsWith("Your server sent older"))).toBe(false);
   });
 
-  it("9: forgets the counters of items the server no longer has", async () => {
+  it("9: an item the server merely stops sending keeps its counter and its copy; served older later, it is told (review 5)", async () => {
     await signIn("alice");
-    expect(remembered()).toEqual({ "item-1": 1 });
+    const old = { ...w.vault.items.get("item-1")! };
+    await updateItem(shown(), { ...shown().item, name: "Mail 2" });
+    expect(remembered()).toEqual({ "item-1": 2 });
+    const newer = { ...w.vault.items.get("item-1")! };
+    // Hidden for one answer (this vault has no manifest: nothing proves the item is gone)...
     w.vault.items.delete("item-1");
     w.revision++;
     await syncNow();
+    expect(getState().items).toEqual([]);
+    expect(remembered()).toEqual({ "item-1": 2 });
+    // ...then the first version is served: not "new", a rollback, and the newer copy this page had is kept.
+    w.vault.items.set("item-1", { ...old, revision: newer.revision + 1 });
+    w.revision++;
+    await syncNow();
+    expect(shown()).toMatchObject({ rollback: true, item: { name: "Mail 2", rev: 2 } });
+    expect(getState().warnings).toContain(ROLLBACK_KEPT);
+    expect(remembered()).toEqual({ "item-1": 2 });
+  });
+
+  it("9: forgets the counter of an item this device deleted for good itself", async () => {
+    await signIn("alice");
+    expect(remembered()).toEqual({ "item-1": 1 });
+    await trashItem("item-1");
+    await purgeItem("item-1");
+    expect(getState().items).toEqual([]);
     expect(remembered()).toEqual({});
   });
 

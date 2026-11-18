@@ -5,7 +5,7 @@
  * manifest is started when the server says every app is ready, "Use the server's copy" writes a new baseline, and due
  * trash is deleted by the app. Vaults without a manifest get exactly the requests from before.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as core from "../wasm/passauth_core";
 import { loadCore, signedVectors, unb64, vectorAccounts, type SignedVectors } from "./test-core";
 
@@ -43,8 +43,9 @@ vi.stubGlobal("localStorage", {
   removeItem: (k: string) => void storage.delete(k),
 });
 
-import { ApiError } from "./api";
-import { MANIFEST_BUSY, MANIFEST_HELD, MANIFEST_NOT_READY, manifestsKey } from "./manifest";
+import { ApiError, UnreachableError } from "./api";
+import { ROLLBACK_SHOWN } from "./item-revs";
+import { MANIFEST_BUSY, MANIFEST_HELD, MANIFEST_HIDDEN, MANIFEST_NOT_READY, MANIFEST_UNCHECKED, manifestsKey } from "./manifest";
 import { emptyItem, type Item } from "./types";
 import {
   acceptServerCopy,
@@ -101,13 +102,18 @@ interface VaultState {
   role: string;
   manifest: string | null;
   manifestSeq: number;
+  manifestPrev: string | null;
   manifestOk: boolean;
+  /** The manifest log: one entry for each manifest stored, oldest first. */
+  log: { seq: number; prev: string; digest: string }[];
 }
 interface Entry {
   vault_id: string;
   seq: number;
+  prev: string;
   sealed: string;
 }
+type Built = { seq: number; prev: string; sealed: string; link: string };
 interface World {
   revision: number;
   clock: number;
@@ -122,6 +128,8 @@ interface World {
   trashDays: number;
   /** Rows the next delta answer sends without their data. */
   bare: Set<string>;
+  /** Entries a manifest-log answer holds at most. */
+  logPage: number;
 }
 let w: World;
 const A = () => v.vault.id;
@@ -142,7 +150,15 @@ const withKey = <T>(vaultId: string, fn: (key: core.VaultKey, vault: VaultState)
 
 /** The fake server's vault checked the way an app checks it (no device memory). */
 const serverCheck = (vaultId: string) =>
-  withKey(vaultId, (key, vault) => key.manifestVerify(vaultId, vault.epoch, vault.manifestSeq, vault.manifest, null, rowsOf(vaultId)) as { status: string; version: number; live: number; trashed: number });
+  withKey(vaultId, (key, vault) => key.manifestVerify(vaultId, vault.epoch, vault.manifestSeq, vault.manifestPrev, vault.manifest, null, null, null, rowsOf(vaultId)) as { status: string; version: number; link: string | null; live: number; trashed: number });
+/** The link of the vault's current manifest on the fake server (null: none). */
+const linkOf = (vault: VaultState): string | null => (vault.manifestSeq > 0 ? core.manifestLink(vault.manifestSeq, vault.manifestPrev!, vault.manifest!) : null);
+const ZERO = "A".repeat(43);
+/** Store a manifest as the vault's current one, with its log entry (the real server keeps one for every manifest). */
+function setManifest(vault: VaultState, m: { seq: number; prev: string; sealed: string }) {
+  Object.assign(vault, { manifest: m.sealed, manifestSeq: m.seq, manifestPrev: m.prev });
+  vault.log.push({ seq: m.seq, prev: m.prev, digest: core.manifestDataHash(m.sealed) });
+}
 
 function bump(vaultId: string): number {
   w.clock++;
@@ -157,12 +173,17 @@ function checkManifests(affected: string[], sent: Entry[]) {
   for (const m of sent) {
     const vault = w.vaults.get(m.vault_id);
     if (!vault || !affected.includes(m.vault_id)) throw err(400, "bad_request");
-    if (vault.manifestSeq === 0 || m.seq !== vault.manifestSeq + 1) throw err(409, "manifest_conflict");
+    if (typeof m.prev !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(m.prev)) throw err(400, "bad_request");
+    if (vault.manifestSeq === 0 || m.seq !== vault.manifestSeq + 1 || m.prev !== linkOf(vault)) throw err(409, "manifest_conflict");
   }
   for (const id of affected) if (w.vaults.get(id)!.manifestSeq > 0 && !sent.some((m) => m.vault_id === id)) throw err(400, "manifest_required");
 }
 function storeManifests(sent: Entry[]) {
-  for (const m of sent) Object.assign(w.vaults.get(m.vault_id)!, { manifest: m.sealed, manifestSeq: m.seq });
+  for (const m of sent) {
+    // A request never carries the device's link.
+    if ("link" in m) throw err(400, "bad_request");
+    setManifest(w.vaults.get(m.vault_id)!, m);
+  }
 }
 const entriesOf = (b: Record<string, unknown>): Entry[] => (Array.isArray(b.manifests) ? (b.manifests as Entry[]) : []);
 function queryOf(path: string, vaultId: string): { path: string; revision?: number; sent: Entry[] } {
@@ -170,8 +191,9 @@ function queryOf(path: string, vaultId: string): { path: string; revision?: numb
   const q = new URLSearchParams(query);
   const seq = q.get("manifest_seq");
   const sealed = q.get("manifest");
-  if ((seq === null) !== (sealed === null)) throw err(400, "bad_request");
-  return { path: bare, ...(q.has("revision") ? { revision: Number(q.get("revision")) } : {}), sent: seq !== null ? [{ vault_id: vaultId, seq: Number(seq), sealed: sealed! }] : [] };
+  const prev = q.get("manifest_prev");
+  if ((seq === null) !== (sealed === null) || (seq === null) !== (prev === null)) throw err(400, "bad_request");
+  return { path: bare, ...(q.has("revision") ? { revision: Number(q.get("revision")) } : {}), sent: seq !== null ? [{ vault_id: vaultId, seq: Number(seq), prev: prev!, sealed: sealed! }] : [] };
 }
 
 function syncAnswer(since: number | null) {
@@ -202,6 +224,7 @@ function syncAnswer(since: number | null) {
       share: null,
       manifest: x.manifest,
       manifest_seq: x.manifestSeq,
+      manifest_prev: x.manifestSeq > 0 ? x.manifestPrev : null,
       manifest_ok: x.manifestSeq > 0 || x.manifestOk,
     })),
     items: [...w.items.values()].filter((r) => since === null || r.at > since).map(strip),
@@ -241,6 +264,13 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
     };
   }
   if (/^\/vaults\/[^/]+\/rosters\?after=/.test(path)) return { rosters: [], latest: 0, more: false };
+  const log = /^\/vaults\/([^/]+)\/manifest-log\?after=(\d+)$/.exec(path);
+  if (log && method === "GET") {
+    const vault = w.vaults.get(log[1]);
+    if (!vault) throw err(404, "not_found");
+    const entries = vault.log.filter((e) => e.seq > Number(log[2]));
+    return { entries: entries.slice(0, w.logPage), more: entries.length > w.logPage };
+  }
 
   if (path === "/items" && method === "POST") {
     const vaultId = b.vault_id as string;
@@ -320,10 +350,12 @@ async function handle(path: string, opts: Opts): Promise<unknown> {
   if (manifest && method === "PUT") {
     const vault = w.vaults.get(manifest[1])!;
     if (vault.role === "read") throw err(403, "forbidden");
-    if (vault.manifestSeq !== b.base_seq || vault.seq !== b.vault_seq || !((b.seq as number) > (b.base_seq as number))) throw err(409, "manifest_conflict");
+    if (typeof b.prev !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(b.prev)) throw err(400, "bad_request");
+    if (vault.manifestSeq !== b.base_seq || vault.seq !== b.vault_seq || !((b.seq as number) > (b.base_seq as number)) || b.prev !== (linkOf(vault) ?? ZERO)) throw err(409, "manifest_conflict");
+    if ((b.seq as number) - (b.base_seq as number) > 1_000_000) throw err(400, "bad_request");
     if (vault.manifestSeq === 0 && !vault.manifestOk) throw err(409, "manifest_not_ready");
     const seq = bump(vault.id);
-    Object.assign(vault, { manifest: b.sealed, manifestSeq: b.seq });
+    setManifest(vault, b as unknown as Entry);
     return { revision: w.revision, vault_seq: seq, manifest_seq: vault.manifestSeq };
   }
   const rotate = /^\/vaults\/([^/]+)\/rotate$/.exec(path);
@@ -353,8 +385,7 @@ function otherCreates(vaultId: string, name: string, id: string = core.newId()):
   withKey(vaultId, (key, vault) => {
     const enc = key.encryptItem(login(name), id, vaultId) as { key: string; data: string };
     if (vault.manifestSeq > 0) {
-      const next = key.manifestNext(vaultId, vault.epoch, vault.manifestSeq, vault.manifest!, [], [{ id, deleted_at: null, data: enc.data }]) as Entry;
-      Object.assign(vault, { manifest: next.sealed, manifestSeq: next.seq });
+      setManifest(vault, key.manifestNext(vaultId, vault.epoch, vault.manifestSeq, vault.manifestPrev!, vault.manifest!, [], [{ id, deleted_at: null, data: enc.data }]) as Built);
     }
     bump(vaultId);
     w.items.set(id, { id, vault_id: vaultId, item_key: enc.key, data: enc.data, revision: w.clock * 1000, deleted_at: null, created_at: 1, updated_at: 1, at: w.clock });
@@ -365,7 +396,7 @@ function otherCreates(vaultId: string, name: string, id: string = core.newId()):
 /** Another device starts the vault's first manifest. */
 function otherStarts(vaultId: string) {
   withKey(vaultId, (key, vault) => {
-    Object.assign(vault, { manifest: key.manifestStart(vaultId, vault.epoch, 1, rowsOf(vaultId)), manifestSeq: 1 });
+    setManifest(vault, key.manifestStart(vaultId, vault.epoch, 1, null, rowsOf(vaultId)) as Built);
     bump(vaultId);
   });
 }
@@ -389,8 +420,8 @@ function newWorld(opts: { manifests?: boolean; ok?: boolean } = {}) {
     revision: 1,
     clock: 1,
     vaults: new Map([
-      [v.vault.id, { id: v.vault.id, meta: first.encryptMeta(v.vault.id, { name: "Personal" }), wrapped: v.vault.wrappedKey, epoch: 0, seq: 1, role: "owner", manifest: null, manifestSeq: 0, manifestOk: opts.ok ?? false }],
-      [B, { id: B, meta: second.encryptMeta(B, { name: "Second" }), wrapped: nv.wrapped, epoch: 0, seq: 1, role: "owner", manifest: null, manifestSeq: 0, manifestOk: opts.ok ?? false }],
+      [v.vault.id, { id: v.vault.id, meta: first.encryptMeta(v.vault.id, { name: "Personal" }), wrapped: v.vault.wrappedKey, epoch: 0, seq: 1, role: "owner", manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: opts.ok ?? false, log: [] }],
+      [B, { id: B, meta: second.encryptMeta(B, { name: "Second" }), wrapped: nv.wrapped, epoch: 0, seq: 1, role: "owner", manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: opts.ok ?? false, log: [] }],
     ]),
     items: new Map(),
     tombs: [],
@@ -400,6 +431,7 @@ function newWorld(opts: { manifests?: boolean; ok?: boolean } = {}) {
     serverTime: 100_000_000,
     trashDays: 30,
     bare: new Set(),
+    logPage: 2000,
   };
   first.free();
   second.free();
@@ -431,7 +463,12 @@ const synced = () => calls((c) => c.path.startsWith("/sync") && c.path !== "/syn
 const lastBody = (pred: (c: World["calls"][number]) => boolean) => calls(pred).at(-1)!.body as Record<string, unknown> & { manifests?: Entry[] };
 const entry = (name: string) => getState().items.find((i) => i.item.name === name)!;
 const vaultState = (id: string) => getState().vaults.find((x) => x.id === id)!;
-const remembered = (): Record<string, number> => JSON.parse(storage.get(manifestsKey(`https://vault.example.test|${alice.id}`)) ?? "{}");
+const SCOPE = () => `https://vault.example.test|${alice.id}`;
+/** What the device remembers, as versions (the links are checked where they matter, `rememberedLinks`). */
+const remembered = (): Record<string, number> =>
+  Object.fromEntries(Object.entries(JSON.parse(storage.get(manifestsKey(SCOPE())) ?? "{}") as Record<string, { version: number }>).map(([id, r]) => [id, r.version]));
+const rememberedLinks = (): Record<string, string> =>
+  Object.fromEntries(Object.entries(JSON.parse(storage.get(manifestsKey(SCOPE())) ?? "{}") as Record<string, { link: string }>).map(([id, r]) => [id, r.link]));
 const names = () =>
   getState()
     .items.map((i) => i.item.name)
@@ -555,15 +592,15 @@ describe("writes carry the vault's next manifest", () => {
     const rev = w.items.get("item-1")!.revision;
     await trashItem("item-1");
     const trash = calls((c) => c.method === "DELETE").at(-1)!;
-    expect(trash.path).toMatch(new RegExp(`^/items/item-1\\?revision=${rev}&manifest_seq=2&manifest=[A-Za-z0-9_-]+$`));
+    expect(trash.path).toMatch(new RegExp(`^/items/item-1\\?revision=${rev}&manifest_seq=2&manifest_prev=[A-Za-z0-9_-]{43}&manifest=[A-Za-z0-9_-]+$`));
     expect(trash.body).toBeUndefined();
     expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 1, trashed: 1 });
     await restoreItem("item-1");
-    expect(calls((c) => c.method === "POST").at(-1)!.path).toMatch(/^\/items\/item-1\/restore\?revision=\d+&manifest_seq=3&manifest=/);
+    expect(calls((c) => c.method === "POST").at(-1)!.path).toMatch(/^\/items\/item-1\/restore\?revision=\d+&manifest_seq=3&manifest_prev=[A-Za-z0-9_-]{43}&manifest=/);
     expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 2, trashed: 0 });
     await trashItem("item-1");
     await purgeItem("item-1");
-    expect(calls((c) => c.method === "DELETE").at(-1)!.path).toMatch(/^\/items\/item-1\/permanent\?revision=\d+&manifest_seq=5&manifest=/);
+    expect(calls((c) => c.method === "DELETE").at(-1)!.path).toMatch(/^\/items\/item-1\/permanent\?revision=\d+&manifest_seq=5&manifest_prev=[A-Za-z0-9_-]{43}&manifest=/);
     expect(serverCheck(A())).toMatchObject({ status: "ok", version: 5, live: 1, trashed: 0 });
     expect(names()).toEqual(["Bank"]);
     expect(remembered()[A()]).toBe(5);
@@ -714,8 +751,7 @@ describe("when the vault changed on another device", () => {
         withKey(A(), (key, vault) => {
           const have = w.items.get("item-1")!;
           const enc = key.updateItem({ id: have.id, vault_id: A(), key: have.item_key, data: have.data }, { ...login("Mail elsewhere"), rev: 1 }) as { key: string; data: string };
-          const next = key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifest!, [have], [{ id: have.id, deleted_at: null, data: enc.data }]) as Entry;
-          Object.assign(vault, { manifest: next.sealed, manifestSeq: next.seq });
+          setManifest(vault, key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifestPrev!, vault.manifest!, [have], [{ id: have.id, deleted_at: null, data: enc.data }]) as Built);
           bump(A());
           // The same revision, so the server reports the manifest (not the item) as what moved.
           w.items.set(have.id, { ...have, item_key: enc.key, data: enc.data, at: w.clock });
@@ -741,8 +777,7 @@ describe("when the vault changed on another device", () => {
       run: () =>
         withKey(A(), (key, vault) => {
           const have = w.items.get("item-2")!;
-          const next = key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifest!, [have], [{ ...have, deleted_at: w.serverTime - 5 }]) as Entry;
-          Object.assign(vault, { manifest: next.sealed, manifestSeq: next.seq });
+          setManifest(vault, key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifestPrev!, vault.manifest!, [have], [{ ...have, deleted_at: w.serverTime - 5 }]) as Built);
           bump(A());
           w.items.set(have.id, { ...have, deleted_at: w.serverTime - 5, revision: w.clock * 1000, at: w.clock });
         }),
@@ -855,7 +890,7 @@ describe("checking every sync answer", () => {
     await syncNow();
     expect(remembered()[A()]).toBe(2);
     tamper(() => {
-      Object.assign(w.vaults.get(A())!, { manifest: before.vault.manifest, manifestSeq: before.vault.manifestSeq });
+      Object.assign(w.vaults.get(A())!, { manifest: before.vault.manifest, manifestSeq: before.vault.manifestSeq, manifestPrev: before.vault.manifestPrev });
       for (const [id, row] of w.items) if (!before.items.has(id)) {
         w.items.delete(id);
         w.tombs.push({ id, vault_id: row.vault_id, at: w.clock });
@@ -894,7 +929,7 @@ describe("checking every sync answer", () => {
     await createItem(A(), login("Shop 2"));
     lock();
     tamper(() => {
-      Object.assign(w.vaults.get(A())!, { manifest: before.manifest, manifestSeq: before.manifestSeq });
+      Object.assign(w.vaults.get(A())!, { manifest: before.manifest, manifestSeq: before.manifestSeq, manifestPrev: before.manifestPrev });
       const id = [...w.items.values()].find((r) => r.at === w.clock - 1)!.id;
       w.items.delete(id);
       return A();
@@ -928,6 +963,593 @@ describe("checking every sync answer", () => {
     h.handler = real;
     expect(synced()).toHaveLength(2);
     expect(vaultState(A()).manifestWarning).toBe(true);
+  });
+});
+
+// ---------------------------------------------------- review fixes, round 1
+
+/** The fake server's whole state at one moment (a backup it can go back to). */
+function saveWorld() {
+  return {
+    vaults: new Map([...w.vaults].map(([id, x]) => [id, { ...x, log: [...x.log] }])),
+    items: new Map(w.items),
+  };
+}
+/**
+ * The server goes back to `saved` (with `then` run on that state: another device writing on the old branch) and serves
+ * the result as a change: rows gone since are tombstoned, vault numbers and the clock only go up, the vault is `reset`
+ * in the next delta so every row of it is sent.
+ */
+function serveBranch(saved: ReturnType<typeof saveWorld>, then: () => void = () => {}) {
+  w.clock++;
+  w.revision++;
+  for (const [id, row] of w.items) if (!saved.items.has(id)) w.tombs.push({ id, vault_id: row.vault_id, at: w.clock });
+  const seqs = new Map([...w.vaults].map(([id, x]) => [id, x.seq]));
+  w.items = new Map([...saved.items].map(([id, row]) => [id, { ...row, at: w.clock }]));
+  w.vaults = new Map([...saved.vaults].map(([id, x]) => [id, { ...x, log: [...x.log], seq: seqs.get(id)! + 1 }]));
+  then();
+}
+const fullSyncs = () => calls((c) => c.path === "/sync");
+const logCalls = () => calls((c) => c.path.includes("/manifest-log"));
+
+describe("an answer older than an own write (review 1: the behind answer)", () => {
+  it("is never taken over unchecked: the whole account is fetched again, and a server that keeps answering so gets the warning", async () => {
+    await signIn();
+    const old = (await handle("/sync", {})) as Record<string, unknown>;
+    await createItem(A(), login("Shop"));
+    expect(names()).toEqual(["Bank", "Mail", "Shop"]);
+    expect(remembered()[A()]).toBe(2);
+    let deltas = 0;
+    let fulls = 0;
+    h.handler = async (path, opts) => {
+      // The rolled-back state, whatever is asked: the own write is gone again, the vault's number below it.
+      if (path.startsWith("/sync?since=")) {
+        deltas++;
+        return { ...old, revision: w.revision + 5, cursor: "c999", delta: true, deleted: [], reset: [A()] };
+      }
+      if (path === "/sync") {
+        fulls++;
+        return { ...old, revision: w.revision + 5, cursor: "c999" };
+      }
+      return handle(path, opts);
+    };
+    await syncNow();
+    await settled();
+    // Two more fetches of the whole account, then the answer counts as the server's: checked, and it is a rollback.
+    expect([deltas, fulls]).toEqual([1, 2]);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(remembered()[A()]).toBe(2);
+    // Nothing is written on the rolled-back branch: no second valid version 2 ever leaves this device.
+    w.calls = [];
+    await expect(createItem(A(), login("Other"))).rejects.toThrow(MANIFEST_HELD);
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    // The reviewer's second half: the server really is at the old state, and stays there.
+    const shop = [...w.items.values()].find((r) => !["item-1", "item-2"].includes(r.id))!;
+    w.items.delete(shop.id);
+    const oldRow = (old.vaults as { id: string; manifest: string; manifest_seq: number; manifest_prev: string }[]).find((x) => x.id === A())!;
+    Object.assign(w.vaults.get(A())!, { manifest: oldRow.manifest, manifestSeq: oldRow.manifest_seq, manifestPrev: oldRow.manifest_prev });
+    h.handler = handle;
+    await expect(createItem(A(), login("Other"))).rejects.toThrow(MANIFEST_HELD);
+    lock();
+    await signIn();
+    await syncNow();
+    await settled();
+    // After a lock, a fresh sign-in and a full sync the device still knows: it saw version 2, the server shows 1.
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(names()).toEqual(["Bank", "Mail"]);
+    expect(remembered()[A()]).toBe(2);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 1 });
+  });
+
+  it("the reviewer's exact answers (a rolled-back delta, then only answers older than what is shown): what is shown never goes back", async () => {
+    await signIn();
+    const old = (await handle("/sync", {})) as Record<string, unknown>;
+    await createItem(A(), login("Shop"));
+    let n = 0;
+    h.handler = async (path, opts) => {
+      if (path.startsWith("/sync?since=")) {
+        n++;
+        if (n === 1) return { ...old, revision: w.revision + 5, cursor: "c999", delta: true, deleted: [], reset: [A()] };
+        return { ...old, revision: 1, delta: true, deleted: [], reset: [] };
+      }
+      return handle(path, opts);
+    };
+    await syncNow();
+    await settled();
+    await syncNow();
+    await settled();
+    // The behind delta was not taken over; the honest full answer that followed was.
+    expect(names()).toEqual(["Bank", "Mail", "Shop"]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(getState().warnings).toEqual([]);
+    expect(remembered()[A()]).toBe(2);
+  });
+
+  it("a harmless one (an own write while a sync was on its way) costs one fetch of the whole account and no warning", async () => {
+    await signIn();
+    const stale = handle("/sync?since=c" + w.clock, {});
+    await createItem(A(), login("Shop"));
+    let served = false;
+    h.handler = async (path, opts) => {
+      if (path.startsWith("/sync?since=") && !served) {
+        served = true;
+        w.calls.push({ method: "GET", path, body: undefined });
+        return stale;
+      }
+      return handle(path, opts);
+    };
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(fullSyncs()).toHaveLength(1);
+    expect(names()).toEqual(["Bank", "Mail", "Shop"]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+  });
+});
+
+describe("the chain of manifests (review 3 / core H1: fork, then join)", () => {
+  it("remembers version and link of what it checked and of every manifest it wrote itself", async () => {
+    newWorld({ ok: true });
+    await signIn();
+    const same = () => expect(rememberedLinks()[A()]).toBe(serverCheck(A()).link);
+    same();
+    const id = await createItem(A(), login("Shop"));
+    same();
+    await updateItem(entry("Shop"), { ...entry("Shop").item, name: "Shop 2" });
+    same();
+    await trashItem(id);
+    same();
+    await restoreItem(id);
+    same();
+    await importItems(A(), [login("One"), login("Two")]);
+    same();
+    await rotateVaultKey(A());
+    same();
+    await updateItem(entry("Shop 2"), entry("Shop 2").item, B);
+    same();
+    expect(rememberedLinks()[B]).toBe(serverCheck(B).link);
+    await purgeItem(id);
+    expect(rememberedLinks()[B]).toBe(serverCheck(B).link);
+    expect(logCalls()).toEqual([]);
+    expect(getState().vaults.some((x) => x.manifestWarning)).toBe(false);
+    // Every write named the manifest it replaced.
+    for (const c of w.calls) for (const m of ((c.body as { manifests?: Entry[] } | undefined)?.manifests ?? [])) expect(m.prev, c.path).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("another manifest at the version this device wrote itself: warning, also when its items are consistent", async () => {
+    await signIn();
+    const backup = saveWorld();
+    await createItem(A(), login("Shop"));
+    expect(remembered()[A()]).toBe(2);
+    // The server kept showing another device version 1; that device wrote, making a second valid version 2.
+    serveBranch(backup, () => otherCreates(A(), "Other"));
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2 });
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    // The delta's verdict got one fetch of the whole account before the warning was shown.
+    expect(fullSyncs()).toHaveLength(1);
+    expect(remembered()[A()]).toBe(2);
+    expect(rememberedLinks()[A()]).not.toBe(serverCheck(A()).link);
+    await expect(createItem(A(), login("More"))).rejects.toThrow(MANIFEST_HELD);
+  });
+
+  it("the other branch at a later version: the manifest log is fetched, doesn't lead back to what this device saw, warning", async () => {
+    await signIn();
+    const atFirst = storage.get(manifestsKey(SCOPE()))!;
+    const backup = saveWorld();
+    await createItem(A(), login("Shop"));
+    serveBranch(backup, () => {
+      otherCreates(A(), "Other 1");
+      otherCreates(A(), "Other 2");
+      otherCreates(A(), "Other 3");
+    });
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 4 });
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(logCalls().map((c) => c.path)).toContain(`/vaults/${A()}/manifest-log?after=2`);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(remembered()[A()]).toBe(2);
+    // A device that only ever saw version 1 follows that branch without a warning (it is on its history).
+    lock();
+    storage.set(manifestsKey(SCOPE()), atFirst);
+    w.calls = [];
+    await boot();
+    const a = v.accounts.find((x) => x.name === "alice")!;
+    await restoreUnlocked(a.id, unb64(a.sessionBytes));
+    await settled();
+    expect(logCalls().map((c) => c.path)).toContain(`/vaults/${A()}/manifest-log?after=1`);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(remembered()[A()]).toBe(4);
+  });
+
+  it("an honest jump of several versions (other devices wrote meanwhile): the log connects, no warning, the newest is remembered", async () => {
+    await signIn();
+    await createItem(A(), login("Shop"));
+    for (let n = 0; n < 5; n++) otherCreates(A(), `Other ${n}`);
+    w.logPage = 2;
+    w.calls = [];
+    await syncNow();
+    await settled();
+    // Paged: after=2, then after the last entry of each page.
+    expect(logCalls().map((c) => c.path.split("after=")[1])).toEqual(["2", "4", "6"]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(remembered()[A()]).toBe(7);
+    expect(rememberedLinks()[A()]).toBe(serverCheck(A()).link);
+    expect(fullSyncs()).toEqual([]);
+    // One step ahead needs no log.
+    otherCreates(A(), "One more");
+    w.calls = [];
+    await syncNow();
+    expect(logCalls()).toEqual([]);
+    expect(remembered()[A()]).toBe(8);
+  });
+
+  it("a log that needs more than five requests doesn't connect", async () => {
+    await signIn();
+    for (let n = 0; n < 13; n++) otherCreates(A(), `Other ${n}`);
+    w.logPage = 2;
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(logCalls().length).toBe(10);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(remembered()[A()]).toBe(1);
+  });
+
+  it("while the log can't be fetched the answer is not taken over: old copy, old verdict, no warning, writes wait; then 404 is a mismatch", async () => {
+    await signIn();
+    for (let n = 0; n < 3; n++) otherCreates(A(), `Other ${n}`);
+    const failing = (status: number) => async (path: string, opts: Opts) => {
+      if (path.includes("/manifest-log")) {
+        w.calls.push({ method: "GET", path, body: undefined });
+        throw status === 0 ? new UnreachableError() : err(status, status === 404 ? "not_found" : "unavailable");
+      }
+      return handle(path, opts);
+    };
+    for (const status of [0, 503, 429]) {
+      h.handler = failing(status);
+      w.calls = [];
+      await expect(syncNow()).rejects.toThrow();
+      await settled();
+      expect(logCalls(), String(status)).toHaveLength(1);
+      // Nothing of the answer is shown or kept.
+      expect(names()).toEqual(["Bank", "Mail"]);
+      expect(vaultState(A()).manifestWarning).toBeUndefined();
+      expect(getState().warnings).toEqual([]);
+      expect(remembered()[A()]).toBe(1);
+      // Writes into that vault wait for a sync that checks it (and fail with it), nothing is sent.
+      w.calls = [];
+      await expect(createItem(A(), login("Shop"))).rejects.toThrow();
+      await expect(trashItem("item-1")).rejects.toThrow();
+      expect(calls((c) => c.method !== "GET")).toEqual([]);
+    }
+    // The other vault is not held up.
+    await createItem(B, login("Elsewhere"));
+    expect(names()).toContain("Elsewhere");
+    // The next sync asks again (the same cursor), and with the log the answer is taken over.
+    h.handler = handle;
+    await syncNow();
+    expect(names()).toEqual(["Bank", "Elsewhere", "Mail", "Other 0", "Other 1", "Other 2"]);
+    expect(remembered()[A()]).toBe(4);
+    await createItem(A(), login("Shop"));
+    // A server that says "no such log" (or "bad request") has answered: the vault is a mismatch.
+    for (const status of [404, 400]) {
+      for (let n = 0; n < 2; n++) otherCreates(A(), `More ${status} ${n}`);
+      h.handler = failing(status);
+      await syncNow();
+      await settled();
+      expect(vaultState(A()).manifestWarning, String(status)).toBe(true);
+      h.handler = handle;
+      await syncNow();
+      expect(vaultState(A()).manifestWarning).toBeUndefined();
+    }
+  });
+
+  it("a log answer that is no log, or that never ends, is a mismatch; garbage entries are not trusted", async () => {
+    await signIn();
+    for (const answer of [null, {}, { entries: "x" }, { entries: [], more: true }, { entries: [{ seq: "2", prev: 5 }, null, 7] }]) {
+      for (let n = 0; n < 2; n++) otherCreates(A(), `Other ${JSON.stringify(answer)} ${n}`);
+      h.handler = async (path, opts) => (path.includes("/manifest-log") ? answer : handle(path, opts));
+      await syncNow();
+      await settled();
+      expect(vaultState(A()).manifestWarning, JSON.stringify(answer)).toBe(true);
+      h.handler = handle;
+      await syncNow();
+      expect(vaultState(A()).manifestWarning).toBeUndefined();
+    }
+  });
+
+  it("the chain crosses a key replacement and a new baseline", async () => {
+    await signIn();
+    const key = manifestsKey(SCOPE());
+    const atFirst = storage.get(key)!;
+    const again = async () => {
+      lock();
+      await signIn();
+    };
+    // Another device writes, this one replaces the key (a whole new manifest under the new key), others write on.
+    otherCreates(A(), "One");
+    await rotateVaultKey(A());
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3 });
+    expect(rememberedLinks()[A()]).toBe(serverCheck(A()).link);
+    expect(lastBody((c) => c.path.endsWith("/rotate")).manifests![0].prev).toBe(w.vaults.get(A())!.log[2].prev);
+    otherCreates(A(), "Two");
+    otherCreates(A(), "Three");
+    await syncNow();
+    expect(remembered()[A()]).toBe(5);
+    const atFifth = storage.get(key)!;
+    // A device that last saw the manifest from before the key replacement follows by the log (hashes alone).
+    storage.set(key, atFirst);
+    w.calls = [];
+    await again();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(remembered()[A()]).toBe(5);
+    // A baseline ("Use the server's copy") names the manifest it replaces...
+    tamper(() => {
+      w.items.delete("item-2");
+      w.tombs.push({ id: "item-2", vault_id: A(), at: w.clock });
+      return A();
+    });
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    const shown = w.vaults.get(A())!;
+    const replaced = core.manifestLink(shown.manifestSeq, shown.manifestPrev!, shown.manifest!);
+    await acceptServerCopy(A());
+    expect(lastBody((c) => c.path === `/vaults/${A()}/manifest`)).toMatchObject({ base_seq: 5, seq: 6, prev: replaced });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(rememberedLinks()[A()]).toBe(serverCheck(A()).link);
+    otherCreates(A(), "Four");
+    // ...so a device on the history under it accepts it, through the log.
+    storage.set(key, atFifth);
+    await again();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(remembered()[A()]).toBe(7);
+    // And one that remembers a state on another history (here: a link nobody ever stored) keeps its warning.
+    storage.set(key, JSON.stringify({ [A()]: { version: 4, link: "B".repeat(43) } }));
+    await again();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+  });
+});
+
+describe("an item can't be hidden under a manifest that checks out (review 4)", () => {
+  it("a row whose item key was broken: the vault shows its warning and takes no writes; a new record can't clear it", async () => {
+    await signIn();
+    const good = w.items.get("item-1")!.item_key;
+    tamper(() => {
+      // The manifest doesn't cover `item_key`: the server's own check still says "ok".
+      w.items.set("item-1", { ...w.items.get("item-1")!, item_key: w.items.get("item-2")!.item_key, at: w.clock });
+      return A();
+    });
+    expect(serverCheck(A())).toMatchObject({ status: "ok" });
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(names()).toEqual(["Bank"]);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(vaultState(B).manifestWarning).toBeUndefined();
+    // One fetch of the whole account before the warning; nothing remembered beyond what was.
+    expect(fullSyncs()).toHaveLength(1);
+    expect(remembered()[A()]).toBe(1);
+    w.calls = [];
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_HELD);
+    await expect(trashItem("item-2")).rejects.toThrow(MANIFEST_HELD);
+    await expect(rotateVaultKey(A())).rejects.toThrow(MANIFEST_HELD);
+    await expect(acceptServerCopy(A())).rejects.toThrow(MANIFEST_HIDDEN);
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    // Lock and unlock: still told.
+    lock();
+    await signIn();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    // The row as it was: the warning clears by itself.
+    tamper(() => {
+      w.items.set("item-1", { ...w.items.get("item-1")!, item_key: good, at: w.clock });
+      return A();
+    });
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(names()).toEqual(["Bank", "Mail"]);
+    await createItem(A(), login("Shop"));
+  });
+
+  it("a row sent without its data but with its correct hash: the web vault asked for whole rows, so the vault keeps its warning", async () => {
+    await signIn();
+    const real = handle;
+    h.handler = async (path, opts) => {
+      const answer = (await real(path, opts)) as { items?: Record<string, unknown>[] };
+      if (!path.startsWith("/sync") || !Array.isArray(answer?.items)) return answer;
+      return {
+        ...answer,
+        items: answer.items.map((r) => {
+          if (r.id !== "item-1") return r;
+          const { data, ...rest } = r;
+          return { ...rest, data_sha256: core.manifestDataHash(data as string) };
+        }),
+      };
+    };
+    tamper(() => {
+      w.items.set("item-1", { ...w.items.get("item-1")!, at: w.clock });
+      return A();
+    });
+    await syncNow();
+    await settled();
+    expect(names()).toEqual(["Bank"]);
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_HELD);
+  });
+
+  it("a row carrying a device-private marker (`served_sha256`) with other data is a mismatch: nothing on a row is taken from the server (R2)", async () => {
+    await signIn();
+    const older = { ...w.items.get("item-1")! };
+    await updateItem(entry("Mail"), { ...entry("Mail").item, name: "Mail 2" });
+    const current = w.items.get("item-1")!;
+    // The server serves the older data and claims, on the row, the hash of the current one.
+    tamper(() => {
+      w.items.set("item-1", { ...current, item_key: older.item_key, data: older.data, at: w.clock, ...({ served_sha256: core.manifestDataHash(current.data), data_sha256: core.manifestDataHash(current.data) } as object) });
+      return A();
+    });
+    await syncNow();
+    await settled();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_HELD);
+  });
+});
+
+describe("the trash state is `deleted_at` not null, for the app as for the core (core M2)", () => {
+  it("a trashed item served with `deleted_at: 0` is never shown as live: the vault is a mismatch and the item stays in the trash", async () => {
+    await signIn();
+    await trashItem("item-1");
+    expect(entry("Mail").deletedAt).not.toBeNull();
+    tamper(() => {
+      w.items.set("item-1", { ...w.items.get("item-1")!, deleted_at: 0, at: w.clock });
+      return A();
+    });
+    await syncNow();
+    await settled();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    // Whatever shows it: not live (`deletedAt !== null` is the rule every page goes by).
+    expect(entry("Mail").deletedAt).toBe(0);
+    expect(entry("Mail").deletedAt !== null).toBe(true);
+    await expect(restoreItem("item-1")).rejects.toThrow(MANIFEST_HELD);
+  });
+
+  it("a number the app can't count with (a fraction, a negative, too large) makes the whole answer invalid: nothing of it is used (R12)", async () => {
+    await signIn();
+    const real = handle;
+    for (const change of [
+      (a: { vaults: Record<string, unknown>[] }) => (a.vaults[0].manifest_seq = 1.5),
+      (a: { vaults: Record<string, unknown>[] }) => (a.vaults[0].seq = -1),
+      (a: { vaults: Record<string, unknown>[] }) => (a.vaults[0].key_epoch = 2 ** 53),
+      (a: { items: Record<string, unknown>[] }) => (a.items[0].deleted_at = 0.5),
+      (a: { items: Record<string, unknown>[] }) => (a.items[0].deleted_at = "1"),
+    ]) {
+      otherCreates(A(), `New ${change.toString().length}`);
+      h.handler = async (path, opts) => {
+        const answer = (await real(path, opts)) as { vaults: Record<string, unknown>[]; items: Record<string, unknown>[] };
+        if (path.startsWith("/sync") && path !== "/sync/revision") change(answer as never);
+        return answer;
+      };
+      const before = names();
+      await expect(syncNow()).rejects.toThrow("unexpected response");
+      expect(names()).toEqual(before);
+      expect(vaultState(A()).manifestWarning).toBeUndefined();
+      h.handler = real;
+      await syncNow();
+    }
+    expect(names().length).toBe(7);
+  });
+});
+
+describe("warnings come from the server's answer, not from this app's bookkeeping (R4, review 8)", () => {
+  it("two tabs: an answer read before the other tab's write is not a rollback (one fetch of the whole account, no warning)", async () => {
+    await signIn();
+    // This tab's sync is on its way: the answer was read before the other tab's write...
+    const early = await handle(`/sync?since=c${w.clock}`, {});
+    // ...which the other tab then made and remembered (the memory is shared by the tabs).
+    otherCreates(A(), "From the other tab");
+    const row = w.vaults.get(A())!;
+    storage.set(manifestsKey(SCOPE()), JSON.stringify({ ...JSON.parse(storage.get(manifestsKey(SCOPE()))!), [A()]: { version: row.manifestSeq, link: linkOf(row) } }));
+    let first = true;
+    h.handler = async (path, opts) => {
+      if (first && path.startsWith("/sync?since=")) {
+        first = false;
+        w.calls.push({ method: "GET", path, body: undefined });
+        return early;
+      }
+      return handle(path, opts);
+    };
+    w.calls = [];
+    await syncNow();
+    await settled();
+    expect(synced().map((c) => c.path.startsWith("/sync?since="))).toEqual([true, false]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(getState().warnings).toEqual([]);
+    expect(names()).toEqual(["Bank", "From the other tab", "Mail"]);
+  });
+
+  it("when that fetch can't be had, nothing is taken over and no warning is shown", async () => {
+    await signIn();
+    tamper(() => {
+      w.items.delete("item-2");
+      w.tombs.push({ id: "item-2", vault_id: A(), at: w.clock });
+      return A();
+    });
+    h.handler = async (path, opts) => {
+      if (path === "/sync") throw new UnreachableError();
+      return handle(path, opts);
+    };
+    await expect(syncNow()).rejects.toThrow(UnreachableError);
+    expect(names()).toEqual(["Bank", "Mail"]);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    // With the server's whole answer the warning is shown.
+    h.handler = handle;
+    await syncNow();
+    expect(vaultState(A()).manifestWarning).toBe(true);
+    expect(names()).toEqual(["Mail"]);
+  });
+
+  it("memory that can't be read is not 'nothing remembered': nothing is checked against it, written over it or started; writes wait", async () => {
+    newWorld({ ok: true });
+    await signIn();
+    expect(remembered()).toEqual({ [A()]: 1, [B]: 1 });
+    lock();
+    storage.set(manifestsKey(SCOPE()), "{broken");
+    // The server takes the chance: no manifest any more (a device with readable memory would call that a rollback).
+    for (const x of w.vaults.values()) Object.assign(x, { manifest: null, manifestSeq: 0, manifestPrev: null, manifestOk: true });
+    await signIn();
+    await syncNow();
+    await settled();
+    expect(storage.get(manifestsKey(SCOPE()))).toBe("{broken");
+    expect(getState().vaults.some((x) => x.manifestWarning)).toBe(false);
+    // No first manifest is started over what the server shows, and nothing is written into the unchecked vaults.
+    expect(calls((c) => c.path.endsWith("/manifest"))).toEqual([]);
+    w.calls = [];
+    await expect(createItem(A(), login("Shop"))).rejects.toThrow(MANIFEST_UNCHECKED);
+    await expect(trashItem("item-1")).rejects.toThrow(MANIFEST_UNCHECKED);
+    await expect(rotateVaultKey(A())).rejects.toThrow(MANIFEST_UNCHECKED);
+    expect(calls((c) => c.method !== "GET")).toEqual([]);
+    expect(names()).toEqual(["Bank", "Mail"]);
+  });
+});
+
+describe("a first manifest is never started over a copy the server sent older than this device saw (R9)", () => {
+  it("the item keeps its mark across syncs and a lock, and the vault gets no manifest from this device", async () => {
+    newWorld();
+    await signIn();
+    const old = { ...w.items.get("item-1")! };
+    await updateItem(entry("Mail"), { ...entry("Mail").item, name: "Mail 2" });
+    tamper(() => {
+      w.items.set("item-1", { ...old, revision: w.items.get("item-1")!.revision + 1, at: w.clock });
+      return A();
+    });
+    await syncNow();
+    expect(entry("Mail 2")).toMatchObject({ rollback: true });
+    // Every member's apps are ready now: vault B gets its manifest, vault A (which holds the older copy) does not.
+    for (const x of w.vaults.values()) x.manifestOk = true;
+    tamper(() => B);
+    await syncNow();
+    await settled();
+    expect(w.vaults.get(B)!.manifestSeq).toBe(1);
+    expect(w.vaults.get(A())!.manifestSeq).toBe(0);
+    // After a lock (nothing newer in memory) the served copy is shown, still marked, still no manifest.
+    lock();
+    await signIn();
+    tamper(() => B);
+    await syncNow();
+    await settled();
+    expect(entry("Mail")).toMatchObject({ rollback: true });
+    expect(getState().warnings).toContain(ROLLBACK_SHOWN);
+    expect(w.vaults.get(A())!.manifestSeq).toBe(0);
+    // Saved over (the user keeps this version): the mark goes, and the vault's first manifest is started.
+    await updateItem(entry("Mail"), { ...entry("Mail").item, name: "Mail 3" });
+    expect(entry("Mail 3").rollback).toBeUndefined();
+    tamper(() => B);
+    await syncNow();
+    await settled();
+    expect(w.vaults.get(A())!.manifestSeq).toBe(1);
   });
 });
 
@@ -970,7 +1592,7 @@ describe("Use the server's copy", () => {
     await createItem(A(), login("Shop"));
     await createItem(A(), login("Shop 2"));
     tamper(() => {
-      Object.assign(w.vaults.get(A())!, { manifest: before.manifest, manifestSeq: before.manifestSeq });
+      Object.assign(w.vaults.get(A())!, { manifest: before.manifest, manifestSeq: before.manifestSeq, manifestPrev: before.manifestPrev });
       for (const [id, row] of w.items) if (row.at > 3 && id !== "item-1" && id !== "item-2") w.items.delete(id);
       return A();
     });
@@ -1041,100 +1663,181 @@ describe("old trash", () => {
     withKey(A(), (key, vault) => {
       const have = w.items.get(id)!;
       if (vault.manifestSeq > 0) {
-        const next = key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifest!, [have], [{ ...have, deleted_at: deletedAt }]) as Entry;
-        Object.assign(vault, { manifest: next.sealed, manifestSeq: next.seq });
+        setManifest(vault, key.manifestNext(A(), vault.epoch, vault.manifestSeq, vault.manifestPrev!, vault.manifest!, [have], [{ ...have, deleted_at: deletedAt }]) as Built);
       }
       bump(A());
       w.items.set(id, { ...have, deleted_at: deletedAt, revision: w.clock * 1000, at: w.clock });
     });
   }
 
-  it("is deleted by the app after a sync that checked out, as one vault write with the next manifest", async () => {
+  // The device's clock is the server's in these tests (`later` moves both), except where a test says otherwise.
+  let deviceAhead = 0;
+  let clock: ReturnType<typeof vi.spyOn> | null = null;
+  beforeEach(() => {
+    deviceAhead = 0;
+    clock = vi.spyOn(Date, "now").mockImplementation(() => (w.serverTime + deviceAhead) * 1000);
+  });
+  afterEach(() => clock?.mockRestore());
+  /** Time passes (server and device), and the app syncs. */
+  async function later(days: number) {
+    w.serverTime += days * DAY;
+    tamper(() => B);
+    await syncNow();
+    await settled();
+  }
+  const purges = () => calls((c) => c.path.endsWith("/trash/purge"));
+  const trashSeen = (): Record<string, number> => JSON.parse(storage.get(`pa.trash-seen.${SCOPE()}`) ?? "{}");
+
+  it("is deleted by the app once the server's rule says so AND this device itself saw it in the trash that long", async () => {
     const due = otherCreates(A(), "Due");
     const fresh = otherCreates(A(), "Fresh");
-    otherTrashes(due, w.serverTime - 31 * DAY);
-    otherTrashes(fresh, w.serverTime - 29 * DAY);
+    otherTrashes(due, w.serverTime - DAY);
+    await signIn();
+    // First seen in the trash now, by the device's clock.
+    expect(trashSeen()).toEqual({ [due]: w.serverTime });
+    await later(10);
+    otherTrashes(fresh, w.serverTime);
+    await later(0);
+    expect(trashSeen()[fresh]).toBe(w.serverTime);
+    // Day 29: the server's rule says "due" (30 days in the trash), the device has watched for 29.
+    await later(19);
+    expect(purges()).toEqual([]);
     const rev = w.items.get(due)!.revision;
-    lock();
-    await boot();
-    const a = v.accounts.find((x) => x.name === "alice")!;
-    await restoreUnlocked(a.id, unb64(a.sessionBytes));
-    await settled();
-    const purges = calls((c) => c.path === `/vaults/${A()}/trash/purge`);
-    expect(purges).toHaveLength(1);
-    expect(purges[0].body).toMatchObject({ items: [{ id: due, revision: rev }], manifests: [{ vault_id: A(), seq: 6 }] });
+    w.calls = [];
+    await later(1);
+    expect(purges()).toHaveLength(1);
+    const seq = w.vaults.get(A())!.manifestSeq;
+    expect(purges()[0].body).toMatchObject({ items: [{ id: due, revision: rev }], manifests: [{ vault_id: A(), seq }] });
+    expect((purges()[0].body as { manifests: Entry[] }).manifests[0]).not.toHaveProperty("link");
     expect(w.items.has(due)).toBe(false);
-    expect(serverCheck(A())).toMatchObject({ status: "ok", version: 6, live: 2, trashed: 1 });
+    expect(w.items.has(fresh)).toBe(true);
+    expect(serverCheck(A())).toMatchObject({ status: "ok", version: seq, live: 2, trashed: 1 });
     expect(names()).toEqual(["Bank", "Fresh", "Mail"]);
-    expect(remembered()[A()]).toBe(6);
-    // Shown without asking the server again.
+    expect(remembered()[A()]).toBe(seq);
+    expect(rememberedLinks()[A()]).toBe(serverCheck(A()).link);
+    expect(trashSeen()).toEqual({ [fresh]: expect.any(Number) });
+    // Shown without asking the server again, and the next sync agrees.
     expect(w.calls.at(-1)!.path).toBe(`/vaults/${A()}/trash/purge`);
-    // Shown without another sync, and the next sync agrees.
     w.calls = [];
     await syncNow();
     await settled();
     expect(vaultState(A()).manifestWarning).toBeUndefined();
-    expect(calls((c) => c.path.endsWith("/trash/purge"))).toEqual([]);
+    expect(purges()).toEqual([]);
+  });
+
+  it("the server's word alone never empties a trash: its clock, its retention and `deleted_at` are not enough (review 9)", async () => {
+    const id = otherCreates(A(), "Trashed today");
+    otherTrashes(id, w.serverTime);
+    await signIn();
+    // A `deleted_at` long past (rewritten the right way, so the manifest still checks out): the device saw it today.
+    otherTrashes(id, 5);
+    await later(0);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(purges()).toEqual([]);
+    // A server clock far in the future, or 31 days ahead of the device's: nothing.
+    const real = w.serverTime;
+    for (const claimed of [Number.MAX_SAFE_INTEGER, real + 31 * DAY]) {
+      deviceAhead = real - claimed;
+      w.serverTime = claimed;
+      tamper(() => B);
+      await syncNow();
+      await settled();
+    }
+    expect(purges()).toEqual([]);
+    w.serverTime = real;
+    deviceAhead = 0;
+    // The shortest retention: still only after the device watched a day.
+    w.trashDays = 1;
+    await later(0);
+    expect(purges()).toEqual([]);
+    expect(w.items.has(id)).toBe(true);
+    await later(1);
+    expect(purges()).toHaveLength(1);
+    expect(w.items.has(id)).toBe(false);
+  });
+
+  it("an item taken out of the trash and put back is watched afresh", async () => {
+    const id = otherCreates(A(), "Back and forth");
+    otherTrashes(id, w.serverTime);
+    await signIn();
+    await later(29);
+    await restoreItem(id);
+    expect(trashSeen()).toEqual({});
+    otherTrashes(id, 5);
+    await later(2);
+    expect(purges()).toEqual([]);
+    expect(w.items.has(id)).toBe(true);
   });
 
   it("one attempt: a refusal is ignored and nothing is retried until the next sync", async () => {
     const due = otherCreates(A(), "Due");
-    otherTrashes(due, w.serverTime - 31 * DAY);
+    otherTrashes(due, w.serverTime);
+    await signIn();
     w.next.push({
       path: `/vaults/${A()}/trash/purge`,
       run: () => {
         throw err(409, "manifest_conflict");
       },
     });
-    await signIn();
+    await later(31);
+    expect(purges()).toHaveLength(1);
     expect(w.items.has(due)).toBe(true);
-    expect(calls((c) => c.path.endsWith("/trash/purge"))).toEqual([]);
     expect(vaultState(A()).manifestWarning).toBeUndefined();
   });
 
-  it("in chunks of the server's limit, each with its own next manifest", async () => {
-    for (let n = 0; n < 5; n++) otherTrashes(otherCreates(A(), `Due ${n}`), 5);
+  it("one request of at most the server's limit for each sync answer, each with its own next manifest", async () => {
+    for (let n = 0; n < 5; n++) otherTrashes(otherCreates(A(), `Due ${n}`), w.serverTime);
+    await signIn();
     h.config = { features: [...FEATURES], limits: { max_import_items: 2 } };
-    lock();
-    await boot();
-    const a = v.accounts.find((x) => x.name === "alice")!;
-    w.calls = [];
-    const config = h.config;
-    await restoreUnlocked(a.id, unb64(a.sessionBytes));
-    h.config = config;
-    await settled();
-    const purges = calls((c) => c.path === `/vaults/${A()}/trash/purge`).map((c) => c.body as { items: unknown[]; manifests: Entry[] });
-    expect(purges.map((p) => p.items.length)).toEqual([2, 2, 1]);
-    expect(purges.map((p) => p.manifests[0].seq)).toEqual([12, 13, 14]);
+    const first = w.vaults.get(A())!.manifestSeq;
+    await later(31);
+    expect(purges().map((c) => (c.body as { items: unknown[] }).items.length)).toEqual([2]);
+    await later(0);
+    await later(0);
+    await later(0);
+    const sent = purges().map((c) => c.body as { items: unknown[]; manifests: Entry[] });
+    expect(sent.map((p) => p.items.length)).toEqual([2, 2, 1]);
+    expect(sent.map((p) => p.manifests[0].seq)).toEqual([first + 1, first + 2, first + 3]);
     expect(serverCheck(A())).toMatchObject({ status: "ok", live: 2, trashed: 0 });
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
   });
 
   it("never in a vault without a manifest (the server sweeps it), with a server that keeps the trash forever, or as a reader", async () => {
     newWorld();
-    otherTrashes("item-1", 5);
+    otherTrashes("item-1", w.serverTime);
     await signIn();
-    await syncNow();
-    await settled();
-    expect(calls((c) => c.path.endsWith("/trash/purge"))).toEqual([]);
+    await later(31);
+    expect(purges()).toEqual([]);
 
     newWorld({ manifests: true });
-    otherTrashes("item-1", 5);
+    otherTrashes("item-1", w.serverTime);
     w.trashDays = 0;
     await signIn();
+    await later(31);
     expect(w.items.has("item-1")).toBe(true);
     w.trashDays = 30;
     w.vaults.get(A())!.role = "read";
-    tamper(() => B);
-    await syncNow();
-    await settled();
+    await later(1);
     expect(w.items.has("item-1")).toBe(true);
+    expect(purges()).toEqual([]);
+    // (As a writer it goes: the two cases above held it back, nothing else.)
+    w.vaults.get(A())!.role = "owner";
+    await later(0);
+    expect(w.items.has("item-1")).toBe(false);
   });
 
   it("never in a vault that doesn't check out", async () => {
-    otherTrashes("item-1", 5);
-    w.items.set("item-2", { ...w.items.get("item-2")!, data: w.items.get("item-1")!.data });
+    otherTrashes("item-1", w.serverTime);
     await signIn();
+    w.serverTime += 31 * DAY;
+    tamper(() => {
+      w.items.set("item-2", { ...w.items.get("item-2")!, data: w.items.get("item-1")!.data, at: w.clock });
+      return A();
+    });
+    await syncNow();
+    await settled();
     expect(vaultState(A()).manifestWarning).toBe(true);
     expect(w.items.has("item-1")).toBe(true);
+    expect(purges()).toEqual([]);
   });
 });

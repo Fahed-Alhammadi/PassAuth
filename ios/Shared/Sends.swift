@@ -327,6 +327,24 @@ extension VaultRepository {
     /// Whether the server keeps v2 Sends' content keys (`send_v2`; as last asked).
     private var sendV2Enabled: Bool { cachedFeatures.contains(sendV2Feature) }
 
+    /// A password is only ever put on a Send in the v2 format (the text is then encrypted with
+    /// the password too). On a server that doesn't list `send_v2` setting or changing one is
+    /// refused: a server can't get a password Send written in the link-only format by no longer
+    /// listing the feature.
+    public nonisolated static let sendPasswordNeedsV2 = "Update your PassAuth server to protect a Send with a password."
+
+    /// The fields say what the Send is, not the list: name (and text, when held) in the v2
+    /// format exactly when it has a content key. Anything else can't be read here and is never
+    /// "repaired" by writing it again.
+    nonisolated static func sendFormatConsistent(_ s: OwnedSend) -> Bool {
+        let keyed = s.ownerContentKey != nil
+        guard let name = try? sendFieldVersion(ciphertext: s.name), (name == 2) == keyed else { return false }
+        if let data = s.data {
+            guard let v = try? sendFieldVersion(ciphertext: data), (v == 2) == keyed else { return false }
+        }
+        return true
+    }
+
     public func listSends() async throws -> [OwnedSend] {
         OwnedSend.list(try await api.call(activeId, "/sends"))
     }
@@ -335,14 +353,6 @@ extension VaultRepository {
     public func getSend(_ id: String) async throws -> OwnedSend {
         guard let s = OwnedSend(json: try await api.call(activeId, "/sends/\(Self.pathPart(id))")) else { throw UserError(Self.sendUnexpected) }
         return s
-    }
-
-    /// A new password's salt and verifier (Argon2id, about a second, off the main thread).
-    private func sendPasswordFields(_ password: String) async throws -> (salt: String, verifier: String) {
-        try await core {
-            let salt = try sendPasswordSalt()
-            return (salt, try sendPasswordVerifier(password: password, salt: salt))
-        }
     }
 
     /// A new password's salt, verifier and v2 content key from one Argon2id run (about a second,
@@ -356,15 +366,16 @@ extension VaultRepository {
     }
 
     /// Encrypt and save a new Send; returns it and its link (the only place its key is shown).
-    /// With a password and a server with `send_v2`, the text is encrypted with the
-    /// password-derived content key (v2); otherwise v1.
+    /// With a password the text is encrypted with the password-derived content key (v2; refused
+    /// on a server without `send_v2`); without one, v1.
     public func createSend(_ d: NewSend) async throws -> (send: OwnedSend, link: String) {
         let account = try sendAccount()
         let id = activeId
         let server = state.server
         let key = try sendNewKey()
         let password = d.password.flatMap { $0.isEmpty ? nil : $0 }
-        if let p = password, sendV2Enabled {
+        if password != nil && !sendV2Enabled { throw UserError(Self.sendPasswordNeedsV2) }
+        if let p = password {
             let f = try await sendPasswordV2(p, key: key)
             let body: [String: JSON] = [
                 "kind": "text",
@@ -383,7 +394,7 @@ extension VaultRepository {
             guard let send = OwnedSend(json: try await api.call(id, "/sends", body: .object(body))) else { throw UserError(Self.sendUnexpected) }
             return (send, SendRules.link(origin: server, id: send.id, key: key))
         }
-        var body: [String: JSON] = [
+        let body: [String: JSON] = [
             "kind": "text",
             "name": .string(try sendEncrypt(key: key, field: "name", plaintext: d.name)),
             "data": .string(try sendEncrypt(key: key, field: "data", plaintext: d.text)),
@@ -394,11 +405,6 @@ extension VaultRepository {
             "hide_email": .bool(d.hideEmail),
             "disabled": false,
         ]
-        if let p = password {
-            let f = try await sendPasswordFields(p)
-            body["access_salt"] = .string(f.salt)
-            body["access_verifier"] = .string(f.verifier)
-        }
         guard let send = OwnedSend(json: try await api.call(id, "/sends", body: .object(body))) else { throw UserError(Self.sendUnexpected) }
         return (send, SendRules.link(origin: server, id: send.id, key: key))
     }
@@ -420,7 +426,11 @@ extension VaultRepository {
         let newPassword: String? = if case .some(.some(let p)) = edit.password, !p.isEmpty { p } else { nil }
         let removing = if case .some(.none) = edit.password { true } else { false }
         let v2 = Self.isV2(s)
-        if (newPassword != nil && (sendV2Enabled || v2)) || (removing && v2) {
+        if newPassword != nil && !sendV2Enabled { throw UserError(Self.sendPasswordNeedsV2) }
+        if (newPassword != nil || removing || edit.name != nil || edit.text != nil) && !Self.sendFormatConsistent(s) {
+            throw UserError("This Send can't be opened here, so it can't be changed.")
+        }
+        if newPassword != nil || (removing && v2) {
             // Both fields again, in their new format: the current ones decrypted first.
             let key = try sendKey(s)
             let name = try edit.name ?? sendField(s, "name", s.name)
@@ -455,13 +465,9 @@ extension VaultRepository {
                     if let t = edit.text { changes.data = try sendEncrypt(key: key, field: "data", plaintext: t) }
                 }
             }
-            switch edit.password {
-            case .some(.none): changes.password = .remove
-            case .some(.some(let p)) where !p.isEmpty:
-                let f = try await sendPasswordFields(p)
-                changes.password = .set(salt: f.salt, verifier: f.verifier)
-            default: break
-            }
+            // Removing a v1 Send's password changes nothing else (a new password always takes
+            // the branch above).
+            if removing { changes.password = .remove }
         }
         guard let send = OwnedSend(json: try await api.call(activeId, "/sends/\(Self.pathPart(s.id))", body: changes.body, method: "PUT")) else {
             throw UserError(Self.sendUnexpected)

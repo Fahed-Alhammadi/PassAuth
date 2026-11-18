@@ -61,8 +61,11 @@ final class Sec789Tests: XCTestCase {
         XCTAssertEqual(ItemRevCheck.observe(&m, id: "a", served: 3), .same)
         XCTAssertEqual(ItemRevCheck.observe(&m, id: "a", served: 1), .rollback)
         XCTAssertEqual(m["a"], 3)
+        // Forgetting is `ItemRevCheck.settle` (only an authenticated absence; `VaultManifestTests`).
         m["b"] = 1
-        XCTAssertEqual(ItemRevCheck.pruned(m, keeping: ["a"]), ["a": 3])
+        let settled = ItemRevCheck.settle(ItemRevMemory(items: ["a": .init(rev: 3, vault: "v"), "b": .init(rev: 1, vault: "v")]), observed: m,
+                                          rows: [(id: "a", vault: "v")], absentOk: [], now: 9)
+        XCTAssertEqual(settled.memory.revs, ["a": 3, "b": 1], "an item the copy doesn't have stays remembered")
     }
 
     func testRollbackKeepsTheNewerCopyAndMarksTheItem() throws {
@@ -161,5 +164,29 @@ final class Sec789Tests: XCTestCase {
         XCTAssertEqual(c.body["owner_content_key"], .null)
         c.ownerContentKey = .set("w")
         XCTAssertEqual(c.body["owner_content_key"], .string("w"))
+    }
+
+    /// A Send is what its fields say: v2 text exactly with a content key. Anything else can't be
+    /// read here and is never "repaired" by writing it again; and a password is only ever set in
+    /// the v2 format.
+    func testASendsFormatIsReadFromItsFieldsAndAPasswordNeedsV2() throws {
+        let v = try XCTUnwrap(Self.vectors["sendV2"] as? Object)
+        let key = try XCTUnwrap(v["key"] as? String)
+        let v2 = try XCTUnwrap(v["data"] as? String)
+        let v1 = try sendEncrypt(key: key, field: "name", plaintext: "Door code")
+        func send(name: String, data: String?, contentKey: String?) -> OwnedSend {
+            var o: [String: JSON] = ["id": "s1", "name": .string(name), "owner_key": "k", "delete_at": 10]
+            if let data { o["data"] = .string(data) }
+            if let contentKey { o["owner_content_key"] = .string(contentKey) }
+            return OwnedSend(json: .object(o))!
+        }
+        XCTAssertTrue(VaultRepository.sendFormatConsistent(send(name: v1, data: v1, contentKey: nil)))
+        XCTAssertTrue(VaultRepository.sendFormatConsistent(send(name: v1, data: nil, contentKey: nil)))
+        XCTAssertTrue(VaultRepository.sendFormatConsistent(send(name: v2, data: v2, contentKey: "ck")))
+        XCTAssertFalse(VaultRepository.sendFormatConsistent(send(name: v2, data: v2, contentKey: nil)), "v2 text without its key")
+        XCTAssertFalse(VaultRepository.sendFormatConsistent(send(name: v1, data: v1, contentKey: "ck")), "a key with link-only text")
+        XCTAssertFalse(VaultRepository.sendFormatConsistent(send(name: v2, data: v1, contentKey: "ck")), "the text downgraded")
+        XCTAssertFalse(VaultRepository.sendFormatConsistent(send(name: "not a field", data: nil, contentKey: nil)))
+        XCTAssertEqual(VaultRepository.sendPasswordNeedsV2, "Update your PassAuth server to protect a Send with a password.")
     }
 }

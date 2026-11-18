@@ -260,8 +260,35 @@ struct OpenedVault: Sendable {
     /// checked) and the rows of the copy to replace with the newer ones this device kept.
     var revs: [String: UInt64]?
     var keptRows: [String: SyncItem] = [:]
-    /// Vault manifests: the manifest versions remembered after this decryption (nil: not checked).
-    var manifests: [String: UInt64]?
+    /// Vault manifests: what this device remembers per vault after this decryption's checks
+    /// (nil: not checked, or the memory can't be read now).
+    var manifests: [String: ManifestMark]?
+    /// Vaults holding rows that didn't open with their vault's key: never `ok`.
+    var unreadable: Set<String> = []
+    /// Vaults whose manifest is more than one step ahead of the remembered one: their manifest
+    /// log is fetched and they are checked again (`VaultRepository.checkManifests`).
+    var needLog: [String] = []
+}
+
+/// Where a copy being opened comes from: it decides what its checks may conclude.
+enum CopySource: Sendable {
+    /// A `/sync` answer (merged into the copy): verdicts are final.
+    case server
+    /// The copy stored on the device: what doesn't check out is only "unchecked" until the
+    /// server answers (the other process may have moved on, a keyless refresh may have written
+    /// an older copy), and no item is marked as rolled back from it.
+    case cache
+    /// This device's own write applied to the copy shown: only the vaults written to change
+    /// (`wrote`: the manifest each now carries), every other vault keeps its verdict. `gone`:
+    /// items this device just deleted for good.
+    case local(wrote: [String: ManifestMark], gone: Set<String>)
+}
+
+/// What this device remembers next to an account's copy, as read at one moment (nil: the file
+/// is there but can't be read now).
+struct DeviceMemory: Sendable {
+    var revs: ItemRevMemory?
+    var manifests: [String: ManifestMark]?
 }
 
 /// Unlocked keys of one account, in memory only (Rust handles, freed when released).
@@ -354,8 +381,16 @@ public final class VaultRepository {
     /// The vault number (`seq`) at which a first manifest / an old-trash purge was last tried, by
     /// account, vault and kind: one attempt per number, whatever came of it.
     @ObservationIgnored private var manifestTried: [String: Int64] = [:]
-    /// The last `/sync` answer fetched was a delta or had the trash as a summary.
+    /// The last `/sync` answer fetched was a delta or had the trash as a summary; `fetchedDelta`:
+    /// it was a delta.
     @ObservationIgnored private var fetchedPartial = false
+    @ObservationIgnored private var fetchedDelta = false
+    /// The device memory the copy shown was last checked with and stored with (this process's
+    /// own view: the checks after this device's own writes use it, never what another process
+    /// wrote since).
+    @ObservationIgnored private var known: (account: String, memory: DeviceMemory)?
+    /// This device's clock (unix seconds); tests set it.
+    @ObservationIgnored var clock: @MainActor () -> Int64 = { Int64(Date().timeIntervalSince1970) }
     /// Why the active account's server can't be used now ("Update your PassAuth server to keep
     /// using this app."); nil: none. The copy on the device stays readable, as when offline.
     public private(set) var serverProblem: String?
@@ -519,20 +554,21 @@ public final class VaultRepository {
         if !allowLanHttp, Self.plainHttpOnNetwork(origin), let host = UrlMatcher.parse(origin)?.hostname {
             throw PlainHttpConfirmation(host: host)
         }
-        guard let config = URL(string: origin + "/api/config") else { throw UserError("That isn't a valid server address.") }
+        guard let url = URL(string: origin + "/api/config") else { throw UserError("That isn't a valid server address.") }
         let ok: Bool
-        var features: [String]?
+        var read: PublicConfig?
         do {
-            let (data, res) = try await api.get(config)
+            let (data, res) = try await api.get(url)
             let j = try? JSON.parse(data)
             ok = res.statusCode == 200 && j?.str("name") == "PassAuth"
-            features = j.flatMap { PublicConfig(json: $0) }?.features
+            read = j.flatMap { PublicConfig(json: $0) }
         } catch {
             throw UserError("No PassAuth server answered at that address.")
         }
-        guard ok else { throw UserError("No PassAuth server answered at that address.") }
+        // A server whose settings can't be read isn't connected to.
+        guard ok, let config = read else { throw UserError("No PassAuth server answered at that address.") }
         // Part S: a PassAuth server from before signed sharing isn't connected to.
-        if requiresSignedSharing && ServerSupport.refused(features: features) { throw UserError(ServerSupport.updateServer) }
+        if requiresSignedSharing && ServerSupport.refused(features: config.features) { throw UserError(ServerSupport.updateServer) }
         await lock.run {
             dropDeviceLogin()
             closeSession(activeId)
@@ -541,10 +577,12 @@ public final class VaultRepository {
                 var a = st.file.accounts[id] ?? AccountData()
                 a.server = origin
                 a.bundle = nil
-                a.features = nil
-                a.featuresAt = nil
-                a.api = nil
-                a.policies = nil
+                // What was just checked is kept (Part S): a server can't have the check skipped
+                // later by no longer answering `/api/config`.
+                a.features = config.features
+                a.featuresAt = Date().timeIntervalSince1970
+                a.api = config.api
+                a.policies = config.features.contains(policiesFeature) ? config.policies : nil
                 st.file.accounts[id] = a
                 st.file.activeId = id
                 st.secrets.tokens[id] = nil
@@ -1220,19 +1258,20 @@ public final class VaultRepository {
     func syncLocked(fallbackToCache: Bool = false, cacheFirst: Bool = false) async throws {
         let id = activeId
         guard let session = sessions[id] else { return }
-        var next: SyncSnapshot
+        var checked: Checked?
         var offline = false
         var fromServer = true
         do {
-            if cacheFirst, let cached = await readSnapshot(id) {
-                next = cached
+            if cacheFirst, let cached = try await openCached(id, session) {
+                checked = cached
                 offline = preferCache
                 fromServer = false
             } else {
-                next = try await fetchSnapshot(id)
-                // The server answered `/sync`: it doesn't (or no longer) require two-step setup first.
-                twoStepGated.remove(id)
+                checked = try await fetchChecked(id, session)
             }
+        } catch let e as CheckFailed {
+            // The answer came but couldn't be opened (signed sharing's own errors): not "offline".
+            throw e.error
         } catch {
             // An answer that isn't a vault is an error, not "offline".
             if let e = error as? UserError, e == DeltaSync.unreadable { throw e }
@@ -1241,8 +1280,15 @@ public final class VaultRepository {
                vault != nil, copy?.account == id {
                 vault?.offline = true
             }
-            guard fallbackToCache, let cached = await readSnapshot(id) else {
-                if fallbackToCache && !(error is ApiError) {
+            guard fallbackToCache, sessions[id] === session, activeId == id else { throw error }
+            let cached: Checked?
+            do {
+                cached = try await openCached(id, session)
+            } catch let e as CheckFailed {
+                throw e.error
+            }
+            guard let cached else {
+                if !(error is ApiError), sessions[id] === session, activeId == id {
                     var empty = VaultData()
                     empty.offline = true
                     copy = nil
@@ -1251,22 +1297,12 @@ public final class VaultRepository {
                 }
                 throw error
             }
-            next = cached
+            checked = cached
             offline = true
             fromServer = false
         }
-        guard sessions[id] === session, activeId == id else { return }
-        // Rows that can't be checked (trashed rows cached before manifests: no data, no hash) in
-        // an answer that was everything, with the trash whole: a mismatch. After a delta or a
-        // summary answer everything is fetched once first (the server sends the hashes now);
-        // what still can't be checked then is a mismatch.
-        let partial = fromServer && fetchedPartial
-        let incomplete = try await show(id, session, next, offline: offline, store: fromServer ? .synced : .none, finalIncomplete: fromServer && !partial)
-        if fromServer && incomplete {
-            let full = try await fetchSnapshot(id, full: true)
-            guard sessions[id] === session, activeId == id else { return }
-            try await show(id, session, full, offline: false, store: .synced, finalIncomplete: true)
-        }
+        guard let checked, sessions[id] === session, activeId == id else { return }
+        try await commit(id, session, checked, offline: offline, store: fromServer ? .synced : .none)
         if fromServer { await maintainManifests(id, session) }
         if cacheFirst && !fromServer && !offline {
             // Queued behind the current operation (the lock is first in, first out), so a change
@@ -1275,46 +1311,210 @@ public final class VaultRepository {
         }
     }
 
-    /// What `show` keeps of a copy besides showing it.
+    /// What `commit` keeps of a copy besides showing it.
     private enum CopyStore { case none, localChange, synced }
 
-    /// Decrypt `snapshot` (only what changed since the copy shown now) and show it. `.synced`:
-    /// fresh from the server, stored as the offline copy with the time of the sync, the profile
-    /// name and the bundle; `.localChange`: this device's write applied to the copy, stored too.
+    /// A copy opened and checked, not shown or stored yet (`commit` does that).
+    private struct Checked {
+        /// The copy as it was opened (with what signed sharing's preparation added).
+        var snapshot: SyncSnapshot
+        var opened: OpenedVault
+        /// The device memory it was checked with.
+        var memory: DeviceMemory
+        var source: CopySource
+    }
+
+    /// An answer was fetched but opening it failed: the error to report as it is.
+    private struct CheckFailed: Error { let error: Error }
+
+    /// The device memory as stored now. Always read before the copy it will be checked against
+    /// is read or fetched: whatever the other process (the app or its AutoFill extension) learns
+    /// after this moment is newer than this memory, never older than the copy, so neither a
+    /// manifest nor an item can look "older than this device saw" only because of the order of
+    /// the two reads.
+    private func readMemory(_ id: String) -> DeviceMemory {
+        DeviceMemory(revs: store.readItemRevMemory(id), manifests: store.readManifestMemory(id))
+    }
+
+    /// The copy stored on the device, opened and checked against the device memory (read first);
+    /// nil when there is none (or the session changed).
+    private func openCached(_ id: String, _ session: Session) async throws -> Checked? {
+        let memory = readMemory(id)
+        guard let cached = await readSnapshot(id) else { return nil }
+        guard sessions[id] === session, activeId == id else { return nil }
+        do {
+            return try await evaluate(id, session, cached, source: .cache, memory: memory, finalIncomplete: false)
+        } catch {
+            throw CheckFailed(error: error)
+        }
+    }
+
+    /// The verdicts of the vaults shown now (the active account's), by vault.
+    private func shownVerdicts(_ id: String) -> [String: ManifestStatus] {
+        guard copy?.account == id, let v = vault else { return [:] }
+        return Dictionary(v.vaults.map { ($0.id, $0.manifest) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    /// Ask the server and check its answer; nothing is shown or stored here, so whatever fails
+    /// leaves the previous copy, cursor and verdicts.
+    ///
+    /// Vault manifests: before a vault gets a warning it didn't have, the answer must have been
+    /// everything: after a delta (whose base is this device's own copy) everything is fetched
+    /// once; an answer that is behind what this device remembers is asked for again (twice at
+    /// most in all), and what still doesn't match then is the server's answer and is warned
+    /// about. Rows that can't be checked yet (trashed rows cached before manifests: no data, no
+    /// hash) after a delta or a summary answer: everything is fetched once (the server sends the
+    /// hashes now); what still can't be checked then is a mismatch. A vault whose manifest log is
+    /// needed and can't be fetched fails the whole sync (`evaluate`).
+    private func fetchChecked(_ id: String, _ session: Session) async throws -> Checked? {
+        var full = false
+        var refetched = 0
+        while true {
+            let memory = readMemory(id)
+            let snapshot = try await fetchSnapshot(id, full: full)
+            // The server answered `/sync`: it doesn't (or no longer) require two-step setup first.
+            twoStepGated.remove(id)
+            guard sessions[id] === session, activeId == id else { return nil }
+            let final = full || !fetchedPartial
+            let delta = !full && fetchedDelta
+            let checked: Checked?
+            do {
+                checked = try await evaluate(id, session, snapshot, source: .server, memory: memory, finalIncomplete: final)
+            } catch let e as ManifestLogUnavailable {
+                throw e.error
+            } catch {
+                throw CheckFailed(error: error)
+            }
+            guard let checked else { return nil }
+            let before = shownVerdicts(id)
+            let vaults = checked.opened.data.vaults
+            let warned = vaults.filter { $0.manifest.warns && before[$0.id]?.warns != true }
+            let incomplete = vaults.contains { $0.manifest == .incomplete }
+            let again = (incomplete && !final) || (!warned.isEmpty && (delta || warned.contains { $0.manifest == .rollback }))
+            guard again, refetched < 2 else { return checked }
+            refetched += 1
+            full = true
+        }
+    }
+
+    /// The vault's manifest log could not be fetched (no answer, a server error, too many
+    /// requests): the sync has failed; the previous copy and verdicts stay.
+    private struct ManifestLogUnavailable: Error { let error: Error }
+
+    /// `GET /vaults/{id}/manifest-log?after=<version>`: the entries after the version this device
+    /// remembers, as one JSON list (pages followed, five requests at most). nil: the server's
+    /// answer is that there is no such log (404, 400), an answer that isn't one, or more pages
+    /// than a device follows: the manifest doesn't connect (a mismatch). Throws when no answer
+    /// came (network, 5xx, 429, a lost session): not a verdict.
+    private func manifestLog(_ id: String, _ vaultId: String, after: UInt64) async throws -> String? {
+        var entries: [JSON] = []
+        var from = Int64(clamping: after)
+        for _ in 0..<VaultManifest.logRequests {
+            let answer: JSON
+            do {
+                answer = try await api.call(id, "/vaults/\(Self.pathPart(vaultId))/manifest-log?after=\(from)")
+            } catch let e as ApiError where e.status == 404 || e.status == 400 {
+                return nil
+            }
+            guard let page = VaultManifest.logPage(answer) else { return nil }
+            entries += page.entries
+            guard page.more else { return JSON.array(entries).text }
+            // The next page starts after the last entry; a page that doesn't move on isn't a log.
+            guard let last = page.last, last > from else { return nil }
+            from = last
+        }
+        return nil
+    }
+
+    /// Decrypt `given` (only what changed since the copy shown now) and check it; nothing is
+    /// shown or stored (`commit`). nil: the session changed meanwhile.
     ///
     /// Signed sharing: the signing identity, key pins and newer member rosters are made ready
-    /// first (`sharingInputs`; with the server only for a copy fresh from it), every vault and
-    /// invitation is checked while decrypting, and afterwards the device memory is saved and the
-    /// key pins written when they changed (`finishSharing`).
+    /// first (`sharingInputs`; with the server unless the copy is the stored one), and every
+    /// vault and invitation is checked while decrypting.
     ///
-    /// Vault manifests: every usable vault is checked against its manifest while decrypting
-    /// (`open`), with what this device remembers (read now: an AutoFill extension may have raised
-    /// it); versions seen are remembered after the copy is stored. True when a vault holds rows
-    /// that can't be checked yet (`ManifestStatus.incomplete`): the caller fetches everything.
-    @discardableResult
-    private func show(_ id: String, _ session: Session, _ given: SyncSnapshot, offline: Bool, store mode: CopyStore,
-                      finalIncomplete: Bool = false) async throws -> Bool {
+    /// Vault manifests: every usable vault is checked against its manifest (`open`,
+    /// `checkManifests`) with `memory`, read before the copy was. A server answer whose manifest
+    /// is more than one step ahead of the remembered one needs the vault's manifest log: it is
+    /// fetched and the vault checked again with it; when it can't be fetched the whole answer
+    /// counts as not received (`ManifestLogUnavailable`).
+    private func evaluate(_ id: String, _ session: Session, _ given: SyncSnapshot, source: CopySource, memory: DeviceMemory,
+                          finalIncomplete: Bool) async throws -> Checked? {
         let account = session.account
         var fresh = given
+        let stored: Bool = if case .cache = source { true } else { false }
         if !session.earlierCopyRead {
             // Grandfathering rule 1: what this device showed before this session shows anything.
-            _ = await earlierCopy(id, session, given: mode == .none ? given : nil)
+            _ = await earlierCopy(id, session, given: stored ? given : nil)
         }
-        let sharing = try await sharingInputs(id, session, &fresh, network: mode != .none)
+        if case .local = source {
+            // This device's own write applied to its copy: the copy's `user.key_pins_seq` is from
+            // the last answer, read before this session wrote its key pins. Raised to what the
+            // server has stored from this device, so the copy isn't taken for a server that
+            // sent an older list of known keys.
+            let written = loadMemory(id, session).serverBase
+            if written > (fresh.user?["key_pins_seq"]?.number ?? 0), case .object(var user)? = fresh.user {
+                user["key_pins_seq"] = .int(written)
+                fresh.user = .object(user)
+            }
+        }
+        let sharing = try await sharingInputs(id, session, &fresh, network: !stored)
         let served = fresh
-        guard sessions[id] === session, activeId == id else { return false }
+        guard sessions[id] === session, activeId == id else { return nil }
         let previous: OpenedVault? = copy?.account == id ? vault.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
         let invitations = isApp
-        let revs = store.readItemRevs(id)
-        let remembered = store.readManifestVersions(id) ?? [:]
-        let opened = try await core {
+        let fullRows = !trashSummary
+        let revs = memory.revs?.revs
+        let marks = memory.manifests
+        var opened = try await core {
             Self.open(account, served, previous: previous, invitations: invitations, sharing: sharing, revs: revs,
-                      manifests: remembered, finalIncomplete: finalIncomplete)
+                      manifests: marks, finalIncomplete: finalIncomplete, source: source, fullRows: fullRows)
         }
-        guard sessions[id] === session, activeId == id else { return false }
+        guard sessions[id] === session, activeId == id else { return nil }
+        if case .server = source, !opened.needLog.isEmpty {
+            var logs: [String: String] = [:]
+            var noLog = Set<String>()
+            for vid in opened.needLog {
+                do {
+                    if let log = try await manifestLog(id, vid, after: marks?[vid]?.version ?? 0) { logs[vid] = log } else { noLog.insert(vid) }
+                } catch {
+                    throw ManifestLogUnavailable(error: error)
+                }
+                guard sessions[id] === session, activeId == id else { return nil }
+            }
+            let first = opened, fetched = logs, missing = noLog
+            let before = previous.map { Dictionary($0.data.vaults.map { ($0.id, $0.manifest) }, uniquingKeysWith: { a, _ in a }) } ?? [:]
+            opened = try await core {
+                var o = first
+                Self.checkManifests(&o, served, memory: marks, logs: fetched, noLog: missing, source: .server, previous: before,
+                                    finalIncomplete: finalIncomplete, fullRows: fullRows)
+                return o
+            }
+        }
+        return Checked(snapshot: served, opened: opened, memory: memory, source: source)
+    }
+
+    /// This device's own write applied to the copy shown: opened, checked (`CopySource.local`:
+    /// with this process's own memory, only the vaults written to), shown and stored.
+    private func showLocal(_ id: String, _ session: Session, _ next: SyncSnapshot, wrote: [String: ManifestMark], gone: Set<String> = []) async throws {
+        let memory = known.flatMap { $0.account == id ? $0.memory : nil } ?? readMemory(id)
+        guard let checked = try await evaluate(id, session, next, source: .local(wrote: wrote, gone: gone), memory: memory, finalIncomplete: false) else { return }
+        try await commit(id, session, checked, offline: false, store: .localChange)
+    }
+
+    /// Show a checked copy. `.synced`: fresh from the server, stored as the offline copy with the
+    /// time of the sync, the profile name and the bundle; `.localChange`: this device's write
+    /// applied to the copy, stored too. Afterwards signed sharing's device memory is saved and
+    /// the key pins written when they changed (`finishSharing`).
+    ///
+    /// The device memory (item edit counters, manifest marks, trash first seen) is written after
+    /// the copy it was learnt from is stored: a mark is only ever remembered together with the
+    /// copy that carries it, and the other process reads the memory before the copy.
+    private func commit(_ id: String, _ session: Session, _ checked: Checked, offline: Bool, store mode: CopyStore) async throws {
+        let account = session.account
+        let opened = checked.opened
         // A rolled-back item whose newer copy this device kept: the copy keeps that row.
-        let snapshot = Self.keeping(opened.keptRows, in: served)
-        if let next = opened.revs, next != revs { store.writeItemRevs(id, next) }
+        let snapshot = Self.keeping(opened.keptRows, in: checked.snapshot)
         if mode == .synced { session.accountWrapsV2 = snapshot.user?["account_wraps_v2"] == .bool(true) }
         if mode != .none {
             let data = try await core { try snapshot.encoded() }
@@ -1331,9 +1531,40 @@ public final class VaultRepository {
                 refreshAvatar(id, session, serverSeq: snapshot.user?["avatar_seq"]?.number)
             }
         }
-        // After the copy they were seen in is stored (the other process reads both).
-        if let seen = opened.manifests, seen != remembered { store.writeManifestVersions(id, seen) }
-        guard sessions[id] === session, activeId == id else { return false }
+        let now = clock()
+        var after = checked.memory
+        if let before = checked.memory.revs, let observed = opened.revs {
+            // An item is forgotten only when its absence is authenticated: gone from a vault whose
+            // manifest matched this answer, or deleted for good by this device just now.
+            var absentOk = Set<String>()
+            var gone = Set<String>()
+            switch checked.source {
+            case .server: absentOk = Set(opened.data.vaults.filter { $0.manifest == .ok }.map(\.id))
+            case .cache: break
+            case .local(let wrote, let deleted):
+                absentOk = Set(wrote.keys)
+                gone = deleted
+            }
+            var settled = ItemRevCheck.settle(before, observed: observed, rows: snapshot.items.map { (id: $0.id, vault: $0.vaultId) }, absentOk: absentOk, now: now)
+            let present = Set(snapshot.items.map(\.id))
+            for g in gone where !present.contains(g) && settled.memory.items[g] != nil {
+                settled.memory.items[g] = nil
+                settled.dropped.insert(g)
+            }
+            if settled.memory != before { store.writeItemRevMemory(id, settled.memory, dropped: settled.dropped) }
+            after.revs = settled.memory
+        }
+        if let seen = opened.manifests {
+            if seen != checked.memory.manifests { store.writeManifestMemory(id, seen) }
+            after.manifests = seen
+        }
+        if isApp, !preferCache, mode != .none, let stored = store.readTrashSeen(id) {
+            // Old trash is only deleted after this device itself saw it wait (`maintainManifests`).
+            let next = VaultManifest.trashSeen(stored, rows: snapshot.items, now: now)
+            if next != stored { store.writeTrashSeen(id, next) }
+        }
+        guard sessions[id] === session, activeId == id else { return }
+        known = (id, after)
         let before = vault.map { Self.keyShape($0.vaults) }
         vaultKeys = opened.keys
         vaultHeaders = opened.headers
@@ -1349,7 +1580,6 @@ public final class VaultRepository {
         // A vault came or went, or a key was replaced (here or on another device): personal vaults
         // may need new emergency-access wraps. The first sync after unlocking runs it from `afterOpen`.
         if let before, before != Self.keyShape(v.vaults) { vaultKeysChanged() }
-        return v.vaults.contains { $0.manifest == .incomplete }
     }
 
     /// `snapshot` with the rows this device kept (rolled-back items' newer copies) in place of the served ones.
@@ -1373,10 +1603,11 @@ public final class VaultRepository {
     /// Part S: nothing is asked of a server without signed sharing (`requireSupportedServer`).
     func fetchSnapshot(_ id: String, full: Bool = false) async throws -> SyncSnapshot {
         let base: SyncSnapshot? = if full { nil } else if let c = copy, c.account == id { c.snapshot } else { await readSnapshot(id) }
-        let known = await deltaSyncEnabled(id)
+        let listed = await deltaSyncEnabled(id)
         try await requireSupportedServer(id)
-        let delta = known && !full
-        fetchedPartial = trashSummary || (delta && base?.cursor?.isEmpty == false)
+        let delta = listed && !full
+        fetchedDelta = delta && base?.cursor?.isEmpty == false
+        fetchedPartial = trashSummary || fetchedDelta
         let api = self.api
         return try await DeltaSync.fetch(base: base, delta: delta, trashSummary: trashSummary) { path in
             try await api.callData(id, path)
@@ -1386,14 +1617,19 @@ public final class VaultRepository {
     /// Part S: this app only uses a server whose `/api/config` lists signed sharing
     /// (`ServerSupport`). Decided from the features kept with the account; a refusal is asked
     /// again first (the server may have been updated), and `ask` (before a sign-in) always asks.
-    /// A config that can't be fetched is never a refusal. Throws "Update your PassAuth server to
-    /// keep using this app."; nothing is requested from or sent to such a server after that.
+    /// With a list kept that names signed sharing, a config that can't be fetched now changes
+    /// nothing (offline). With none kept (the server's settings were never read on this device),
+    /// one that can't be fetched or read means the server isn't used at all: "PassAuth couldn't
+    /// reach your server…", so breaking `/api/config` never gets a server past the check. Throws
+    /// "Update your PassAuth server to keep using this app."; nothing is requested from or sent
+    /// to such a server after that.
     func requireSupportedServer(_ id: String, ask: Bool = false) async throws {
         guard requiresSignedSharing else { return }
-        var features = store.get().file.accounts[id]?.features
-        if ask || ServerSupport.refused(features: features) {
-            if let config = await fetchConfig(id) { features = config.features }
+        var stored = store.get().file.accounts[id]?.features
+        if ask || stored == nil || ServerSupport.refused(features: stored) {
+            if let config = await fetchConfig(id) { stored = config.features }
         }
+        guard let features = stored else { throw UserError(ServerSupport.unreachable) }
         let refused = ServerSupport.refused(features: features)
         if id == activeId { serverProblem = refused ? ServerSupport.updateServer : nil }
         if refused { throw UserError(ServerSupport.updateServer) }
@@ -1490,6 +1726,10 @@ public final class VaultRepository {
         await lock.run {
             // Unlocked and shown meanwhile: its own sync writes the copy.
             guard !(sessions[id] != nil && activeId == id) else { return }
+            // The copy on the device moved on meanwhile (the AutoFill extension synced or saved
+            // something): this answer is based on the older one and must not replace it.
+            let current = await readSnapshot(id)
+            guard current?.revision == cached?.revision, current?.cursor == cached?.cursor, current?.position == cached?.position else { return }
             await store.writeCacheInBackground(id, data)
             store.updateAccount(id) { a in
                 a.lastSync = Date().timeIntervalSince1970
@@ -1611,8 +1851,12 @@ public final class VaultRepository {
             guard current, let seq, let next = SyncMerge.applyLocal(change, vaultId: vaultId, vaultSeq: seq, manifest: sent, to: c.snapshot) else {
                 return await syncAfterWrite()
             }
+            // Only the vault written to is touched; with a manifest, the one this device sent
+            // (and its link) is what the row now carries and what is remembered with the copy.
+            var gone = Set<String>()
+            if case .purge(let item) = change { gone = [item] }
             do {
-                try await show(id, session, next, offline: false, store: .localChange)
+                try await showLocal(id, session, next, wrote: sent.map { [vaultId: $0.mark] } ?? [:], gone: gone)
             } catch {
                 await syncAfterWrite()
             }
@@ -1645,15 +1889,21 @@ public final class VaultRepository {
     /// `revs` (rollback detection; nil: not checked): the highest item edit counter this device
     /// saw per item. An item served with a lower one is marked; the newer copy `previous` holds is
     /// shown instead (and its row kept in the copy, `keptRows`) when its vault's key is unchanged.
+    /// The stored copy (`source` `.cache`) marks nothing by its counters: only the server's
+    /// answer does. A row that is such a kept newer copy (`servedSha256`) stays marked for as
+    /// long as the copy holds it, whatever the counters say, until the row is written again.
+    /// The returned `revs` are the counters after this copy (nothing forgotten: `ItemRevCheck.settle`).
     ///
-    /// `manifests` (vault manifests; nil: not checked): the highest manifest version this device
-    /// saw per vault. Every usable vault's rows, as the copy keeps them, are checked against the
-    /// vault row's manifest (`VaultManifest.verify`); the verdict is on its `VaultInfo`.
+    /// `manifests` (vault manifests; nil: the memory can't be read): what this device remembers
+    /// per vault. Every usable vault's rows, as the copy keeps them, are checked against the
+    /// vault row's manifest (`checkManifests`); the verdict is on its `VaultInfo`.
     /// `finalIncomplete`: everything was just fetched, so rows that still can't be checked count
-    /// as a mismatch.
+    /// as a mismatch. `fullRows`: this app asks for every row whole, so a row without its data
+    /// is a mismatch too. `source`: where the copy comes from (`CopySource`).
     nonisolated static func open(_ account: Account, _ snap: SyncSnapshot, previous: OpenedVault?, invitations: Bool = false,
                                  sharing: SharingInputs? = nil, revs: [String: UInt64]? = nil,
-                                 manifests: [String: UInt64]? = nil, finalIncomplete: Bool = false) -> OpenedVault {
+                                 manifests: [String: ManifestMark]? = [:], finalIncomplete: Bool = false,
+                                 source: CopySource = .server, fullRows: Bool = false) -> OpenedVault {
         var keys: [String: VaultKey] = [:]
         var outputs = sharing.map { SharingOutputs(pins: $0.pins, pinsChanged: $0.pinsChanged, memory: $0.memory, keep: $0.keep, holdPins: $0.holdPins,
                                                       notice: $0.notice) }
@@ -1673,7 +1923,8 @@ public final class VaultRepository {
                 // An `account` wrap opens with the row's key epoch (an epoch-bound wrap only for
                 // it; a legacy one only where the key pins allow it).
                 let epoch = UInt64(max(0, v.keyEpoch ?? 0))
-                let legacy = sharing.map { _ in (try? pinsLegacyWrapAllowed(pinsJson: outputs?.pins, vaultId: v.id, keyEpoch: epoch)) ?? true } ?? true
+                // With the checks on, a legacy wrap the pins can't be asked about is refused.
+                let legacy = sharing.map { _ in (try? pinsLegacyWrapAllowed(pinsJson: outputs?.pins, vaultId: v.id, keyEpoch: epoch)) ?? false } ?? true
                 guard let k = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
                                                         keyEpoch: epoch, legacyAllowed: legacy) else { continue }
                 key = k
@@ -1742,6 +1993,8 @@ public final class VaultRepository {
         var memory = revs
         var rollback = ItemRollback()
         var keptRows: [String: SyncItem] = [:]
+        var unreadable = Set<String>()
+        let fromCache: Bool = if case .cache = source { true } else { false }
         for row in snap.items {
             guard let key = keys[row.vaultId], let itemKey = row.itemKey, let data = row.data else { continue }
             var enc = EncryptedItem(id: row.id, vaultId: row.vaultId, key: itemKey, data: data)
@@ -1749,12 +2002,25 @@ public final class VaultRepository {
             if kept.contains(row.vaultId), let old = before[row.id], old.vaultId == row.vaultId, old.enc.key == itemKey, old.enc.data == data {
                 item = old.item
             } else {
-                guard let json = try? key.decryptItem(encrypted: enc), let decoded = try? ItemCodec.decode(json) else { continue }
+                // A row that doesn't open with its vault's key is a hidden item: its vault never
+                // counts as matching its manifest (a hash alone would pass).
+                guard let json = try? key.decryptItem(encrypted: enc) else {
+                    unreadable.insert(row.vaultId)
+                    continue
+                }
+                guard let decoded = try? ItemCodec.decode(json) else { continue }
                 item = decoded
             }
             var rolledBack = false
+            if row.servedSha256 != nil {
+                // A newer copy this device kept after the server sent an older version: marked
+                // for as long as the copy holds it.
+                rolledBack = true
+                rollback.items.insert(row.id)
+                rollback.kept.insert(row.id)
+            }
             if var m = memory {
-                if ItemRevCheck.observe(&m, id: row.id, served: item.rev) == .rollback {
+                if ItemRevCheck.observe(&m, id: row.id, served: item.rev) == .rollback, !fromCache {
                     rolledBack = true
                     rollback.items.insert(row.id)
                     // The newer copy this device has, while its vault keeps the key it was read with.
@@ -1777,26 +2043,6 @@ public final class VaultRepository {
             if row.deletedAt == nil { out.entries.append(e) } else { out.trash.append(e) }
         }
         if !rollback.items.isEmpty { out.rollback = rollback }
-        if let m = memory { memory = ItemRevCheck.pruned(m, keeping: Set(snap.items.map(\.id))) }
-        // Vault manifests: checked over the rows the copy keeps, never over part of an answer (a
-        // rolled-back item's newer row counts with the hash of the data the server sent for it).
-        var seen = manifests
-        if var m = manifests {
-            var byVault: [String: [SyncItem]] = [:]
-            for row in snap.items where keys[row.vaultId] != nil {
-                let kept = keptRows[row.id].flatMap { $0.vaultId == row.vaultId ? $0 : nil }
-                byVault[row.vaultId, default: []].append(kept ?? row)
-            }
-            for i in out.vaults.indices {
-                let vid = out.vaults[i].id
-                guard let key = keys[vid], let header = headers[vid] else { continue }
-                var check = VaultManifest.verify(header, key: key, remembered: m[vid], rows: byVault[vid] ?? [])
-                if check.status == .incomplete && finalIncomplete { check.status = .mismatch }
-                VaultManifest.remember(&m, vault: vid, status: check.status, version: check.version)
-                out.vaults[i].manifest = check.status
-            }
-            seen = m
-        }
         out.entries.sort { $0.item.name.localizedCaseInsensitiveCompare($1.item.name) == .orderedAscending }
         out.trash.sort { ($0.deletedAt ?? 0) > ($1.deletedAt ?? 0) }
         out.revision = snap.revision
@@ -1834,7 +2080,81 @@ public final class VaultRepository {
                 out.invitations += consent
             }
         }
-        return OpenedVault(data: out, keys: keys, headers: headers, names: names, sharing: outputs, revs: memory, keptRows: keptRows, manifests: seen)
+        var opened = OpenedVault(data: out, keys: keys, headers: headers, names: names, sharing: outputs, revs: memory, keptRows: keptRows,
+                                 unreadable: unreadable)
+        let verdicts = Dictionary((previous?.data.vaults ?? []).map { ($0.id, $0.manifest) }, uniquingKeysWith: { a, _ in a })
+        checkManifests(&opened, snap, memory: manifests, source: source, previous: verdicts, finalIncomplete: finalIncomplete, fullRows: fullRows)
+        return opened
+    }
+
+    /// Vault manifests: every usable vault of an opened copy against its manifest, over the rows
+    /// the copy keeps (never over part of an answer; a rolled-back item's newer row counts with
+    /// the hash of the data the server sent for it). The verdict goes on the vault's `VaultInfo`,
+    /// what to remember from now on into `manifests`.
+    ///
+    /// - A server's answer (`.server`): the core's verdict. `ok` also needs every row to have
+    ///   opened (`unreadable`) and, when this app asks for whole rows (`fullRows`), to carry its
+    ///   data: a hidden item is a mismatch. A manifest that is more than a step ahead of the
+    ///   remembered one needs the vault's log: the vault is listed in `needLog` and stays
+    ///   `unchecked` until this runs again with it (`logs`: the entries by vault; `noLog`: the
+    ///   server has none to give, which is a mismatch).
+    /// - The stored copy (`.cache`): only `ok`, `none` and `incomplete` are verdicts. Anything
+    ///   else is `unchecked`: no warning, no write, until the server's answer is checked (the
+    ///   copy may simply be older than what the other process already saw).
+    /// - This device's own write (`.local`): the vaults it wrote to are `ok` at the manifest it
+    ///   sent (nothing to verify: it made that manifest); every other vault keeps its verdict.
+    /// - `memory` nil (it can't be read now): nothing is checked against a memory that isn't
+    ///   there and nothing is remembered; a warning stays, everything else is `unchecked`.
+    nonisolated static func checkManifests(_ o: inout OpenedVault, _ snap: SyncSnapshot, memory: [String: ManifestMark]?, logs: [String: String] = [:],
+                                           noLog: Set<String> = [], source: CopySource, previous: [String: ManifestStatus],
+                                           finalIncomplete: Bool, fullRows: Bool) {
+        var byVault: [String: [SyncItem]] = [:]
+        for row in snap.items where o.keys[row.vaultId] != nil {
+            let kept = o.keptRows[row.id].flatMap { $0.vaultId == row.vaultId ? $0 : nil }
+            byVault[row.vaultId, default: []].append(kept ?? row)
+        }
+        var marks = memory
+        var needLog: [String] = []
+        for i in o.data.vaults.indices {
+            let vid = o.data.vaults[i].id
+            guard let key = o.keys[vid], let header = o.headers[vid] else { continue }
+            let before = previous[vid]
+            if case .local(let wrote, _) = source {
+                if let mark = wrote[vid] {
+                    // A vault with an item nobody can open stays warned, also after a baseline
+                    // was written over it (the manifest is this device's, the item is still hidden).
+                    let hidden = o.unreadable.contains(vid) || (fullRows && (byVault[vid] ?? []).contains { $0.data == nil })
+                    o.data.vaults[i].manifest = hidden ? .mismatch : .ok
+                    if mark.valid, mark.version > (marks?[vid]?.version ?? 0) { marks?[vid] = mark }
+                } else {
+                    o.data.vaults[i].manifest = before ?? (header.manifestVersion == 0 && marks?[vid] == nil && marks != nil ? .none : .unchecked)
+                }
+                continue
+            }
+            guard var m = marks else {
+                o.data.vaults[i].manifest = before?.warns == true ? before ?? .unchecked : .unchecked
+                continue
+            }
+            let rows = byVault[vid] ?? []
+            var check = VaultManifest.verify(header, key: key, remembered: m[vid], log: logs[vid], rows: rows)
+            if check.status == .needLog && noLog.contains(vid) { check = (.mismatch, nil) }
+            if check.status == .incomplete && finalIncomplete { check = (.mismatch, nil) }
+            if check.status == .ok && (o.unreadable.contains(vid) || (fullRows && rows.contains { $0.data == nil })) { check = (.mismatch, nil) }
+            switch source {
+            case .cache:
+                if check.status.warns || check.status == .needLog { check = (.unchecked, nil) }
+            default:
+                if check.status == .needLog {
+                    needLog.append(vid)
+                    check = (.unchecked, nil)
+                }
+            }
+            VaultManifest.remember(&m, vault: vid, status: check.status, mark: check.mark)
+            marks = m
+            o.data.vaults[i].manifest = check.status
+        }
+        o.manifests = marks
+        o.needLog = needLog
     }
 
     // MARK: Items
@@ -1849,6 +2169,16 @@ public final class VaultRepository {
             throw UserError(ServerSupport.updateServer)
         }
         return v
+    }
+
+    /// `requireVault` for a write. A vault that isn't checked against an answer of the server yet
+    /// (opened from the copy on the device, rows that can't be checked yet) makes the write wait
+    /// for a sync first (`synced`: one ran, so what the caller read before may be older).
+    private func vaultForWrite() async throws -> (vault: VaultData, synced: Bool) {
+        let v = try requireVault()
+        guard v.vaults.contains(where: { $0.manifest.pending }) else { return (v, false) }
+        try await syncLocked()
+        return (try requireVault(), true)
     }
 
     private func writableVault(_ v: VaultData) throws -> VaultInfo {
@@ -1871,7 +2201,7 @@ public final class VaultRepository {
     }
 
     private func createLocked(_ item: Item, vaultId: String?, id requested: String?) async throws -> String {
-        var v = try requireVault()
+        var v = try await vaultForWrite().vault
         let id: String
         if let requested { id = requested } else { id = try await core { try newId() } }
         var next = item
@@ -1940,7 +2270,8 @@ public final class VaultRepository {
     }
 
     private func updateLocked(_ base: Entry, _ item: Item, targetVaultId: String?) async throws {
-        var v = try requireVault()
+        let ready = try await vaultForWrite()
+        var v = ready.vault
         var next = item
         next.updatedAt = now
         let old = base.item.login?.password ?? ""
@@ -1949,6 +2280,14 @@ public final class VaultRepository {
         }
         let json = ItemCodec.encode(next)
         var entry = base
+        if ready.synced {
+            // The copy moved on under the editor: the same rule as after any sync in between.
+            guard let fresh = v.get(base.id) else { throw UserError("This item was deleted on another device.") }
+            guard fresh.vaultId == base.vaultId, fresh.deletedAt == base.deletedAt, fresh.item == base.item else {
+                throw ConflictError(itemId: base.id)
+            }
+            entry = fresh
+        }
         var retried = false
         var sends = 0
         var written: (answer: JSON, enc: EncryptedItem, vault: String, moved: Bool, sent: ManifestEntry?)?
@@ -2042,9 +2381,20 @@ public final class VaultRepository {
     /// or this item: `revision_conflict`) the vault is synced and checked and the change sent
     /// again, three times at most, unless the item is gone or already where it should be.
     private func changeState(_ entry: Entry, _ kind: StateChange) async throws {
-        var v = try requireVault()
+        let ready = try await vaultForWrite()
+        var v = ready.vault
         if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
         var current = entry
+        if ready.synced {
+            // Gone, or already where it should be: done.
+            guard let fresh = v.get(entry.id), fresh.vaultId == entry.vaultId else { return }
+            switch kind {
+            case .trash: if fresh.deletedAt != nil { return }
+            case .restore: if fresh.deletedAt == nil { return }
+            case .purge: break
+            }
+            current = fresh
+        }
         var sends = 0
         while true {
             let vid = current.vaultId
@@ -2114,18 +2464,24 @@ public final class VaultRepository {
         guard let c = copy, c.account == activeId, let row = c.snapshot.vaults.first(where: { $0.id == vid }) else { return nil }
         let status = vault?.vaults.first { $0.id == vid }?.manifest ?? .none
         if status.unresolved { throw UserError(ManifestText.held) }
+        // Not checked against the server's answer (the sync a write waits for didn't settle it).
+        if status.pending { throw UserError(ManifestText.unchecked) }
         let seq = row.manifestVersion
         guard seq > 0 else { return nil }
-        guard status == .ok, let sealed = row.manifest, let key = vaultKeys[vid], VaultManifest.complete(removed), VaultManifest.complete(added) else {
+        guard status == .ok, let sealed = row.manifest, let prev = row.manifestPrev, let key = vaultKeys[vid],
+              VaultManifest.complete(removed), VaultManifest.complete(added) else {
             throw UserError(ManifestText.held)
         }
         let epoch = UInt64(max(0, row.keyEpoch ?? 0))
         let removedJson = VaultManifest.rowsJson(removed), addedJson = VaultManifest.rowsJson(added)
         do {
+            // The core names the row's manifest as the one this replaces (`prev`) and returns the
+            // new one's link, which is remembered once the server stored it.
             let next = try await core {
-                try key.manifestNext(vaultId: vid, keyEpoch: epoch, manifestSeq: UInt64(seq), sealed: sealed, removedJson: removedJson, addedJson: addedJson)
+                try key.manifestNext(vaultId: vid, keyEpoch: epoch, manifestSeq: UInt64(seq), prev: prev, sealed: sealed,
+                                     removedJson: removedJson, addedJson: addedJson)
             }
-            return ManifestEntry(vaultId: vid, seq: next.seq, sealed: next.sealed)
+            return ManifestEntry(vaultId: vid, next)
         } catch {
             throw UserError(ManifestText.held)
         }
@@ -2135,6 +2491,12 @@ public final class VaultRepository {
     /// refresh): start the first manifest of the vaults that may get one, and delete the trashed
     /// items the server's retention has run out for in vaults with a manifest (the server no
     /// longer deletes there by itself). One attempt each; every failure is left to the next sync.
+    ///
+    /// Old trash is bounded by what this device saw (`VaultManifest.dueTrash`): the server's
+    /// clock, retention and `deleted_at`s aren't covered by the manifest, so an item goes only
+    /// after this device itself saw it in the trash for the retention period, with the two
+    /// clocks within a day of each other. One request per vault and vault number, of at most
+    /// 250 items (fewer when the server's limit is lower); the rest waits for the next sync.
     private func maintainManifests(_ id: String, _ session: Session) async {
         guard isApp, !preferCache, !maintaining, sessions[id] === session, activeId == id, let v = vault, !v.offline,
               let first = copyOf(id) else { return }
@@ -2142,9 +2504,13 @@ public final class VaultRepository {
         guard features.contains(vaultManifestFeature) else { return }
         maintaining = true
         defer { maintaining = false }
-        let remembered = store.readManifestVersions(id)
+        // Nothing is started or deleted while this device's memory can't be read.
+        guard let remembered = known.flatMap({ $0.account == id ? $0.memory.manifests : nil }) ?? store.readManifestMemory(id) else { return }
+        let trashSeen = store.readTrashSeen(id)
+        let rolledBack = v.rollback?.items ?? []
         var snapshot = first
-        var changed = false
+        var wrote: [String: ManifestMark] = [:]
+        var gone = Set<String>()
         var resync = false
         for info in v.vaults where info.role != .read {
             guard sessions[id] === session, activeId == id else { return }
@@ -2152,72 +2518,72 @@ public final class VaultRepository {
             let row = snapshot.vaults[i]
             let rows = snapshot.items.filter { $0.vaultId == info.id }
             let epoch = UInt64(max(0, row.keyEpoch ?? 0))
-            if let remembered, VaultManifest.mayStart(row, role: info.role, status: info.manifest, remembered: remembered[info.id], rows: rows, features: features),
+            let vid = info.id
+            if VaultManifest.mayStart(row, role: info.role, status: info.manifest, remembered: remembered[info.id], rows: rows, features: features,
+                                      rolledBack: rows.contains { rolledBack.contains($0.id) }),
                let seq = row.seq {
                 guard manifestTried["\(id)|\(info.id)|start"] != seq else { continue }
                 manifestTried["\(id)|\(info.id)|start"] = seq
-                // The vault's first manifest, from the complete, checked set of this sync answer.
+                // The vault's first manifest (it replaces none), from the complete, checked set of
+                // this sync answer.
                 let json = VaultManifest.rowsJson(rows)
-                let vid = info.id
-                guard let sealed = try? await core({ try key.manifestStart(vaultId: vid, keyEpoch: epoch, version: 1, itemsJson: json) }),
+                guard let w = try? await core({ try key.manifestStart(vaultId: vid, keyEpoch: epoch, version: 1, prev: nil, itemsJson: json) }),
                       let answer = try? await api.call(id, "/vaults/\(Self.pathPart(vid))/manifest", body: [
-                          "base_seq": 0, "seq": 1, "sealed": .string(sealed), "vault_seq": .int(seq),
+                          "base_seq": 0, "seq": 1, "prev": .string(w.prev), "sealed": .string(w.sealed), "vault_seq": .int(seq),
                       ], method: "PUT") else { continue }
-                if Self.number(answer["manifest_seq"]) == 1, Self.number(answer["vault_seq"]) == seq + 1 {
-                    snapshot.vaults[i].manifest = sealed
+                let (after, overflow) = seq.addingReportingOverflow(1)
+                if !overflow, w.seq == 1, Self.number(answer["manifest_seq"]) == 1, Self.number(answer["vault_seq"]) == after {
+                    snapshot.vaults[i].manifest = w.sealed
                     snapshot.vaults[i].manifestSeq = 1
+                    snapshot.vaults[i].manifestPrev = w.prev
                     snapshot.vaults[i].manifestOk = true
-                    snapshot.vaults[i].seq = seq + 1
-                    changed = true
+                    snapshot.vaults[i].seq = after
+                    wrote[vid] = ManifestMark(version: 1, link: w.link)
                 } else {
                     resync = true
                 }
                 continue
             }
-            guard info.manifest == .ok, row.manifestVersion > 0 else { continue }
-            let due = VaultManifest.dueTrash(rows, serverTime: first.serverTime, trashDays: first.trashDays)
-            guard !due.isEmpty, let tried = row.seq, manifestTried["\(id)|\(info.id)|purge"] != tried else { continue }
-            manifestTried["\(id)|\(info.id)|purge"] = tried
-            let limit = await importLimit(id)
-            var rest = due[...]
-            while !rest.isEmpty, sessions[id] === session, activeId == id {
-                let chunk = Array(rest.prefix(limit))
-                rest = rest.dropFirst(chunk.count)
-                let now = snapshot.vaults[i]
-                guard let base = now.manifest, let known = now.seq else { break }
-                let vid = info.id
-                let version = UInt64(now.manifestVersion)
-                let removed = VaultManifest.rowsJson(chunk)
-                guard let next = try? await core({
-                    try key.manifestNext(vaultId: vid, keyEpoch: epoch, manifestSeq: version, sealed: base, removedJson: removed, addedJson: "[]")
-                }) else { break }
-                let sent = ManifestEntry(vaultId: vid, seq: next.seq, sealed: next.sealed)
-                let items = chunk.map { r -> JSON in
-                    var o: [String: JSON] = ["id": .string(r.id)]
-                    if let revision = r.revision { o["revision"] = .int(revision) }
-                    return .object(o)
-                }
-                guard let answer = try? await api.call(id, "/vaults/\(Self.pathPart(vid))/trash/purge", body: [
-                    "items": .array(items), "manifests": [sent.json],
-                ]) else { break }
-                guard Self.number(answer["manifest_seq"]) == Int64(clamping: sent.seq), Self.number(answer["vault_seq"]) == known + 1 else {
-                    resync = true
-                    break
-                }
-                let gone = Set(chunk.map(\.id))
-                snapshot.items.removeAll { $0.vaultId == vid && gone.contains($0.id) }
-                snapshot.vaults[i].manifest = sent.sealed
-                snapshot.vaults[i].manifestSeq = Int64(clamping: sent.seq)
-                snapshot.vaults[i].seq = known + 1
-                changed = true
+            guard info.manifest == .ok, row.manifestVersion > 0, let trashSeen else { continue }
+            let due = VaultManifest.dueTrash(rows, serverTime: first.serverTime, trashDays: first.trashDays, firstSeen: trashSeen, now: clock())
+            guard !due.isEmpty, let known = row.seq, manifestTried["\(id)|\(info.id)|purge"] != known else { continue }
+            manifestTried["\(id)|\(info.id)|purge"] = known
+            let chunk = Array(due.prefix(await importLimit(id)))
+            guard sessions[id] === session, activeId == id, let base = row.manifest, let prev = row.manifestPrev else { continue }
+            let version = UInt64(row.manifestVersion)
+            let removed = VaultManifest.rowsJson(chunk)
+            guard let next = try? await core({
+                try key.manifestNext(vaultId: vid, keyEpoch: epoch, manifestSeq: version, prev: prev, sealed: base, removedJson: removed, addedJson: "[]")
+            }) else { continue }
+            let sent = ManifestEntry(vaultId: vid, next)
+            let items = chunk.map { r -> JSON in
+                var o: [String: JSON] = ["id": .string(r.id)]
+                if let revision = r.revision { o["revision"] = .int(revision) }
+                return .object(o)
             }
+            guard let answer = try? await api.call(id, "/vaults/\(Self.pathPart(vid))/trash/purge", body: [
+                "items": .array(items), "manifests": [sent.json],
+            ]) else { continue }
+            let (after, overflow) = known.addingReportingOverflow(1)
+            guard !overflow, Self.number(answer["manifest_seq"]) == Int64(clamping: sent.seq), Self.number(answer["vault_seq"]) == after else {
+                resync = true
+                continue
+            }
+            let deleted = Set(chunk.map(\.id))
+            snapshot.items.removeAll { $0.vaultId == vid && deleted.contains($0.id) }
+            snapshot.vaults[i].manifest = sent.sealed
+            snapshot.vaults[i].manifestSeq = Int64(clamping: sent.seq)
+            snapshot.vaults[i].manifestPrev = sent.prev
+            snapshot.vaults[i].seq = after
+            wrote[vid] = sent.mark
+            gone.formUnion(deleted)
         }
         guard sessions[id] === session, activeId == id, copyOf(id) == first else { return }
         if resync {
             try? await syncLocked()
-        } else if changed {
+        } else if !wrote.isEmpty {
             do {
-                try await show(id, session, snapshot, offline: false, store: .localChange)
+                try await showLocal(id, session, snapshot, wrote: wrote, gone: gone)
             } catch {
                 try? await syncLocked()
             }
@@ -2228,7 +2594,7 @@ public final class VaultRepository {
     /// web vault's batch size, when the server doesn't say).
     private func importLimit(_ id: String) async -> Int {
         let n = await fetchConfig(id)?.limits?["max_import_items"]?.number ?? 0
-        return n > 0 ? Int(clamping: min(n, 250)) : 250
+        return n > 0 ? Int(clamping: min(n, Int64(VaultManifest.purgeChunk))) : VaultManifest.purgeChunk
     }
 
     /// "Use the server's copy": accept vault `vaultId` as the server has it now and write a new
@@ -2242,28 +2608,45 @@ public final class VaultRepository {
             let id = activeId
             guard let session = sessions[id], vault != nil else { throw UserError("Your vault is locked.") }
             for _ in 0..<VaultManifest.attempts {
+                let memory = readMemory(id)
                 let full = try await fetchSnapshot(id, full: true)
                 guard sessions[id] === session, activeId == id else { return }
-                try await show(id, session, full, offline: false, store: .synced, finalIncomplete: true)
+                let checked: Checked?
+                do {
+                    checked = try await evaluate(id, session, full, source: .server, memory: memory, finalIncomplete: true)
+                } catch let e as ManifestLogUnavailable {
+                    throw e.error
+                }
+                guard let checked else { return }
+                try await commit(id, session, checked, offline: false, store: .synced)
                 guard sessions[id] === session, activeId == id, let info = vault?.vaults.first(where: { $0.id == vaultId }) else {
                     throw UserError("Vault not found.")
                 }
                 // The fresh answer matches its manifest after all: nothing to accept.
-                if !info.manifest.unresolved { return }
+                if !info.manifest.unresolved {
+                    if info.manifest.pending { throw UserError(ManifestText.unchecked) }
+                    return
+                }
                 if info.role == .read { throw UserError(ManifestText.reader) }
                 guard sessions[id] === session, activeId == id, let c = copyOf(id), let row = c.vaults.first(where: { $0.id == vaultId }),
                       let key = vaultKeys[vaultId] else { throw UserError("Vault not found.") }
                 let rows = c.items.filter { $0.vaultId == vaultId }
                 guard VaultManifest.complete(rows), let known = row.seq else { throw UserError("The server's answer couldn't be read.") }
-                let remembered = store.readManifestVersions(id)?[vaultId]
-                let seq = VaultManifest.baselineSeq(row: row.manifestVersion, remembered: remembered)
+                // Above the row's version and above what this device remembers (never against a
+                // memory that can't be read).
+                guard let marks = checked.opened.manifests else { throw UserError(ManifestText.unchecked) }
+                let seq = VaultManifest.baselineSeq(row: row.manifestVersion, remembered: marks[vaultId]?.version)
                 let epoch = UInt64(max(0, row.keyEpoch ?? 0))
                 let json = VaultManifest.rowsJson(rows)
-                let sealed = try await core { try key.manifestStart(vaultId: vaultId, keyEpoch: epoch, version: seq, itemsJson: json) }
+                // It replaces whatever manifest the server shows now, by that manifest's link (it
+                // needn't open or match: that is what is being accepted); none: a first manifest.
+                let replaced = VaultManifest.link(of: row)
+                let w = try await core { try key.manifestStart(vaultId: vaultId, keyEpoch: epoch, version: seq, prev: replaced, itemsJson: json) }
                 let answer: JSON
                 do {
                     answer = try await api.call(id, "/vaults/\(Self.pathPart(vaultId))/manifest", body: [
-                        "base_seq": .int(row.manifestVersion), "seq": .int(Int64(clamping: seq)), "sealed": .string(sealed), "vault_seq": .int(known),
+                        "base_seq": .int(row.manifestVersion), "seq": .int(Int64(clamping: w.seq)), "prev": .string(w.prev), "sealed": .string(w.sealed),
+                        "vault_seq": .int(known),
                     ], method: "PUT")
                 } catch let e as ApiError where e.code == "manifest_conflict" {
                     continue
@@ -2271,15 +2654,17 @@ public final class VaultRepository {
                     throw UserError(ManifestText.notReady)
                 }
                 guard sessions[id] === session, activeId == id else { return }
-                // Remembered when the copy that carries it is stored (the check of it below).
+                // Remembered (version and link) when the copy that carries it is stored.
                 var next = c
-                if Self.number(answer["manifest_seq"]) == Int64(clamping: seq), Self.number(answer["vault_seq"]) == known + 1,
+                let (after, overflow) = known.addingReportingOverflow(1)
+                if !overflow, Self.number(answer["manifest_seq"]) == Int64(clamping: w.seq), Self.number(answer["vault_seq"]) == after,
                    let i = next.vaults.firstIndex(where: { $0.id == vaultId }) {
-                    next.vaults[i].manifest = sealed
-                    next.vaults[i].manifestSeq = Int64(clamping: seq)
-                    next.vaults[i].seq = known + 1
+                    next.vaults[i].manifest = w.sealed
+                    next.vaults[i].manifestSeq = Int64(clamping: w.seq)
+                    next.vaults[i].manifestPrev = w.prev
+                    next.vaults[i].seq = after
                     do {
-                        try await show(id, session, next, offline: false, store: .localChange)
+                        try await showLocal(id, session, next, wrote: [vaultId: ManifestMark(version: w.seq, link: w.link)])
                         return
                     } catch {}
                 }
@@ -2385,6 +2770,8 @@ public final class VaultRepository {
         let me = session.meId
         // Vault manifests: a key is only replaced in a vault whose items match its manifest.
         if info.manifest.unresolved { throw UserError(ManifestText.held) }
+        // …and that was checked against the server's answer (the sync before this settles it).
+        if info.manifest.pending { throw UserError(ManifestText.unchecked) }
         let rows = c.snapshot.items.filter { $0.vaultId == vid }
         // One members answer decides everything below (personal or not, who gets the key).
         let answer = try await api.call(id, "/vaults/\(Self.pathPart(vid))/members")
@@ -2400,30 +2787,29 @@ public final class VaultRepository {
         }
         if members.map(\.userId) != [me] { return .shared(info.name) }
         if personalOnly && (info.keyKind != VaultInfo.accountKeyKind || info.role != .owner) { return .shared(info.name) }
-        return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows, manifestSeq: row?.manifestVersion ?? 0)
+        return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows, row: row)
     }
 
     /// A vault whose members are this account alone: a new key wrapped for it only (no roster,
     /// sealed to nobody).
     ///
-    /// `manifestSeq`: the vault's manifest version in the copy the rows are from (0: none). With
-    /// one, the request carries the vault's next manifest, made new with the new key for the
-    /// next epoch over the re-encrypted items (the key that seals and sums it changes with the
-    /// vault key).
-    func rotatePlain(_ id: String, _ session: Session, _ info: VaultInfo, oldKey: VaultKey, rows: [SyncItem], manifestSeq: Int64) async throws -> RotationOutcome {
+    /// `row`: the vault's row in the copy the rows are from. With a manifest, the request carries
+    /// the vault's next one, made new with the new key for the next epoch over the re-encrypted
+    /// items (the key that seals and sums it changes with the vault key), naming the row's
+    /// manifest as the one it replaces (`VaultManifest.rotation`).
+    func rotatePlain(_ id: String, _ session: Session, _ info: VaultInfo, oldKey: VaultKey, rows: [SyncItem], row: SyncVault?) async throws -> RotationOutcome {
         let vid = info.id
         let me = session.meId
         let account = session.account
         let name = info.name
-        let next = info.keyEpoch.map { UInt64(max(0, $0) + 1) }
+        let next = info.keyEpoch.map { UInt64(max(0, $0)) + 1 }
         // Epoch-bound (v2) when every app of the account reads it and the row has an epoch.
         let bound = session.accountWrapsV2 ? next : nil
-        // A vault with a manifest always has a key epoch (the manifest is sealed for it).
-        if manifestSeq > 0 && next == nil { throw UserError(ManifestText.held) }
         let made: (wrapped: String, items: [JSON], meta: String, epochPin: String?, manifest: ManifestEntry?) = try await core {
             let nv = try bound.map { try account.newVaultKeyBound(vaultId: vid, keyEpoch: $0) } ?? account.newVaultKey(vaultId: vid)
             let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
-            let manifest = try Self.rotationManifest(vid, newKey: nv.key, nextEpoch: next, manifestSeq: manifestSeq, rows: rows, items: items)
+            // A vault with a manifest always has a key epoch (the manifest is sealed for it).
+            let manifest = try row.flatMap { try VaultManifest.rotation($0, newKey: nv.key, nextEpoch: next, rows: rows, items: items) }
             return (nv.wrapped, items, meta, try next.map { try nv.key.epochPinJson(vaultId: vid, keyEpoch: $0) }, manifest)
         }
         var body: [String: JSON] = [
@@ -2471,16 +2857,6 @@ public final class VaultRepository {
         }
         let meta = try newKey.encryptMeta(vaultId: vid, metaJson: (["name": .string(name)] as JSON).text)
         return (items, meta)
-    }
-
-    /// The manifest a key replacement carries (nil: the vault has none): version `manifestSeq`
-    /// + 1, made with the new key for the next epoch over every re-encrypted item where it was.
-    nonisolated static func rotationManifest(_ vid: String, newKey: VaultKey, nextEpoch: UInt64?, manifestSeq: Int64, rows: [SyncItem],
-                                             items: [JSON]) throws -> ManifestEntry? {
-        guard manifestSeq > 0, let nextEpoch else { return nil }
-        let seq = UInt64(manifestSeq) + 1
-        let sealed = try newKey.manifestStart(vaultId: vid, keyEpoch: nextEpoch, version: seq, itemsJson: VaultManifest.rotationRows(rows, items))
-        return ManifestEntry(vaultId: vid, seq: seq, sealed: sealed)
     }
 
     /// After unlocking, a change to the vaults or a key replacement: add the emergency-access wraps
@@ -2556,7 +2932,13 @@ public final class VaultRepository {
             } else {
                 // Keep only the server address, so the sign-in screen still knows where to go.
                 store.update { st in
-                    st.file.accounts[id] = AccountData(server: a.server)
+                    // And what its `/api/config` said (Part S: a record without it would let a
+                    // server that stops answering there be signed in to unchecked).
+                    var kept = AccountData(server: a.server)
+                    kept.features = a.features
+                    kept.featuresAt = a.featuresAt
+                    kept.api = a.api
+                    st.file.accounts[id] = kept
                     st.secrets.tokens[id] = nil
                     st.secrets.persistedKeys[id] = nil
                 }

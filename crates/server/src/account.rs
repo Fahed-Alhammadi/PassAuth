@@ -2,7 +2,7 @@
 //! deletion. Sensitive actions need a reauth token (`x-reauth-token`) from a
 //! fresh OPAQUE login with `purpose: "reauth"`.
 
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -31,7 +31,11 @@ pub fn routes() -> Router<AppState> {
         .route("/profile", put(update_profile))
         .route(
             "/avatar",
-            get(get_avatar).put(put_avatar).delete(delete_avatar),
+            get(get_avatar)
+                .put(put_avatar)
+                .delete(delete_avatar)
+                // The general body limit (64 KiB) is below a sealed picture's size.
+                .layer(DefaultBodyLimit::max(MAX_SEALED_AVATAR + 1024)),
         )
         .route("/keys/start", post(keys_start))
         .route("/keys/finish", post(keys_finish))
@@ -920,6 +924,7 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
             "DELETE FROM item_versions WHERE vault_id = $1",
             "DELETE FROM item_tombstones WHERE vault_id = $1",
             "DELETE FROM vault_rosters WHERE vault_id = $1",
+            "DELETE FROM vault_manifest_log WHERE vault_id = $1",
             "DELETE FROM vault_members WHERE vault_id = $1",
             "DELETE FROM vaults WHERE id = $1",
         ] {

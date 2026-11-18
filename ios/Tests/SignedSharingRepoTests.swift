@@ -153,7 +153,7 @@ final class SignedSharingRepoTests: XCTestCase {
     /// answer); then the unlock shows it first and syncs after (awaited here). `features` nil and
     /// `config: false`: the server's features were never read (and can't be now).
     private func repo(_ me: Person, _ bodies: [Data], memory: InMemorySharingMemory = InMemorySharingMemory(), earlier: Data? = nil,
-                      features: [String]? = [signedSharingFeature], config: Bool = true) async throws -> VaultRepository {
+                      features: [String]? = [signedSharingFeature], config: Bool = true, olderServers: Bool = false) async throws -> VaultRepository {
         let store = SecureStore(directory: dir, role: .app)
         store.load()
         store.update { s in
@@ -177,6 +177,10 @@ final class SignedSharingRepoTests: XCTestCase {
         let repo = VaultRepository(store: store, api: ApiClient(store: store) { $0.protocolClasses = [ScriptedServer.self] })
         repo.sharingMemory = memory
         repo.isApp = true
+        // The rules for servers whose settings were never read only exist where such a server is
+        // used at all (tests of the client rules for servers from before signed sharing): a
+        // release build refuses it ("PassAuth couldn't reach your server…", `ManifestContractTests`).
+        if olderServers { _ = repo.allowingOlderServers() }
         try await repo.unlock(password: password, secretKey: nil)
         if earlier != nil { try await repo.sync() }
         return repo
@@ -665,7 +669,7 @@ final class SignedSharingRepoTests: XCTestCase {
         let key = try alice.account.newVaultKey(vaultId: vid).key
         let memory = InMemorySharingMemory()
         let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
-                                                     items: [own.item])], memory: memory, features: nil, config: false)
+                                                     items: [own.item])], memory: memory, features: nil, config: false, olderServers: true)
         XCTAssertNil(repo.vault?.vaults.first { $0.id == vid }, "checked")
         XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Mine"])
         XCTAssertTrue(memory.load("acc").isEmpty, "nothing kept")
@@ -1068,7 +1072,7 @@ final class SignedSharingRepoTests: XCTestCase {
                                          "key_epoch": 0, "share": NSNull(), "member_roster": NSNull(), "member_roster_seq": 0]
         let memory = InMemorySharingMemory()
         let repo = try await repo(bob, [try syncBody(bob, identity: false, vaults: [own.row, try unsignedRow(vid, key: key, to: bob, epoch: 0)],
-                                                     items: [own.item], invitations: [invitation])], memory: memory, features: nil, config: false)
+                                                     items: [own.item], invitations: [invitation])], memory: memory, features: nil, config: false, olderServers: true)
         XCTAssertEqual(repo.vault?.refused.map(\.reason), [.checking])
         XCTAssertNil(repo.vault?.invitations.first { $0.vaultId == vid }, "not a consent: nothing to accept or decline")
         XCTAssertEqual(SharingText.refusedNotice(repo.vault?.refused ?? []), "A shared vault isn't shown until PassAuth finishes checking it.")

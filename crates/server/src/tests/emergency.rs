@@ -685,6 +685,7 @@ async fn emergency_access_goes_step_by_step_and_each_side_takes_its_own_steps() 
                 "id",
                 "key_epoch",
                 "manifest",
+                "manifest_prev",
                 "manifest_seq",
                 "meta",
                 "wrapped_key"

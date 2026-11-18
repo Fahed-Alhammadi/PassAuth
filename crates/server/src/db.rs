@@ -451,12 +451,25 @@ const SCHEMA_V15: &[&str] = &[
 const SCHEMA_V16: &[&str] = &["ALTER TABLE sends ADD COLUMN owner_content_key TEXT"];
 
 /// Vault manifests: a small record of what the vault holds, sealed by the apps with a
-/// key made from the vault key (`manifest`, opaque here) and its version
-/// (`manifest_seq`, 0 = the vault has none). Once a vault has one, every write that
-/// changes its items replaces both in the same transaction (`vault/manifest.rs`).
+/// key made from the vault key (`manifest`, opaque here), its version (`manifest_seq`,
+/// 0 = the vault has none) and the link of the manifest it replaced (`manifest_prev`,
+/// base64url; the apps bind it into the sealing). Once a vault has one, every write
+/// that changes its items replaces all three in the same transaction
+/// (`vault/manifest.rs`). `vault_manifest_log` keeps, for the newest manifests of each
+/// vault, what an app needs to follow the chain from the one it last saw to the
+/// current one by hashes alone: the version, `prev`, and the SHA-256 of the sealed
+/// text (`digest`, base64url).
 const SCHEMA_V17: &[&str] = &[
     "ALTER TABLE vaults ADD COLUMN manifest TEXT",
     "ALTER TABLE vaults ADD COLUMN manifest_seq BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE vaults ADD COLUMN manifest_prev TEXT",
+    "CREATE TABLE IF NOT EXISTS vault_manifest_log (
+        vault_id TEXT NOT NULL,
+        seq BIGINT NOT NULL,
+        prev TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        PRIMARY KEY (vault_id, seq)
+    )",
 ];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still

@@ -4,6 +4,7 @@ import java.security.MessageDigest
 import java.util.Base64
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -114,12 +115,26 @@ data class GrantorVaultData(
     val sealedKey: String,
     val vaults: List<GrantorVaultRow>,
     val items: List<GrantorItemRow>,
-    /** Every item row as sent (also ones this app can't read), for the vaults' manifests ([Manifests]). */
-    val rawItems: List<JsonObject> = emptyList(),
+    /**
+     * Vaults with an item row this app can't use as sent (no `data` or `item_key`, a `deleted_at`
+     * that is no time): behind a manifest, such a row is an item being hidden or misplaced, so the
+     * vault doesn't match its record. [strayRows]: some row names no vault at all (or isn't a row):
+     * then no vault's rows can be told to be complete.
+     */
+    val incompleteVaults: Set<String> = emptySet(),
+    val strayRows: Boolean = false,
 )
 
-/** [keyEpoch], [manifest], [manifestSeq]: the vault's manifest as the server sends it with the vault (0: none). */
-data class GrantorVaultRow(val id: String, val meta: String, val wrappedKey: String, val keyEpoch: Long = 0, val manifest: String? = null, val manifestSeq: Long = 0)
+/** [keyEpoch], [manifest], [manifestSeq], [manifestPrev]: the vault's manifest as the server sends it with the vault (0: none). */
+data class GrantorVaultRow(
+    val id: String,
+    val meta: String,
+    val wrappedKey: String,
+    val keyEpoch: Long = 0,
+    val manifest: String? = null,
+    val manifestSeq: Long = 0,
+    val manifestPrev: String? = null,
+)
 data class GrantorItemRow(val id: String, val vaultId: String, val key: String, val data: String, val deletedAt: Long?, val updatedAt: Long)
 
 object Emergency {
@@ -500,13 +515,45 @@ object Emergency {
         val vaults = vaultsRaw.mapNotNull { raw ->
             val r = raw as? JsonObject ?: return@mapNotNull null
             if (str(r["id"]).isEmpty() || str(r["meta"]).isEmpty() || str(r["wrapped_key"]).isEmpty()) null
-            else GrantorVaultRow(str(r["id"]), str(r["meta"]), str(r["wrapped_key"]), long(r["key_epoch"]) ?: 0, str(r["manifest"]).ifEmpty { null }, long(r["manifest_seq"]) ?: 0)
+            else GrantorVaultRow(
+                str(r["id"]), str(r["meta"]), str(r["wrapped_key"]), long(r["key_epoch"]) ?: 0,
+                str(r["manifest"]).ifEmpty { null }, long(r["manifest_seq"]) ?: 0, str(r["manifest_prev"]).ifEmpty { null },
+            )
         }
+        val incomplete = mutableSetOf<String>()
+        var stray = false
         val items = itemsRaw.mapNotNull { raw ->
-            val r = raw as? JsonObject ?: return@mapNotNull null
-            if (str(r["id"]).isEmpty() || str(r["vault_id"]).isEmpty() || str(r["item_key"]).isEmpty() || str(r["data"]).isEmpty()) null
-            else GrantorItemRow(str(r["id"]), str(r["vault_id"]), str(r["item_key"]), str(r["data"]), long(r["deleted_at"]), long(r["updated_at"]) ?: 0)
+            val r = raw as? JsonObject
+            val vault = r?.let { str(it["vault_id"]) }.orEmpty()
+            if (r == null || vault.isEmpty()) {
+                stray = true
+                return@mapNotNull null
+            }
+            // Only whole rows are used; `deleted_at` is null (live) or a time, nothing else.
+            val deleted = r["deleted_at"].let { if (it == null || it is JsonNull) null else wholeTime(it) ?: -1 }
+            if (str(r["id"]).isEmpty() || str(r["item_key"]).isEmpty() || str(r["data"]).isEmpty() || deleted == -1L) {
+                incomplete += vault
+                null
+            } else {
+                GrantorItemRow(str(r["id"]), vault, str(r["item_key"]), str(r["data"]), deleted, long(r["updated_at"]) ?: 0)
+            }
         }
-        return GrantorVaultData(long(v["key_version"]), sealedKey, vaults, items, itemsRaw.mapNotNull { it as? JsonObject })
+        return GrantorVaultData(long(v["key_version"]), sealedKey, vaults, items, incomplete, stray)
     }
+
+    /** A time as the server sends one: a whole number above 0 (no text, fraction, zero or negative number). */
+    private fun wholeTime(v: JsonElement): Long? =
+        (v as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()?.takeIf { it in 1..Manifests.MAX_NUMBER }
+
+    /**
+     * The rows of one vault as the core counts them for its manifest, built from the fields this app
+     * read and uses (never the server's row objects: a field it added couldn't then stand in for one).
+     */
+    fun manifestRows(rows: List<GrantorItemRow>): String = kotlinx.serialization.json.buildJsonArray {
+        for (r in rows) add(kotlinx.serialization.json.buildJsonObject {
+            put("id", JsonPrimitive(r.id))
+            put("deleted_at", r.deletedAt?.let(::JsonPrimitive) ?: JsonNull)
+            put("data", JsonPrimitive(r.data))
+        })
+    }.toString()
 }

@@ -31,6 +31,24 @@ object AvatarRules {
     /** The server's picture is fetched only when its sequence differs from the one kept (absent: an older server, nothing to do). */
     fun needsFetch(cachedSeq: Long, serverSeq: Long?): Boolean = serverSeq != null && serverSeq != cachedSeq
 
+    /** The longest side a picked image is decoded at: a very wide or tall one is never held in memory at full size. */
+    const val MAX_DECODE_SIDE = 4096
+
+    /**
+     * The size a picked [width]×[height] image is decoded at; null: as it is. Downsampled so the
+     * short side stays at least twice [SIDE] (no need to decode a 50 MP photo), and further when
+     * the long side would still be above [MAX_DECODE_SIDE] (a panorama strip is cropped to its
+     * centre anyway).
+     */
+    fun decodeSize(width: Int, height: Int): Pair<Int, Int>? {
+        if (width <= 0 || height <= 0) return null
+        val short = minOf(width, height)
+        val long = maxOf(width, height)
+        val ratio = maxOf(short.toDouble() / (SIDE * 2), long.toDouble() / MAX_DECODE_SIDE)
+        if (ratio <= 1.0) return null
+        return (width / ratio).toInt().coerceIn(1, MAX_DECODE_SIDE) to (height / ratio).toInt().coerceIn(1, MAX_DECODE_SIDE)
+    }
+
     /** The centred square of a [width]×[height] image: left, top and side. */
     fun centerSquare(width: Int, height: Int): Triple<Int, Int, Int> {
         val side = minOf(width, height)
@@ -104,20 +122,28 @@ object AvatarImage {
      * scaled to [AvatarRules.SIDE] and re-encoded as JPEG within [AvatarRules.MAX_BYTES] (no EXIF/GPS:
      * the original file is never uploaded).
      */
-    fun prepare(context: Context, uri: Uri): ByteArray {
+    fun prepare(context: Context, uri: Uri): ByteArray = try {
+        encode(context, uri)
+    } catch (e: UserException) {
+        throw e
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (_: Throwable) {
+        // Also an image too large for this phone's memory (an Error, not an Exception): never a crash.
+        throw UserException(CANT_OPEN)
+    }
+
+    private const val CANT_OPEN = "That picture couldn't be opened. Choose another one."
+
+    private fun encode(context: Context, uri: Uri): ByteArray {
         val source = ImageDecoder.createSource(context.contentResolver, uri)
         val decoded = try {
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                // Downsample so the short side stays at least SIDE (no need to decode a 50 MP photo).
-                val short = minOf(info.size.width, info.size.height)
-                if (short > AvatarRules.SIDE * 2) {
-                    val ratio = short.toDouble() / (AvatarRules.SIDE * 2)
-                    decoder.setTargetSize((info.size.width / ratio).toInt().coerceAtLeast(1), (info.size.height / ratio).toInt().coerceAtLeast(1))
-                }
+                AvatarRules.decodeSize(info.size.width, info.size.height)?.let { (w, h) -> decoder.setTargetSize(w, h) }
             }
-        } catch (e: Exception) {
-            throw UserException("That picture couldn't be opened. Choose another one.")
+        } catch (_: Throwable) {
+            throw UserException(CANT_OPEN)
         }
         val square = squareOf(decoded)
         if (square !== decoded) decoded.recycle()

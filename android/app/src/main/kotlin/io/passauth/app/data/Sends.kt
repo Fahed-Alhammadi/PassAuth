@@ -285,7 +285,6 @@ interface SendCrypto {
     fun wrap(key: String): String
     fun unwrap(wrapped: String): String
     fun passwordSalt(): String
-    fun verifier(password: String, salt: String): String
 
     /** Send v2: the verifier and the content key, from one Argon2id run over [password] (and the link [key]). */
     fun passwordKeys(password: String, salt: String, key: String): SendKeys
@@ -329,16 +328,29 @@ class SendActions(
         }
     }
 
-    /** A Send's field, v1 or v2 (by its first byte). */
-    private fun open(c: SendCrypto, s: OwnedSend, field: String, cipher: String): String =
-        c.open(c.unwrap(s.ownerKey), contentKeyOf(c, s), field, cipher)
+    /**
+     * A Send's field, v1 or v2 (by its first byte). The fields are trusted, not the server's word:
+     * a field that is v2 without a content key, or v1 next to one, belongs to a Send that was
+     * tampered with or half written; it is unreadable, never read (or "repaired") as v1.
+     */
+    private fun open(c: SendCrypto, s: OwnedSend, field: String, cipher: String): String {
+        if (mixed(c, s, cipher)) throw UserException(UNREADABLE)
+        return c.open(c.unwrap(s.ownerKey), contentKeyOf(c, s), field, cipher)
+    }
+
+    /** [cipher] (a field of [s]) has another format than the Send's `owner_content_key` says (v2 exactly when there is one). */
+    private fun mixed(c: SendCrypto, s: OwnedSend, cipher: String): Boolean {
+        val version = runCatching { c.fieldVersion(cipher) }.getOrNull() ?: return false
+        return (version == 2) != (s.ownerContentKey != null)
+    }
 
     /** Whether the Send's fields are v2 (encrypted with its password too). */
     private fun isV2(c: SendCrypto, s: OwnedSend): Boolean = runCatching { c.fieldVersion(s.name) == 2 }.getOrDefault(s.ownerContentKey != null)
 
     /** The Send's name, or null when it can't be decrypted (made by an account key this account no longer has; a v2 Send without a readable content key). */
     fun nameOf(s: OwnedSend): String? = try {
-        open(crypto(), s, "name", s.name)
+        val c = crypto()
+        if (mixed(c, s, s.name)) null else open(c, s, "name", s.name)
     } catch (e: Exception) {
         if (e is UserException) throw e
         null
@@ -360,12 +372,6 @@ class SendActions(
     /** One Send with its text. */
     suspend fun get(id: String): OwnedSend = Sends.read(transport.call(path(id), null, "GET", true, emptyMap())) ?: throw UserException(UNEXPECTED)
 
-    /** A new password's salt and verifier (Argon2id, about a second): the server keeps only the verifier's hash. v1 only. */
-    private fun passwordFields(c: SendCrypto, password: String): SendPassword.Set {
-        val salt = c.passwordSalt()
-        return SendPassword.Set(salt, c.verifier(password, salt))
-    }
-
     /** The `POST /sends` body for [d] encrypted with [key]; with a password and [v2], a Send v2. */
     fun createBody(d: NewSend, key: String, v2: Boolean = false): JsonObject {
         val c = crypto()
@@ -383,7 +389,8 @@ class SendActions(
             data = c.encryptV2(keys.contentKey, "data", d.text)
             ownerContentKey = c.wrapContent(keys.contentKey)
         } else {
-            password?.let { passwordFields(c, it) }?.let { salt = it.salt; verifier = it.verifier }
+            // Never a password with fields the link alone opens.
+            if (password != null) throw UserException(SendActions.NEEDS_V2)
             name = c.encrypt(key, "name", d.name)
             data = c.encrypt(key, "data", d.text)
         }
@@ -407,7 +414,9 @@ class SendActions(
 
     /** Encrypt and save a new Send; returns it with its key (the link is made from [server]'s address). */
     suspend fun create(d: NewSend): Pair<OwnedSend, String> {
-        val v2 = !d.password.isNullOrEmpty() && sendV2()
+        // A password Send is only ever written v2: on a server that doesn't take it, not at all.
+        val v2 = !d.password.isNullOrEmpty()
+        if (v2 && !sendV2()) throw UserException(NEEDS_V2)
         val key = crypto().newKey()
         val send = Sends.read(transport.call("/sends", createBody(d, key, v2), "POST", true, emptyMap())) ?: throw UserException(UNEXPECTED)
         return send to key
@@ -415,9 +424,11 @@ class SendActions(
 
     /**
      * The changes [edit] makes to [s]: only what changed, name and text encrypted again with the
-     * same link key (the link has it). A new password with [v2] makes (or keeps) it a v2 Send: both
-     * fields encrypted again with the new content key (so [s] must have its `data`); removing the
-     * password of a v2 Send turns it back into v1 the same way.
+     * same link key (the link has it). A new password makes (or keeps) it a v2 Send: both fields
+     * encrypted again with the new content key (so [s] must have its `data`); removing the password
+     * of a v2 Send turns it back into v1 the same way. [v2]: the server takes Send v2; without it a
+     * password is neither set nor changed ([NEEDS_V2]): a Send is never written v1 with a password,
+     * and a v2 Send never goes back to v1 while it keeps one.
      */
     fun changesOf(s: OwnedSend, edit: SendEdit, v2: Boolean = false): SendChanges {
         val c = crypto()
@@ -427,6 +438,10 @@ class SendActions(
         val content: String? by lazy { if (wasV2) contentKeyOf(c, s) ?: throw UserException(UNREADABLE) else null }
         val newPassword = edit.password?.takeIf { it.isNotEmpty() }
         val removing = edit.password != null && edit.password.isEmpty()
+        if (newPassword != null && !v2) throw UserException(NEEDS_V2)
+        // The fields say what the Send is: one whose fields and content key disagree isn't rewritten.
+        val rewrites = edit.name != null || edit.text != null || edit.password != null
+        if (rewrites && (mixed(c, s, s.name) || s.data?.let { mixed(c, s, it) } == true)) throw UserException(UNREADABLE)
         // Both fields again in plain text, when the format or the content key changes.
         fun plain(): Pair<String, String> {
             val name = edit.name ?: c.open(key, content, "name", s.name)
@@ -434,7 +449,7 @@ class SendActions(
             return name to text
         }
         return when {
-            newPassword != null && v2 -> {
+            newPassword != null -> {
                 val (name, text) = plain()
                 val salt = c.passwordSalt()
                 val keys = c.passwordKeys(newPassword, salt, key)
@@ -444,23 +459,20 @@ class SendActions(
                     ownerContentKey = Change(c.wrapContent(keys.contentKey)),
                 )
             }
-            wasV2 && (removing || newPassword != null) -> {
-                // Back to v1 (no password, or a server without v2 now): encrypted with the link key alone.
+            wasV2 && removing -> {
+                // Back to v1, only together with its password going: encrypted with the link key alone.
                 val (name, text) = plain()
                 SendChanges(
                     c.encrypt(key, "name", name), c.encrypt(key, "data", text),
-                    if (removing) SendPassword.Remove else passwordFields(c, newPassword!!),
+                    SendPassword.Remove,
                     edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail,
                     ownerContentKey = Change(null),
                 )
             }
             else -> {
                 fun seal(field: String, plain: String) = content?.let { c.encryptV2(it, field, plain) } ?: c.encrypt(key, field, plain)
-                val password = when {
-                    edit.password == null -> SendPassword.Keep
-                    removing -> SendPassword.Remove
-                    else -> passwordFields(c, newPassword!!)
-                }
+                // A new password was handled above (always v2): here it stays or goes.
+                val password = if (removing) SendPassword.Remove else SendPassword.Keep
                 SendChanges(edit.name?.let { seal("name", it) }, edit.text?.let { seal("data", it) }, password, edit.maxViews, edit.expiresAt, edit.deleteAt, edit.disabled, edit.hideEmail)
             }
         }
@@ -469,6 +481,7 @@ class SendActions(
     /** Save changes to a Send. */
     suspend fun update(s: OwnedSend, edit: SendEdit): OwnedSend {
         val v2 = !edit.password.isNullOrEmpty() && sendV2()
+        if (!edit.password.isNullOrEmpty() && !v2) throw UserException(NEEDS_V2)
         // A change of the format needs the text too (the list has none).
         val needsText = edit.password != null && s.data == null && (v2 || s.ownerContentKey != null || isV2(crypto(), s))
         val full = if (needsText) get(s.id) else s
@@ -486,6 +499,7 @@ class SendActions(
 
     companion object {
         const val UNEXPECTED = "The server sent an unexpected response. Try again."
+        const val NEEDS_V2 = "Update your PassAuth server to protect a Send with a password."
         const val UNREADABLE = "This Send is protected with its password and can't be read on this phone. You can still turn it off, delete it or copy its link."
     }
 }

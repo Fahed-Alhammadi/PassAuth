@@ -29,14 +29,14 @@ import {
   writableVaults,
 } from "../lib/vault";
 import { useSiteIconsShown } from "../lib/site-icons";
-import { emptyItem, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type LoginUrl, type VaultEntry } from "../lib/types";
+import { emptyItem, isTrashed, KIND_LABEL, kindOf, safeHref, siteHost, type Item, type ItemKind, type LoginUrl, type VaultEntry } from "../lib/types";
 import * as core from "../wasm/passauth_core";
 import type { HealthLinkState } from "./Health";
 import { FilterSelect, filterPath, Notices } from "./Shell";
 
 function matches(e: VaultEntry, filter: string): boolean {
-  if (filter === "trash") return !!e.deletedAt;
-  if (e.deletedAt) return false;
+  if (filter === "trash") return isTrashed(e);
+  if (isTrashed(e)) return false;
   if (filter === "all") return true;
   if (filter === "favorites") return e.item.favorite;
   if (filter.startsWith("vault:")) return e.vaultId === filter.slice(6);
@@ -221,7 +221,7 @@ export function VaultPage() {
           <Detail key={selected.id} entry={selected} onClose={close} />
         ) : (
           <div className="empty empty-fill">
-            <p>{items.some((e) => !e.deletedAt) ? "Select an item to see its details." : "Items you add show their details here."}</p>
+            <p>{items.some((e) => !isTrashed(e)) ? "Select an item to see its details." : "Items you add show their details here."}</p>
           </div>
         )}
       </section>
@@ -319,7 +319,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
   const showIcons = useSiteIconsShown();
   const history = hasFeature(usePublicConfig(), "item_history");
   const wantsEdit = (useLocation().state as Partial<HealthLinkState> | null)?.edit === true;
-  const [editing, setEditing] = useState(() => wantsEdit && !entry.deletedAt && vaults.some((v) => v.id === entry.vaultId && v.role !== "read"));
+  const [editing, setEditing] = useState(() => wantsEdit && !isTrashed(entry) && vaults.some((v) => v.id === entry.vaultId && v.role !== "read"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [purging, setPurging] = useState(false);
@@ -363,7 +363,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
         </header>
         {canWrite && (
           <div className="detail-actions">
-            {entry.deletedAt ? (
+            {isTrashed(entry) ? (
               <>
                 <button type="button" className="btn" disabled={busy} onClick={() => run(() => restoreItem(entry.id), "Item restored")}>
                   <Icon name="restore" /> Restore
@@ -396,7 +396,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
           </div>
         )}
       </div>
-      {entry.deletedAt && (
+      {isTrashed(entry) && (
         <div className="alert small" role="note">
           This item is in the trash. Restore it to use it again.
         </div>
@@ -630,7 +630,7 @@ function VersionSheet({ entry, version, canWrite, onClose }: { entry: VaultEntry
     };
   }, [entry.id, version.seq]);
 
-  const restorable = canWrite && !entry.deletedAt;
+  const restorable = canWrite && !isTrashed(entry);
   const lost = item ? passkeysMissingFrom(item, entry.item) : [];
   const close = () => {
     if (!busy) onClose();
@@ -668,7 +668,7 @@ function VersionSheet({ entry, version, canWrite, onClose }: { entry: VaultEntry
           {lost.length === 1 ? "it" : "them"} from the item: you may no longer be able to sign in with {lost.length === 1 ? "it" : "them"}.
         </div>
       )}
-      {item && canWrite && entry.deletedAt && <p className="small muted">Restore the item from the trash first to bring back this version.</p>}
+      {item && canWrite && isTrashed(entry) && <p className="small muted">Restore the item from the trash first to bring back this version.</p>}
       <ErrorText error={error} />
       <SheetActions
         quiet={
@@ -702,7 +702,7 @@ function PasswordNotes({ entry, onChange }: { entry: VaultEntry; onChange?: () =
   const { reuseCount } = useHealthReport();
   const { results } = useBreachCheck();
   const password = entry.item.login?.password ?? "";
-  if (!password || entry.deletedAt) return null;
+  if (!password || isTrashed(entry)) return null;
   const weak = isWeak(password, estimateBits);
   const others = reuseCount.get(entry.id) ?? 0;
   const breached = (results?.get(password) ?? 0) > 0;

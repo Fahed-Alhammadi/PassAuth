@@ -268,6 +268,15 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
     let t = token(&app, "send-v2@example.com", "pw-send-v2-1").await;
     let ock = b64(b"wrapped content key");
     let pw = json!({ "access_salt": "c2FsdHNhbHRzYWx0", "access_verifier": "verifier-one-1" });
+    // Stand-in fields in each format: what counts is the first byte (1: the link key
+    // opens it; 2: the content key made with the password).
+    let field = |marker: u8, text: &str| b64(&[&[marker], text.as_bytes()].concat());
+    let (v1, v2) = (|text: &str| field(1, text), |text: &str| field(2, text));
+    let with_text = |mut body: Value, name: String, data: String| {
+        body["name"] = json!(name);
+        body["data"] = json!(data);
+        body
+    };
 
     // Without a password there is nothing to wrap.
     let (s, v) = call(
@@ -289,16 +298,47 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
     let plain = new_send(&app, &t, json!({})).await;
     assert_eq!(plain["owner_content_key"], json!(null), "{plain}");
 
+    // The text's format and the content key go together (review fix): text encrypted
+    // with the password needs its key, and a key needs such text, both fields of it.
+    let mut keyed = pw.clone();
+    keyed["owner_content_key"] = json!(ock);
+    for (body, why) in [
+        (keyed.clone(), "a key over stand-in text that isn't v2"),
+        (
+            with_text(keyed.clone(), v1("n"), v1("d")),
+            "a key over v1 text",
+        ),
+        (with_text(keyed.clone(), v2("n"), v1("d")), "a key, v1 data"),
+        (with_text(keyed.clone(), v1("n"), v2("d")), "a key, v1 name"),
+        (
+            with_text(pw.clone(), v2("n"), v2("d")),
+            "v2 text without its key",
+        ),
+        (
+            with_text(pw.clone(), v1("n"), v2("d")),
+            "v2 data without a key",
+        ),
+        (
+            with_text(json!({}), v2("n"), v2("d")),
+            "v2 text, no password",
+        ),
+    ] {
+        let (s, v) = call(&app, Method::POST, "/api/sends", Some(&t), send_with(body)).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{why}: {v}");
+    }
+    // A v1 Send with real v1 fields, with and without a password, as always.
+    new_send(&app, &t, with_text(json!({}), v1("n"), v1("d"))).await;
+    new_send(&app, &t, with_text(pw.clone(), v1("n"), v1("d"))).await;
+
     // A v2 Send: kept, listed and read back for the owner, counted in its size.
-    let mut body = pw.clone();
-    body["owner_content_key"] = json!(ock);
+    let body = with_text(keyed.clone(), v2("encrypted name"), v2("encrypted text"));
     let s2 = new_send(&app, &t, body).await;
     let id = s2["id"].as_str().unwrap().to_owned();
     assert_eq!(s2["owner_content_key"], json!(ock));
     assert_eq!(
         s2["size"].as_u64().unwrap(),
-        (b64(b"encrypted name").len()
-            + b64(b"encrypted text").len()
+        (v2("encrypted name").len()
+            + v2("encrypted text").len()
             + b64(b"wrapped send key").len()
             + ock.len()) as u64
     );
@@ -334,12 +374,43 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         json!({ "access_salt": "bmV3c2FsdG5ld3NhbHQ", "access_verifier": "verifier-two-2" }),
         json!({ "access_salt": "bmV3c2FsdG5ld3NhbHQ", "access_verifier": "verifier-two-2", "owner_content_key": ock }),
         json!({ "access_verifier": null }),
-        json!({ "access_verifier": null, "name": b64(b"n"), "data": b64(b"d") }),
+        json!({ "access_verifier": null, "name": v1("n"), "data": v1("d") }),
+        // Review fix: an app from before rewriting the text with the link key alone
+        // (the password stays, the text would no longer need it).
+        json!({ "name": v1("n"), "data": v1("d") }),
+        json!({ "data": v1("d") }),
+        json!({ "name": v1("n") }),
+        json!({ "name": b64(b"n"), "data": b64(b"d") }),
+        // …and the key dropped while the text stays as it is, with or without the
+        // password, or with text that still needs the key.
+        json!({ "owner_content_key": null }),
+        json!({ "access_verifier": null, "owner_content_key": null }),
+        json!({ "access_verifier": null, "owner_content_key": null, "name": v2("n"), "data": v2("d") }),
+        json!({ "access_verifier": null, "owner_content_key": null, "name": v1("n") }),
+        json!({ "owner_content_key": null, "name": v1("n"), "data": v1("d") }),
+        // A new password over text in the old format.
+        json!({ "access_salt": "bmV3c2FsdG5ld3NhbHQ", "access_verifier": "verifier-two-2",
+                "name": v1("n"), "data": v1("d"), "owner_content_key": ock }),
     ] {
         let (s, v) = change_send(&app, &t, &id, change.clone()).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{change}: {v}");
     }
-    assert_eq!(my_send(&app, &t, &id).await["has_password"], true);
+    let kept = my_send(&app, &t, &id).await;
+    assert_eq!(
+        (
+            &kept["has_password"],
+            &kept["owner_content_key"],
+            &kept["name"]
+        ),
+        (&json!(true), &json!(ock), &json!(v2("encrypted name")))
+    );
+    // An edit of the text in its own format (same password, same key) is an edit.
+    let (s, v) = change_send(&app, &t, &id, json!({ "data": v2("edited text") })).await;
+    assert_eq!(
+        (s, &v["owner_content_key"]),
+        (StatusCode::OK, &json!(ock)),
+        "{v}"
+    );
     // A new password with everything re-encrypted.
     let ock2 = b64(b"wrapped content key two");
     let (s, v) = change_send(
@@ -347,7 +418,7 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         &t,
         &id,
         json!({ "access_salt": "bmV3c2FsdG5ld3NhbHQ", "access_verifier": "verifier-two-2",
-                "name": b64(b"name two"), "data": b64(b"data two"), "owner_content_key": ock2 }),
+                "name": v2("name two"), "data": v2("data two"), "owner_content_key": ock2 }),
     )
     .await;
     assert_eq!(
@@ -359,7 +430,7 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         open_send(&app, "198.51.100.91", &id, Some("verifier-two-2"))
             .await
             .1["data"],
-        json!(b64(b"data two"))
+        json!(v2("data two"))
     );
     // A content key without a password is refused on change too.
     let pid = plain["id"].as_str().unwrap();
@@ -370,7 +441,7 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         &app,
         &t,
         &id,
-        json!({ "access_verifier": null, "name": b64(b"name three"), "data": b64(b"data three"),
+        json!({ "access_verifier": null, "name": v1("name three"), "data": v1("data three"),
                 "owner_content_key": null }),
     )
     .await;
@@ -394,6 +465,11 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         (StatusCode::OK, &json!(null)),
         "{v}"
     );
+    // …edits its text in the old format, and can't be given v2 text without the key.
+    let (s, v) = change_send(&app, &t, oid, json!({ "data": v1("edited") })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let (s, v) = change_send(&app, &t, oid, json!({ "data": v2("edited") })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     // …and removing it clears nothing it didn't have.
     let (s, _) = change_send(&app, &t, oid, json!({ "access_verifier": null })).await;
     assert_eq!(s, StatusCode::OK);
@@ -403,7 +479,7 @@ async fn send_v2_keeps_the_owner_content_key_with_the_password() {
         &t,
         oid,
         json!({ "access_salt": "c2FsdHNhbHRzYWx0", "access_verifier": "verifier-one-1",
-                "name": b64(b"n4"), "data": b64(b"d4"), "owner_content_key": ock }),
+                "name": v2("n4"), "data": v2("d4"), "owner_content_key": ock }),
     )
     .await;
     assert_eq!(

@@ -10,7 +10,6 @@ import io.passauth.core.sendDecrypt
 import io.passauth.core.sendEncrypt
 import io.passauth.core.sendNewKey
 import io.passauth.core.sendPasswordSalt
-import io.passauth.core.sendPasswordVerifier
 import io.passauth.core.sendPasswordKeys
 import io.passauth.core.sendEncryptV2
 import io.passauth.core.sendOpen
@@ -42,7 +41,6 @@ class CoreSendCrypto(private val account: Account) : SendCrypto {
     override fun wrap(key: String): String = account.wrapSendKey(key)
     override fun unwrap(wrapped: String): String = account.unwrapSendKey(wrapped)
     override fun passwordSalt(): String = sendPasswordSalt()
-    override fun verifier(password: String, salt: String): String = sendPasswordVerifier(password, salt)
     override fun passwordKeys(password: String, salt: String, key: String): SendKeys =
         sendPasswordKeys(password, salt, key).let { SendKeys(it.verifier, it.contentKey) }
     override fun encryptV2(contentKey: String, field: String, plain: String): String = sendEncryptV2(contentKey, field, plain)
@@ -85,7 +83,7 @@ private class CoreEmergencyKey(private val key: EmergencyKey, private val vaultK
 private class CoreOpenedVaultKey(private val key: VaultKey) : OpenedVaultKey {
     override fun decryptMeta(vaultId: String, meta: String): String = key.decryptMeta(vaultId, meta)
     override fun decryptItem(id: String, vaultId: String, key: String, data: String): String = this.key.decryptItem(EncryptedItem(id, vaultId, key, data))
-    override fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, sealed: String?, itemsJson: String): Boolean =
-        this.key.manifestVerify(vaultId, keyEpoch.toULong(), manifestSeq.toULong(), sealed, null, itemsJson).status == "ok"
+    override fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, prev: String?, sealed: String?, itemsJson: String): Boolean =
+        this.key.manifestVerify(vaultId, keyEpoch.toULong(), manifestSeq.toULong(), prev, sealed, null, null, null, itemsJson).status == "ok"
     override fun close() = key.close()
 }

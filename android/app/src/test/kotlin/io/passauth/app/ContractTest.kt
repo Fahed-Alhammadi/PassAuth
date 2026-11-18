@@ -189,8 +189,9 @@ class ContractTest {
             runBlocking { ItemWrites.update(entry(), send = { sends++; throw keyChanged }, resync = { entry(password = "changed elsewhere", revision = 4) }) }
         }
         assertEquals("nothing sent on top of the other change", 1, sends)
-        // Gone, or moved to another vault meanwhile: also a conflict.
-        assertThrows(ConflictException::class.java) { runBlocking { ItemWrites.update(entry(), send = { throw keyChanged }, resync = { null }) } }
+        // Gone meanwhile: said so (there is nothing to save over). Moved to another vault: a conflict.
+        val gone = assertThrows(io.passauth.app.data.UserException::class.java) { runBlocking { ItemWrites.update(entry(), send = { throw keyChanged }, resync = { null }) } }
+        assertEquals("This item was deleted on another device.", gone.message)
         assertThrows(ConflictException::class.java) {
             runBlocking { ItemWrites.update(entry(), send = { throw keyChanged }, resync = { entry(vault = "v2", revision = 4) }) }
         }

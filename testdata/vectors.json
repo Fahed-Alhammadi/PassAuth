@@ -9442,7 +9442,7 @@
     }
   },
   "itemRev": {
-    "about": "encryptItem writes rev + 1 of the item given (1 for a new item); updateItem one more than the higher of the stored and the given item's rev; a move or key replacement re-encrypts the decrypted item (+1)",
+    "about": "encryptItem writes rev + 1 of the item given (1 for a new item); updateItem one more than the higher of the stored and the given item's rev; a move or key replacement re-encrypts the decrypted item (+1). `limits`: items sealed here (not by the core) whose stored rev is any number at all: the core reads at most 2^53 − 2 (`reads`) and writes one more than that at most (`writes`: the rev after updateItem, after encryptItem of the decrypted item, and after a move), so no stored rev makes an item impossible to open or save. Open the key with accountFromSessionBytes(accountId, sessionBytes) and openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false).",
     "chain": [
       1,
       2,
@@ -9486,7 +9486,117 @@
         "served": 0,
         "expected": "same"
       }
-    ]
+    ],
+    "limits": {
+      "accountId": "00000000-0000-4000-8000-0000000000d1",
+      "sessionBytes": "RERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERERA",
+      "vaultId": "00000000-0000-4000-8000-0000000000d2",
+      "keyEpoch": 0,
+      "wrappedKey": "AgFycnJycnJycnJycnJycnJycnJycnJycnJCPMmpvXnYQSLG8j61DqGOAUvwL_yrrlwdpTKY9uLSByj_9Iz4QBU-tZ3blWL8LFI",
+      "itemId": "00000000-0000-4000-8000-0000000000d3",
+      "top": 9007199254740990,
+      "items": [
+        {
+          "rev": "18446744073709551615",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYCAgICAgICAgICAgICAgICAgICAgICAgOuijgbpp9dmf7qZ4UCXkQUZ_suGA93dNY3iA5279cLwZBNLZ5XGGcgQcizCMHOsqQ",
+            "data": "AZCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkL5tQSaup5f4n1ZneOBF15Zk_VxETtMH9EGLrXcYNkHcg37ugh7KGlIFZf3w_vPH23CyEMXU-4cqFSVtp79GAsjVC4gx-mDUUtT8XhvxlskkwqS5zsUI5gOSkXTCTYlxj-zqaw"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "18446744073709551616",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgfj2mdejmlFITjcJU2RUdX4aHtEfUUfqRiN_KcB7uWeiCuPZZXUKc6fOsjc11hPJXQ",
+            "data": "AZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkaS_8q-roUdKVr102Xq7XdhnEyLPgLPuES8_DtQdOb1UXIx3v9KL_-HTnWnQ_9Tt48-WeyqV5yiADRyS5n4-L2OOd-Av6hJTxz6dkk_WJM0nXmDOnW5dOLFMNFqjBDQv_OiQQA"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "9007199254740993",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgviuUju-SLAjMYszHlyuZvEJ1pAetS0yIO5av8AadEnudN3xo9NQWQ3w8J0EY2S55A",
+            "data": "AZKSkpKSkpKSkpKSkpKSkpKSkpKSkpKSkhWlk6HIxMI0vjaQrYffIxF8w_Dh0zugnENl6oM_qdqtkV5Xa3VI2C5Ufuz-y4J2UJzQOU1tZgi1GGT46_-w8W4-ppHkvQ131NBzxVktWvq-1wWFS8oo6BqCF8w"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "9007199254740991",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4IFIIWp74CJBQsJUdToqlQJCKY14fROvNxJTJdln8l1-GqrDUnuZQvST_BFBHZ9Hw",
+            "data": "AZOTk5OTk5OTk5OTk5OTk5OTk5OTk5OTk3d5I_lQoDg_Ohk6xtzPTfqUzscI2dqntzSNQc8a5cZ0oJXi56Uz9Pef61GJwkCfYVBoQOBk_PfF6H3Yc4MwkPt9PlpIw8Pntb2W5Dn1piCpZMwFegLN1OymlZo"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "9007199254740990",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYSEhISEhISEhISEhISEhISEhISEhISEhKqCmreIWKsB-uQsGtRIqkfjigaXvNKZ382lIFItNqiWuQ9dEE8vkaTOSIc3Zgf0ng",
+            "data": "AZSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlHvu1cl6bY2JITCTGMoh7qhRTG1pRE2BKcRuhpBBNyzx65IHi1ai_neVXdUcRkGQ9jAJTvSsDOC24rdj6-Gl-yBt9_xVgrQbor1uh4zlKPl5e7kOirjPNmtoqSA"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "9007199254740989",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhSV-msjj-J5h6jsX7qLHNMCWNil70xJTt2Xv30ZA8D5PiRnUl4TBd3kiNqZq8YnJAg",
+            "data": "AZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlUMeP1IwS5KaTZhMxa0qXb__p3J4jAHNNHUQBxMztZvFN0uSKTjYWBpzfMk2ttK-0_USn5h10vBi_ECsH90EDSkn5AFtNkIf3mIS9Nn02gIXP3krKyOJyGhF0hI"
+          },
+          "reads": 9007199254740989,
+          "writes": 9007199254740990
+        },
+        {
+          "rev": "1e300",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYaGhoaGhoaGhoaGhoaGhoaGhoaGhoaGhpdEV8ZeYM7A8vy53CzIX_RPvNGIPcV1rf9TF0VOXv8D2bUVN0uJin2xOxHNEX7p_A",
+            "data": "AZaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlsG-hdfPGXA8ziu0h9EFvvU-WOIzX5dvTptnpB--mDNKgMWwD30YxgLW0hnY55OulbI2nekNvZXgFl3RLyhKw9ZDZiZ24Q"
+          },
+          "reads": 9007199254740990,
+          "writes": 9007199254740991
+        },
+        {
+          "rev": "7",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYeHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh999bSJpsttNcAvvmqg0cvsYnl9IfHx9a4Ohd_vk6UFVjRtjbm8x5M6CcbfUmAZnaw",
+            "data": "AZeXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl91lrjNXWp4LYLSAa8vtw32kwUptPPjAdC-QkwygYzgJ_fSbjx0ARzGYm__nWeKYxTNy1EOOLmoX4Uy3z8Y"
+          },
+          "reads": 7,
+          "writes": 8
+        },
+        {
+          "rev": "-3",
+          "encrypted": {
+            "id": "00000000-0000-4000-8000-0000000000d3",
+            "vault_id": "00000000-0000-4000-8000-0000000000d2",
+            "key": "AYiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiO9goB8gi8MOGye5dRE0Mp5tgg9wBGXwSXxc2r14nMTVOQaxyIRgUCtFCd6_VY7-IA",
+            "data": "AZiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmKvvNu2fNnKr2DW249XDYJwFcqn68HZl_hbKaY35m9RsbtQ5ZDTcevuMPKwjYfJrU7z17ppGc-_sep4HEAVTBQ"
+          },
+          "reads": 0,
+          "writes": 1
+        }
+      ]
+    }
   },
   "sendV2": {
     "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
@@ -9499,13 +9609,18 @@
     "data": "AgFgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGC6_cxzj5F59c-YPuZLJqYvImwYxRfFw1Vje5sVsh5So_ip0lX6KaV4WfQQB6RXHQ"
   },
   "vaultManifest": {
-    "about": "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>. Open the vault key with accountFromSessionBytes(accountId, sessionBytes) and openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false).",
+    "about": "term = HMAC-SHA256(HKDF(vault key, info passauth/vault-manifest-mac/v1), id ‖ 0x00 ‖ state (0 live, 1 trashed) ‖ 0x00 ‖ SHA-256(data text)); acc = sum of the terms mod 2^256 (big-endian); link = SHA-256(\"passauth/vault-manifest-link/v1\" ‖ 0x00 ‖ version (8 bytes, big-endian) ‖ prev (32 bytes; zero for a first manifest) ‖ SHA-256(sealed text)); sealed with HKDF(vault key, info passauth/vault-manifest-key/v1), associated data passauth/vault-manifest/v1/<vault id>/<key epoch>/<version>/<prev in hex>. An item is in the trash exactly when its deleted_at is not null; deleted_at must be null/absent or a whole number above 0 (`malformed`: every entry point throws). Keys: accountFromSessionBytes(accountId, sessionBytes), then openVaultKey(vaultId, wrappedKey, \"account\", keyEpoch, false) for `main` and openVaultKey(vaultId, rotated.wrappedKey, \"account\", rotated.keyEpoch, false) for `rotated`. `manifests`: vault rows (manifest_seq, manifest_prev, manifest) with their link (manifestLink must give it). `checks`: manifestVerify(vaultId, keyEpoch of the check, the row of `manifest`, remembered version and link or none, log or none, items[`items`]) with that check's key gives `expected` exactly. `writes`: manifestNext on `manifests.current` gives seq and prev of `expected`, opens to its counts and sum, and checks out against `after` for a device that remembers `current`. `starts`: manifestStart(vaultId, keyEpoch, version, prev, items[`items`]) with that key gives seq and prev of `expected` and checks out for `remembered`.",
     "accountId": "00000000-0000-4000-8000-0000000000e1",
     "sessionBytes": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw",
     "vaultId": "00000000-0000-4000-8000-0000000000e2",
     "keyEpoch": 2,
     "wrappedKey": "AgFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXH5hZ7DlgIp7AvcX086cWDTJHj9Ixfkx4FLq1TjVNJqL2PO1fTdrNCp2ZSaQPI6xt4",
     "vaultKey": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "rotated": {
+      "keyEpoch": 3,
+      "wrappedKey": "AgFzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3OnbAISNhhLiCbuPobFxxasgpv8oayozdIGyL98BJkGEdaAAKQTDFnfwearguf-w3E",
+      "vaultKey": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+    },
     "version": 3,
     "live": 2,
     "trashed": 1,
@@ -9756,340 +9871,1927 @@
           "deleted_at": 1763400000
         }
       ],
+      "trashedFieldIgnored": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first",
+          "revision": 11,
+          "trashed": true
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third",
+          "revision": 13,
+          "trashed": false
+        }
+      ],
+      "rotated": [
+        {
+          "id": "00000000-0000-4000-8000-000000000101",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_first-under-the-new-key",
+          "revision": 11
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000102",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": null,
+          "data": "AbCdEf0123456789-_second-under-the-new-key",
+          "revision": 12
+        },
+        {
+          "id": "00000000-0000-4000-8000-000000000103",
+          "vault_id": "00000000-0000-4000-8000-0000000000e2",
+          "deleted_at": 1763400000,
+          "data": "AbCdEf0123456789-_third-under-the-new-key",
+          "revision": 13
+        }
+      ],
       "empty": []
     },
-    "sealed": {
-      "current": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-IlmxPdYSFPZjgjvYFkdjECg",
-      "otherVersion": "AVJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUu4ZDYukUyKf11AWHx1Qx53S2y3qYCOWPBZ3wRoH-bXFQzsqhrcwu1oUafzZv8I5gg01oGsuNseH_6lyqm3mYlRZFen9V1CxcMaI45J5gf3-2nwxIQMYAixfzOKCeSdb6yt8XyRmmA",
-      "otherEpoch": "AVNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU41ZcN6RiLOx58mt0hQXKqjFhgICvmAn2VmqrrV52AHKPEbNISmO0zzeS40nm9upjTEJzekpu_RhyLEMz6eyZ-gFaYYeeM8wmK6FWS-Mmh0xqfzRqMCd06vefekUz6YpQzdE9g26ag",
-      "otherVault": "AVRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVPTcqmG8A6dy6pZpPAODqb-eYbb9g1i-JBc5IM2jZVTWavVKqGfoM3l9d_1MicRJz57RstDpqQZv9vO_T7JaYYUrLvgukKo_N0Swf__PSR1EsatMeEd6Jrbr-L9LyBYMQBYwu0gMbw",
-      "lyingVersion": "AVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVfGnksXDTUFg_lr2AoPDn12s8NXQ8IUHlJKYi-_MtGJN3E-0r7-vovPBLGmWDz7nOwhXhNX3luP6VfM6Jo6kc_R1l8QvsDeejLzlw845jzJVF1gAXgBC1oaUgi8hHHzu-N7V1n_sOw",
-      "emptyVault": "AVZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVscTp1rRen7VbYuvVHwe76LhOKVz41CNUbWkIh_LUPdu1IVHR9zB-h9pLlMUkJcobJDaTldvUdpu-9sizsTvJkA7fbxG14LqID2TiP6I7fwuWteDW3PiLECQwPYESCWCQWni5gxu5w",
-      "garbage": "AAAA"
+    "malformed": [
+      {
+        "deletedAt": 0,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 0,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": -1,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": -1,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": 0.5,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 0.5,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": 1763400000.5,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": 1763400000.5,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": "1763400000",
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": "1763400000",
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": "",
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": "",
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": true,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": true,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      },
+      {
+        "deletedAt": false,
+        "items": [
+          {
+            "id": "00000000-0000-4000-8000-000000000101",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_first",
+            "revision": 11
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": null,
+            "data": "AbCdEf0123456789-_second",
+            "revision": 12
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000103",
+            "vault_id": "00000000-0000-4000-8000-0000000000e2",
+            "deleted_at": false,
+            "data": "AbCdEf0123456789-_third",
+            "revision": 13
+          }
+        ]
+      }
+    ],
+    "manifests": {
+      "first": {
+        "manifest_seq": 1,
+        "manifest_prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "manifest": "AVZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVscTp1rRen7VbYuvVHwe76LhOKVz41CNUbWkIh_LUPdu1IVHR9zB-h9pLlMUkJcobJDaTldvUdpu-9sizsTvJkA7fbxG14LqID2TiP6I7fwuWteDW3PitFFz8NTSrn6Y2nByNKFgLA",
+        "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+      },
+      "second": {
+        "manifest_seq": 2,
+        "manifest_prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+        "manifest": "AVdXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV3Ni6uyLwvSmMmFWq9g_34TVK2M-jgx5S4ecgXtiQiN_6gHpGK8Ba8_KPhvRR1jJScC-i7BGN1_IrNYuHM9MsbeOsZXMa2myMJQjdtYPMRFtvJSPqCgNcqJLv90kIyWorBYWQn_RIw",
+        "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+      },
+      "current": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-ItNczOCJjFouTkWrlgf2AeQ",
+        "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+      },
+      "fourth": {
+        "manifest_seq": 4,
+        "manifest_prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+        "manifest": "AVhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWIGyA6UvgJoxK_P4uoB1_GMfILPHO0SYzkU3s4fVm9TOi3jOj_72UaCeQgNjHahvXwPdwRNcJKffFhNMaEdghMPuIcUrLYgOGsOmesF6rKVXJ0BnVdg-xtPxwELCXedrSIW0caUfSw",
+        "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo"
+      },
+      "fifth": {
+        "manifest_seq": 5,
+        "manifest_prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+        "manifest": "AVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWbMh8CpAaloL2Xady_d01qKiZvylbJPMUxcLvq2x_a7zZwzd-n1NDZb5GPhDrMkTYeZCntflBg14eFLM-Hq3ffnC_CPJEBLEQ0Xdw4GkdKhIBfr3jY6isyFyCJzafCHXex9bN7qVGQ",
+        "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+      },
+      "forkThird": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWixvQTnj2T_I2wBVXEB7obUzfRvoWqGXRRU0XZkvwkxq_XPxi-L2tnPM7cyqk53l6_o3t2csgrW6uuCiynfDRyrve1EFqGNePP54FvEHNH9pIgvkI7J8Gnfdhahg2J8emEKOFNJVuw",
+        "link": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI"
+      },
+      "forkFourth": {
+        "manifest_seq": 4,
+        "manifest_prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+        "manifest": "AVtbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW3x-J0hlo5N6oDbEcISwqv0tzB_f5LH5gobN9XikY2fAfb8kiFQtaO8UbrloicOPhoTuT8d935fykrvpF1xYcWWnx7c2n53R1BAtKQUaHaDjd4593ai_O4splZeXvlwtn1HZpwlynw",
+        "link": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ"
+      },
+      "forkFifth": {
+        "manifest_seq": 5,
+        "manifest_prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+        "manifest": "AVxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXJekT4cukYnVCHvka7OtPDQA0_alNZnTPSUIdSR8_Z6M_sypsOna9GoFlZ9X0LgXVeayVk5aXWO50JESl1PPQgxgxJt2ToSZTSgStdR2izEncVg4v2qfkcBNzTrTjGtEeNpgcOzaHw",
+        "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
+      },
+      "rotated": {
+        "manifest_seq": 6,
+        "manifest_prev": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+        "manifest": "AV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXdF9b4PjV12Ia4jPpGwRZ-WfNcscboc8y9x1pe54cFBksBUArbG6GnTC9g9Bjo-Lb8Jerk3GQ2BlU3aPf4talYU1bD7A-xkeN4jJB6jndLmOxsgH4sKnPSQ80qcyjJl5r_YLlz64HQ",
+        "link": "rcT630NBcEsXUpz5ZYdvJ4d_Ol0Yke39naa8LuW-RUM"
+      },
+      "rotatedNext": {
+        "manifest_seq": 7,
+        "manifest_prev": "rcT630NBcEsXUpz5ZYdvJ4d_Ol0Yke39naa8LuW-RUM",
+        "manifest": "AV5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXlEGv2bCyHTeCk9tNj7i4IJGrl21y5_lSrAnSTjsNUH5uAA7Qp9UpuVR5jlPP7dHl2pTLnKX_EXFXBChvYysUu692_4sAV6Vo8KZZe7MLRlBzwkjX_nyK-0YGVdXtXASa_xF4z68kQ",
+        "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E"
+      },
+      "baseline": {
+        "manifest_seq": 9,
+        "manifest_prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
+        "manifest": "AV9fX19fX19fX19fX19fX19fX19fX19fX8-v0ktkB2meT-IsFLDkHZg7NoaLY5-18-_99YphdMxaQnIim03CgRBgaq8IkQAGOPH7q3ZWglbjurhgejMv93XNgLe2YBI_-TZ889Ej4tOPnhWIETo7lZ_eAbnPouAU85T8dJnYLA",
+        "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM"
+      },
+      "relabelled": {
+        "manifest_seq": 4,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-ItNczOCJjFouTkWrlgf2AeQ",
+        "link": "KKQiEWqd8PKTdxSAtQZsrTHCRzMlYG_8cyurKpPsxK0"
+      },
+      "otherPrev": {
+        "manifest_seq": 3,
+        "manifest_prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "manifest": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-ItNczOCJjFouTkWrlgf2AeQ",
+        "link": "R5VdatBCMey_qw6-npXac2Hk1JBDH4_f3lEJbtDb_Yg"
+      },
+      "noPrev": {
+        "manifest_seq": 3,
+        "manifest_prev": null,
+        "manifest": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-ItNczOCJjFouTkWrlgf2AeQ",
+        "link": null
+      },
+      "noText": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": null,
+        "link": null
+      },
+      "otherEpoch": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU41ZcN6RiLOx58mt0hQXKqjFhgICvmAn2VmqrrV52AHKPEbNISmO0zzeS40nm9upjTEJzekpu_RhyLEMz6eyZ-gFaYYeeM8wmK6FWS-Mmh0xqfzRqMCdOrbMoE6LzpqftAAOdr1A-Q",
+        "link": "yeA93VZY4FcBl71UXQs9COtNS5gg479G3mJ2rcrxeyY"
+      },
+      "otherVault": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVPTcqmG8A6dy6pZpPAODqb-eYbb9g1i-JBc5IM2jZVTWavVKqGfoM3l9d_1MicRJz57RstDpqQZv9vO_T7JaYYUrLvgukKo_N0Swf__PSR1EsatMeEd6OIUszErPxtciKxflUiiOkA",
+        "link": "jNgGwempFgjcxel9cUiScLDkoXfh0yKzXlOAv25HAJc"
+      },
+      "lyingVersion": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVfGnksXDTUFg_lr2AoPDn12s8NXQ8IUHlJKYi-_MtGJN3E-0r7-vovPBLGmWDz7nOwhXhNX3luP6VfM6Jo6kc_R1l8QvsDeejLzlw845jzJVF1gAXgBCftdw0PS0WAAvgJ6MvglFEw",
+        "link": "1OtxyFxThKeOPDSvnnKswmULbAxEyCWP9QspnLcFtzY"
+      },
+      "garbage": {
+        "manifest_seq": 3,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AAAA",
+        "link": "YHV65xgIDqzlAfumfbF4ImVsNSyNyhvkUNhffp4Kwhc"
+      },
+      "none": {
+        "manifest_seq": 0,
+        "manifest_prev": null,
+        "manifest": null,
+        "link": null
+      },
+      "noneWithText": {
+        "manifest_seq": 0,
+        "manifest_prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+        "manifest": "AVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUZrygHkyD8xukN4V7flfUNtmJpxrbiy0dgV63hjCqMT2f_Cspx2l2iucqjyjAeAnJPN_vuS6CiN0_nVm3olDGd5OnGH3xH03rH1MIJMVNFpwwqqVfN-ItNczOCJjFouTkWrlgf2AeQ",
+        "link": null
+      }
     },
     "checks": [
       {
-        "manifestSeq": 3,
-        "sealed": "current",
+        "name": "first sight",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
+        "log": null,
         "items": "full",
         "expected": {
           "status": "ok",
           "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": 3,
-        "items": "full",
-        "expected": {
-          "status": "ok",
-          "version": 3,
-          "live": 2,
-          "trashed": 1
-        }
-      },
-      {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": 2,
+        "name": "first sight, summary rows",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
         "items": "summary",
         "expected": {
           "status": "ok",
           "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
+        "name": "first sight, any order",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
+        "log": null,
         "items": "reordered",
         "expected": {
           "status": "ok",
           "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": 4,
-        "items": "full",
+        "name": "first sight, a `trashed` field is ignored",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "trashedFieldIgnored",
         "expected": {
-          "status": "rollback",
-          "version": 4,
-          "live": 0,
-          "trashed": 0
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
         }
       },
       {
-        "manifestSeq": 0,
-        "sealed": null,
-        "remembered": 1,
-        "items": "full",
+        "name": "first sight of the empty vault",
+        "manifest": "first",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "empty",
         "expected": {
-          "status": "rollback",
+          "status": "ok",
           "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 0,
-        "sealed": null,
+        "name": "no manifest, none seen",
+        "manifest": "none",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
+        "log": null,
         "items": "full",
         "expected": {
           "status": "none",
           "version": 0,
+          "link": null,
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 0,
-        "sealed": "current",
+        "name": "no manifest, none seen, no items",
+        "manifest": "none",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
-        "items": "full",
-        "expected": {
-          "status": "none",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
-        }
-      },
-      {
-        "manifestSeq": 0,
-        "sealed": null,
-        "remembered": null,
+        "log": null,
         "items": "empty",
         "expected": {
           "status": "none",
           "version": 0,
+          "link": null,
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": null,
+        "name": "version 0 ignores a text",
+        "manifest": "noneWithText",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
+        "log": null,
         "items": "full",
         "expected": {
-          "status": "mismatch",
+          "status": "none",
           "version": 0,
+          "link": null,
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "hidden",
+        "name": "the remembered manifest",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": null,
+        "items": "full",
         "expected": {
-          "status": "mismatch",
-          "version": 0,
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "resurrected",
-        "expected": {
-          "status": "mismatch",
-          "version": 0,
-          "live": 2,
-          "trashed": 1
-        }
-      },
-      {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": 2,
-        "items": "older",
-        "expected": {
-          "status": "mismatch",
+        "name": "one step ahead",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
           "version": 2,
-          "live": 2,
-          "trashed": 1
-        }
-      },
-      {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "restored",
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": null,
+        "items": "summary",
         "expected": {
-          "status": "mismatch",
-          "version": 0,
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "trashed",
+        "name": "two steps ahead, no log yet",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": null,
+        "items": "full",
         "expected": {
-          "status": "mismatch",
-          "version": 0,
+          "status": "need_log",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "wrongHash",
+        "name": "two steps ahead, with the log",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          }
+        ],
+        "items": "full",
         "expected": {
-          "status": "mismatch",
-          "version": 0,
+          "status": "ok",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": null,
-        "items": "noHash",
+        "name": "four steps ahead, with the log",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
         "expected": {
-          "status": "incomplete",
-          "version": 0,
+          "status": "ok",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "current",
-        "remembered": 5,
+        "name": "four steps ahead, the log reversed and with strangers",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "the log starts right after the remembered one",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": [
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a lower version",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "a lower version, whatever the history",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 4,
+          "link": "h-yz3gZP-kYwU5JhefZ_0qzTT1ppt0MOJ_HmzCtN47g"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 4,
+          "link": "h-yz3gZP-kYwU5JhefZ_0qzTT1ppt0MOJ_HmzCtN47g",
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "no manifest after one was seen",
+        "manifest": "none",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "rollback",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "a lower version comes before the items",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
         "items": "noHash",
         "expected": {
           "status": "rollback",
           "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 4,
-        "sealed": "current",
-        "remembered": null,
+        "name": "another manifest at the remembered version",
+        "manifest": "forkThird",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": null,
         "items": "full",
         "expected": {
           "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
-        }
-      },
-      {
-        "manifestSeq": 3,
-        "sealed": "otherVersion",
-        "remembered": null,
-        "items": "full",
-        "expected": {
-          "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
-        }
-      },
-      {
-        "manifestSeq": 4,
-        "sealed": "otherVersion",
-        "remembered": 3,
-        "items": "full",
-        "expected": {
-          "status": "ok",
-          "version": 4,
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "otherEpoch",
-        "remembered": null,
+        "name": "the other way round",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI"
+        },
+        "log": null,
         "items": "full",
         "expected": {
           "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
+          "version": 3,
+          "link": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+          "live": 2,
+          "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "otherVault",
-        "remembered": null,
+        "name": "joined one version later, no log yet",
+        "manifest": "forkFourth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "need_log",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "joined one version later, its log",
+        "manifest": "forkFourth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          }
+        ],
         "items": "full",
         "expected": {
           "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "lyingVersion",
-        "remembered": null,
+        "name": "joined two versions later, its log",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          }
+        ],
         "items": "full",
         "expected": {
           "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
         }
       },
       {
-        "manifestSeq": 3,
-        "sealed": "garbage",
-        "remembered": null,
+        "name": "joined later, both histories' logs",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          },
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
         "items": "full",
         "expected": {
           "status": "mismatch",
-          "version": 0,
-          "live": 0,
-          "trashed": 0
+          "version": 4,
+          "link": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+          "live": 2,
+          "trashed": 1
         }
       },
       {
-        "manifestSeq": 1,
-        "sealed": "emptyVault",
-        "remembered": null,
-        "items": "empty",
+        "name": "joined later, an empty log",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": [],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a device from before the fork follows either",
+        "manifest": "forkFifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          }
+        ],
+        "items": "full",
         "expected": {
           "status": "ok",
+          "version": 5,
+          "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a manifest from a history never seen",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 4,
+          "link": "h-yz3gZP-kYwU5JhefZ_0qzTT1ppt0MOJ_HmzCtN47g"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 4,
+          "link": "h-yz3gZP-kYwU5JhefZ_0qzTT1ppt0MOJ_HmzCtN47g",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a pruned log",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
           "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log with a hole",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log entry renumbered",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 2,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "aFf34d29a70Epq7IxSpDvWo3qAT7dhRlDYzswSiCGwM"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log entry with another digest",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": [
+          {
+            "seq": 1,
+            "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "digest": "3xbDVnmC9TADiPHOTLKC33EzbRYjWWg23IM30P6GFAI"
+          },
+          {
+            "seq": 2,
+            "prev": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+            "digest": "qyy-ySo8BCXfSeWkzmFm4IlywY7Tnjh7qANCk3Bam_I"
+          },
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "LXEWQrcmsEQBYnyp-6wy9chTD7GQPMTbAiWHF5IaSIE"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a log entry that is no link",
+        "manifest": "fifth",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": [
+          {
+            "seq": 3,
+            "prev": "AAAA",
+            "digest": "AAAA"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "no text",
+        "manifest": "noText",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
           "live": 0,
           "trashed": 0
         }
       },
       {
-        "manifestSeq": 1,
-        "sealed": "emptyVault",
+        "name": "no predecessor listed",
+        "manifest": "noPrev",
+        "key": "main",
+        "keyEpoch": 2,
         "remembered": null,
+        "log": null,
         "items": "full",
         "expected": {
           "status": "mismatch",
           "version": 0,
+          "link": null,
           "live": 0,
           "trashed": 0
+        }
+      },
+      {
+        "name": "another predecessor listed",
+        "manifest": "otherPrev",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "another version listed",
+        "manifest": "relabelled",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "another version listed, one step ahead",
+        "manifest": "relabelled",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "sealed for another epoch",
+        "manifest": "otherEpoch",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "sealed for another vault",
+        "manifest": "otherVault",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "another version inside",
+        "manifest": "lyingVersion",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "not a manifest",
+        "manifest": "garbage",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "an item hidden",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "hidden",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an item brought back",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "resurrected",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an older copy of an item",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": null,
+        "items": "older",
+        "expected": {
+          "status": "mismatch",
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an item out of the trash",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "restored",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "an item into the trash",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "trashed",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "another hash for a row without data",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "wrongHash",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a row without data or hash",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "noHash",
+        "expected": {
+          "status": "incomplete",
+          "version": 0,
+          "link": null,
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a row without data or hash comes before the log",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": null,
+        "items": "noHash",
+        "expected": {
+          "status": "incomplete",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "wrong items come before the log",
+        "manifest": "current",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU"
+        },
+        "log": null,
+        "items": "hidden",
+        "expected": {
+          "status": "mismatch",
+          "version": 1,
+          "link": "6_o23S3BYXMePdVg_S3oRf9XD0zcSJSaw5qq84LyrJU",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "items in an empty vault",
+        "manifest": "first",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 0,
+          "link": null,
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "after a key replacement, one step ahead",
+        "manifest": "rotated",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
+        "items": "rotated",
+        "expected": {
+          "status": "ok",
+          "version": 6,
+          "link": "rcT630NBcEsXUpz5ZYdvJ4d_Ol0Yke39naa8LuW-RUM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "after a key replacement, first sight",
+        "manifest": "rotated",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "remembered": null,
+        "log": null,
+        "items": "rotated",
+        "expected": {
+          "status": "ok",
+          "version": 6,
+          "link": "rcT630NBcEsXUpz5ZYdvJ4d_Ol0Yke39naa8LuW-RUM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "after a key replacement, from the old epoch by the log",
+        "manifest": "rotatedNext",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "remembered": {
+          "version": 3,
+          "link": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM"
+        },
+        "log": [
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          },
+          {
+            "seq": 6,
+            "prev": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+            "digest": "v_Rwv-zYW-9QN6sYQ8IrL1oOGb1dEMAwJkZbxzxBW98"
+          }
+        ],
+        "items": "rotated",
+        "expected": {
+          "status": "ok",
+          "version": 7,
+          "link": "yXjn--s8-J5xsogbIAB9XpuWhOsLZmrvdwAQSC9nv2E",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "after a key replacement, from the other history",
+        "manifest": "rotatedNext",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "remembered": {
+          "version": 3,
+          "link": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI"
+        },
+        "log": [
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          },
+          {
+            "seq": 6,
+            "prev": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+            "digest": "v_Rwv-zYW-9QN6sYQ8IrL1oOGb1dEMAwJkZbxzxBW98"
+          }
+        ],
+        "items": "rotated",
+        "expected": {
+          "status": "mismatch",
+          "version": 3,
+          "link": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "after a key replacement, the old key",
+        "manifest": "rotated",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
+        "items": "rotated",
+        "expected": {
+          "status": "mismatch",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 0,
+          "trashed": 0
+        }
+      },
+      {
+        "name": "after a key replacement, the old items",
+        "manifest": "rotated",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, its writer",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 9,
+          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 9,
+          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, first sight",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": null,
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 9,
+          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device on the history it replaced",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 9,
+          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device further back on that history",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 2,
+          "link": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ"
+        },
+        "log": [
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "ok",
+          "version": 9,
+          "link": "_xDWW2XhF8Su-IwpR-qx7uP0FsbkJoMkZbEQgn-8zMM",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device on the other history",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": [
+          {
+            "seq": 3,
+            "prev": "WlKPTsTSW-yNmrUamR4XtoRkRvtTTC4l-9JhMxbb1nQ",
+            "digest": "v9x4jR1M1RWtKeqgjq9OmleeOeEWIdUSywd1jlsSNi4"
+          },
+          {
+            "seq": 4,
+            "prev": "ARzxAVuP3K2ovFd8o6nB1dms_a9srEboTNZLE6CiMcI",
+            "digest": "LT5BFgei55R-JpMqj_N7e8J7NaXYtJos6MAwx_Y5sn0"
+          },
+          {
+            "seq": 5,
+            "prev": "dV1lGrAVXB7fOoaODERNVKB8BzoHlfyhotbVRJNfILQ",
+            "digest": "17vdtf-vLwdZHIuP4uYDIWAvTPuoCFLSmX5iThV4bmY"
+          },
+          {
+            "seq": 4,
+            "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
+            "digest": "RMvY3IjopwKqVL0KKK5OG_U_B5dW2TdDPNludE3a4BY"
+          },
+          {
+            "seq": 5,
+            "prev": "2yp_QSGUP2rvaBnhc8jWZtvSbwqIM1qpQJC5ikd3fKo",
+            "digest": "S49gTUv62lIlqSBPHpljrqxwm42prYDW9UMmhbNDy20"
+          }
+        ],
+        "items": "full",
+        "expected": {
+          "status": "mismatch",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
+        }
+      },
+      {
+        "name": "a baseline, a device on the other history, no log yet",
+        "manifest": "baseline",
+        "key": "main",
+        "keyEpoch": 2,
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "log": null,
+        "items": "full",
+        "expected": {
+          "status": "need_log",
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+          "live": 2,
+          "trashed": 1
         }
       }
     ],
@@ -10134,6 +11836,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 3,
           "trashed": 1,
           "acc": "9bab26427323bbd46f218cc60e50e7fa7ae09ddca38a009db164fcd589c9b5bd"
@@ -10184,6 +11887,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1,
           "acc": "b8da96487ff90689f3538a82f5730fd23364f551bf5102fdf82bc9139f6fdde0"
@@ -10234,6 +11938,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 1,
           "trashed": 2,
           "acc": "606fab41eef7a39b6bdc071865cdad81ae3535555ba76f38753651df79115c32"
@@ -10285,6 +11990,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 3,
           "trashed": 0,
           "acc": "c63ec1d121eb18e0501576dd8b672ae7bd4ca20e5dc9ea8906c0de2673701119"
@@ -10320,6 +12026,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 0,
           "acc": "c43e7d9eb6113633a63e77f2032c46b051ca8a28e909a128184ba6da8a899ebd"
@@ -10355,6 +12062,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 1,
           "trashed": 1,
           "acc": "4e2e96a1a79d1e758fdbf845041df9fc322e3d85c5296cb0d8fd79d8971a23c8"
@@ -10410,6 +12118,7 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 4,
           "trashed": 1,
           "acc": "16463d7bfb7e7cead94795981a97a4d353d81a109f6840df8d848df21357ef8c"
@@ -10444,9 +12153,70 @@
         ],
         "expected": {
           "seq": 4,
+          "prev": "5IfAUxws_0Kx_UpWRf_-UJsqdPZYfczFQRlMRf6eCiM",
           "live": 2,
           "trashed": 1,
           "acc": "dcaf12ccb40b35bb2f185926f99892729f462d73f6d54021d095552d911d02e8"
+        }
+      }
+    ],
+    "starts": [
+      {
+        "name": "a vault's first manifest",
+        "key": "main",
+        "keyEpoch": 2,
+        "version": 1,
+        "prev": null,
+        "items": "full",
+        "remembered": null,
+        "expected": {
+          "seq": 1,
+          "prev": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      {
+        "name": "a key replacement's manifest",
+        "key": "rotated",
+        "keyEpoch": 3,
+        "version": 6,
+        "prev": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc",
+        "items": "rotated",
+        "remembered": {
+          "version": 5,
+          "link": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        },
+        "expected": {
+          "seq": 6,
+          "prev": "lTSQzu-5dBZCjLyQdTsufkwWALVOFZ720WyuXDABCVc"
+        }
+      },
+      {
+        "name": "a baseline on the manifest the server shows",
+        "key": "main",
+        "keyEpoch": 2,
+        "version": 9,
+        "prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw",
+        "items": "full",
+        "remembered": {
+          "version": 5,
+          "link": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
+        },
+        "expected": {
+          "seq": 9,
+          "prev": "tTZQs9edGBjVspfd6GDvytH1bQ6aAhov7BD0NewcROw"
+        }
+      },
+      {
+        "name": "a baseline on a manifest that doesn't open",
+        "key": "main",
+        "keyEpoch": 2,
+        "version": 9,
+        "prev": "YHV65xgIDqzlAfumfbF4ImVsNSyNyhvkUNhffp4Kwhc",
+        "items": "full",
+        "remembered": null,
+        "expected": {
+          "seq": 9,
+          "prev": "YHV65xgIDqzlAfumfbF4ImVsNSyNyhvkUNhffp4Kwhc"
         }
       }
     ]

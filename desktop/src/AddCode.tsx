@@ -8,7 +8,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { ConfirmDialog, Icon, Modal, SheetActions, SiteIcon, toast } from "@web/components/ui";
 import { clearDraft, hasUnsavedEdit, openDraft } from "@web/lib/drafts";
 import { useShowIcons } from "@web/lib/prefs";
-import { siteHost, type VaultEntry } from "@web/lib/types";
+import { isTrashed, siteHost, type VaultEntry } from "@web/lib/types";
 import { useVault } from "@web/lib/vault";
 import { navigateTo } from "./bridge";
 import { otpLabel, parseOtpLink, type OtpKey } from "./otpauth";
@@ -157,7 +157,7 @@ function rankLogins(items: VaultEntry[], writable: Set<string>, issuer: string, 
   const related = (e: VaultEntry) =>
     !!iss && (e.item.name.toLowerCase().includes(iss) || (e.item.login?.urls ?? []).some((u) => u.url.toLowerCase().includes(iss)));
   return items
-    .filter((e) => !e.deletedAt && e.item.login && writable.has(e.vaultId))
+    .filter((e) => !isTrashed(e) && e.item.login && writable.has(e.vaultId))
     .filter(
       (e) =>
         !q ||

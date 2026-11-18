@@ -724,93 +724,134 @@ impl VaultKey {
     }
 
     /// Check this vault against its manifest after applying a sync answer:
-    /// `{status, version, live, trashed}` with `status` "none" (no manifest, none seen
-    /// before), "ok" (remember `version`), "rollback" (a lower version than `remembered`,
-    /// or none after one was seen), "mismatch" (the manifest doesn't open or the items
-    /// aren't what it records) or "incomplete" (an item has neither `data` nor
-    /// `data_sha256`: fetch the vault in full once). `manifest_seq` and `sealed` are the
-    /// vault row's `manifest_seq` and `manifest` (0 / null = none), `remembered` the
-    /// highest version this device saw for the vault (null = none), `items` every item
-    /// row of the vault as synced (`id`, `deleted_at`, `data` or `data_sha256`; other
-    /// fields are ignored). `version` is what to remember from now on.
+    /// `{status, version, link, live, trashed}` with `status` "none" (no manifest, none
+    /// seen before), "ok" (remember `version` and `link`), "rollback" (a lower version
+    /// than remembered, or none after one was seen), "mismatch" (the manifest doesn't
+    /// open, the items aren't what it records, or it isn't on the history this device
+    /// saw), "incomplete" (an item has neither `data` nor `data_sha256`: fetch the vault
+    /// in full once) or "need_log" (fetch the vault's manifest log after the remembered
+    /// version and call again with it as `log`). `manifest_seq`, `prev` and `sealed` are
+    /// the vault row's `manifest_seq`, `manifest_prev` and `manifest` (0 / null = none);
+    /// `remembered_version` and `remembered_link` what this device stored for the vault
+    /// (both or neither); `log` the log's entries (`[{seq, prev, digest}]`), null when
+    /// none was fetched; `items` every item row of the vault as synced (`id`,
+    /// `deleted_at`, `data` or `data_sha256`; other fields are ignored). `version` and
+    /// `link` are what to remember from now on (unchanged unless "ok").
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = manifestVerify)]
     pub fn manifest_verify(
         &self,
         #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
         key_epoch: f64,
         manifest_seq: f64,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] prev: JsValue,
         #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] sealed: JsValue,
-        remembered: Option<f64>,
+        remembered_version: Option<f64>,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")]
+        remembered_link: JsValue,
+        log: JsValue,
         items: JsValue,
     ) -> R<JsValue> {
-        let (vault_id, sealed) = (string(vault_id)?, opt_string(sealed)?);
+        let (vault_id, prev, sealed) = (string(vault_id)?, opt_string(prev)?, opt_string(sealed)?);
+        let remembered = match (remembered_version, opt_string(remembered_link)?) {
+            (None, None) => None,
+            (Some(version), Some(link)) => {
+                Some(manifest::Seen::parse(manifest_number(version)?, &link).map_err(js_err)?)
+            }
+            _ => {
+                return Err(JsError::new(
+                    "invalid input: a remembered manifest is a version and a link",
+                ));
+            }
+        };
+        let log: Option<Vec<manifest::LogEntry>> = if log.is_undefined() || log.is_null() {
+            None
+        } else {
+            Some(from_js(log)?)
+        };
         let items: Vec<manifest::Entry> = from_js(items)?;
         let check = manifest::verify(
             &self.0,
             &vault_id,
             manifest_number(key_epoch)?,
-            manifest_number(manifest_seq)?,
-            sealed.as_deref(),
-            remembered.map(manifest_number).transpose()?,
+            manifest::Row {
+                seq: manifest_number(manifest_seq)?,
+                prev: prev.as_deref(),
+                sealed: sealed.as_deref(),
+            },
+            remembered.as_ref(),
+            log.as_deref(),
             &items,
         )
         .map_err(js_err)?;
         to_js(&check)
     }
 
-    /// The sealed manifest of `version` for exactly `items` (every item row of the
-    /// vault, each with `data` or `data_sha256`): a vault's first manifest, a new
-    /// baseline, or the one a key replacement carries (called on the new key with the
-    /// new `key_epoch` and the re-encrypted items).
+    /// `{seq, prev, sealed, link}`: a manifest of `version` for exactly `items` (every
+    /// item row of the vault, each with `data` or `data_sha256`), replacing the manifest
+    /// whose link is `prev`: null for a vault's first manifest; for a new baseline and
+    /// for the one a key replacement carries (called on the new key with the new
+    /// `key_epoch` and the re-encrypted items), `manifestLink` of the vault row's
+    /// current manifest. `seq`, `prev` and `sealed` go into the request; `seq` and
+    /// `link` are what the device remembers once the server stored it.
     #[wasm_bindgen(js_name = manifestStart)]
     pub fn manifest_start(
         &self,
         #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
         key_epoch: f64,
         version: f64,
+        #[wasm_bindgen(unchecked_param_type = "string | null | undefined")] prev: JsValue,
         items: JsValue,
-    ) -> R<String> {
-        let vault_id = string(vault_id)?;
+    ) -> R<JsValue> {
+        let (vault_id, prev) = (string(vault_id)?, opt_string(prev)?);
         let items: Vec<manifest::Entry> = from_js(items)?;
-        manifest::start(
+        let written = manifest::start(
             &self.0,
             &vault_id,
             manifest_number(key_epoch)?,
             manifest_number(version)?,
+            prev.as_deref(),
             &items,
         )
-        .map_err(js_err)
+        .map_err(js_err)?;
+        to_js(&written)
     }
 
-    /// `{seq, sealed}` to send with a write into this vault: the manifest after it, one
-    /// version above the row's `manifest_seq` / `manifest` (`sealed`). `removed`: the
-    /// items as they were before the write (edited, trashed, restored, deleted, moved
-    /// out); `added`: as they are after it (new, edited, trashed, restored, moved in).
-    /// Only for a vault whose last `manifestVerify` was "ok".
+    /// `{seq, prev, sealed, link}` for a write into this vault: the manifest after it,
+    /// one version above the row's `manifest_seq` / `manifest_prev` (`prev`) /
+    /// `manifest` (`sealed`) and naming it as its predecessor. `removed`: the items as
+    /// they were before the write (edited, trashed, restored, deleted, moved out);
+    /// `added`: as they are after it (new, edited, trashed, restored, moved in). Only
+    /// for a vault whose last `manifestVerify` was "ok".
+    #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = manifestNext)]
     pub fn manifest_next(
         &self,
         #[wasm_bindgen(unchecked_param_type = "string")] vault_id: JsValue,
         key_epoch: f64,
         manifest_seq: f64,
+        #[wasm_bindgen(unchecked_param_type = "string")] prev: JsValue,
         #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
         removed: JsValue,
         added: JsValue,
     ) -> R<JsValue> {
-        let (vault_id, sealed) = (string(vault_id)?, string(sealed)?);
+        let (vault_id, prev, sealed) = (string(vault_id)?, string(prev)?, string(sealed)?);
         let removed: Vec<manifest::Entry> = from_js(removed)?;
         let added: Vec<manifest::Entry> = from_js(added)?;
-        let (seq, sealed) = manifest::advance(
+        let written = manifest::advance(
             &self.0,
             &vault_id,
             manifest_number(key_epoch)?,
-            manifest_number(manifest_seq)?,
-            &sealed,
+            manifest::Row {
+                seq: manifest_number(manifest_seq)?,
+                prev: Some(&prev),
+                sealed: Some(&sealed),
+            },
             &removed,
             &added,
         )
         .map_err(js_err)?;
-        to_js(&serde_json::json!({ "seq": seq, "sealed": sealed }))
+        to_js(&written)
     }
 
     #[wasm_bindgen(js_name = encryptMeta)]
@@ -1052,6 +1093,23 @@ pub fn create_account_with_kdf(
 
 fn manifest_number(n: f64) -> R<u64> {
     sharing::whole(n).ok_or_else(|| JsError::new("invalid manifest number"))
+}
+
+/// The link (base64url) of a vault row's manifest (`manifest_seq`, `manifest_prev`,
+/// `manifest`): what a new baseline or a key replacement's manifest names as `prev`.
+/// Nothing is opened or checked.
+#[wasm_bindgen(js_name = manifestLink)]
+pub fn manifest_link(
+    manifest_seq: f64,
+    #[wasm_bindgen(unchecked_param_type = "string")] prev: JsValue,
+    #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
+) -> R<String> {
+    manifest::row_link(
+        manifest_number(manifest_seq)?,
+        &string(prev)?,
+        &string(sealed)?,
+    )
+    .map_err(js_err)
 }
 
 /// base64url SHA-256 of an item's `data` string as stored: what the server sends as

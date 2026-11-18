@@ -1,7 +1,8 @@
 /**
  * Item rollback detection (ARCHITECTURE "Item edit counter"): every item carries an edit counter `rev` inside its
- * ciphertext, which the core raises on every write. This browser remembers, per account and next to the offline copy,
- * the highest `rev` it has seen for each item. A server that sends an item with a lower `rev` than that sends an older
+ * ciphertext, which the core raises on every write. This browser remembers, per account in its device memory
+ * (device-memory.ts: kept when the offline copy goes at a sign-out or a "log out" timeout), the highest `rev` it has
+ * seen for each item. A server that sends an item with a lower `rev` than that sends an older
  * version (an old password, say): the item is marked and shown with a warning, and when this browser still has the
  * newer copy, that copy is kept. The pure parts, unit-tested in item-revs.test.ts; vault.ts applies them where items
  * are decrypted.
@@ -17,7 +18,7 @@ export interface RevMemory {
   rolledBack: Map<string, RolledBack>;
 }
 
-/** As the offline copy keeps it (sync-rules.ts `StoredSync`). */
+/** As it is stored (device-memory.ts; offline copies written before that kept it themselves). */
 export interface StoredRevMemory {
   itemRevs?: Record<string, number>;
   rolledBack?: Record<string, RolledBack>;
@@ -37,7 +38,7 @@ export const itemRevOf = (item: unknown): number => {
   return count(r) ? r : 0;
 };
 
-/** The memory an offline copy holds (anything malformed in it is left out). */
+/** The memory as stored (anything malformed in it is left out). */
 export function readRevMemory(v: { itemRevs?: unknown; rolledBack?: unknown } | null | undefined): RevMemory {
   const m = emptyRevMemory();
   const revs = v?.itemRevs;
@@ -47,7 +48,7 @@ export function readRevMemory(v: { itemRevs?: unknown; rolledBack?: unknown } | 
   return m;
 }
 
-/** The memory as the offline copy keeps it. */
+/** The memory as it is stored. */
 export function storedRevMemory(m: RevMemory): StoredRevMemory {
   return {
     ...(m.revs.size ? { itemRevs: Object.fromEntries(m.revs) } : {}),
@@ -67,11 +68,18 @@ export function storedRevMemory(m: RevMemory): StoredRevMemory {
  */
 export function noteServed(m: RevMemory, id: string, served: number, verdict: string, changed: boolean, newerCopy: () => number | null): "show" | "keep" {
   if (verdict === "new" || verdict === "newer") {
+    // Deleted first: the map's order is "least recently seen first" (`capRevMemory`).
+    m.revs.delete(id);
     m.revs.set(id, served);
     m.rolledBack.delete(id);
     return "show";
   }
   if (verdict === "same") {
+    const known = m.revs.get(id);
+    if (known !== undefined) {
+      m.revs.delete(id);
+      m.revs.set(id, known);
+    }
     if (changed) m.rolledBack.delete(id);
     return "show";
   }
@@ -86,10 +94,34 @@ export function noteServed(m: RevMemory, id: string, served: number, verdict: st
   return "show";
 }
 
-/** Forget items that are gone for good (not in the account's rows any more). */
-export function pruneRevMemory(m: RevMemory, live: { has(id: string): boolean }): void {
-  for (const id of [...m.revs.keys()]) if (!live.has(id)) m.revs.delete(id);
-  for (const id of [...m.rolledBack.keys()]) if (!live.has(id)) m.rolledBack.delete(id);
+/** How many item edit counters are remembered at most. */
+export const REV_MEMORY_CAP = 20_000;
+
+/**
+ * Forget an item: only when its absence is proven. Either this browser deleted it for good itself, or it is absent
+ * from a vault whose manifest checked "ok" for that very answer. An item a server merely leaves out of an answer
+ * keeps its counter: else the server could hide it once and then send an older version unnoticed.
+ */
+export function forgetRev(m: RevMemory, id: string): void {
+  m.revs.delete(id);
+  m.rolledBack.delete(id);
+}
+
+/**
+ * Keep at most `cap` counters: the least recently seen go first, items this browser doesn't hold any more before
+ * ones it holds (`present`). Marks of forgotten items go with them.
+ */
+export function capRevMemory(m: RevMemory, present: { has(id: string): boolean }, cap = REV_MEMORY_CAP): void {
+  let over = m.revs.size - cap;
+  if (over <= 0) return;
+  for (const pass of [false, true]) {
+    for (const id of [...m.revs.keys()]) {
+      if (over <= 0) return;
+      if (!pass && present.has(id)) continue;
+      forgetRev(m, id);
+      over--;
+    }
+  }
 }
 
 /** The vault-wide notice (with a key that changes with the set, for dismissing), or null when nothing is marked. */

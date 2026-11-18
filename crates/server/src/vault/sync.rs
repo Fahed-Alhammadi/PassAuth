@@ -140,10 +140,12 @@ struct VaultRow {
     share_signer_identity: Option<String>,
     #[serde(skip)]
     signer_gone: i64,
-    /// Vault manifest (`manifest.rs`): the sealed record of the vault's items and its
-    /// version (0 = none), read in the same snapshot as the items.
+    /// Vault manifest (`manifest.rs`): the sealed record of the vault's items, its
+    /// version (0 = none) and the link of the manifest it replaced, read in the same
+    /// snapshot as the items.
     manifest: Option<String>,
     manifest_seq: i64,
+    manifest_prev: Option<String>,
     /// A vault without a manifest: whether its first one may be started now (every
     /// signed-in app of every member keeps manifests). True once it has one. A
     /// compatibility hint: a server saying false only delays the start.
@@ -401,7 +403,7 @@ pub(super) async fn sync(
                 v.seq, v.horizon, v.member_roster, v.member_roster_seq, m.share_signature,
                 m.share_signer_identity,
                 CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS signer_gone,
-                v.manifest, v.manifest_seq
+                v.manifest, v.manifest_seq, v.manifest_prev
          FROM vaults v JOIN vault_members m ON m.vault_id = v.id
          LEFT JOIN users s ON s.id = m.share_signer
          WHERE m.user_id = $1 AND m.status = 'active' ORDER BY v.created_at",

@@ -16,7 +16,7 @@
  * grantor's vaults opens the sealed key, then each wrapped vault key. Everything decrypted stays in memory (the page's
  * state) and every key handle is freed as soon as it has been used.
  */
-import { verifyVault } from "./manifest";
+import { checkView } from "./manifest";
 import * as core from "../wasm/passauth_core";
 import { ApiError, UnreachableError, api, friendlyError, hasErrorCode, hasFeature, knownPublicConfig, loadPublicConfig } from "./api";
 import {
@@ -622,8 +622,11 @@ export interface GrantorEntry {
 /** A grantor's vaults, decrypted for viewing: memory only. */
 export interface GrantorVault {
   grant: Grant;
-  /** `warning`: the vault's items don't match its manifest (`VAULT_WARNING` is shown; the view stays read-only as ever). */
-  vaults: { id: string; name: string; warning?: boolean }[];
+  /**
+   * `warning`: the vault's items don't match its manifest, or one of them can't be opened (`VAULT_WARNING` is shown;
+   * the view stays read-only as ever). `unchecked`: the vault has no manifest, so nothing could be checked.
+   */
+  vaults: { id: string; name: string; warning?: boolean; unchecked?: boolean }[];
   items: GrantorEntry[];
   /** Items (and vaults' items) that couldn't be decrypted. */
   failed: number;
@@ -672,25 +675,18 @@ export async function openGrantorVault(id: string): Promise<GrantorVault> {
         } catch {
           /* keep the generic name */
         }
-        // Vault manifests: a vault that has one is checked against exactly the rows of this answer. There is no device
-        // memory for someone else's vault, and nothing is written.
-        const warning =
-          v.manifestSeq !== 0 &&
-          (data.malformed > 0 ||
-            verifyVault(
-              vaultKey,
-              { id: v.id, key_epoch: v.keyEpoch ?? undefined, manifest: v.manifest, manifest_seq: v.manifestSeq },
-              undefined,
-              rows.map((r) => ({ id: r.row.id, deleted_at: r.deletedAt, data: r.row.data })),
-            ).status !== "ok");
-        vaults.push({ id: v.id, name, ...(warning ? { warning } : {}) });
-        for (const r of rows) {
-          try {
-            items.push({ id: r.row.id, vaultId: v.id, item: vaultKey.decryptItem(r.row) as Item, deletedAt: r.deletedAt });
-          } catch {
-            failed++;
-          }
-        }
+        // Vault manifests: a vault that has one is checked against exactly the rows of this answer (`checkView`).
+        // There is no device memory for someone else's vault, and nothing is written.
+        const view = checkView(
+          vaultKey,
+          v,
+          rows.map((r) => ({ id: r.row.id, deletedAt: r.deletedAt, data: r.row.data, row: r.row })),
+          data.malformed,
+          (r) => vaultKey.decryptItem(r.row),
+        );
+        vaults.push({ id: v.id, name, ...(view.warning ? { warning: true } : {}), ...(view.unchecked ? { unchecked: true } : {}) });
+        for (const o of view.opened) items.push({ id: o.row.id, vaultId: v.id, item: o.value as Item, deletedAt: o.row.deletedAt });
+        failed += view.failed;
       } finally {
         vaultKey.free();
       }

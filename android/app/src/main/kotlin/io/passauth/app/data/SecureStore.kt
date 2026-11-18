@@ -86,48 +86,27 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
         if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
     }.getOrNull()
 
-    private fun revsFile(id: String) = File(File(context.noBackupFilesDir, "vault"), "$id.revs")
+    private fun memory(id: String, kind: String) = SealedFile(
+        File(File(context.noBackupFilesDir, "vault"), "$id.$kind"),
+        seal = { Keystore.encrypt(Keystore.storeKey(), it) },
+        open = { Keystore.decrypt(Keystore.storeKey(), it) },
+    )
 
     /** The highest item edit counters this phone saw of account [id] ([ItemRevs]), with the offline copy. */
-    fun writeRevs(id: String, json: String) {
-        val f = revsFile(id)
-        f.parentFile?.mkdirs()
-        val tmp = File(f.parentFile, "${f.name}.tmp")
-        tmp.writeBytes(Keystore.encrypt(Keystore.storeKey(), json.encodeToByteArray()))
-        tmp.renameTo(f)
-    }
+    fun revs(id: String): SealedFile = memory(id, "revs")
 
-    fun readRevs(id: String): String? = runCatching {
-        val f = revsFile(id)
-        if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
-    }.getOrNull()
+    /** The version and link of the last manifest this phone checked or wrote of each vault of account [id] ([Manifests]), with the offline copy. */
+    fun manifests(id: String): SealedFile = memory(id, "manifests")
 
-    private fun manifestsFile(id: String) = File(File(context.noBackupFilesDir, "vault"), "$id.manifests")
+    /** When this phone first saw each trashed item of account [id] in the trash ([TrashSeen]), with the offline copy. */
+    fun trashSeen(id: String): SealedFile = memory(id, "trashseen")
 
-    /**
-     * The highest manifest version this phone saw of each vault of account [id] ([Manifests]), kept
-     * with the offline copy. A write merges with what the file holds ([merge]: never lowered).
-     */
-    @Synchronized
-    fun writeManifests(id: String, merge: (String?) -> String) {
-        val f = manifestsFile(id)
-        f.parentFile?.mkdirs()
-        val json = merge(readManifests(id))
-        val tmp = File(f.parentFile, "${f.name}.tmp")
-        tmp.writeBytes(Keystore.encrypt(Keystore.storeKey(), json.encodeToByteArray()))
-        tmp.renameTo(f)
-    }
-
-    fun readManifests(id: String): String? = runCatching {
-        val f = manifestsFile(id)
-        if (!f.exists()) null else Keystore.decrypt(Keystore.storeKey(), f.readBytes()).decodeToString()
-    }.getOrNull()
-
-    /** Deletes account [id]'s offline copy (with its item edit counters and manifest versions) and its profile picture (log out, account removed). */
+    /** Deletes account [id]'s offline copy (with its item edit counters, manifest memory and trash times) and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
         cacheFile(id).delete()
-        revsFile(id).delete()
-        manifestsFile(id).delete()
+        revs(id).delete()
+        manifests(id).delete()
+        trashSeen(id).delete()
         avatars.delete(id)
     }
 
@@ -139,4 +118,63 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
         seal = { Keystore.encrypt(Keystore.storeKey(), it) },
         open = { Keystore.decrypt(Keystore.storeKey(), it) },
     )
+}
+
+/**
+ * A small sealed file of what this phone remembers (item edit counters, manifest versions). A file
+ * that is there but can't be opened right now (a Keystore hiccup) is not an empty one: it is never
+ * read as "nothing remembered" and never written over, or one bad read would wipe the memory the
+ * rollback checks rest on. [seal]/[open]: the store key's encryption (fakes in tests).
+ */
+class SealedFile(private val file: File, private val seal: (ByteArray) -> ByteArray, private val open: (ByteArray) -> ByteArray) {
+    sealed interface Read {
+        /** No file: nothing was ever remembered. */
+        data object Missing : Read
+
+        /** A file that doesn't open now: unknown, not empty. */
+        data object Unreadable : Read
+
+        data class Text(val text: String) : Read
+    }
+
+    fun read(): Read = synchronized(lock) {
+        if (!file.exists()) return Read.Missing
+        try {
+            Read.Text(open(file.readBytes()).decodeToString())
+        } catch (_: Exception) {
+            Read.Unreadable
+        }
+    }
+
+    /**
+     * Write what [merge] makes of the text the file holds now (null: no file yet). False, and
+     * nothing written, while the file is unreadable.
+     */
+    fun write(merge: (String?) -> String): Boolean = synchronized(lock) {
+        val now = when (val r = read()) {
+            Read.Unreadable -> return false
+            Read.Missing -> null
+            is Read.Text -> r.text
+        }
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.writeBytes(seal(merge(now).encodeToByteArray()))
+        if (!tmp.renameTo(file)) {
+            tmp.delete()
+            return false
+        }
+        true
+    }
+
+    fun delete() {
+        synchronized(lock) {
+            file.delete()
+            File(file.parentFile, "${file.name}.tmp").delete()
+        }
+    }
+
+    private companion object {
+        /** One writer at a time across every sealed file (they are small and rarely written). */
+        val lock = Any()
+    }
 }

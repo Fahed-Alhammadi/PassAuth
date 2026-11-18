@@ -268,9 +268,12 @@ export const seenKey = (scope: string) => `${SEEN_PREFIX}${scope}`;
 const ITEM_REVS_PREFIX = "pa.item-revs.";
 /** Vault manifest versions seen here (`manifest.ts`, same prefix): device memory per server and account like the rest. */
 const MANIFESTS_PREFIX = "pa.vault-manifests.";
+/** When this device first saw each trashed item in the trash (`manifest.ts`), and the features each server listed (`vault.ts`). */
+const TRASH_SEEN_PREFIX = "pa.trash-seen.";
+const FEATURES_PREFIX = "pa.server-features.";
 /** Whether a local-storage key holds trust memory (kept when the desktop app changes server: it is per server and account). */
 export const isTrustMemoryKey = (key: string) =>
-  key.startsWith(MEMORY_PREFIX) || key.startsWith(PINS_PREFIX) || key.startsWith(SEEN_PREFIX) || key.startsWith(ITEM_REVS_PREFIX) || key.startsWith(MANIFESTS_PREFIX);
+  key.startsWith(MEMORY_PREFIX) || key.startsWith(PINS_PREFIX) || key.startsWith(SEEN_PREFIX) || key.startsWith(ITEM_REVS_PREFIX) || key.startsWith(MANIFESTS_PREFIX) || key.startsWith(TRASH_SEEN_PREFIX) || key.startsWith(FEATURES_PREFIX);
 
 const GENERATED_MAX = 4;
 /** Vault ids kept in the list of vaults seen here (more are never grandfathered: decline or accept by consent). */

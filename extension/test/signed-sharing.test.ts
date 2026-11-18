@@ -16,7 +16,7 @@ import { fromB64u } from "./helpers";
 
 const vault = await import("../src/background/vault");
 const storage = await import("../src/background/storage");
-const { forgetServerFeatures, SERVER_UPDATE_TEXT } = await import("../src/background/api");
+const { forgetServerFeatures, SERVER_UPDATE_TEXT, UNREACHABLE_TEXT } = await import("../src/background/api");
 const ss = await import("../src/background/signed-sharing");
 
 // ------------------------------------------------------------------ vectors
@@ -1174,17 +1174,30 @@ test("worker: a server that drops signed sharing is refused: its unsigned share 
   expect(names()).toStrictEqual(["Own", "Team login"]);
 });
 
-test("worker: a server whose features can't be read gets no benefit of the doubt: rows without key epochs are checked (and refused), never used unchecked", async () => {
-  // A new browser, `/api/config` failing, and rows made to look like an old server's (no key epochs, nothing signed).
-  await bobSignedIn({
+test("worker: a server whose features can't be read gets no benefit of the doubt: a new browser doesn't use it at all; one that knew it as signing checks its rows (and refuses them), never unchecked", async () => {
+  // Rows made to look like an old server's (no key epochs, nothing signed), with `/api/config` failing.
+  const setup = (): Setup => ({
     identity: null,
     pins: () => null,
     shared: (w) => ({ wrapped_key: w.key.shareTo(VID, who("bob").public_key), share: undefined, member_roster: undefined, member_roster_seq: undefined, key_epoch: undefined }),
+    noUnlock: true,
     beforeUnlock: () => {
       server.handlers["GET /config"] = () => ({ status: 500, body: {} });
       userField("key_pins_seq", undefined);
     },
   });
+  // A new browser (no feature list ever read from this server): "can't reach", and no sync answer is asked for or used.
+  await bobSignedIn(setup());
+  await expect(vault.ensureUnlocked()).rejects.toThrow(UNREACHABLE_TEXT);
+  await expect(vault.sync()).rejects.toThrow(UNREACHABLE_TEXT);
+  await expect(vault.login("bob@example.com", "pw")).rejects.toThrow(UNREACHABLE_TEXT);
+  expect([...new Set(server.requests.map((r) => r.path))]).toStrictEqual(["/config"]);
+  expect(names()).toStrictEqual([]);
+  expect(await storage.syncCache.get("a1")).toBeUndefined();
+  // A browser that read `signed_sharing` from this server before: it goes on (offline use), with the checks on.
+  await bobSignedIn(setup());
+  await storage.knownFeatures.set("https://vault.test", SIGNED_FEATURES);
+  expect(await vault.ensureUnlocked()).toBe(true);
   expect(names()).toStrictEqual(["Own"]);
   expect((await storage.syncCache.get("a1"))?.checks).toBeUndefined();
 });
@@ -1371,15 +1384,19 @@ test("B: an upload whose answer was lost still counts as made here once the serv
 });
 
 test("A: while the server's features are unknown the checks run, but nothing turns them on for good; known again as a server that doesn't sign: refused", async () => {
+  // (A browser that read this server's feature list before: without one, a server whose config fails isn't used at all.)
   await bobSignedIn({
     identity: null,
     pins: () => null,
     shared: unsignedShare,
+    noUnlock: true,
     beforeUnlock: () => {
       server.handlers["GET /config"] = () => ({ status: 500, body: {} });
       userField("key_pins_seq", undefined);
     },
   });
+  await storage.knownFeatures.set("https://vault.test", SIGNED_FEATURES);
+  expect(await vault.ensureUnlocked()).toBe(true);
   // Checked (unknown is never "off"): the unsigned share waits…
   expect(names()).toStrictEqual(["Own"]);
   // …but nothing was kept that would keep the checks on, and no identity was made for a server that may not sign.

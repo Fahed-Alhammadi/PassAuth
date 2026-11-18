@@ -44,7 +44,7 @@ vi.mock("./api", async (importOriginal) => {
 vi.mock("./vault", () => ({ getAccount: () => h.account }));
 vi.stubGlobal("location", new URL("https://vault.example.test/"));
 
-import { createSend, nameOf, textOf, updateSend, getSend } from "./send-client";
+import { SEND_PASSWORD_NEEDS_V2, SEND_UNREADABLE, createSend, getSend, nameOf, sendFormat, textOf, updateSend } from "./send-client";
 import { sendKeysHere } from "./send-kdf";
 import { readSend, type OwnedSend } from "./sends";
 
@@ -91,16 +91,67 @@ describe("Send v2 (password-derived content key)", () => {
     expect(textOf(await getSend(send.id))).toBe("hunter2");
   }, 60_000);
 
-  it("stays v1 without a password, and on a server without send_v2", async () => {
+  it("stays v1 without a password; a password is never written v1: a server without send_v2 gets no password Send (core M4a)", async () => {
     await createSend({ ...base, name: "Note", text: "plain", password: null });
     expect(version(lastBody().name)).toBe(1);
     expect(lastBody().owner_content_key).toBeUndefined();
     h.features = ["sends"];
-    const { send } = await createSend({ ...base, name: "Old", text: "server", password: PW });
+    h.calls = [];
+    await expect(createSend({ ...base, name: "Old", text: "server", password: PW })).rejects.toThrow(SEND_PASSWORD_NEEDS_V2);
+    expect(SEND_PASSWORD_NEEDS_V2).toBe("Update your PassAuth server to protect a Send with a password.");
+    // Nothing was sent, and a Send without a password still works there.
+    expect(h.calls).toEqual([]);
+    await createSend({ ...base, name: "Plain", text: "ok", password: null });
     expect(version(lastBody().data)).toBe(1);
-    expect(lastBody().owner_content_key).toBeUndefined();
-    expect(lastBody().access_verifier).toEqual(expect.any(String));
-    expect(textOf(await getSend(send.id))).toBe("server");
+  }, 60_000);
+
+  it("a server that stops listing send_v2 can't downgrade a Send: no password is set or changed there, a v2 Send stays v2 (review 7 / core M4b)", async () => {
+    const { send, link } = await createSend({ ...base, name: "Wi-Fi", text: "one", password: PW });
+    const plain = (await createSend({ ...base, name: "Note", text: "plain", password: null })).send;
+    h.features = ["sends"];
+    h.calls = [];
+    // Changing the password of a v2 Send, or giving a v1 Send one: refused here, nothing sent.
+    await expect(updateSend(send, { password: "another one" })).rejects.toThrow(SEND_PASSWORD_NEEDS_V2);
+    await expect(updateSend(send, { password: "another one", text: "x" })).rejects.toThrow(SEND_PASSWORD_NEEDS_V2);
+    await expect(updateSend(plain, { password: PW })).rejects.toThrow(SEND_PASSWORD_NEEDS_V2);
+    expect(h.calls).toEqual([]);
+    // Editing the text of the v2 Send keeps it v2 (its own content key), whatever the server lists.
+    const s = await updateSend(send, { text: "two", name: "Wi-Fi 2" });
+    expect(version(lastBody().data)).toBe(2);
+    expect(version(lastBody().name)).toBe(2);
+    expect(lastBody()).not.toHaveProperty("owner_content_key");
+    expect(lastBody()).not.toHaveProperty("access_verifier");
+    expect(() => core.sendOpen(linkKey(link), null, "data", lastBody().data as string)).toThrow();
+    expect(textOf(await getSend(s.id))).toBe("two");
+    // Taking the password away is the owner's choice and still goes back to v1.
+    await updateSend(s, { password: null });
+    expect(lastBody()).toMatchObject({ access_verifier: null, owner_content_key: null });
+    expect(version(lastBody().data)).toBe(1);
+  }, 60_000);
+
+  it("the format is read from the fields, not from a list: a Send whose content key and text disagree is unreadable and never rewritten (contract 7c)", async () => {
+    const { send } = await createSend({ ...base, name: "Wi-Fi", text: "x", password: PW });
+    const full = await getSend(send.id);
+    expect(sendFormat(full)).toBe(2);
+    const plain = await getSend((await createSend({ ...base, name: "Note", text: "plain", password: null })).send.id);
+    expect(sendFormat(plain)).toBe(1);
+    // The server drops the content key of a v2 Send, or hands a v1 Send someone's key, or sends garbage.
+    const dropped: OwnedSend = { ...full, ownerContentKey: null };
+    const planted: OwnedSend = { ...plain, ownerContentKey: full.ownerContentKey };
+    const garbage: OwnedSend = { ...plain, name: "zzzz" };
+    h.calls = [];
+    for (const bad of [dropped, planted, garbage]) {
+      expect(sendFormat(bad)).toBeNull();
+      expect(nameOf(bad)).toBeNull();
+      expect(() => textOf(bad)).toThrow();
+      await expect(updateSend(bad, { text: "repaired" })).rejects.toThrow(SEND_UNREADABLE);
+      await expect(updateSend(bad, { password: null })).rejects.toThrow(SEND_UNREADABLE);
+      await expect(updateSend(bad, { password: PW })).rejects.toThrow(SEND_UNREADABLE);
+    }
+    expect(h.calls).toEqual([]);
+    // Its settings can still be changed (to switch it off), which sends no text.
+    await updateSend(dropped, { disabled: true });
+    expect(lastBody()).toEqual({ disabled: true });
   }, 60_000);
 
   it("edits keep the format; a new password re-keys both fields; removing it goes back to v1", async () => {

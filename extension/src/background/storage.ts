@@ -15,6 +15,10 @@
  *   origin's IndexedDB, so the vault opens offline and after a service-worker
  *   restart without downloading everything again. Content scripts can't reach
  *   the extension's IndexedDB.
+ * - deviceMemory: what this browser remembers per account to notice a rollback (item edit counters, vault manifest
+ *   versions and links, when it first saw items in the trash), in the same IndexedDB store under its own key. It is
+ *   NOT part of the offline copy: a vault timeout that signs out removes the copy, never this memory.
+ * - knownFeatures: per server address, the feature list of the last `/api/config` this browser read.
  */
 import type { Bundle, SyncResponse } from "@web/lib/types";
 import { log, logged } from "../shared/log";
@@ -238,7 +242,11 @@ export const local = {
       await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id)]);
       await forgetLastUsed(id);
       await syncCache.clear(id);
-      if (gone?.server && gone.userId) await trustMemory.clear(gone.server, gone.userId);
+      if (gone?.server && gone.userId) {
+        await trustMemory.clear(gone.server, gone.userId);
+        // What this browser remembered to notice a rollback goes only here: with the account, never at a sign-out.
+        await deviceMemory.clear(gone.server, gone.userId);
+      }
     }),
 
   /** One account's record without reading everything else (hot path: every API request). */
@@ -464,4 +472,51 @@ export const trustMemory = {
     }),
   clear: (server: string, userId: string): Promise<void> =>
     inOrder(() => tx("readwrite", (s) => s.delete(trustKey(server, userId)))).then(() => {}, logged("Removing what this browser trusted for signed sharing")),
+};
+
+/** The device memory's key: like the trust memory's, the server's address as stored and the account id the core authenticated. */
+const deviceKey = (server: string, userId: string) => `device:${server}|${userId}`;
+
+/**
+ * What this browser remembers for one account to notice a rollback (device-memory.ts `StoredDeviceMemory`): the
+ * highest item edit counters seen, the items marked, per vault the version and link of the last manifest checked, and
+ * when each trashed item was first seen in the trash. In the same IndexedDB store as the offline copies, under its
+ * own key (never the server's `user.id`), so it outlives the offline copy: a vault timeout with the "log out" action
+ * and a sign-out remove the copy, and this stays until the account is removed from the browser
+ * (`local.removeAccount`). `read` rejects when the read fails: what can't be read is never taken for "nothing
+ * remembered" (the checks wait, nothing is overwritten). `update` reads, merges and writes in one queued step; a read
+ * that fails rejects and nothing is written.
+ */
+export const deviceMemory = {
+  read: (server: string, userId: string): Promise<unknown> => inOrder(() => tx<unknown>("readonly", (s) => s.get(deviceKey(server, userId)))),
+  update: <T>(server: string, userId: string, fn: (stored: unknown) => T): Promise<T> =>
+    inOrder(async () => {
+      const key = deviceKey(server, userId);
+      const stored = await tx<unknown>("readonly", (s) => s.get(key));
+      const next = fn(stored);
+      await tx("readwrite", (s) => s.put(next, key));
+      return next;
+    }),
+  clear: (server: string, userId: string): Promise<void> =>
+    inOrder(() => tx("readwrite", (s) => s.delete(deviceKey(server, userId)))).then(() => {}, logged("Removing what this browser remembered about the vault's versions")),
+};
+
+const FEATURES_KEY = "serverFeatures";
+
+/**
+ * Per server address, the feature list of the last `/api/config` this browser read (api.ts). With it, a server whose
+ * config can't be fetched right now is still known to be one this app works with (offline use); without it, such a
+ * server is not used at all: a server can't dodge the "signed sharing required" check by breaking `/api/config`.
+ */
+export const knownFeatures = {
+  async get(server: string): Promise<string[] | null> {
+    const all = ((await chrome.storage.local.get(FEATURES_KEY)) as Record<string, unknown>)[FEATURES_KEY] as Record<string, unknown> | undefined;
+    const list = all && typeof all === "object" ? all[server] : undefined;
+    return Array.isArray(list) ? list.filter((f): f is string => typeof f === "string") : null;
+  },
+  set: (server: string, features: string[]): Promise<void> =>
+    serial(async () => {
+      const all = (((await chrome.storage.local.get(FEATURES_KEY)) as Record<string, unknown>)[FEATURES_KEY] as Record<string, string[]> | undefined) ?? {};
+      await chrome.storage.local.set({ [FEATURES_KEY]: { ...all, [server]: features } });
+    }),
 };

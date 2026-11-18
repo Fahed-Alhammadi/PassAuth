@@ -28,6 +28,9 @@ import kotlinx.serialization.json.put
  *   never the "changed on another device, overwrite?" conflict.
  */
 object ItemWrites {
+    /** After a retry's sync the item is no longer there (deleted for good or moved to the trash elsewhere): nothing to save over. */
+    const val DELETED_ELSEWHERE = "This item was deleted on another device."
+
     /** [send] asks for the sync-and-retry of a manifest conflict itself (its copy can't make the manifest). */
     class StaleCopy : Exception()
 
@@ -85,8 +88,8 @@ object ItemWrites {
 
     /**
      * [send] encrypts the change for the given entry (its key wrapping and revision) and puts it.
-     * [resync] syncs and returns the item as the server has it now (null if gone). Any other 409
-     * is a [ConflictException] (the item changed elsewhere); a manifest conflict never is.
+     * [resync] syncs and returns the item as the server has it now (null if gone: [DELETED_ELSEWHERE]).
+     * Any other 409 is a [ConflictException] (the item changed elsewhere); a manifest conflict never is.
      */
     suspend fun update(base: Entry, send: suspend (Entry) -> Unit, resync: suspend () -> Entry?) {
         var entry = base
@@ -106,8 +109,8 @@ object ItemWrites {
                 }
             }
             // The item as the server has it now: the change goes ahead only on the content it was made to.
-            val fresh = resync()
-            if (fresh == null || fresh.vaultId != base.vaultId || fresh.item != base.item) throw ConflictException()
+            val fresh = resync() ?: throw UserException(DELETED_ELSEWHERE)
+            if (fresh.vaultId != base.vaultId || fresh.item != base.item) throw ConflictException()
             entry = fresh
         }
     }

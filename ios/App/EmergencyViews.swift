@@ -751,6 +751,12 @@ private struct GrantorVaultPage: View {
                             .font(.footnote).foregroundStyle(Color.paDanger)
                             .accessibilityIdentifier("emergency.manifestWarning")
                     }
+                    // A vault without a record of changes: nothing to check it against.
+                    ForEach(o.vaults.filter { o.unchecked.contains($0.id) }, id: \.id) { v in
+                        Text("\(v.name): \(ManifestText.viewUnchecked)")
+                            .font(.footnote).foregroundStyle(Color.paMuted)
+                            .accessibilityIdentifier("emergency.manifestUnchecked")
+                    }
                 }
             }
             .paRow()

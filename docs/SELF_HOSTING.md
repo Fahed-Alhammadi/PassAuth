@@ -72,7 +72,7 @@ Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign i
 - open or close sign-ups, or limit them to email domains,
 - set up email delivery and send a test email,
 - choose whether new accounts must confirm their email, whether the server fetches website icons, and how much it logs,
-- empty the trash automatically after 30, 60 or 90 days (off by default: deleted items stay in the trash until someone empties it),
+- empty the trash automatically after 30, 60 or 90 days (off by default: deleted items stay in the trash until someone empties it). In vaults that keep a record of their changes (every vault once all its members' apps are up to date) the apps do this, not the server, so old trash stays until someone who can edit the vault opens it in an app,
 - set limits: how long a sign-in lasts and how long a device may stay offline or skip two-step login, sign-in and two-step attempt limits, the largest item and import, an item or storage quota per user (off by default), live-sync connection checks, and how long deletions are kept for apps that sync only changes,
 - see the server's activity log (sign-ins and failed attempts, admin actions, vault, sharing and item changes; ids only, never vault contents), kept 365 days by default (30 days to 10 years), and choose whether it records IP addresses (on by default; turning it off also erases the ones kept),
 - keep earlier versions of items so users can restore them (10 per item by default, up to 100; 0 turns history off). Versions count toward storage quotas,

@@ -576,8 +576,11 @@ export interface GrantorVaultData {
   /** The key scheme; null from servers before emergency keys (whose sealed key this app can't open). */
   keyVersion: number | null;
   sealedKey: string;
-  /** `manifest` / `manifestSeq` (0: none) / `keyEpoch`: the vault's manifest, from the same snapshot as the items. */
-  vaults: { id: string; meta: string; wrappedKey: string; keyEpoch: number | null; manifest: string | null; manifestSeq: number }[];
+  /**
+   * `manifest` / `manifestSeq` (0: none) / `manifestPrev` (the link of the manifest it replaced) / `keyEpoch`: the
+   * vault's manifest, from the same snapshot as the items.
+   */
+  vaults: { id: string; meta: string; wrappedKey: string; keyEpoch: number | null; manifest: string | null; manifestSeq: number; manifestPrev: string | null }[];
   items: { row: EncryptedItem; deletedAt: number | null; updatedAt: number }[];
   /** Item rows of the answer this app couldn't read (left out of `items`), by vault where the row named one. */
   malformed: number;
@@ -601,19 +604,22 @@ export function readGrantorVault(value: unknown): GrantorVaultData | null {
         manifest: str(r.manifest) || null,
         // Anything but a whole number above 0 that this app can carry is "none", except a value that isn't one at all.
         manifestSeq: r.manifest_seq === undefined || r.manifest_seq === null ? 0 : typeof r.manifest_seq === "number" && Number.isSafeInteger(r.manifest_seq) && r.manifest_seq >= 0 ? r.manifest_seq : -1,
+        manifestPrev: str(r.manifest_prev) || null,
       });
   }
   const items: GrantorVaultData["items"] = [];
   let malformed = 0;
   for (const raw of v.items) {
     const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
-    if (!r || !str(r.id) || !str(r.vault_id) || !str(r.item_key) || !str(r.data)) {
+    // In the trash exactly when `deleted_at` is not null; anything that is neither null nor a whole number is no row.
+    const at = r?.deleted_at ?? null;
+    if (!r || !str(r.id) || !str(r.vault_id) || !str(r.item_key) || !str(r.data) || (at !== null && !(typeof at === "number" && Number.isSafeInteger(at) && at >= 0))) {
       malformed++;
       continue;
     }
     items.push({
       row: { id: str(r.id), vault_id: str(r.vault_id), key: str(r.item_key), data: str(r.data) },
-      deletedAt: num(r.deleted_at),
+      deletedAt: at as number | null,
       updatedAt: num(r.updated_at) ?? 0,
     });
   }

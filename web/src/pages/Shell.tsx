@@ -13,7 +13,7 @@ import { USE_SERVER_COPY, USE_SERVER_COPY_BODY, USE_SERVER_COPY_TITLE, VAULT_WAR
 import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
 import { ROSTER_ROLLED_BACK, ROSTER_UNREADABLE } from "../lib/emergency-client";
 import { acceptServerCopy, dismissWarnings, lock, logout, useVault } from "../lib/vault";
-import { kindOf, type ItemKind } from "../lib/types";
+import { isTrashed, kindOf, type ItemKind } from "../lib/types";
 
 const KINDS: [ItemKind, string, IconName][] = [
   ["login", "Logins", "globe"],
@@ -31,7 +31,7 @@ function useCounts() {
   const counts = { all: 0, favorites: 0, login: 0, note: 0, card: 0, identity: 0, ssh_key: 0 } as Record<string, number>;
   const folders = new Set<string>();
   for (const e of items) {
-    if (e.deletedAt) continue;
+    if (isTrashed(e)) continue;
     counts.all++;
     if (e.item.favorite) counts.favorites++;
     counts[kindOf(e.item)]++;

@@ -3,6 +3,7 @@ import {
   UNEXPECTED_RESPONSE,
   expectStrings,
   isSyncResponse,
+  isTrashed,
   readFoundUser,
   readLoginFinish,
   readMembers,
@@ -96,5 +97,30 @@ describe("checking the server's answers", () => {
     expect(readFoundUser({ user_id: "u2", name: "Sam", public_key: "pk" })).toEqual({ user_id: "u2", name: "Sam", public_key: "pk" });
     expect(readFoundUser({ user_id: "u2", public_key: "pk" })).toEqual({ user_id: "u2", name: "", public_key: "pk" });
     expect(readFoundUser({ user_id: "u2", name: "Sam", public_key: HUGE })).toBeNull();
+  });
+});
+
+describe("the trash state (core M2 / R6)", () => {
+  it("is exactly: deletedAt is not null", () => {
+    expect(isTrashed({ deletedAt: null })).toBe(false);
+    expect(isTrashed({ deletedAt: 1700000000 })).toBe(true);
+    // A row a server sends with `deleted_at: 0` is in the trash, like the core counts it (never "falsy = live").
+    expect(isTrashed({ deletedAt: 0 })).toBe(true);
+  });
+
+  it("no page, component or library decides it by truthiness", () => {
+    const sources = import.meta.glob(["../**/*.ts", "../**/*.tsx", "!../wasm/**", "!../**/*.test.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(40);
+    const falsy = /(!+\s*\w+(\?)?\.(deletedAt|deleted_at)\b)|(\b\w+(\?)?\.(deletedAt|deleted_at)\s*(\?|&&|\|\||\)\s*(continue|return|\{)))/;
+    const hits: string[] = [];
+    for (const [file, text] of Object.entries(sources))
+      text.split("\n").forEach((line, n) => {
+        // Comparisons (`=== x.deletedAt`, `x.deletedAt !== null`) are the rule itself.
+        const rest = line
+          .replace(/\w+(\?)?\.(deletedAt|deleted_at)\s*[!=]==\s*\w+(\?)?\.(deletedAt|deleted_at)\b/g, "")
+          .replace(/[!=]==\s*\w+(\?)?\.(deletedAt|deleted_at)\b/g, "").replace(/\w+(\?)?\.(deletedAt|deleted_at)\s*[!=]==/g, "");
+        if (falsy.test(rest) && !/\?\?/.test(rest)) hits.push(`${file}:${n + 1}: ${line.trim()}`);
+      });
+    expect(hits).toEqual([]);
   });
 });

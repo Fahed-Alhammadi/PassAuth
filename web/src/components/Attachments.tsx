@@ -29,7 +29,7 @@ import { getDesktop } from "../lib/platform";
 import { server } from "../lib/server";
 import { formatBytes } from "../lib/sizes";
 import { MissingFile, TransferCancelled } from "../lib/transfer";
-import type { Attachment, VaultEntry } from "../lib/types";
+import { isTrashed, type Attachment, type VaultEntry } from "../lib/types";
 import { ConfirmDialog, ErrorText, Icon, toast } from "./ui";
 import "../styles/files.css";
 
@@ -218,7 +218,7 @@ export function ItemAttachments({ entry, canWrite }: { entry: VaultEntry; canWri
   const uploads = useUploads(entry.id);
   const transfers = filesSupported();
   const limitMb = attachmentLimitMb(config?.limits);
-  const editable = canWrite && !entry.deletedAt;
+  const editable = canWrite && !isTrashed(entry);
   const canAttach = feature && editable && transfers;
   const [stored, setStored] = useState<StoredAttachment[] | null>(null);
   const [removing, setRemoving] = useState<Attachment | null>(null);

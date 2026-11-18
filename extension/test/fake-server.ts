@@ -12,14 +12,16 @@
  *
  * `/api/config` always lists `signed_sharing` (every server this app talks to has it) unless `outdated` says
  * otherwise. With `vault_manifest` in `features` it keeps vault manifests like the real one
- * (crates/server/src/vault/manifest.rs): vault rows carry `manifest`, `manifest_seq`, `manifest_ok`, answers carry
- * `server_time` and `trash_days`, trash summaries carry `data_sha256`, every item write into a vault with a manifest
- * must bring the next one (400 `manifest_required`, 409 `manifest_conflict`), `PUT /vaults/{id}/manifest` starts one,
- * `POST /vaults/{id}/trash/purge` deletes trashed items for good. A manifest a client sends is checked with the real
+ * (crates/server/src/vault/manifest.rs): vault rows carry `manifest`, `manifest_seq`, `manifest_prev`, `manifest_ok`,
+ * answers carry `server_time` and `trash_days`, trash summaries carry `data_sha256`, every item write into a vault
+ * with a manifest must bring the next one, which must name the vault's current one as its predecessor (400
+ * `manifest_required`; 409 `manifest_conflict` for another version or another `prev`; 400 for a `prev` that is no
+ * link), `PUT /vaults/{id}/manifest` starts one, `POST /vaults/{id}/trash/purge` deletes trashed items for good, and
+ * `GET /vaults/{id}/manifest-log?after=` lists every manifest stored (`{seq, prev, digest}`, `logPage` an answer). A manifest a client sends is checked with the real
  * core against the items the server then holds (test/manifest-key.ts): one that doesn't describe them is listed in
  * `manifestErrors` and answered 500. Writes "elsewhere" (the helpers below) bring their own manifest, like another device.
  */
-import { dataHash, manifestKey } from "./manifest-key";
+import { dataHash, manifestKey, manifestLink, ZERO_LINK } from "./manifest-key";
 
 export interface Recorded {
   method: string;
@@ -42,6 +44,8 @@ export interface ServerVault {
   /** Vault manifests: the sealed manifest and its version (0 / absent: none), and the gate for a first one. */
   manifest?: string | null;
   manifest_seq?: number;
+  /** The link of the manifest the current one replaced (null: the vault has none). */
+  manifest_prev?: string | null;
   manifest_ok?: boolean;
 }
 
@@ -49,8 +53,18 @@ export interface ServerVault {
 interface SentManifest {
   vault_id: string;
   seq: number;
+  prev?: unknown;
   sealed: string;
 }
+
+/** An entry of a vault's manifest log. */
+export interface LogEntry {
+  seq: number;
+  prev: string;
+  digest: string;
+}
+
+const LINK = /^[A-Za-z0-9_-]{43}$/;
 
 export interface ServerItem {
   id: string;
@@ -111,6 +125,23 @@ export function fakeServer(base = "https://vault.test") {
     omitHashes: false,
     /** Manifests clients sent that don't describe the vault after their write. */
     manifestErrors: [] as string[],
+    /** Every manifest stored, per vault, oldest first (the manifest log). */
+    logs: {} as Record<string, LogEntry[]>,
+    /** Entries one manifest-log answer holds at most. */
+    logPage: 2000,
+
+    /** The link of the vault's current manifest (null: it has none). */
+    linkOf(vaultId: string): string | null {
+      const v = s.vaults.find((x) => x.id === vaultId);
+      return v?.manifest && v.manifest_prev && (v.manifest_seq ?? 0) > 0 ? manifestLink(v.manifest_seq ?? 0, v.manifest_prev, v.manifest) : null;
+    },
+
+    /** Store a manifest as the vault's current one, and list it in the vault's log. */
+    setManifest(vaultId: string, m: { seq: number; prev: string; sealed: string }) {
+      const v = s.vaults.find((x) => x.id === vaultId)!;
+      Object.assign(v, { manifest: m.sealed, manifest_seq: m.seq, manifest_prev: m.prev, manifest_ok: true });
+      s.logs[vaultId] = [...(s.logs[vaultId] ?? []), { seq: m.seq, prev: m.prev, digest: dataHash(m.sealed) }];
+    },
 
     clock(): number {
       return s.now ?? Math.floor(Date.now() / 1000);
@@ -121,12 +152,15 @@ export function fakeServer(base = "https://vault.test") {
       return s.items.filter((i) => i.vault_id === vaultId).map((i) => ({ id: i.id, deleted_at: i.deleted_at, data: i.data }));
     },
 
-    /** Another device (with the vault's key) writes the vault's manifest for the items as they are now: version `seq` (default: the next). */
+    /**
+     * Another device (with the vault's key) writes the vault's manifest for the items as they are now: version `seq`
+     * (default: the next), naming the manifest the server holds now as its predecessor (what a write, a key
+     * replacement and "Use the server's copy" all do).
+     */
     remanifest(vaultId: string, seq?: number) {
       const v = s.vaults.find((x) => x.id === vaultId)!;
-      v.manifest_seq = seq ?? (v.manifest_seq ?? 0) + 1;
-      v.manifest = manifestKey(v.wrapped_key).manifestStart(v.id, v.key_epoch, v.manifest_seq, s.manifestRows(vaultId));
-      v.manifest_ok = true;
+      const w = manifestKey(v.wrapped_key).manifestStart(v.id, v.key_epoch, seq ?? (v.manifest_seq ?? 0) + 1, s.linkOf(vaultId), s.manifestRows(vaultId));
+      s.setManifest(vaultId, w);
     },
 
     /** After a write elsewhere: the manifest follows, when the vault has one. */
@@ -149,7 +183,8 @@ export function fakeServer(base = "https://vault.test") {
       const seq = v?.manifest_seq ?? 0;
       if (seq === 0) return mine ? { status: 409, body: { error: "manifest_conflict", message: "this vault has no manifest" } } : null;
       if (!mine) return { status: 400, body: { error: "manifest_required", message: "Update PassAuth to change this vault." } };
-      if (mine.seq !== seq + 1) return { status: 409, body: { error: "manifest_conflict", message: "the vault changed; sync and try again" } };
+      if (typeof mine.prev !== "string" || !LINK.test(mine.prev)) return { status: 400, body: { error: "bad_request", message: "prev is not a link" } };
+      if (mine.seq !== seq + 1 || mine.prev !== s.linkOf(vaultId)) return { status: 409, body: { error: "manifest_conflict", message: "the vault changed; sync and try again" } };
       return null;
     },
 
@@ -159,12 +194,10 @@ export function fakeServer(base = "https://vault.test") {
       const list = Array.isArray(sent) ? sent : sent ? [sent] : [];
       const mine = list.find((m) => m.vault_id === vaultId);
       if (!mine) return null;
-      v.manifest = mine.sealed;
-      v.manifest_seq = mine.seq;
-      v.manifest_ok = true;
+      s.setManifest(vaultId, { seq: mine.seq, prev: String(mine.prev), sealed: mine.sealed });
       let status = "error";
       try {
-        status = manifestKey(v.wrapped_key).manifestVerify(v.id, v.key_epoch, mine.seq, mine.sealed, null, s.manifestRows(vaultId)).status;
+        status = manifestKey(v.wrapped_key).manifestVerify(v.id, v.key_epoch, mine.seq, String(mine.prev), mine.sealed, null, null, null, s.manifestRows(vaultId)).status;
       } catch (e) {
         status = `error: ${e instanceof Error ? e.message : String(e)}`;
       }
@@ -279,13 +312,14 @@ export function fakeServer(base = "https://vault.test") {
         const b = req.body;
         if (!v) return { status: 404, body: { error: "not_found", message: "not found" } };
         if (v.role === "read") return { status: 403, body: { error: "forbidden", message: "read only" } };
-        if ((v.manifest_seq ?? 0) !== b.base_seq || (v.seq ?? 0) !== b.vault_seq || !(b.seq > b.base_seq)) {
+        if (typeof b.prev !== "string" || !LINK.test(b.prev)) return { status: 400, body: { error: "bad_request", message: "prev is not a link" } };
+        if ((v.manifest_seq ?? 0) !== b.base_seq || (v.seq ?? 0) !== b.vault_seq || !(b.seq > b.base_seq) || b.prev !== (s.linkOf(v.id) ?? ZERO_LINK)) {
           return { status: 409, body: { error: "manifest_conflict", message: "the vault changed; sync and try again" } };
         }
         if (b.base_seq === 0 && !v.manifest_ok) return { status: 409, body: { error: "manifest_not_ready", message: "some apps are too old" } };
         s.revision++;
         const seq = s.bump(v.id);
-        const bad = s.storeManifest(v.id, { vault_id: v.id, seq: b.seq, sealed: b.sealed });
+        const bad = s.storeManifest(v.id, { vault_id: v.id, seq: b.seq, prev: b.prev, sealed: b.sealed });
         if (bad) return bad;
         return { body: { revision: s.revision, vault_seq: seq, manifest_seq: b.seq } };
       }
@@ -310,6 +344,14 @@ export function fakeServer(base = "https://vault.test") {
         if (bad) return bad;
         return { body: { purged: targets.length, revision: s.revision, vault_seq: seq, ...manifestSeq(v.id) } };
       }
+      const logOf = /^\/vaults\/([^/]+)\/manifest-log$/.exec(req.path);
+      if (req.method === "GET" && logOf) {
+        const after = Number(req.query.after ?? 0);
+        if (!s.vaults.some((x) => x.id === logOf[1])) return { status: 404, body: { error: "not_found", message: "not found" } };
+        if (!Number.isSafeInteger(after) || after < 0) return { status: 400, body: { error: "bad_request", message: "bad range" } };
+        const rest = (s.logs[logOf[1]!] ?? []).filter((e) => e.seq > after).sort((a, b) => a.seq - b.seq);
+        return { body: { entries: rest.slice(0, s.logPage), more: rest.length > s.logPage } };
+      }
       if (req.method === "GET" && req.path === "/sync") return { body: s.syncAnswer(req.query) };
       if (req.method === "GET" && req.path === "/sync/revision") {
         return { body: { revision: s.revision, ...(v2("delta_sync") ? { vaults: Object.fromEntries(s.vaults.map((v) => [v.id, v.seq ?? 0])) } : {}) } };
@@ -320,7 +362,7 @@ export function fakeServer(base = "https://vault.test") {
         if (req.query.revision !== undefined && Number(req.query.revision) !== i.revision) {
           return { status: 409, body: { error: "revision_conflict", message: "item changed on another device; sync and retry" } };
         }
-        const sent = req.query.manifest_seq !== undefined ? { vault_id: i.vault_id, seq: Number(req.query.manifest_seq), sealed: req.query.manifest ?? "" } : undefined;
+        const sent = req.query.manifest_seq !== undefined ? { vault_id: i.vault_id, seq: Number(req.query.manifest_seq), prev: req.query.manifest_prev, sealed: req.query.manifest ?? "" } : undefined;
         const refused = s.manifestFor(i.vault_id, sent);
         if (refused) return refused;
         i.deleted_at = s.clock();
@@ -390,12 +432,19 @@ function syncAnswer(s: Server, query: Record<string, string>) {
   };
   const manifests = s.features.includes("vault_manifest");
   const vaults = s.vaults.map((v) => {
-    const { seq, manifest, manifest_seq, manifest_ok, ...rest } = v;
+    const { seq, manifest, manifest_seq, manifest_prev, manifest_ok, ...rest } = v;
     return {
       ...rest,
       ...(s.features.includes("key_epoch") ? {} : { key_epoch: undefined }),
       ...(delta ? { seq: seq ?? 0 } : {}),
-      ...(manifests ? { manifest: manifest ?? null, manifest_seq: manifest_seq ?? 0, manifest_ok: (manifest_seq ?? 0) > 0 || manifest_ok === true } : {}),
+      ...(manifests
+        ? {
+            manifest: manifest ?? null,
+            manifest_seq: manifest_seq ?? 0,
+            manifest_prev: (manifest_seq ?? 0) > 0 ? (manifest_prev ?? null) : null,
+            manifest_ok: (manifest_seq ?? 0) > 0 || manifest_ok === true,
+          }
+        : {}),
     };
   });
   const base = { revision: s.revision, user: s.user, bundle: s.bundle, vaults, invitations: s.invitations, ...(manifests ? { server_time: s.clock(), trash_days: s.trashDays } : {}) };

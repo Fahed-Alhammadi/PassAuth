@@ -16,7 +16,9 @@ import {
   serverConfig,
   serverFeatures,
   serverOutdated,
+  UNREACHABLE_TEXT,
 } from "../src/background/api";
+import { knownFeatures } from "../src/background/storage";
 import { codeOf, SIGNED_OUT } from "../src/shared/errors";
 import { type FakeChrome, installChrome } from "./chrome";
 import { accountRecord, type FakeServer, fakeServer } from "./fake-server";
@@ -135,7 +137,7 @@ test("serverFeatures: from /api/config, cached per server; an older server has n
   expect([...(await serverFeatures("https://down.test"))]).toContain("key_epoch");
 });
 
-test("servers this app refuses: a config that doesn't list signed_sharing (API 2 without it, or from before API 2); unknown is never a refusal", async () => {
+test("servers this app refuses: a config that doesn't list signed_sharing (API 2 without it, or from before API 2); a config that can't be read is no way around it", async () => {
   expect(SERVER_UPDATE_TEXT).toBe("Update your PassAuth server to keep using this app.");
   expect(serverOutdated(null), "the server can't be reached: decided at the next answer").toBe(false);
   expect(serverOutdated({ features: new Set(["signed_sharing", "delta_sync"]) })).toBe(false);
@@ -158,14 +160,41 @@ test("servers this app refuses: a config that doesn't list signed_sharing (API 2
       kind,
     ).toStrictEqual(["/config", "/auth/logout"]);
   }
-  // Unreachable: the request itself says so, as always; an up-to-date server is used as before.
+  // Unreachable, and this browser never read a feature list from that server: "can't reach", nothing is asked.
   vi.stubGlobal("fetch", () => Promise.reject(new TypeError("Failed to fetch")));
   forgetServerFeatures();
   await expectReject(api("/sync"), (e) => codeOf(e) === "unreachable");
-  await refuseOutdated("https://vault.test");
+  await expectReject(refuseOutdated("https://vault.test"), (e) => codeOf(e) === "unreachable");
+  // Review (Part S): a server that fails `/api/config` (an error, or something that isn't a config) but would answer
+  // everything else is not used either: no sign-in is started, no `/sync` is asked.
+  for (const broken of [() => ({ status: 500, body: {} }), () => ({ status: 200, body: null }), () => ({ status: 404, body: { error: "not_found" } })]) {
+    fake = installChrome();
+    await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1" });
+    expect(await knownFeatures.get("https://vault.test")).toBe(null);
+    server = fakeServer();
+    server.handlers["GET /config"] = broken;
+    vi.stubGlobal("fetch", server.fetch);
+    forgetServerFeatures();
+    await expectReject(api("/sync"), (e) => codeOf(e) === "unreachable" && e.message === UNREACHABLE_TEXT);
+    await expectReject(api("/auth/prelogin", { body: { email: "alex@example.com" }, auth: false }), (e) => codeOf(e) === "unreachable");
+    await expectReject(refuseOutdated(server.base), (e) => codeOf(e) === "unreachable");
+    expect(server.requests.map((r) => r.path)).toStrictEqual(["/config", "/config", "/config"]);
+  }
+  // An up-to-date server is used as before, and its feature list is kept…
   server = fakeServer();
   vi.stubGlobal("fetch", server.fetch);
   forgetServerFeatures();
   await refuseOutdated(server.base);
   expect(await api("/sync/revision")).toMatchObject({ revision: 1 });
+  expect(await knownFeatures.get(server.base)).toContain("signed_sharing");
+  // …so the same server with its config unreachable later keeps working (offline use: the next answer decides).
+  server.handlers["GET /config"] = () => ({ status: 500, body: {} });
+  forgetServerFeatures();
+  await refuseOutdated(server.base);
+  expect(await api("/sync/revision")).toMatchObject({ revision: 1 });
+  // A list kept from when the server didn't sign is no pass.
+  await knownFeatures.set(server.base, ["delta_sync"]);
+  forgetServerFeatures();
+  await expectReject(api("/sync/revision"), (e) => codeOf(e) === "unreachable");
+  expect(await knownFeatures.get("https://other.test")).toBe(null);
 });

@@ -147,7 +147,6 @@ class SendsTest {
             saltsMade++
             return "salt-$saltsMade"
         }
-        override fun verifier(password: String, salt: String) = "v($password,$salt)"
         // Send v2 with the real core (a real salt: one Argon2id run each).
         override fun passwordKeys(password: String, salt: String, key: String) =
             io.passauth.core.sendPasswordKeys(password, salt, key).let { SendKeys(it.verifier, it.contentKey) }
@@ -243,24 +242,90 @@ class SendsTest {
         assertEquals("Wi-Fi", actions.nameOf(actions.get(send.id)))
     }
 
+    private suspend fun refused(block: suspend () -> Unit): String? = try {
+        block()
+        null
+    } catch (e: UserException) {
+        e.message
+    }
+
+    /** Review core M4 / mobile L5 (R11): the server's feature list can't turn a password Send into one the link alone opens. */
     @Test
-    fun withoutSendV2OrAPasswordSendsStayV1() = runBlocking {
+    fun aPasswordSendIsNeverWrittenOrRewrittenAsV1() = runBlocking {
+        val needsV2 = "Update your PassAuth server to protect a Send with a password."
         val server = Server()
-        val actions = SendActions(server.transport, sendV2 = { false }) { V2Crypto() }
-        actions.create(NewSend("A", "text", "pw", null, null, 5000, false))
-        assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
-        assertFalse("owner_content_key" in server.last())
+        val without = SendActions(server.transport, sendV2 = { false }) { V2Crypto() }
         val v2 = SendActions(server.transport, sendV2 = { true }) { V2Crypto() }
-        v2.create(NewSend("B", "text", null, null, null, 5000, false))
+        // A server that doesn't list `send_v2`: a Send with a password isn't made at all.
+        assertEquals(needsV2, refused { without.create(NewSend("A", "text", "pw", null, null, 5000, false)) })
+        assertTrue("nothing was sent", server.calls.isEmpty())
+        // Without a password a Send is v1 everywhere.
+        for (actions in listOf(without, v2)) {
+            actions.create(NewSend("B", "text", null, null, null, 5000, false))
+            assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
+            assertFalse("owner_content_key" in server.last())
+            assertFalse("access_verifier" in server.last())
+        }
+
+        // A v2 Send, and the server stops listing the feature.
+        val (send, key) = v2.create(NewSend("C", "secret", "pw", null, null, 5000, false))
+        val made = server.last()
+        val before = server.calls.size
+        // Changing its password would mean v1 with a password: refused, nothing sent, the Send untouched.
+        assertEquals(needsV2, refused { without.update(without.get(send.id), SendEdit(password = "pw2")) })
+        assertEquals(needsV2, refused { without.update(without.get(send.id).copy(data = null), SendEdit(password = "pw2", text = "x")) })
+        assertTrue(server.calls.drop(before).none { it.first == "PUT" })
+        assertEquals(2, io.passauth.core.sendFieldVersion(text(server.stored!!, "data")).toInt())
+        // Its text is edited with its content key: still v2, and the link alone still doesn't open it.
+        without.update(without.get(send.id), SendEdit(text = "edited"))
+        assertEquals(setOf("data"), server.last().keys)
+        assertEquals(2, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
+        val visitor = io.passauth.core.sendPasswordKeys("pw", text(made, "access_salt"), key)
+        assertEquals("edited", io.passauth.core.sendOpen(key, visitor.contentKey, "data", text(server.last(), "data")))
+        // Only removing the password goes back to v1 (in one request, the content key cleared).
+        without.update(without.get(send.id), SendEdit(password = ""))
+        assertEquals(JsonNull, server.last()["owner_content_key"])
+        assertEquals(JsonNull, server.last()["access_verifier"])
         assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
-        assertFalse("owner_content_key" in server.last())
-        // A v1 Send with a password gets v2 when its password changes on a server with v2.
-        val (s, key) = actions.create(NewSend("C", "old", "pw", null, null, 5000, false))
-        v2.update(v2.get(s.id), SendEdit(password = "pw3"))
+
+        // A v1 Send with a password from before: its text is still edited as it is; a new password
+        // makes it v2 on a server that takes it, and is refused on one that doesn't.
+        val (old, oldKey) = v2.create(NewSend("D", "old", null, null, null, 5000, false))
+        server.stored = JsonObject(server.stored!! + mapOf("access_verifier" to JsonPrimitive("v"), "has_password" to JsonPrimitive(true)))
+        without.update(without.get(old.id), SendEdit(text = "old 2"))
+        assertEquals(1, io.passauth.core.sendFieldVersion(text(server.last(), "data")).toInt())
+        assertEquals(needsV2, refused { without.update(without.get(old.id), SendEdit(password = "pw3")) })
+        v2.update(v2.get(old.id), SendEdit(password = "pw3"))
         val up = server.last()
         assertEquals(2, io.passauth.core.sendFieldVersion(text(up, "data")).toInt())
-        val keys = io.passauth.core.sendPasswordKeys("pw3", text(up, "access_salt"), key)
-        assertEquals("old", io.passauth.core.sendOpen(key, keys.contentKey, "data", text(up, "data")))
+        val keys = io.passauth.core.sendPasswordKeys("pw3", text(up, "access_salt"), oldKey)
+        assertEquals("old 2", io.passauth.core.sendOpen(oldKey, keys.contentKey, "data", text(up, "data")))
+    }
+
+    /** The fields say what a Send is: one whose fields and content key disagree is unreadable, never "repaired" as v1. */
+    @Test
+    fun aSendWhoseFieldsAndContentKeyDisagreeIsUnreadableAndNotRewritten() = runBlocking {
+        val server = Server()
+        val v2 = SendActions(server.transport, sendV2 = { true }) { V2Crypto() }
+        val (send, _) = v2.create(NewSend("C", "secret", "pw", null, null, 5000, false))
+        val full = v2.get(send.id)
+        // v2 fields, the content key taken away by the server.
+        val stripped = full.copy(ownerContentKey = null)
+        assertNull(v2.nameOf(stripped))
+        assertEquals(SendActions.UNREADABLE, refused { v2.textOf(stripped) })
+        val before = server.calls.size
+        assertEquals(SendActions.UNREADABLE, refused { v2.update(stripped, SendEdit(text = "x")) })
+        assertEquals(SendActions.UNREADABLE, refused { v2.update(stripped, SendEdit(password = "")) })
+        // v1 fields next to a content key.
+        val (plain, _) = v2.create(NewSend("P", "open", null, null, null, 5000, false))
+        val planted = v2.get(plain.id).copy(ownerContentKey = full.ownerContentKey)
+        assertNull(v2.nameOf(planted))
+        assertEquals(SendActions.UNREADABLE, refused { v2.textOf(planted) })
+        assertEquals(SendActions.UNREADABLE, refused { v2.update(planted, SendEdit(name = "y")) })
+        assertTrue(server.calls.drop(before).none { it.first == "PUT" })
+        // Settings that touch no field still go through (turn it off, delete it).
+        v2.update(stripped, SendEdit(disabled = true))
+        assertEquals(setOf("disabled"), server.last().keys)
     }
 
     @Test
@@ -280,12 +345,11 @@ class SendsTest {
             }
         }
         val actions = SendActions(transport) { crypto }
-        val (send, sendKey) = actions.create(NewSend("Wi-Fi", "hunter2", "pw", 3, null, 5000, true))
+        val (send, sendKey) = actions.create(NewSend("Wi-Fi", "hunter2", null, 3, null, 5000, true))
         val body = calls[0].third as JsonObject
         assertEquals("text", (body["kind"] as JsonPrimitive).content)
         assertEquals("wrapped:$sendKey", (body["owner_key"] as JsonPrimitive).content)
-        assertEquals("salt-1", (body["access_salt"] as JsonPrimitive).content)
-        assertEquals("v(pw,salt-1)", (body["access_verifier"] as JsonPrimitive).content)
+        assertFalse("access_salt" in body || "access_verifier" in body)
         assertEquals(JsonNull, body["expires_at"])
         assertEquals(JsonPrimitive(3), body["max_views"])
         // The server gets ciphertext only; the owner reads it back with the wrapped key.

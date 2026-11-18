@@ -381,6 +381,7 @@ pub(super) async fn update_item(
 pub(super) struct RevisionQuery {
     revision: Option<i64>,
     manifest_seq: Option<i64>,
+    manifest_prev: Option<String>,
     manifest: Option<String>,
 }
 
@@ -392,7 +393,7 @@ async fn set_deleted(
     deleted_at: Option<i64>,
 ) -> ApiResult<Json<Value>> {
     let (vault, current) = item_vault(state, id).await?;
-    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest)?;
+    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest_prev, q.manifest)?;
     let need = Need::new(&vault, Role::Write, None);
     let mut w = VaultWrite::begin(state, user, &[need]).await?;
     if q.revision.is_some_and(|r| r != current) {
@@ -462,7 +463,7 @@ pub(super) async fn purge_item(
     Query(q): Query<RevisionQuery>,
 ) -> ApiResult<Json<Value>> {
     let (vault, current) = item_vault(&state, &id).await?;
-    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest)?;
+    let sent = manifest::from_query(&vault, q.manifest_seq, q.manifest_prev, q.manifest)?;
     let need = Need::new(&vault, Role::Write, None);
     let mut w = VaultWrite::begin(&state, &user, &[need]).await?;
     if q.revision.is_some_and(|r| r != current) {

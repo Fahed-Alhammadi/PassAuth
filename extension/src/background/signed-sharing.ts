@@ -242,7 +242,7 @@ export type Trust =
   | { state: "refused"; reason: string; why: string; changed?: ChangedKey };
 
 /**
- * A verdict with what it was made from: `row` = the row it is for (`rowStamp`, what `materialize` compares), `stamp` =
+ * A verdict with what it was made from: `row` = the row it is for (`rowStamp`, what vault.ts `prepare` compares), `stamp` =
  * the row plus everything else the verdict depends on (`contextStamp`). Kept with the offline copy; an offline open
  * reuses only verdicts whose `stamp` is unchanged.
  */
@@ -448,7 +448,7 @@ export const publicOf = (s: SignerSnapshot): core.PublicIdentity => ({
   x25519_signature: s.x25519_signature,
 });
 
-/** What the row is (the fields a verdict is about): `materialize` opens a vault only with a verdict for this row. */
+/** What the row is (the fields a verdict is about): vault.ts `prepare` opens a vault only with a verdict for this row. */
 export function rowStamp(row: SignedVaultRow): string {
   return JSON.stringify([row.id, row.key_kind, row.wrapped_key, row.key_epoch ?? null, row.role, row.meta ?? null, row.share ?? null, row.member_roster ?? null]);
 }

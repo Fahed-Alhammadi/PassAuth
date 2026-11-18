@@ -208,58 +208,125 @@ public final class SecureStore {
         try? FileManager.default.removeItem(at: cacheURL(id))
         try? FileManager.default.removeItem(at: revsURL(id))
         try? FileManager.default.removeItem(at: manifestsURL(id))
+        try? FileManager.default.removeItem(at: trashSeenURL(id))
     }
 
-    // MARK: Item edit counters seen (rollback detection), next to the offline copy
+    // MARK: Device memory next to the offline copy (item edit counters, manifest marks, trash first seen)
+    //
+    // The app and its AutoFill extension both read and write these files. Each write reads what
+    // is stored, merges and writes back under one cross-process lock (`memoryLock`), so neither
+    // loses what the other learnt. A file that is there but can't be read now (the Keychain, file
+    // protection) is "unreadable" (nil), never "nothing remembered": nothing is checked against
+    // it and nothing is written over it.
 
-    private func revsURL(_ id: String) -> URL {
-        cacheDir.appendingPathComponent("\(id.filter { $0.isLetter || $0.isNumber || $0 == "-" }).revs")
+    private var memoryLockURL: URL { FileLock.url("memory", directory: dir) }
+
+    private func memoryFile(_ id: String, _ ext: String) -> URL {
+        cacheDir.appendingPathComponent("\(id.filter { $0.isLetter || $0.isNumber || $0 == "-" }).\(ext)")
     }
 
-    /// The highest item edit counter (`rev`) this device saw per item id of the account; empty
-    /// when none was kept (a new device or copy: trust on first sight), nil when the file exists
-    /// but can't be read now.
-    public func readItemRevs(_ id: String) -> [String: UInt64]? {
-        guard let blob = try? Data(contentsOf: revsURL(id)) else { return [:] }
-        guard let plain = open(blob, aad: "revs:\(id)") else { return nil }
-        return (try? JSONDecoder().decode([String: UInt64].self, from: plain)) ?? [:]
+    private enum MemoryRead {
+        case missing
+        case unreadable
+        case plain(Data)
     }
 
-    /// Store `revs` (only these ids: the ones left out were pruned), never lowering a value the
-    /// other process (the app or an AutoFill extension) wrote meanwhile.
-    public func writeItemRevs(_ id: String, _ revs: [String: UInt64]) {
-        let disk = readItemRevs(id) ?? [:]
-        let merged = revs.reduce(into: [String: UInt64]()) { out, e in out[e.key] = max(e.value, disk[e.key] ?? 0) }
-        guard let plain = try? JSONEncoder().encode(merged), let blob = seal(plain, aad: "revs:\(id)") else { return }
+    private func readMemoryFile(_ url: URL, aad: String) -> MemoryRead {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+        guard let blob = try? Data(contentsOf: url), let plain = open(blob, aad: aad) else { return .unreadable }
+        return .plain(plain)
+    }
+
+    /// Read, change and write one memory file under the cross-process lock. Nothing is written
+    /// while the stored file can't be read, the lock can't be had (the next write merges again),
+    /// or `merge` returns nil (nothing to change).
+    private func updateMemoryFile(_ url: URL, aad: String, merge: (Data?) -> Data?) {
+        guard let lock = FileLock.acquireSync(memoryLockURL) else { return }
+        defer { lock.release() }
+        let stored: Data?
+        switch readMemoryFile(url, aad: aad) {
+        case .missing: stored = nil
+        case .unreadable: return
+        case .plain(let d): stored = d
+        }
+        guard let plain = merge(stored), plain != stored, let blob = seal(plain, aad: aad) else { return }
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
-        write(blob, to: revsURL(id))
+        write(blob, to: url)
     }
 
-    // MARK: Vault manifest versions seen (rollback detection), next to the item edit counters
+    // Item edit counters seen (rollback detection)
 
-    private func manifestsURL(_ id: String) -> URL {
-        cacheDir.appendingPathComponent("\(id.filter { $0.isLetter || $0.isNumber || $0 == "-" }).manifests")
+    private func revsURL(_ id: String) -> URL { memoryFile(id, "revs") }
+
+    /// What this device remembers per item id of the account (the highest edit counter `rev` it
+    /// saw, the vault it was in, when it was last seen); empty when nothing was kept (a new
+    /// device or copy: trust on first sight), nil when the file is there but can't be read now.
+    public func readItemRevMemory(_ id: String) -> ItemRevMemory? {
+        switch readMemoryFile(revsURL(id), aad: "revs:\(id)") {
+        case .missing: ItemRevMemory()
+        case .unreadable: nil
+        case .plain(let d): ItemRevMemory.read(d)
+        }
     }
 
-    /// The highest manifest version this device saw per vault id of the account; empty when none
-    /// was kept (a new device: the first manifest seen is trusted), nil when the file exists but
+    /// The highest edit counter per item id (`readItemRevMemory`).
+    public func readItemRevs(_ id: String) -> [String: UInt64]? { readItemRevMemory(id)?.revs }
+
+    /// Store `memory` merged into what is on the device (`ItemRevMemory.merged`: no counter is
+    /// lowered, nothing the other process learnt is lost), without the ids in `dropped` (items
+    /// this device knows are gone for good).
+    public func writeItemRevMemory(_ id: String, _ memory: ItemRevMemory, dropped: Set<String> = []) {
+        updateMemoryFile(revsURL(id), aad: "revs:\(id)") { stored in
+            ItemRevMemory.merged(stored: stored.map(ItemRevMemory.read) ?? ItemRevMemory(), memory, dropped: dropped).encoded()
+        }
+    }
+
+    // Vault manifests seen (rollback and fork detection)
+
+    private func manifestsURL(_ id: String) -> URL { memoryFile(id, "manifests") }
+
+    /// The last manifest (version and link) this device checked or wrote per vault id of the
+    /// account; empty when none was kept (a new device: the first manifest seen is trusted, and
+    /// so is a memory in the first format, which had no links), nil when the file is there but
     /// can't be read now. Entries of vaults that are gone stay (vault ids are never reused; a
     /// server could hide a vault and show it again).
-    public func readManifestVersions(_ id: String) -> [String: UInt64]? {
-        guard let blob = try? Data(contentsOf: manifestsURL(id)) else { return [:] }
-        guard let plain = open(blob, aad: "manifests:\(id)") else { return nil }
-        return try? JSONDecoder().decode([String: UInt64].self, from: plain)
+    public func readManifestMemory(_ id: String) -> [String: ManifestMark]? {
+        switch readMemoryFile(manifestsURL(id), aad: "manifests:\(id)") {
+        case .missing: [:]
+        case .unreadable: nil
+        case .plain(let d): VaultManifest.readMemory(d) ?? [:]
+        }
     }
 
-    /// Store `versions` merged into what is on the device: the higher number per vault, so
-    /// neither the app nor an AutoFill extension lowers what the other saw. Nothing is written
-    /// while the stored ones can't be read.
-    public func writeManifestVersions(_ id: String, _ versions: [String: UInt64]) {
-        guard let disk = readManifestVersions(id) else { return }
-        let merged = VaultManifest.merged(disk, versions.filter { $0.value > 0 })
-        guard merged != disk, let plain = try? JSONEncoder().encode(merged), let blob = seal(plain, aad: "manifests:\(id)") else { return }
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
-        write(blob, to: manifestsURL(id))
+    /// Store `marks` merged into what is on the device: per vault the higher version; a link is
+    /// never replaced at its version. Nothing is written while the stored ones can't be read.
+    public func writeManifestMemory(_ id: String, _ marks: [String: ManifestMark]) {
+        updateMemoryFile(manifestsURL(id), aad: "manifests:\(id)") { stored in
+            let disk = stored.flatMap(VaultManifest.readMemory) ?? [:]
+            let merged = VaultManifest.merged(disk, marks)
+            guard merged != disk else { return nil }
+            return try? JSONEncoder().encode(merged)
+        }
+    }
+
+    // Trashed items first seen (old trash is only deleted after this device watched it wait)
+
+    private func trashSeenURL(_ id: String) -> URL { memoryFile(id, "trashed") }
+
+    /// When this device first saw each item of the account in the trash (unix seconds, its own
+    /// clock); empty when nothing was kept, nil when the file can't be read now. Kept by the app
+    /// only (it alone deletes old trash).
+    public func readTrashSeen(_ id: String) -> [String: Int64]? {
+        switch readMemoryFile(trashSeenURL(id), aad: "trashed:\(id)") {
+        case .missing: [:]
+        case .unreadable: nil
+        case .plain(let d): (try? JSONDecoder().decode([String: Int64].self, from: d)) ?? [:]
+        }
+    }
+
+    /// Replace the stored first-seen times with `seen` (the app is their only writer).
+    public func writeTrashSeen(_ id: String, _ seen: [String: Int64]) {
+        updateMemoryFile(trashSeenURL(id), aad: "trashed:\(id)") { _ in try? JSONEncoder().encode(seen) }
     }
 
     // MARK: Encryption

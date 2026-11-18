@@ -1,3 +1,4 @@
+import { isTrashed } from "../lib/types";
 import { useState, type FormEvent } from "react";
 import { ErrorText, Icon, PasswordField, toast } from "../components/ui";
 import { friendlyError, usePolicies } from "../lib/api";
@@ -59,7 +60,7 @@ function ExportForm() {
   const [master, setMaster] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const kept = items.filter((e) => !e.deletedAt).map((e) => e.item);
+  const kept = items.filter((e) => !isTrashed(e)).map((e) => e.item);
   // Files aren't exported: their list (with each file's key) is left out of every format.
   const withFiles = anyAttachments(kept);
   const live = kept.map(stripAttachments);

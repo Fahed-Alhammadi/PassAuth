@@ -32,7 +32,11 @@ extension VaultRepository {
     /// (an identity, key pins, a share or a roster), or the server's features are unknown (never
     /// read) and its vault rows name key epochs. A server that stops listing the feature can't
     /// switch them off that way.
+    ///
+    /// Part S: an app that only uses servers with signed sharing (every release build) always
+    /// runs them, whatever the feature list kept or served says.
     func signedSharingOn(_ id: String, _ snapshot: SyncSnapshot? = nil, memory: SharingMemoryRecord? = nil) -> Bool {
+        if requiresSignedSharing { return true }
         let features = store.get().file.accounts[id]?.features
         if features?.contains(signedSharingFeature) == true { return true }
         if !(memory ?? sharingMemory.load(id)).isEmpty { return true }
@@ -173,7 +177,7 @@ extension VaultRepository {
                 let rows = ident.created ? snapshot.vaults.filter { candidates.contains($0.id) } : []
                 let ids: [(vaultId: String, keyId: String)] = rows.compactMap { v in
                     let epoch = UInt64(max(0, v.keyEpoch ?? 0))
-                    let legacy = (try? pinsLegacyWrapAllowed(pinsJson: pinsNow, vaultId: v.id, keyEpoch: epoch)) ?? true
+                    let legacy = (try? pinsLegacyWrapAllowed(pinsJson: pinsNow, vaultId: v.id, keyEpoch: epoch)) ?? false
                     guard let key = try? account.openVaultKey(vaultId: v.id, wrapped: v.wrappedKey, kind: v.keyKind,
                                                               keyEpoch: epoch, legacyAllowed: legacy),
                           let keyId = try? key.keyId(vaultId: v.id) else { return nil }
@@ -926,8 +930,7 @@ extension VaultRepository {
                 && !memory.signed.contains(vid) && !KeyPinsReader.signedSince(pins, vid)
             guard personal else { return .shared(info.name) }
         }
-        let manifestSeq = row.manifestVersion
-        if trusted == nil && onlyMe { return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows, manifestSeq: manifestSeq) }
+        if trusted == nil && onlyMe { return try await rotatePlain(id, session, info, oldKey: oldKey, rows: rows, row: row) }
         guard let signing = session.signing else { throw UserError(session.signingPaused ? SharingText.paused : SharingText.needsIdentity) }
         let myPub = try signing.publicIdentityJson()
         let inputs = members.compactMap { SharingIdentity.memberJson($0.identity, role: $0.role, email: $0.email) }
@@ -990,8 +993,9 @@ extension VaultRepository {
                 let (items, meta) = try Self.reencrypt(rows, vid: vid, name: name, oldKey: oldKey, newKey: nv.key)
                 let roster = try signing.signRoster(vaultKey: nv.key, vaultId: vid, previous: trusted, keyEpoch: next, membersJson: membersJson,
                                                     reviewed: digest)
-                // Vault manifests: the vault's next manifest, new under the new key and epoch.
-                let manifest = try Self.rotationManifest(vid, newKey: nv.key, nextEpoch: next, manifestSeq: manifestSeq, rows: rows, items: items)
+                // Vault manifests: the vault's next manifest, new under the new key and epoch,
+                // naming the row's manifest as the one it replaces.
+                let manifest = try VaultManifest.rotation(row, newKey: nv.key, nextEpoch: next, rows: rows, items: items)
                 return (keys, items, meta, roster, epochPin, manifest)
             }
         } catch let e as CoreError {

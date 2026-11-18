@@ -261,6 +261,22 @@ class GoldenVectorsTest {
         check(failures, "rev chain", v["chain"]!!.jsonArray.map { it.jsonPrimitive.content.toLong() }, chain)
         // The editor's copy keeps `rev` but a rev alone never makes two items differ in what the user sees.
         check(failures, "rev kept through the model", 2L, io.passauth.app.data.ItemCodec.decode(io.passauth.app.data.ItemCodec.encode(io.passauth.app.data.ItemCodec.decode(vault.decryptItem(e2)))).rev)
+        // Counters at and beyond what every client can count (2^53 − 1): the core reads them clamped
+        // and an update never fails, so one planted number can't jam an item; this app's model takes them.
+        val limits = v["limits"]!!.jsonObject
+        val owner = io.passauth.core.accountFromSessionBytes(limits.s("accountId"), java.util.Base64.getUrlDecoder().decode(limits.s("sessionBytes")))
+        val limitKey = owner.openVaultKey(limits.s("vaultId"), limits.s("wrappedKey"), "account", limits.s("keyEpoch").toULong(), false)
+        val top = limits.s("top").toLong()
+        val planted = limits["items"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(planted.size >= 5)
+        for (i in planted) {
+            val e = i["encrypted"]!!.jsonObject
+            val enc = EncryptedItem(e.s("id"), e.s("vault_id"), e.s("key"), e.s("data"))
+            val read = io.passauth.app.data.ItemCodec.decode(limitKey.decryptItem(enc))
+            check(failures, "rev ${i.s("rev")} reads", i.s("reads").toLong(), read.rev)
+            val updated = limitKey.updateItem(enc, io.passauth.app.data.ItemCodec.encode(read))
+            check(failures, "rev ${i.s("rev")} writes", minOf(i.s("writes").toLong(), top), rev(limitKey, updated))
+        }
         assertTrue(failures.joinToString("\n"), failures.isEmpty())
     }
 
@@ -288,69 +304,126 @@ class GoldenVectorsTest {
     }
 
     /**
-     * Vault manifests: every verdict of `manifestVerify` and every kind of write through
-     * `manifestNext`, with the fixture's account and wrapped vault key. Each row list also goes
-     * through the app's own row builder ([io.passauth.app.data.Manifests.rows] over its sync rows)
-     * where the app can hold it, and must come out the same.
+     * Vault manifests: every verdict of `manifestVerify` (with and without device memory and the
+     * manifest log), the link of every manifest, every kind of write through `manifestNext`, and
+     * `manifestStart` (first manifest, baseline, key replacement), with the fixture's account and
+     * its two wrapped vault keys. Each row list also goes through the app's own row builder
+     * ([io.passauth.app.data.Manifests.rows] over its sync rows) and must come out the same.
      */
     @Test
     fun vaultManifests() {
         val failures = mutableListOf<String>()
         val v = vectors["vaultManifest"]!!.jsonObject
         val vaultId = v.s("vaultId")
-        val epoch = v.s("keyEpoch").toULong()
         val account = io.passauth.core.accountFromSessionBytes(v.s("accountId"), java.util.Base64.getUrlDecoder().decode(v.s("sessionBytes")))
-        val key = account.openVaultKey(vaultId, v.s("wrappedKey"), "account", epoch, false)
+        val rotated = v["rotated"]!!.jsonObject
+        val keys = mapOf(
+            "main" to account.openVaultKey(vaultId, v.s("wrappedKey"), "account", v.s("keyEpoch").toULong(), false),
+            "rotated" to account.openVaultKey(vaultId, rotated.s("wrappedKey"), "account", rotated.s("keyEpoch").toULong(), false),
+        )
         val items = v["items"]!!.jsonObject
-        val sealed = v["sealed"]!!.jsonObject
+        val manifests = v["manifests"]!!.jsonObject
         fun long(o: JsonObject, k: String): Long? = (o[k] as? JsonPrimitive)?.takeIf { !it.isString }?.contentOrNull?.toLong()
+        fun obj(o: JsonObject, k: String): JsonObject? = o[k] as? JsonObject
 
-        /** The rows as this app holds them (its sync rows), when every row has what the app's model needs. */
-        fun appRows(rows: JsonArray): String? {
-            val list = rows.map { it.jsonObject }.map { r ->
-                if (r["trashed"] != null) return null // an explicit state the app's rows never carry
+        /** The rows as this app holds them (its sync rows): `id`, `deleted_at` and the data or its hash, nothing else. */
+        fun appRows(rows: JsonArray): String = io.passauth.app.data.Manifests.rows(
+            rows.map { it.jsonObject }.map { r ->
                 io.passauth.app.data.SyncItem(
                     r.s("id"), r.sOrNull("vault_id") ?: vaultId, null, r.sOrNull("data"), long(r, "revision"), long(r, "deleted_at"),
                     dataSha256 = r.sOrNull("data_sha256"),
                 )
-            }
-            return io.passauth.app.data.Manifests.rows(list)
-        }
+            },
+        )
         fun same(a: io.passauth.core.ManifestCheck, e: JsonObject) =
-            a.status == e.s("status") && a.version == e.s("version").toULong() && a.live == e.s("live").toULong() && a.trashed == e.s("trashed").toULong()
+            a.status == e.s("status") && a.version == e.s("version").toULong() && a.link == e.sOrNull("link") &&
+                a.live == e.s("live").toULong() && a.trashed == e.s("trashed").toULong()
+
+        // Every manifest's link is what the core's `manifestLink` gives for its row.
+        for ((name, m) in manifests) {
+            val row = m.jsonObject
+            val link = row.sOrNull("link") ?: continue
+            check(failures, "link of $name", link, io.passauth.core.manifestLink(row.s("manifest_seq").toULong(), row.s("manifest_prev"), row.s("manifest")))
+        }
 
         val checks = v["checks"]!!.jsonArray.map { it.jsonObject }
-        assertTrue(checks.size >= 20)
+        assertTrue(checks.size >= 40)
         val seen = mutableSetOf<String>()
-        for ((n, c) in checks.withIndex()) {
+        for (c in checks) {
+            val row = manifests[c.s("manifest")]!!.jsonObject
+            val key = keys.getValue(c.s("key"))
+            val epoch = c.s("keyEpoch").toULong()
             val rows = items[c.s("items")]!!.jsonArray
-            val text = c.sOrNull("sealed")?.let { sealed.s(it) }
-            val remembered = long(c, "remembered")?.toULong()
+            val remembered = obj(c, "remembered")
+            val log = (c["log"] as? JsonArray)?.toString()
             val expected = c["expected"]!!.jsonObject
             seen += expected.s("status")
-            val got = key.manifestVerify(vaultId, epoch, c.s("manifestSeq").toULong(), text, remembered, rows.toString())
-            if (!same(got, expected)) failures += "check $n (${c.s("items")}): got $got, want $expected"
-            appRows(rows)?.let { mine ->
-                val through = key.manifestVerify(vaultId, epoch, c.s("manifestSeq").toULong(), text, remembered, mine)
-                if (!same(through, expected)) failures += "check $n through the app's rows: got $through, want $expected"
+            for (mine in listOf(false, true)) {
+                val got = key.manifestVerify(
+                    vaultId, epoch, row.s("manifest_seq").toULong(), row.sOrNull("manifest_prev"), row.sOrNull("manifest"),
+                    remembered?.s("version")?.toULong(), remembered?.sOrNull("link"), log, if (mine) appRows(rows) else rows.toString(),
+                )
+                if (!same(got, expected)) failures += "check ${c.s("name")} (app rows: $mine): got $got, want $expected"
             }
         }
-        assertEquals(setOf("none", "ok", "rollback", "mismatch", "incomplete"), seen)
+        assertEquals(setOf("none", "ok", "rollback", "mismatch", "incomplete", "need_log"), seen)
+
+        // Rows every entry point refuses (a `deleted_at` that is no time, …).
+        val current = manifests["current"]!!.jsonObject
+        val main = keys.getValue("main")
+        val mainEpoch = v.s("keyEpoch").toULong()
+        val malformed = v["malformed"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(malformed.size >= 5)
+        for ((n, m) in malformed.withIndex()) {
+            val rows = m["items"].toString()
+            try {
+                main.manifestVerify(vaultId, mainEpoch, current.s("manifest_seq").toULong(), current.s("manifest_prev"), current.s("manifest"), null, null, null, rows)
+                failures += "malformed $n: verify took it"
+            } catch (_: io.passauth.core.CoreException) {
+            }
+            try {
+                main.manifestStart(vaultId, mainEpoch, 1u, null, rows)
+                failures += "malformed $n: start took it"
+            } catch (_: io.passauth.core.CoreException) {
+            }
+        }
 
         val writes = v["writes"]!!.jsonArray.map { it.jsonObject }
         assertTrue(writes.size >= 7)
-        val version = v.s("version").toULong()
+        val version = current.s("manifest_seq").toULong()
         for (w in writes) {
             val expected = w["expected"]!!.jsonObject
             for (mine in listOf(false, true)) {
-                val removed = if (mine) appRows(w["removed"]!!.jsonArray) ?: continue else w["removed"].toString()
-                val added = if (mine) appRows(w["added"]!!.jsonArray) ?: continue else w["added"].toString()
-                val next = key.manifestNext(vaultId, epoch, version, sealed.s("current"), removed, added)
+                val removed = if (mine) appRows(w["removed"]!!.jsonArray) else w["removed"].toString()
+                val added = if (mine) appRows(w["added"]!!.jsonArray) else w["added"].toString()
+                val next = main.manifestNext(vaultId, mainEpoch, version, current.s("manifest_prev"), current.s("manifest"), removed, added)
                 check(failures, "write ${w.s("name")} seq (app rows: $mine)", expected.s("seq").toULong(), next.seq)
-                val after = key.manifestVerify(vaultId, epoch, next.seq, next.sealed, version, w["after"].toString())
+                check(failures, "write ${w.s("name")} prev (app rows: $mine)", expected.s("prev"), next.prev)
+                check(failures, "write ${w.s("name")} names the current manifest", current.s("link"), next.prev)
+                val after = main.manifestVerify(vaultId, mainEpoch, next.seq, next.prev, next.sealed, version, current.s("link"), null, w["after"].toString())
                 check(failures, "write ${w.s("name")} verifies (app rows: $mine)", "ok", after.status)
+                check(failures, "write ${w.s("name")} link", next.link, after.link)
                 check(failures, "write ${w.s("name")} live", expected.s("live").toULong(), after.live)
                 check(failures, "write ${w.s("name")} trashed", expected.s("trashed").toULong(), after.trashed)
+            }
+        }
+
+        val starts = v["starts"]!!.jsonArray.map { it.jsonObject }
+        assertTrue(starts.size >= 3)
+        for (st in starts) {
+            val key = keys.getValue(st.s("key"))
+            val epoch = st.s("keyEpoch").toULong()
+            val rows = items[st.s("items")]!!.jsonArray
+            val expected = st["expected"]!!.jsonObject
+            val remembered = obj(st, "remembered")
+            for (mine in listOf(false, true)) {
+                val text = if (mine) appRows(rows) else rows.toString()
+                val made = key.manifestStart(vaultId, epoch, st.s("version").toULong(), st.sOrNull("prev"), text)
+                check(failures, "start ${st.s("name")} seq", expected.s("seq").toULong(), made.seq)
+                check(failures, "start ${st.s("name")} prev", expected.s("prev"), made.prev)
+                val after = key.manifestVerify(vaultId, epoch, made.seq, made.prev, made.sealed, remembered?.s("version")?.toULong(), remembered?.sOrNull("link"), null, text)
+                check(failures, "start ${st.s("name")} verifies (app rows: $mine)", "ok", after.status)
+                check(failures, "start ${st.s("name")} link", made.link, after.link)
             }
         }
         // The data hash the app keeps for rows without data is the core's.

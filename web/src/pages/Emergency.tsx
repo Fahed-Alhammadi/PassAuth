@@ -1,4 +1,4 @@
-import { VAULT_WARNING } from "../lib/manifest";
+import { VAULT_WARNING, VIEW_UNCHECKED } from "../lib/manifest";
 import { useCallback, useDeferredValue, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { ReadOnlyFiles } from "../components/Attachments";
@@ -719,6 +719,13 @@ export function EmergencyVaultPage() {
                     <strong>{v.name}:</strong> {VAULT_WARNING}
                   </span>
                 </div>
+              ))}
+            {view.vaults
+              .filter((v) => v.unchecked)
+              .map((v) => (
+                <p key={v.id} className="small muted" role="note" data-manifest-unchecked={v.id}>
+                  <strong>{v.name}:</strong> {VIEW_UNCHECKED}
+                </p>
               ))}
             {view.failed > 0 && (
               <div className="alert alert-warn small" role="note">

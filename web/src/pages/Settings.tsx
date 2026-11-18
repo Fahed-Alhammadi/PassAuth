@@ -14,7 +14,7 @@ import { sharerListedAs, sharerName, sharerShortName, type Invitation } from "..
 import { clientName, getDesktop, isDesktop, type DesktopAppHook, type DesktopHooks, type TimeoutSettings, type VaultTimeoutHook } from "../lib/platform";
 import { MIN_MASTER_PASSWORD, clampTimeout, minPasswordLength, minutesLabel, newKeysMeetKdf, timeoutOptions } from "../lib/policies";
 import { server } from "../lib/server";
-import { UNEXPECTED_RESPONSE, readRecoveryCodes, type Role } from "../lib/types";
+import { UNEXPECTED_RESPONSE, isTrashed, readRecoveryCodes, type Role } from "../lib/types";
 import {
   ASK_OWNER_TO_SIGN,
   NOT_NOW_HINT,
@@ -1527,7 +1527,7 @@ function VaultsTab() {
   }
 
   const counts = new Map<string, number>();
-  for (const it of items) if (!it.deletedAt) counts.set(it.vaultId, (counts.get(it.vaultId) ?? 0) + 1);
+  for (const it of items) if (!isTrashed(it)) counts.set(it.vaultId, (counts.get(it.vaultId) ?? 0) + 1);
 
   return (
     <>

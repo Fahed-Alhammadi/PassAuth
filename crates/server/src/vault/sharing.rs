@@ -148,6 +148,7 @@ pub(super) async fn delete_vault(
         "DELETE FROM item_versions WHERE vault_id = $1",
         "DELETE FROM item_tombstones WHERE vault_id = $1",
         "DELETE FROM vault_rosters WHERE vault_id = $1",
+        "DELETE FROM vault_manifest_log WHERE vault_id = $1",
         "DELETE FROM vault_members WHERE vault_id = $1",
         "DELETE FROM vaults WHERE id = $1",
     ] {

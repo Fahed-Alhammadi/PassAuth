@@ -4,7 +4,8 @@
  * wrapped the item key, so an item encrypted under a replaced vault key fails
  * to open, as with the real core. The site logic (host names, matching, the save
  * rule, passkey targets, RP IDs, sign-in phrases, the item edit counter check) is the real core's; item writes raise
- * the item's edit counter `rev` like the core's. Vault manifests are the real core's too (test/manifest-key.ts).
+ * the item's edit counter `rev` like the core's. Vault manifests are the real core's too (test/manifest-key.ts): the
+ * chain included (`prev`, links, `need_log`).
  * Signed sharing (which every server this app talks to has) is a stand-in that finds nothing wrong: the account opens
  * or makes a signing identity, every vault row passes its check, nothing is pinned. Its rules are tested with the real
  * core in signed-sharing.test.ts. Used through
@@ -51,17 +52,27 @@ export class FakeVaultKey {
     return true;
   }
   /** Vault manifests: the real core's, bound to this key's name. */
-  manifestVerify(vaultId: string, epoch: number, seq: number, sealed: string | null | undefined, remembered: number | null | undefined, items: unknown) {
-    return manifestKey(this.tag).manifestVerify(vaultId, epoch, seq, sealed, remembered, items);
+  manifestVerify(
+    vaultId: string,
+    epoch: number,
+    seq: number,
+    prev: string | null | undefined,
+    sealed: string | null | undefined,
+    rememberedVersion: number | null | undefined,
+    rememberedLink: string | null | undefined,
+    log: unknown,
+    items: unknown,
+  ) {
+    return manifestKey(this.tag).manifestVerify(vaultId, epoch, seq, prev, sealed, rememberedVersion, rememberedLink, log, items);
   }
-  manifestStart(vaultId: string, epoch: number, version: number, items: unknown) {
-    return manifestKey(this.tag).manifestStart(vaultId, epoch, version, items);
+  manifestStart(vaultId: string, epoch: number, version: number, prev: string | null | undefined, items: unknown) {
+    return manifestKey(this.tag).manifestStart(vaultId, epoch, version, prev, items);
   }
-  manifestNext(vaultId: string, epoch: number, seq: number, sealed: string, removed: unknown, added: unknown) {
-    return manifestKey(this.tag).manifestNext(vaultId, epoch, seq, sealed, removed, added);
+  manifestNext(vaultId: string, epoch: number, seq: number, prev: string, sealed: string, removed: unknown, added: unknown) {
+    return manifestKey(this.tag).manifestNext(vaultId, epoch, seq, prev, sealed, removed, added);
   }
   private check(enc: { key: string }) {
-    if (!enc.key.startsWith(`${this.tag}:`)) throw new Error("decrypt_failed");
+    if (typeof enc.key !== "string" || !enc.key.startsWith(`${this.tag}:`)) throw new Error("decrypt_failed");
   }
   decryptMeta(_id: string, meta: string) {
     return JSON.parse(meta);
@@ -196,6 +207,7 @@ async function realSiteLogic() {
     loginPhraseChoices,
     itemRevCheck,
     manifestDataHash,
+    manifestLink,
     normalizeEmail,
   } = real;
   return {
@@ -218,6 +230,7 @@ async function realSiteLogic() {
     loginPhraseChoices,
     itemRevCheck,
     manifestDataHash,
+    manifestLink,
     normalizeEmail,
   };
 }

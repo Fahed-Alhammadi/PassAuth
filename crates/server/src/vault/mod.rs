@@ -55,6 +55,8 @@ pub use history::trim_versions;
 pub use items::purge_trash;
 use manifest::ManifestIn;
 #[cfg(test)]
+pub(crate) use manifest::{LOG_KEPT as MANIFEST_LOG_KEPT, prune_log as prune_manifest_log};
+#[cfg(test)]
 pub(crate) use sharing::KEY_REPLACEMENTS_PER_HOUR;
 pub use sharing::insert_vault;
 #[cfg(test)]
@@ -112,6 +114,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/vaults/{id}/events", get(vault_events))
         .route("/vaults/{id}/manifest", put(manifest::put_manifest))
+        .route("/vaults/{id}/manifest-log", get(manifest::get_log))
         .route(
             "/vaults/{id}/trash/purge",
             post(items::purge_items).layer(bulk()),
@@ -275,6 +278,33 @@ impl<'a> Need<'a> {
     }
 }
 
+/// What taking a vault's row lock returns ([`VaultWrite::lock_row`]).
+#[derive(sqlx::FromRow)]
+struct LockedRow {
+    seq: i64,
+    key_epoch: i64,
+    manifest_seq: i64,
+    manifest_prev: Option<String>,
+    manifest: Option<String>,
+}
+
+impl LockedRow {
+    fn locked(self, vault: &str, role: Option<Role>) -> Locked {
+        Locked {
+            id: vault.to_owned(),
+            role,
+            key_epoch: self.key_epoch,
+            seq: self.seq,
+            manifest_seq: self.manifest_seq,
+            manifest_link: manifest::head_link(
+                self.manifest_seq,
+                self.manifest_prev.as_deref(),
+                self.manifest.as_deref(),
+            ),
+        }
+    }
+}
+
 struct Locked {
     id: String,
     /// The caller's role (`None` for the server's own writes, e.g. the trash sweeper).
@@ -282,9 +312,11 @@ struct Locked {
     key_epoch: i64,
     /// The vault's sequence number taken by this write.
     seq: i64,
-    /// The version of the vault's manifest (0 = none), kept current through
-    /// [`VaultWrite::manifests`].
+    /// The version of the vault's manifest (0 = none) and its link (what the next
+    /// manifest must name as its predecessor; all zero while there is none), kept
+    /// current through [`VaultWrite::manifests`].
     manifest_seq: i64,
+    manifest_link: manifest::Link,
 }
 
 /// One write into one or more vaults; see the module docs. Dropping it without
@@ -347,17 +379,11 @@ impl VaultWrite {
     /// invitation (404 when there is none).
     async fn invitation(state: &AppState, me: &AuthUser, vault: &str) -> ApiResult<(Self, bool)> {
         let mut w = Self::start(state, Some(me)).await?;
-        let (seq, epoch, manifest_seq) = w.lock_row(vault).await?;
+        let row = w.lock_row(vault).await?;
         let (role, invited) = membership(&mut w.tx, &me.user_id, vault)
             .await?
             .ok_or(ApiError::NotFound)?;
-        w.locked.push(Locked {
-            id: vault.to_owned(),
-            role: Some(role),
-            key_epoch: epoch,
-            seq,
-            manifest_seq,
-        });
+        w.locked.push(row.locked(vault, Some(role)));
         Ok((w, invited))
     }
 
@@ -387,7 +413,8 @@ impl VaultWrite {
         if let Some(l) = self.locked.iter().find(|l| l.id == vault) {
             return Ok(l.key_epoch);
         }
-        let (seq, epoch, manifest_seq) = self.lock_row(vault).await?;
+        let row = self.lock_row(vault).await?;
+        let epoch = row.key_epoch;
         let role = match &self.me {
             Some(me) => Some(
                 member_role(&mut self.tx, &me.user_id, vault)
@@ -396,22 +423,16 @@ impl VaultWrite {
             ),
             None => None,
         };
-        self.locked.push(Locked {
-            id: vault.to_owned(),
-            role,
-            key_epoch: epoch,
-            seq,
-            manifest_seq,
-        });
+        self.locked.push(row.locked(vault, role));
         Ok(epoch)
     }
 
-    /// The row lock and the next sequence number: (seq, key epoch, manifest version);
-    /// 404 for no vault.
-    async fn lock_row(&mut self, vault: &str) -> ApiResult<(i64, i64, i64)> {
-        let row: Option<(i64, i64, i64)> = sqlx::query_as(
+    /// The row lock and the next sequence number, with the vault's key epoch and
+    /// manifest; 404 for no vault.
+    async fn lock_row(&mut self, vault: &str) -> ApiResult<LockedRow> {
+        let row: Option<LockedRow> = sqlx::query_as(
             "UPDATE vaults SET updated_at = $1, seq = seq + 1 WHERE id = $2
-             RETURNING seq, key_epoch, manifest_seq",
+             RETURNING seq, key_epoch, manifest_seq, manifest_prev, manifest",
         )
         .bind(now())
         .bind(vault)
@@ -478,8 +499,9 @@ impl VaultWrite {
     /// This write changed the items of `changed` (vaults it has locked): each of them
     /// that has a manifest gets its next one from `sent`, in this transaction. Without
     /// it the write is refused (400 `manifest_required`); one that isn't exactly the
-    /// next version, or one for a vault that has none yet (only `PUT
-    /// /vaults/{id}/manifest` starts one), is a 409 `manifest_conflict`. Entries for
+    /// next version or doesn't name the current manifest as its predecessor, or one
+    /// for a vault that has none yet (only `PUT /vaults/{id}/manifest` starts one), is
+    /// a 409 `manifest_conflict`. Entries for
     /// vaults the write didn't change (a retried create or import that found its
     /// items) are ignored. Call it after the item statements, so an item's own
     /// `revision_conflict` is reported first.
@@ -494,25 +516,35 @@ impl VaultWrite {
                 (n, Some(m)) if m.seq == n + 1 => m,
                 _ => return Err(ApiError::manifest_conflict()),
             };
-            self.store_manifest(vault, current, next.seq, &next.sealed)
+            self.store_manifest(vault, current, next.seq, &next.prev, &next.sealed)
                 .await?;
         }
         Ok(())
     }
 
-    /// Replace the manifest of a locked vault whose version is `current`.
+    /// Replace the manifest of a locked vault whose version is `current` by one that
+    /// names it as its predecessor (`prev` is the current manifest's link, all zero
+    /// when there is none; anything else is a 409 `manifest_conflict`: the app built
+    /// on another state than the vault's), and add it to the vault's log.
     async fn store_manifest(
         &mut self,
         vault: &str,
         current: i64,
         seq: i64,
+        prev: &str,
         sealed: &str,
     ) -> ApiResult<()> {
+        let head = self.locked(vault).manifest_link;
+        if manifest::parse_link(prev).ok() != Some(head) {
+            return Err(ApiError::manifest_conflict());
+        }
         let done = sqlx::query(
-            "UPDATE vaults SET manifest = $1, manifest_seq = $2 WHERE id = $3 AND manifest_seq = $4",
+            "UPDATE vaults SET manifest = $1, manifest_seq = $2, manifest_prev = $3
+             WHERE id = $4 AND manifest_seq = $5",
         )
         .bind(sealed)
         .bind(seq)
+        .bind(prev)
         .bind(vault)
         .bind(current)
         .execute(&mut *self.tx)
@@ -520,11 +552,16 @@ impl VaultWrite {
         if done.rows_affected() != 1 {
             return Err(ApiError::manifest_conflict());
         }
-        self.locked
+        let digest = manifest::sealed_digest(sealed);
+        manifest::log(&mut self.tx, vault, seq, prev, &digest).await?;
+        let locked = self
+            .locked
             .iter_mut()
             .find(|l| l.id == vault)
-            .expect("a vault locked by this write")
-            .manifest_seq = seq;
+            .expect("a vault locked by this write");
+        locked.manifest_seq = seq;
+        // `seq` is within 1…2^53−1 (`ManifestIn::check_all`, `put_manifest`).
+        locked.manifest_link = manifest::link(seq.unsigned_abs(), &head, &digest);
         Ok(())
     }
 

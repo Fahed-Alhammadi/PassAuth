@@ -31,11 +31,11 @@ interface OpenedVaultKey : AutoCloseable {
     fun decryptItem(id: String, vaultId: String, key: String, data: String): String
 
     /**
-     * Are [itemsJson] (every item row of the vault, as sent) exactly what the vault's manifest
+     * Are [itemsJson] (every item row of the vault, built from the fields read) exactly what the vault's manifest
      * records ([Manifests]; the core's `manifestVerify` without device memory)? Only asked for a
      * vault that has one.
      */
-    fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, sealed: String?, itemsJson: String): Boolean
+    fun manifestMatches(vaultId: String, keyEpoch: Long, manifestSeq: Long, prev: String?, sealed: String?, itemsJson: String): Boolean
 }
 
 class NewEmergencyKeyHandle(val wrapped: String, val key: EmergencyKeyHandle) : AutoCloseable {
@@ -658,22 +658,25 @@ class EmergencyClient(private val env: EmergencyEnv) {
                         null
                     } ?: "Vault"
                     vaults += v.id to name
-                    // A vault with a manifest: the rows sent must be exactly what it records (read-only check, nothing remembered).
-                    if (v.manifestSeq > 0) {
-                        val sent = kotlinx.serialization.json.JsonArray(data.rawItems.filter { (it["vault_id"] as? kotlinx.serialization.json.JsonPrimitive)?.content == v.id })
-                        val ok = try {
-                            vk.manifestMatches(v.id, v.keyEpoch, v.manifestSeq, v.manifest, sent.toString())
-                        } catch (_: Exception) {
-                            false
-                        }
-                        if (!ok) mismatched += name
-                    }
+                    var unopened = 0
                     for (r in rows) {
                         try {
                             items += GrantorEntry(r.id, v.id, ItemCodec.decode(vk.decryptItem(r.id, v.id, r.key, r.data)), r.deletedAt)
                         } catch (_: Exception) {
-                            failed++
+                            unopened++
                         }
+                    }
+                    failed += unopened
+                    // A vault with a manifest: the rows shown must be exactly what it records (read-only check,
+                    // nothing remembered). Counted from the fields read, so a row this app can't use (no data or
+                    // key) or can't open is an item hidden behind the record: a mismatch.
+                    if (v.manifestSeq > 0) {
+                        val ok = unopened == 0 && v.id !in data.incompleteVaults && !data.strayRows && try {
+                            vk.manifestMatches(v.id, v.keyEpoch, v.manifestSeq, v.manifestPrev, v.manifest, Emergency.manifestRows(rows))
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (!ok) mismatched += name
                     }
                 }
             }

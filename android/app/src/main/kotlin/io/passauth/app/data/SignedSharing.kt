@@ -414,16 +414,6 @@ object SignedSharing {
     const val NOT_DECLINABLE = "PassAuth keeps this one locked until you decide. It can't be declined here, because that could give up a vault you use."
     const val PINS_UNSENT = "PassAuth couldn't check your list of known keys right now, so it didn't replace any key. Try again when your server can be reached."
 
-    /**
-     * Whether signed sharing is checked for an account: its server lists `signed_sharing` (in the
-     * features kept, [kept], or asked now, [now]), this phone has trust memory for it ([hasMemory]), or
-     * the server sent an identity, share, roster or key pins version ([signals]). An unknown
-     * `/api/config` (null) turns nothing on by itself and persists nothing (web re-review A): a server
-     * without the feature works as before once its config is known.
-     */
-    fun checksOn(kept: List<String>?, now: List<String>?, hasMemory: Boolean, signals: Boolean): Boolean =
-        kept?.contains(FEATURE) == true || now?.contains(FEATURE) == true || hasMemory || signals
-
     /** One value for what a check showed (hashed, so it can be compared and kept short). */
     internal fun token(vararg parts: Any?): String {
         val d = java.security.MessageDigest.getInstance("SHA-256")
@@ -837,6 +827,12 @@ class SharingSession(
     var pins: String? = null
         private set
     private var pinsSeq = 0L
+
+    /**
+     * The version of the key pins the server holds as far as this session knows for certain (it
+     * loaded them from the server, or wrote them itself, without a problem); null otherwise.
+     */
+    val serverPinsSeq: Long? get() = pinsSeq.takeIf { pinsLoaded && loadedOnline && pinsProblem == null && !pinsUnreachable && !dirty }
     private var pinsLoaded = false
 
     /** Set while the server's key pins can't be used (rollback, unreadable): nothing is written. */

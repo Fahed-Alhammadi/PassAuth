@@ -32,15 +32,18 @@ public struct SyncVault: Codable, Equatable, Sendable {
     public var memberRosterSeq: Int64?
     /// Vault manifests (servers with `vault_manifest`): the vault's sealed manifest and its
     /// version (0 or nil: the vault has none), read in the same snapshot as the answer's items;
-    /// `manifestOk`: while it has none, its first one may be started now.
+    /// `manifestOk`: while it has none, its first one may be started now. `manifestPrev`: the
+    /// link of the manifest it replaced (base64url; nil while the vault has none), needed to
+    /// open it; the three travel together in every copy.
     public var manifest: String?
     public var manifestSeq: Int64?
+    public var manifestPrev: String?
     public var manifestOk: Bool?
 
     public init(id: String, meta: String = "", role: String = "owner", wrappedKey: String = "", keyKind: String = "account",
                 rotationPending: Int64? = nil, keyEpoch: Int64? = nil, seq: Int64? = nil, share: JSON? = nil,
                 memberRoster: String? = nil, memberRosterSeq: Int64? = nil,
-                manifest: String? = nil, manifestSeq: Int64? = nil, manifestOk: Bool? = nil) {
+                manifest: String? = nil, manifestSeq: Int64? = nil, manifestPrev: String? = nil, manifestOk: Bool? = nil) {
         self.id = id
         self.meta = meta
         self.role = role
@@ -54,6 +57,7 @@ public struct SyncVault: Codable, Equatable, Sendable {
         self.memberRosterSeq = memberRosterSeq
         self.manifest = manifest
         self.manifestSeq = manifestSeq
+        self.manifestPrev = manifestPrev
         self.manifestOk = manifestOk
     }
 
@@ -61,7 +65,7 @@ public struct SyncVault: Codable, Equatable, Sendable {
         case id, meta, role, seq, share, manifest
         case wrappedKey = "wrapped_key", keyKind = "key_kind", rotationPending = "rotation_pending", keyEpoch = "key_epoch"
         case memberRoster = "member_roster", memberRosterSeq = "member_roster_seq"
-        case manifestSeq = "manifest_seq", manifestOk = "manifest_ok"
+        case manifestSeq = "manifest_seq", manifestPrev = "manifest_prev", manifestOk = "manifest_ok"
     }
 
     /// The manifest's version; 0: the vault has none.
@@ -91,7 +95,8 @@ public struct SyncItem: Codable, Equatable, Sendable {
     /// Only in this device's copy, on a row it kept from a newer copy of its own after the
     /// server sent an older version of the item (item rollback): the hash of the data the server
     /// sent. The vault's manifest is checked (and advanced) with it, since that is what the
-    /// manifest records for the row.
+    /// manifest records for the row. Never taken from a server's answer (`SyncMerge.apply` drops
+    /// it there): a server could otherwise name the hash its own row is checked with.
     public var servedSha256: String?
 
     public init(id: String, vaultId: String, itemKey: String?, data: String?, revision: Int64? = nil, deletedAt: Int64? = nil,
@@ -236,7 +241,7 @@ public struct SyncSnapshot: Codable, Equatable, Sendable {
     /// The stored copy, or nil when it can't be read as one.
     public static func decode(_ data: Data) -> SyncSnapshot? {
         guard let r = try? JSONDecoder().decode(SyncResponse.self, from: data) else { return nil }
-        return SyncMerge.apply(r, to: nil)
+        return SyncMerge.apply(r, to: nil, local: true)
     }
 }
 
@@ -262,9 +267,21 @@ public enum SyncMerge {
     ///
     /// nil for an answer that isn't a vault snapshot (a numeric revision, `vaults` and `items`;
     /// well-formed rows, checked by decoding, and only trashed ones without key and data) or a
-    /// delta without the copy it was asked for.
-    public static func apply(_ r: SyncResponse, to base: SyncSnapshot?) -> SyncSnapshot? {
-        guard let revision = r.revision, revision >= 0, let vaults = r.vaults, let items = r.items else { return nil }
+    /// delta without the copy it was asked for. The numbers the apps count with (a vault's
+    /// `seq`, `manifest_seq` and `key_epoch`, a row's `deleted_at`) must be whole numbers up to
+    /// 2^53 − 1 (a vault's not below 0), else the answer isn't one either.
+    ///
+    /// `local`: `r` is this device's own stored copy. Only then do rows keep what the device
+    /// itself put on them (`servedSha256`); in a server's answer it is dropped.
+    public static func apply(_ r: SyncResponse, to base: SyncSnapshot?, local: Bool = false) -> SyncSnapshot? {
+        guard let revision = r.revision, revision >= 0, let vaults = r.vaults, var items = r.items else { return nil }
+        let top = Int64(VaultManifest.maxNumber)
+        func counted(_ n: Int64?) -> Bool { n.map { $0 >= 0 && $0 <= top } ?? true }
+        guard vaults.allSatisfy({ counted($0.seq) && counted($0.manifestSeq) && counted($0.keyEpoch) }),
+              items.allSatisfy({ ($0.deletedAt ?? 0) <= top }) else { return nil }
+        if !local {
+            for i in items.indices where items[i].servedSha256 != nil { items[i].servedSha256 = nil }
+        }
         let bundle = r.bundle == .null ? nil : r.bundle
         // Only trashed items may come without key and data (`trash=summary`).
         guard items.allSatisfy({ ($0.itemKey != nil && $0.data != nil) || $0.deletedAt != nil }) else { return nil }
@@ -312,6 +329,7 @@ public enum SyncMerge {
             guard manifest.vaultId == vaultId else { return nil }
             next.vaults[v].manifest = manifest.sealed
             next.vaults[v].manifestSeq = Int64(clamping: manifest.seq)
+            next.vaults[v].manifestPrev = manifest.prev
         }
         switch change {
         case .put(let row):
@@ -378,7 +396,9 @@ public enum SyncDecision {
     public static func afterWrite(known: Int64?, vaultSeq: Int64?) -> AfterWrite {
         guard let known, let vaultSeq else { return .sync }
         if vaultSeq == known { return .nothing }
-        return vaultSeq == known + 1 ? .applyLocally : .sync
+        // Server numbers: never added to without a check.
+        let (next, overflow) = known.addingReportingOverflow(1)
+        return !overflow && vaultSeq == next ? .applyLocally : .sync
     }
 
     /// A live sync message (`{"type":"sync","revision","vaults"}`) against the copy at `have`

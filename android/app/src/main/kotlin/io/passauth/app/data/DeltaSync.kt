@@ -45,6 +45,8 @@ data class SyncVault(
     /** Vault manifests ([Manifests]): the sealed manifest (null: none) and its version (0 or null: the vault has none). */
     val manifest: String? = null,
     @SerialName("manifest_seq") val manifestSeq: Long? = null,
+    /** The link of the manifest this one replaced (base64url, 43 characters; null: the vault has none). Needed to open the manifest. */
+    @SerialName("manifest_prev") val manifestPrev: String? = null,
     /** While the vault has no manifest: every member's signed-in apps keep manifests, so its first one may be started. */
     @SerialName("manifest_ok") val manifestOk: Boolean? = null,
 ) {
@@ -140,6 +142,12 @@ data class SyncSnapshot(
      */
     @kotlinx.serialization.Transient val serverTime: Long? = null,
     @kotlinx.serialization.Transient val trashDays: Long? = null,
+    /**
+     * This copy is one whole answer of the server, exactly as sent (never stored; false for a delta
+     * merged into this phone's copy, for the stored copy and after a local change): only such a
+     * copy's manifest verdict raises a vault's warning ([Manifests.judge]).
+     */
+    @kotlinx.serialization.Transient val whole: Boolean = false,
 ) {
     val position: SyncPosition
         get() {
@@ -153,7 +161,7 @@ data class SyncSnapshot(
     companion object {
         /** The stored copy, or null when it can't be read as one (also a plain `/sync` answer stored before delta sync). */
         fun decode(text: String): SyncSnapshot? = DeltaSync.parse(text)?.let { r ->
-            SyncMerge.apply(r, null, local = true)?.copy(held = r.held.orEmpty().filter { it.itemKey != null && it.data != null }, serverTime = null, trashDays = null)
+            SyncMerge.apply(r, null, local = true)?.copy(held = r.held.orEmpty().filter { it.itemKey != null && it.data != null }, serverTime = null, trashDays = null, whole = false)
         }
     }
 }
@@ -193,16 +201,22 @@ object SyncMerge {
      * Null for an answer that isn't a vault snapshot (a numeric revision ≥ 0, `vaults` and `items`;
      * only trashed rows without key and data) or a delta without the copy it was asked for.
      * [local]: [r] is this phone's own stored copy; from a server a row's `served_sha256` is never
-     * taken (a server could name a hash for a row and then send any data with it).
+     * taken (a server could name a hash for a row and then send any data with it). An answer with a
+     * vault number, manifest version, key epoch or trash time that isn't a whole number in
+     * 0..2^53−1 isn't one either.
      */
+    private fun wholeNumber(n: Long?) = n == null || n in 0..Manifests.MAX_NUMBER
+
     fun apply(r: SyncResponse, base: SyncSnapshot?, local: Boolean = false): SyncSnapshot? {
         val revision = (r.revision as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull?.takeIf { it >= 0 } ?: return null
         val vaults = r.vaults ?: return null
         val items = (r.items ?: return null).let { rows -> if (local) rows else rows.map { if (it.servedSha256 == null) it else it.copy(servedSha256 = null) } }
         if (items.any { (it.itemKey == null || it.data == null) && it.deletedAt == null }) return null
+        // Numbers every client counts with are whole and within 0..2^53−1; anything else isn't an answer.
+        if (vaults.any { !wholeNumber(it.seq) || !wholeNumber(it.manifestSeq) || !wholeNumber(it.keyEpoch) } || items.any { !wholeNumber(it.deletedAt) }) return null
         val bundle = r.bundle?.takeIf { it !is JsonNull }
         val invitations = Invitations.read(r.invitations)
-        if (!r.delta) return SyncSnapshot(revision, r.cursor, r.user, bundle, vaults, items, invitations, serverTime = r.serverTime, trashDays = r.trashDays)
+        if (!r.delta) return SyncSnapshot(revision, r.cursor, r.user, bundle, vaults, items, invitations, serverTime = r.serverTime, trashDays = r.trashDays, whole = !local)
         base ?: return null
         val gone = r.deleted.orEmpty().map { it.vaultId to it.id }.toSet()
         val reset = r.reset.orEmpty().toSet()
@@ -222,7 +236,8 @@ object SyncMerge {
      * next delta from that cursor brings the row again). Null when the copy can't take it (vault or item not
      * there, a summary row to restore): sync instead. [manifest]: the vault's next manifest this
      * write carried and the server stored with it (the answer's `manifest_seq` is its version): the
-     * vault row gets it, so the copy's rows and manifest still belong together.
+     * vault row gets it (sealed text, version and the link it replaces), so the copy's rows and
+     * manifest still belong together and the next write is built on it.
      */
     fun applyLocal(change: LocalChange, vaultId: String, vaultSeq: Long, s: SyncSnapshot, manifest: ManifestEntry? = null): SyncSnapshot? {
         if (s.vaults.none { it.id == vaultId }) return null
@@ -230,7 +245,7 @@ object SyncMerge {
         val vaults = s.vaults.map {
             when {
                 it.id != vaultId -> it
-                manifest != null -> it.copy(seq = vaultSeq, manifest = manifest.sealed, manifestSeq = manifest.seq)
+                manifest != null -> it.copy(seq = vaultSeq, manifest = manifest.sealed, manifestSeq = manifest.seq, manifestPrev = manifest.prev)
                 else -> it.copy(seq = vaultSeq)
             }
         }
@@ -264,7 +279,7 @@ object SyncMerge {
             }
             LocalChange.ManifestOnly -> s.items
         }
-        return s.copy(vaults = vaults, items = items, serverTime = null, trashDays = null)
+        return s.copy(vaults = vaults, items = items, serverTime = null, trashDays = null, whole = false)
     }
 }
 

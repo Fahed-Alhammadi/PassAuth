@@ -49,18 +49,27 @@ export class DeltaError extends Error {}
 
 const isString = (v: unknown): v is string => typeof v === "string";
 const wholeNumber = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+/** A number the app counts with or compares, when the server sent it: a whole number from 0 to 2^53 − 1. */
+const optWhole = (v: unknown) => v === undefined || wholeNumber(v);
 
 /**
  * Every field of the answer that the app keeps or hands to the core has its type (the core's string parameters must
  * never get anything else): the user, the bundle, each vault row (`wrapped_key`, `key_kind`, `meta`, `role` as strings,
- * the numbers as numbers), each item's ids, and a delta's `deleted` and `reset`.
+ * the numbers as numbers), each item's ids, and a delta's `deleted` and `reset`. The numbers the apps count with or
+ * compare (a vault's `seq`, `manifest_seq` and `key_epoch`, an item's `deleted_at`) are whole numbers from 0 to
+ * 2^53 − 1 or the answer is refused as a whole: no arithmetic ever runs on anything else. (`deleted_at` 0 passes here
+ * and is refused by the core as "no time", which makes its vault a mismatch.)
  */
 function check(resp: SyncResponse) {
   if (!isSyncUser(resp.user)) throw new DeltaError("user");
   if (!isBundle(resp.bundle)) throw new DeltaError("bundle");
   if (resp.cursor !== undefined && !isString(resp.cursor)) throw new DeltaError("cursor");
-  for (const v of resp.vaults) if (!isSyncVaultRow(v)) throw new DeltaError("vault");
-  for (const row of resp.items) if (!isString(row?.id) || !isString(row.vault_id)) throw new DeltaError("item");
+  for (const v of resp.vaults) if (!isSyncVaultRow(v) || !optWhole(v.seq) || !optWhole(v.manifest_seq) || !optWhole(v.key_epoch)) throw new DeltaError("vault");
+  for (const row of resp.items) {
+    if (!isString(row?.id) || !isString(row.vault_id)) throw new DeltaError("item");
+    const at: unknown = row.deleted_at;
+    if (at !== null && at !== undefined && !wholeNumber(at)) throw new DeltaError("item");
+  }
   if (resp.delta !== true) return;
   if (resp.deleted !== undefined && (!Array.isArray(resp.deleted) || !resp.deleted.every((d) => isString(d?.id) && isString(d.vault_id))))
     throw new DeltaError("deleted");
@@ -122,10 +131,14 @@ export function knownSeq(s: Snapshot | null, vaultId: string): number | undefine
   return Math.max(v.seq, s.own[vaultId] ?? v.seq);
 }
 
-/** The vault manifest a write carried (`manifest.ts`): the vault's manifest version after the write and its sealed text. */
+/**
+ * The vault manifest a write carried (`manifest.ts`): the vault's manifest version after the write, its sealed text
+ * and the link of the manifest it replaced (`prev`; the vault row keeps the three together).
+ */
 export interface SentManifest {
   seq: number;
   sealed: string;
+  prev?: string;
 }
 
 /**
@@ -153,7 +166,9 @@ export function applyOwnWrite(s: Snapshot, w: OwnWrite): Snapshot {
 export function applyOwnManifest(s: Snapshot, vaultId: string, manifest: SentManifest, vaultSeq: number): Snapshot {
   return {
     ...s,
-    vaults: s.vaults.map((v) => (v.id === vaultId ? { ...v, manifest: manifest.sealed, manifest_seq: manifest.seq } : v)),
+    vaults: s.vaults.map((v) =>
+      v.id === vaultId ? { ...v, manifest: manifest.sealed, manifest_seq: manifest.seq, ...(manifest.prev !== undefined ? { manifest_prev: manifest.prev } : {}) } : v,
+    ),
     own: { ...s.own, [vaultId]: vaultSeq },
   };
 }

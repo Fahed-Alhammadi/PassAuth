@@ -23,12 +23,17 @@
 //! Send v2 (migration 16, feature `send_v2`): a Send with a password may have its name
 //! and text encrypted with a key made from the link's key *and* the password, so the
 //! link alone doesn't open it. Its owner keeps that key wrapped by their account key
-//! (`owner_content_key`, returned only to the owner). The server can't tell the formats
-//! apart and doesn't need to; it only keeps `owner_content_key` consistent with the
-//! password: none without a password, and while a Send has one, changing or removing
-//! the password must bring the re-encrypted `name`, `data` and `owner_content_key`
-//! (`null` when going back to the link key alone), so an app from before can't leave
-//! the text encrypted with a password visitors no longer have.
+//! (`owner_content_key`, returned only to the owner). The server tells the formats
+//! apart only by the fields' first byte (`check_format`) and keeps three things
+//! consistent. `owner_content_key` goes with the password: none without one, and
+//! while a Send has one, changing or removing the password must bring the
+//! re-encrypted `name`, `data` and `owner_content_key` (`null` when going back to
+//! the link key alone), so an app from before can't leave the text encrypted with a
+//! password visitors no longer have. The text goes with the key: `name` and `data`
+//! are v2 exactly when the Send has an `owner_content_key`, so an app from before
+//! can't rewrite a v2 Send's text with the link key alone, and the key can't be
+//! dropped from under text that needs it. And a v2 Send stays v2 while it has a
+//! password: only removing the password takes it back to the link key alone.
 //!
 //! The sweeper deletes Sends once their `delete_at` (at most `send_max_days` ahead)
 //! has passed; their bytes count toward the owner's storage quota until then.
@@ -268,6 +273,45 @@ async fn check_quota(
     Ok(())
 }
 
+/// Whether an encrypted field is in the Send v2 format: its first byte is the `0x02`
+/// marker (v1 starts with the cipher's `0x01`). Read from the first two base64url
+/// characters; the server learns nothing else from it.
+fn is_v2_field(field: &str) -> bool {
+    fn six(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let mut chars = field.bytes();
+    match (chars.next().and_then(six), chars.next().and_then(six)) {
+        (Some(a), Some(b)) => (a << 2) | (b >> 4) == 0x02,
+        _ => false,
+    }
+}
+
+/// A Send's text and its `owner_content_key` go together (security review): with the
+/// key both fields are v2 (encrypted with the password too), without it neither is.
+/// So an older app that rewrites the text with the link key alone, or a request that
+/// drops the key and keeps the text, is refused instead of quietly weakening the Send.
+fn check_format(name: &str, data: &str, content_key: bool) -> ApiResult<()> {
+    if is_v2_field(name) == content_key && is_v2_field(data) == content_key {
+        Ok(())
+    } else if content_key {
+        Err(ApiError::bad(
+            "this Send is encrypted with its password: update PassAuth to change its text",
+        ))
+    } else {
+        Err(ApiError::bad(
+            "a Send's password-encrypted text needs its owner_content_key",
+        ))
+    }
+}
+
 fn content_key_without_password() -> ApiError {
     ApiError::bad("owner_content_key needs a password (access_salt and access_verifier)")
 }
@@ -333,6 +377,7 @@ async fn create(
             return Err(content_key_without_password());
         }
     }
+    check_format(&b.name, &b.data, b.owner_content_key.is_some())?;
     state.limiter.limit(
         Class::Target,
         &format!("send-create:{}", user.user_id),
@@ -549,8 +594,22 @@ async fn update(
     if content_key.is_some() && verifier.is_none() {
         return Err(content_key_without_password());
     }
+    // A Send whose text needs its password stays that way while it has a password
+    // (review fix): going back to the link key alone means removing the password, so
+    // no request leaves a Send that asks for a password its text no longer needs.
+    if old.owner_content_key.is_some() && content_key.is_none() && verifier.is_some() {
+        return Err(ApiError::bad(
+            "this Send is encrypted with its password: remove the password to encrypt it with the link alone",
+        ));
+    }
     if content_key != old.owner_content_key {
         changed.push("owner_content_key");
+    }
+    if changed
+        .iter()
+        .any(|c| matches!(*c, "name" | "data" | "owner_content_key"))
+    {
+        check_format(&name, &data, content_key.is_some())?;
     }
     let max_views = match b.max_views {
         Some(v) if v != old.max_views => {

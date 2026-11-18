@@ -53,7 +53,7 @@ export function analyze<T extends HealthEntry>(entries: readonly T[], estimateBi
   const byPassword = new Map<string, T[]>();
   for (const e of entries) {
     const password = e.item.login?.password;
-    if (e.deletedAt || !password) continue;
+    if (e.deletedAt !== null || !password) continue;
     logins.push(e);
     if (isWeak(password, estimateBits)) weak.push(e);
     const same = byPassword.get(password);
