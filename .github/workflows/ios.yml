@@ -57,14 +57,16 @@ jobs:
   ios:
     name: ios app
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
-    runs-on: macos-latest
+    # Apple requires the iOS 27 SDK (Xcode 27) for uploads from April 2027 (ITMS-90725); GitHub's macOS 26
+    # images only have Xcode 26, so both jobs use the xcode-27 image.
+    runs-on: xcode-27
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: latest-stable
+          xcode-version: '^27.0'
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -81,7 +83,7 @@ jobs:
 
   archive:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'tag')
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -94,7 +96,7 @@ jobs:
 
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: latest-stable
+          xcode-version: '^27.0'
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
