@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.13.1 (2026-11-18)
+
+- Server: allow blob: images in the web vault CSP (profile pictures) (2cfc7ae)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.13.0...server-0.13.1)
+
 ## 0.13.0 (2026-11-18)
 
 - Apps: profile pictures and a globe tile when website icons are off (107d7ea)
