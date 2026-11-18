@@ -1,7 +1,9 @@
-New in 0.9.0
-• Add a site to a login you already have: when you use the same account on another site (for example your mail login on a developer console), PassAuth no longer needs a second copy. In the AutoFill list, tap "Add this site to a login…", pick the login and confirm: it is filled now and suggested on that site from then on.
-• When you save a password that matches a login saved for another site, the save sheet also offers "Add this site" next to "New login".
+New in 0.9.1
+• Settings is reorganised: your account is at the top, then grouped rows with coloured icons (vault tools, security and AutoFill, appearance and permissions, About).
+• Everything about your account is on one page: tap your name to see the server, switch or add accounts, lock, log out or delete the account.
+• New About PassAuth page with the version, help, feedback, rating, website and privacy policy.
 
 Please test:
-1. In Safari, open a site where your account works but nothing is saved for it yet. Open AutoFill, tap "Add this site to a login…", pick the login and confirm. Check it fills, and that next time it is suggested for that site.
-2. Sign in on such a site with the same user name and password as an existing login and save: the sheet should offer "Add this site". "New login" stays selected until you choose otherwise.
+1. Open Settings and check every row opens the right page.
+2. Tap your name: switch to another account and back, add an account, lock and log out.
+3. Open About PassAuth and try each link.
