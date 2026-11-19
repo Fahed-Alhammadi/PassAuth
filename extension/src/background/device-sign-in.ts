@@ -12,6 +12,7 @@ import { AppError, EXPIRED, UNREACHABLE } from "../shared/errors";
 import type { DeviceSignInStart } from "../shared/types";
 import { ApiError, api, logoutRemote } from "./api";
 import { accountKey, local } from "./storage";
+import { openKeyPage } from "./two-step-key";
 import * as vault from "./vault";
 
 /** The account a request is made for: the active one, signed out, with a server. */
@@ -75,4 +76,19 @@ export async function verifyDeviceTwoStep(account: string, token: string, provid
 export async function discardDeviceSession(account: string, accessToken: string): Promise<void> {
   const { server } = (await local.account(account)).data ?? { server: "" };
   await logoutRemote(server ?? "", { access: accessToken });
+}
+
+/**
+ * Two-step login with a security key after an approval (servers with `two_step_key_page`; two-step-key.ts): the key
+ * window opens, and this answer waits for it (the device sign-in window stays open while the key window has focus).
+ * The session for the popup to open, or null when the user cancelled.
+ */
+export async function keyDeviceTwoStep(account: string, token: string, remember: boolean): Promise<LoginFinishResponse | null> {
+  await signedOut(account);
+  const { outcome: waiting } = await openKeyPage(token, "device", account);
+  const outcome = await waiting;
+  if ("cancelled" in outcome) return null;
+  if ("expired" in outcome) throw new AppError(EXPIRED, "Your security key wasn't used in time. Try again.");
+  await signedOut(account);
+  return api<LoginFinishResponse>("/auth/2fa/passkey/finish", { body: { two_factor_token: token, credential: outcome.credential, remember }, auth: false, accountId: account });
 }

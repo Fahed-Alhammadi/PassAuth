@@ -6,7 +6,7 @@ import { callPopup, setFailureHandler } from "../shared/protocol";
 import type { PopupState, TwoFactorChallenge } from "../shared/types";
 import { openCentered, POPUP_WINDOW } from "../shared/windows";
 import { AddSitePage } from "./add-site";
-import { type CopyRequest, type Ctx, hostOf, msg, type Route, seconds } from "./ctx";
+import { type CopyRequest, type Ctx, hostOf, KEY_PAGE_TEXT, KEY_PAGE_WARNING, msg, PROVIDER_ICONS, PROVIDER_TITLES, type Route, seconds } from "./ctx";
 import { DeviceSignIn, deviceSignInEmail, deviceSignInUrl } from "./device-sign-in";
 import { EditPage } from "./editor";
 import { GeneratorPage } from "./generator";
@@ -209,6 +209,8 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  /** The server's key page is open in PassAuth's security-key window (background/two-step-key.ts). */
+  const [waitingKey, setWaitingKey] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -216,17 +218,8 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     setError(null);
     try {
       const r = await callPopup("login", { email, password, secretKey: secretKey || undefined });
-      if ("twoFactor" in r) {
-        // Security keys (WebAuthn) can't be used from the popup yet: offer the other methods.
-        const providers = r.twoFactor.providers.filter((p) => p === "totp" || p === "email" || p === "recovery");
-        setChallenge({ ...r.twoFactor, providers });
-        setProvider(providers[0] ?? "recovery");
-        setNote(
-          r.twoFactor.providers.includes("passkey") && providers.every((p) => p === "recovery")
-            ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
-            : null,
-        );
-      } else onDone();
+      if ("twoFactor" in r) showChallenge(r.twoFactor);
+      else onDone();
     } catch (err) {
       if (codeOf(err) === SECRET_KEY_REQUIRED) setNeedKey(true);
       setError(msg(err));
@@ -235,11 +228,67 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     }
   }
 
+  /**
+   * The server's two-step methods. A security key works through the server's key page where the server offers it
+   * (`keyPage`); otherwise only the other methods, with a note when a security key is all the account has.
+   */
+  function showChallenge(c: TwoFactorChallenge, preferred?: string) {
+    const providers = c.providers.filter((p) => p === "totp" || p === "email" || p === "recovery" || (p === "passkey" && c.keyPage === true));
+    setChallenge({ ...c, providers });
+    setProvider(preferred && providers.includes(preferred) ? preferred : (providers[0] ?? "recovery"));
+    setNote(
+      c.providers.includes("passkey") && providers.every((p) => p === "recovery")
+        ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
+        : null,
+    );
+  }
+
+  // A security-key sign-in started before this popup closed (the key window took the focus): waiting, or how it ended.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, when the sign-in screen opens
+  useEffect(() => {
+    void callPopup("twoStepKey:status").then(
+      (s) => {
+        if (!s) return;
+        if (s.email) setEmail(s.email);
+        if (s.challenge) showChallenge(s.challenge, "passkey");
+        setWaitingKey(s.status === "waiting");
+        if (s.error) setError(s.error);
+      },
+      () => {},
+    );
+  }, []);
+
+  // While the key window is open: the background finishes the sign-in; this follows how it went.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: follows `waitingKey` only (showChallenge and onDone are the same each time)
+  useEffect(() => {
+    if (!waitingKey) return;
+    const timer = setInterval(() => {
+      void callPopup("twoStepKey:status").then(
+        (s) => {
+          if (s?.status === "waiting") return;
+          setWaitingKey(false);
+          // Signed in (or nothing left to wait for): the popup shows what is there now.
+          if (!s) return onDone();
+          if (s.challenge) showChallenge(s.challenge, "passkey");
+          if (s.error) setError(s.error);
+        },
+        () => {},
+      );
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [waitingKey]);
+
   async function verify(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
+      if (provider === "passkey") {
+        await callPopup("twoStepKey:start", { email, challenge: challenge!, remember });
+        setWaitingKey(true);
+        setBusy(false);
+        return;
+      }
       await callPopup("verify2fa", { token: challenge!.token, provider, code, remember });
       onDone();
     } catch (err) {
@@ -283,7 +332,33 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     };
     return <Setup initial={state.server} onDone={changed} />;
   }
+  if (challenge && waitingKey) {
+    return (
+      <div className="pop-auth">
+        <AuthHead title="Two-step login" sub={email} />
+        <p className="card-text" role="status">
+          Waiting for your security key…
+        </p>
+        <p className="card-text">{KEY_PAGE_WARNING}</p>
+        <SheetActions>
+          <button
+            type="button"
+            className="btn btn-ghost btn-block"
+            onClick={() =>
+              void callPopup("twoStepKey:cancel").then(
+                () => setWaitingKey(false),
+                (e) => setError(msg(e)),
+              )
+            }
+          >
+            Cancel
+          </button>
+        </SheetActions>
+      </div>
+    );
+  }
   if (challenge) {
+    const usingKey = provider === "passkey";
     return (
       <form className="pop-auth" onSubmit={verify}>
         <AuthHead title="Two-step login" sub={email} />
@@ -295,19 +370,23 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
             onChange={setProvider}
             options={challenge.providers.map((p) => ({
               id: p,
-              title: p === "totp" ? "Authenticator app" : p === "email" ? "Email code" : "Recovery code",
+              title: PROVIDER_TITLES[p] ?? p,
               icon: (
                 <Tile>
-                  <Icon name={p === "totp" ? "phone" : p === "email" ? "mail" : "key"} />
+                  <Icon name={PROVIDER_ICONS[p] ?? "key"} />
                 </Tile>
               ),
             }))}
           />
         )}
-        <label className="field">
-          <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
-          <input className="input mono" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" autoFocus required />
-        </label>
+        {usingKey ? (
+          <p className="card-text">{KEY_PAGE_TEXT}</p>
+        ) : (
+          <label className="field">
+            <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
+            <input className="input mono" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" autoFocus required />
+          </label>
+        )}
         {note && (
           <div className="alert alert-info" role="status">
             {note}
@@ -336,9 +415,15 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
             )
           }
         >
-          <button type="submit" className="btn btn-primary btn-block" disabled={busy || !code}>
-            {busy ? "Verifying…" : "Verify and sign in"}
-          </button>
+          {usingKey ? (
+            <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+              {busy ? "Opening…" : "Use security key"}
+            </button>
+          ) : (
+            <button type="submit" className="btn btn-primary btn-block" disabled={busy || !code}>
+              {busy ? "Verifying…" : "Verify and sign in"}
+            </button>
+          )}
         </SheetActions>
       </form>
     );

@@ -14,7 +14,7 @@ import { fileAccess, keptFiles, missingFiles, withoutFiles } from "../attachment
 import { fromBase64 } from "../avatar";
 import { copy } from "../clipboard";
 import { afterUnlock, openPopup, orderedMatches } from "../commands";
-import { createDeviceRequest, discardDeviceSession, pollDeviceRequest, startDeviceSignIn, verifyDeviceTwoStep } from "../device-sign-in";
+import { createDeviceRequest, discardDeviceSession, keyDeviceTwoStep, pollDeviceRequest, startDeviceSignIn, verifyDeviceTwoStep } from "../device-sign-in";
 import { fill } from "../fill";
 import { fillProblem } from "../fill-problems";
 import { ROLLBACK_ITEM_TEXT } from "../item-revs";
@@ -28,6 +28,7 @@ import type { SenderKind } from "../senders";
 import { answerSignIn, refreshSignInRequests, signInRequests } from "../sign-in-requests";
 import { regexError } from "../site";
 import { activeId, getSettings, local } from "../storage";
+import { cancelKeySignIn, keyPageOffered, keySignInStatus, startKeySignIn } from "../two-step-key";
 import * as vault from "../vault";
 
 const POPUP: readonly SenderKind[] = ["popup"];
@@ -75,6 +76,9 @@ export const popupHandlers = {
   login: { from: POPUP, activity: "force", run: ({ email, password, secretKey }) => vault.login(email, password, secretKey) },
   verify2fa: { from: POPUP, activity: "force", run: ({ token, provider, code, remember }) => vault.verifyTwoFactor(token, provider, code, remember) },
   email2fa: { from: POPUP, run: ({ token }) => vault.sendTwoFactorEmail(token) },
+  "twoStepKey:start": { from: POPUP, activity: "force", run: ({ email, challenge, remember }) => startKeySignIn(String(email), challenge, remember === true) },
+  "twoStepKey:status": { from: POPUP, run: () => keySignInStatus() },
+  "twoStepKey:cancel": { from: POPUP, run: () => cancelKeySignIn() },
   unlock: { from: POPUP, activity: "force", run: ({ password, secretKey }) => vault.unlock(password, secretKey) },
   // Every account, like the vault timeout.
   lock: { from: POPUP, run: () => vault.lock() },
@@ -242,6 +246,8 @@ export const popupHandlers = {
     from: POPUP,
     run: ({ account, token, provider, code, remember }) => verifyDeviceTwoStep(account, String(token), String(provider), String(code), remember === true),
   },
+  "deviceSignIn:keyPage": { from: POPUP, run: ({ account }) => keyPageOffered(String(account)) },
+  "deviceSignIn:verifyKey": { from: POPUP, run: ({ account, token, remember }) => keyDeviceTwoStep(String(account), String(token), remember === true) },
   // Signing in is an unlock: the vault timeout starts from it.
   "deviceSignIn:finish": {
     from: POPUP,

@@ -35,7 +35,7 @@ import { callPopup } from "../shared/protocol";
 import type { DeviceSignIn as DeviceSignInResult } from "../shared/types";
 import type { ApprovedLogin, LoginRequestKey } from "../wasm/passauth_core";
 import { popupCore } from "./core";
-import { msg } from "./ctx";
+import { KEY_PAGE_TEXT, KEY_PAGE_WARNING, msg, PROVIDER_ICONS, PROVIDER_TITLES } from "./ctx";
 import { Choices, Tile } from "./sheet";
 import { Phrase } from "./sign-in-requests";
 
@@ -158,8 +158,6 @@ interface Held {
   requestId: string;
   account: string;
 }
-
-const PROVIDERS: Record<string, string> = { totp: "Authenticator app", email: "Email code", recovery: "Recovery code" };
 
 /**
  * The request's screens. `onDone(email)`: signed in (the popup shows the vault, saying which account it reached);
@@ -358,33 +356,64 @@ function TwoStep({
   onDone: (email: string) => void;
   onBack: () => void;
 }) {
-  // Security keys (WebAuthn) can't be used from the popup: the other methods only.
-  const providers = challenge.providers.filter((p) => p in PROVIDERS);
+  // A security key works through the server's key page where the server offers it; otherwise the other methods only.
+  const [keyPage, setKeyPage] = useState(false);
+  const providers = challenge.providers.filter((p) => (p === "passkey" ? keyPage : p === "totp" || p === "email" || p === "recovery"));
   const [provider, setProvider] = useState(providers[0] ?? "recovery");
+  /** The key window is open; this answer waits for it. */
+  const [waitingKey, setWaitingKey] = useState(false);
   const [code, setCode] = useState("");
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [opened, setOpened] = useState<Opened | null>(null);
   const [stopped, setStopped] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(
-    challenge.providers.includes("passkey") && providers.length === 0
-      ? "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
-      : null,
-  );
+  const [note, setNote] = useState<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, for the account this run signs in to
+  useEffect(() => {
+    const account = held.current?.account;
+    const offered = account && challenge.providers.includes("passkey") ? callPopup("deviceSignIn:keyPage", { account }).catch(() => false) : Promise.resolve(false);
+    void offered.then((yes) => {
+      setKeyPage(yes);
+      if (yes && !challenge.providers.some((p) => p === "totp" || p === "email")) setProvider("passkey");
+      else if (!yes && challenge.providers.includes("passkey") && !challenge.providers.some((p) => p === "totp" || p === "email"))
+        setNote("This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault.");
+    });
+  }, []);
+
+  /** The second step passed: open the approval with the kept request key. */
+  function approved(h: Held, r: LoginFinishResponse) {
+    const session = sessionOf(r);
+    if (!session) throw new Error("Your server didn't send the approved key. Start again.");
+    held.current = null;
+    setOpened(openApproval(h.key, h.requestId, h.account, email, session));
+  }
+
+  async function withKey() {
+    const h = held.current;
+    if (!h) return setError("This sign-in expired. Start again.");
+    setError(null);
+    setWaitingKey(true);
+    try {
+      const r = await callPopup("deviceSignIn:verifyKey", { account: h.account, token: challenge.token, remember });
+      setWaitingKey(false);
+      // Cancelled (the key window closed): back to the choice.
+      if (r) approved(h, r);
+    } catch (err) {
+      setWaitingKey(false);
+      setError(msg(err));
+    }
+  }
 
   async function verify(e: FormEvent) {
     e.preventDefault();
+    if (provider === "passkey") return void withKey();
     const h = held.current;
     if (!h) return setError("This sign-in expired. Start again.");
     setBusy(true);
     setError(null);
     try {
-      const r = await callPopup("deviceSignIn:verify2fa", { account: h.account, token: challenge.token, provider, code, remember });
-      const session = sessionOf(r);
-      if (!session) throw new Error("Your server didn't send the approved key. Start again.");
-      held.current = null;
-      setOpened(openApproval(h.key, h.requestId, h.account, email, session));
+      approved(h, await callPopup("deviceSignIn:verify2fa", { account: h.account, token: challenge.token, provider, code, remember }));
     } catch (err) {
       setError(msg(err));
       setBusy(false);
@@ -424,6 +453,27 @@ function TwoStep({
     );
   }
 
+  if (waitingKey) {
+    return (
+      <div className="pop-auth">
+        <div className="auth-head">
+          <h1>Two-step login</h1>
+          <p className="auth-sub">{email}</p>
+        </div>
+        <p className="card-text" role="status">
+          Waiting for your security key…
+        </p>
+        <p className="card-text">{KEY_PAGE_WARNING}</p>
+        <SheetActions>
+          <button type="button" className="btn btn-ghost btn-block" onClick={() => void callPopup("twoStepKey:cancel").catch((e) => setError(msg(e)))}>
+            Cancel
+          </button>
+        </SheetActions>
+      </div>
+    );
+  }
+
+  const usingKey = provider === "passkey";
   return (
     <form className="pop-auth" onSubmit={verify}>
       <div className="auth-head">
@@ -439,19 +489,23 @@ function TwoStep({
           onChange={setProvider}
           options={providers.map((p) => ({
             id: p,
-            title: PROVIDERS[p] ?? p,
+            title: PROVIDER_TITLES[p] ?? p,
             icon: (
               <Tile>
-                <Icon name={p === "totp" ? "phone" : p === "email" ? "mail" : "key"} />
+                <Icon name={PROVIDER_ICONS[p] ?? "key"} />
               </Tile>
             ),
           }))}
         />
       )}
-      <label className="field">
-        <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
-        <input className="input mono" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" autoFocus required />
-      </label>
+      {usingKey ? (
+        <p className="card-text">{KEY_PAGE_TEXT}</p>
+      ) : (
+        <label className="field">
+          <span>{provider === "recovery" ? "Recovery code" : "6-digit code"}</span>
+          <input className="input mono" value={code} onChange={(e) => setCode(e.target.value)} autoComplete="one-time-code" autoFocus required />
+        </label>
+      )}
       {note && (
         <div className="alert alert-info" role="status">
           {note}
@@ -485,9 +539,15 @@ function TwoStep({
           </>
         }
       >
-        <button type="submit" className="btn btn-primary btn-block" disabled={busy || !code}>
-          {busy ? "Verifying…" : "Verify and sign in"}
-        </button>
+        {usingKey ? (
+          <button type="submit" className="btn btn-primary btn-block">
+            Use security key
+          </button>
+        ) : (
+          <button type="submit" className="btn btn-primary btn-block" disabled={busy || !code}>
+            {busy ? "Verifying…" : "Verify and sign in"}
+          </button>
+        )}
       </SheetActions>
     </form>
   );

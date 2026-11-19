@@ -120,6 +120,32 @@ test("two-step sign-in: a remember token is kept only when asked; the Secret Key
   expect((await vault.state()).rememberedDevice).toBe(true);
 });
 
+test("L3: a two-step finish is refused unless its token is the waiting sign-in's; a new sign-in closes an open key window", async () => {
+  const { a } = servers({ twoFactor: true });
+  a.handlers["POST /auth/2fa/passkey/finish"] = () => ({ body: { access_token: "a", refresh_token: "r", email: EMAIL, bundle: a.bundle } });
+  await fake.local.set({ accounts: { a1: { ...accountRecord(A, EMAIL), tokens: null } }, active: "a1" });
+  // A key window of an earlier sign-in is still open.
+  await fake.session.set({ twoStepKeyWait: { id: "h0", tabId: 41, windowId: 40, done: `${A}/two-step/key/done`, challenge: "AAAA", state: "s".repeat(22), purpose: "login" } });
+  const removed: number[] = [];
+  vi.spyOn(fake.chrome.windows, "remove").mockImplementation((async (id: number) => {
+    removed.push(id);
+  }) as never);
+  await vault.login(EMAIL, "pw", "SK-A");
+  expect(removed).toEqual([40]);
+  expect(fake.session.data.has("twoStepKeyWait")).toBe(false);
+
+  const finishes = () => a.requests.filter((r) => r.path.startsWith("/auth/2fa/")).length;
+  for (const run of [() => vault.verifyTwoFactorPasskey("other", { id: "x" }, false), () => vault.verifyTwoFactor("other", "totp", "123456", false)]) {
+    const e = await run().catch((err) => err);
+    expect(e?.message).toBe("Sign-in expired. Start again.");
+  }
+  expect(finishes()).toBe(0);
+  await vault.verifyTwoFactorPasskey("tf", { id: "x" }, false);
+  expect(finishes()).toBe(1);
+  // Used up: the same token can't finish again.
+  expect((await vault.verifyTwoFactorPasskey("tf", { id: "x" }, false).catch((err) => err))?.message).toBe("Sign-in expired. Start again.");
+});
+
 test("S10: signing out forgets this account's Secret Key and remember token, and only this account's", async () => {
   servers();
   await fake.local.set({

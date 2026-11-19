@@ -24,6 +24,7 @@ import type {
   ItemData,
   ItemList,
   ItemSummary,
+  KeySignInStatus,
   LoginResult,
   PasskeyRequestInfo,
   PinUnlockResult,
@@ -39,6 +40,7 @@ import type {
   SignInApproval,
   SignInRequestList,
   TotpCode,
+  TwoFactorChallenge,
 } from "./types";
 
 /** No fields besides `type`. */
@@ -67,6 +69,12 @@ export interface PopupApi {
   login: Rpc<{ email: string; password: string; secretKey?: string }, LoginResult>;
   verify2fa: Rpc<{ token: string; provider: string; code: string; remember: boolean }, void>;
   email2fa: Rpc<{ token: string }, void>;
+  /** "Use security key": opens the server's key page in a PassAuth window; the sign-in finishes in the background. */
+  "twoStepKey:start": Rpc<{ email: string; challenge: TwoFactorChallenge; remember: boolean }, void>;
+  /** Where that sign-in stands (null: nothing to show). */
+  "twoStepKey:status": Rpc<None, KeySignInStatus | null>;
+  /** Cancel while waiting: the key window closes. */
+  "twoStepKey:cancel": Rpc<None, void>;
   unlock: Rpc<{ password: string; secretKey?: string }, void>;
   /** Every account, like the vault timeout. */
   lock: Rpc<None, void>;
@@ -144,6 +152,10 @@ export interface PopupApi {
   "deviceSignIn:create": Rpc<{ account: string; body: NewRequestBody }, unknown>;
   "deviceSignIn:poll": Rpc<{ account: string; id: string; accessCode: string }, PollOutcome>;
   "deviceSignIn:verify2fa": Rpc<{ account: string; token: string; provider: string; code: string; remember: boolean }, LoginFinishResponse>;
+  /** Whether the account's server offers the key page (a security key can be the second step here). */
+  "deviceSignIn:keyPage": Rpc<{ account: string }, boolean>;
+  /** The second step with a security key (the key window); null when the user cancelled. */
+  "deviceSignIn:verifyKey": Rpc<{ account: string; token: string; remember: boolean }, LoginFinishResponse | null>;
   /** `typedEmail`: the email typed on this device; a Secret Key that came along is kept only for it. */
   "deviceSignIn:finish": Rpc<{ account: string; signIn: DeviceSignIn; typedEmail?: string }, void>;
   "deviceSignIn:discard": Rpc<{ account: string; accessToken: string }, void>;

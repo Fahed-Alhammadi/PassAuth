@@ -306,3 +306,19 @@ test("L-3: a page that aborts its own request is held back like a cancel; a page
   await r.reply;
   expect(backedOff(t)).toBe(false);
 });
+
+test("the server's key page in PassAuth's security-key window: the browser's own authenticators answer, no PassAuth window", async () => {
+  const fake = installedChrome();
+  const keyTab = ++tab;
+  await fake.session.set({
+    twoStepKeyWait: { id: "h1", tabId: keyTab, windowId: 9, done: `${ORIGIN}/two-step/key/done`, challenge: "AAAA", state: "s".repeat(22), purpose: "login" },
+  });
+  const before = w.opened.length;
+  const get = { rpId: "login.example.com", challenge: b64uEncode(crypto.getRandomValues(new Uint8Array(32))), allowCredentials: [] } as unknown as GetRequest;
+  expect(await handlePasskey({ type: "passkey:get", options: get, origin: ORIGIN, topLevel: true, tabId: keyTab, frameId: 0, bridgeId: "k", activated: true })).toStrictEqual({ fallback: true });
+  expect(
+    await handlePasskey({ type: "passkey:create", options: createOptions() as unknown as CreateRequest, origin: ORIGIN, topLevel: true, tabId: keyTab, frameId: 0, bridgeId: "k2", activated: true }),
+  ).toStrictEqual({ fallback: true });
+  expect(w.opened.length).toBe(before);
+  await fake.session.remove("twoStepKeyWait");
+});

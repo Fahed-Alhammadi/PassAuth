@@ -41,6 +41,7 @@ import {
 import { NEW_LOGIN, type PasskeyTarget, passkeyDefaultTarget, passkeySaveTargets } from "./site";
 import { local } from "./storage";
 import { notifyTab } from "./toast";
+import { isKeyPageRequest } from "./two-step-key";
 import { allEntries, canWrite, createItem, type Entry, ensureUnlocked, getEntry, isPersonal, owner, recentlyVerified, stillOwner, updateItem, vaultName, verifyMasterPassword } from "./vault";
 
 /** The confirmation window has closed by the time the passkey is saved: the storage limit is said inside the page (PassAuth's own words, no vault data). */
@@ -154,6 +155,9 @@ export function timeoutOf(options: unknown): number {
 export async function handlePasskey(msg: PasskeyMessage): Promise<Reply> {
   // The user just cancelled in this tab (or the page aborted): no window again without a fresh click or key press.
   if (!msg.activated && backedOff(msg.tabId)) return notAllowed();
+  // The server's key page in PassAuth's security-key window (two-step-key.ts; top-level frame, key page origin): the
+  // account signing in there is never unlocked, so the browser's own security key / passkey UI answers.
+  if (await isKeyPageRequest(msg)) return FALLBACK;
   // The RP ID rules and "Save in" targets are the core's.
   await initCore();
   // Before the user has seen anything, any problem (locked, server down, odd

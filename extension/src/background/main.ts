@@ -27,6 +27,7 @@ import { onMessage } from "./router";
 import { dropSavesLogged, forgetTab as forgetSaves, onTabUpdated as showPendingSave } from "./save-prompt";
 import { forgetSignInRequests, refreshSignInRequests } from "./sign-in-requests";
 import { lockCheck, onAlarm, onBrowserStart, onConnect, onIdleState } from "./timeout";
+import { onKeyTabUpdated, onKeyWindowGone, setKeySignInFinisher } from "./two-step-key";
 import * as vault from "./vault";
 
 // Local storage holds session tokens, Secret Keys, two-step "remember" tokens and (with the timeout "Never") the
@@ -54,6 +55,8 @@ vault.setUnlockedHandler(() => void refreshSignInRequests(true).catch(logged("Li
 vault.setOpenedHandler(() => void ensureLive().catch(logged("Starting live sync")));
 // Signed out elsewhere (refresh token refused): this account's keys go too.
 setSessionLostHandler((id) => void vault.clearUnlocked(id).catch(logged("Dropping the keys of a signed-out account")));
+// A security key's assertion from the server's key page finishes the popup's sign-in here (two-step-key.ts).
+setKeySignInFinisher((token, credential, remember) => vault.verifyTwoFactorPasskey(token, credential, remember));
 // The server requires two-step login first (403 two_step_required): the popup says so.
 setTwoStepHandler(noteTwoStepRequired);
 
@@ -100,6 +103,9 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => void showPendingSave(t
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.url || change.status === "loading") void forgetFillProblem(tabId).catch(logged("Forgetting a fill problem"));
 });
+// The security key window reached the server's done page, or was closed (two-step-key.ts).
+chrome.tabs.onUpdated.addListener((tabId, change) => void onKeyTabUpdated(tabId, change).catch(logged("Reading the security key result")));
+chrome.windows.onRemoved.addListener((windowId) => void onKeyWindowGone({ windowId }).catch(logged("A closed security key window")));
 chrome.windows.onFocusChanged.addListener(refreshPage);
 chrome.tabs.onRemoved.addListener((tabId) => {
   void forgetSaves(tabId).catch(logged("Forgetting a closed tab's save"));
@@ -107,6 +113,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void forgetFillProblem(tabId).catch(logged("Forgetting a closed tab's fill problem"));
   forgetContextField(tabId);
   cancelPasskeysInTab(tabId);
+  void onKeyWindowGone({ tabId }).catch(logged("A closed security key window"));
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (pageStateChanged(changes, area)) refreshPage();

@@ -80,3 +80,11 @@ export function splitCode(code: string): [string, string] {
 }
 
 export const isMac = () => /mac/i.test(navigator.platform) || /Mac OS X/.test(navigator.userAgent);
+
+/** Two-step methods as every PassAuth app names them. */
+export const PROVIDER_TITLES: Record<string, string> = { totp: "Authenticator app", email: "Email code", passkey: "Security key or passkey", recovery: "Recovery code" };
+export const PROVIDER_ICONS: Record<string, "phone" | "mail" | "key" | "note"> = { totp: "phone", email: "mail", passkey: "key", recovery: "note" };
+/** What "Use security key" does (the server's key page in a PassAuth window: background/two-step-key.ts). */
+export const KEY_PAGE_TEXT = "PassAuth opens your server's page in the browser. Touch your security key or use your passkey there.";
+/** Under "Waiting for your security key…" in every PassAuth app. */
+export { KEY_PAGE_WARNING } from "@web/lib/key-page";

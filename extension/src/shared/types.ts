@@ -356,7 +356,19 @@ export interface EditorInfo {
   folders: string[];
 }
 
-export type TwoFactorChallenge = { token: string; providers: string[] };
+/** `keyPage`: the server offers the key page, so `passkey` (a security key) can be used from here (background/two-step-key.ts). */
+export type TwoFactorChallenge = { token: string; providers: string[]; keyPage?: boolean };
+
+/**
+ * The popup's security-key sign-in (background/two-step-key.ts): waiting for the key window, or how it ended (told
+ * once). `challenge`: the two-step choice to show again (missing after a worker restart).
+ */
+export interface KeySignInStatus {
+  status: "waiting" | "cancelled" | "failed";
+  email: string;
+  challenge?: TwoFactorChallenge;
+  error?: string;
+}
 
 /** Sign-in: done, or a two-step code is needed first. */
 export type LoginResult = { done: true } | { twoFactor: TwoFactorChallenge };

@@ -157,6 +157,7 @@ import {
 } from "./signed-sharing";
 import { type AccountData, accountKey, activeId, deviceMemory, earlierVaults, local, memoryUnread, pinCopies, pinsFloor, type SessionData, scratch, session, syncCache, trustMemory } from "./storage";
 import { emptyExtras, fromStored, isStale, olderAnswer, type RevisionAnswer, type RowExtras, readExtras, readRevision, STASH_CAP, type StoredSync, toStored, withSignedFields } from "./sync-rules";
+import { keyPageOffered, resetKeySignIn } from "./two-step-key";
 
 export interface Entry {
   id: string;
@@ -321,6 +322,8 @@ let memoryUnreadable = false;
 /** Sign-in waiting for its two-step code: the derived keys, and the Secret Key to remember once it succeeds. */
 let pendingMaster: core.MasterKeys | null = null;
 let pendingLogin: { server: string; email: string; secretKey?: string } | null = null;
+/** The two-step token of that sign-in: a finish with any other token is refused (a stale popup or key window). */
+let pendingToken: string | null = null;
 
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const unb64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -479,6 +482,8 @@ async function loginStart(email: string, message: string, accountId?: string): P
 }
 
 export async function login(email: string, password: string, secretKey?: string): Promise<LoginResult> {
+  // A key window of an earlier sign-in can't finish this one.
+  await resetKeySignIn().catch(logged("Closing the security key window"));
   await initCore();
   const l = await local.get();
   const server = l.server;
@@ -512,7 +517,11 @@ export async function login(email: string, password: string, secretKey?: string)
     pendingMaster?.free();
     pendingMaster = master;
     pendingLogin = remember;
-    return { twoFactor: { token: result.two_factor_token ?? "", providers: result.providers ?? [] } };
+    pendingToken = result.two_factor_token ?? null;
+    const providers = result.providers ?? [];
+    // A security key works here through the server's key page (two-step-key.ts), on servers that offer it.
+    const keyPage = providers.includes("passkey") && (await keyPageOffered().catch(() => false));
+    return { twoFactor: { token: result.two_factor_token ?? "", providers, keyPage } };
   }
   await finishLogin(master, result, remember);
   return { done: true };
@@ -520,12 +529,30 @@ export async function login(email: string, password: string, secretKey?: string)
 
 /** `remember`: keep a "remember this device" token, so this browser skips the two-step code for 30 days. */
 export async function verifyTwoFactor(token: string, provider: string, code: string, remember: boolean) {
+  pendingFor(token);
   const result = await api<LoginFinishResponse>("/auth/2fa/verify", { body: { two_factor_token: token, provider, code, remember }, auth: false });
+  await finishTwoStep(result, remember);
+}
+
+/** The second step with a security key: the assertion the server's key page returned (two-step-key.ts). */
+export async function verifyTwoFactorPasskey(token: string, credential: Record<string, unknown>, remember: boolean) {
+  pendingFor(token);
+  const result = await api<LoginFinishResponse>("/auth/2fa/passkey/finish", { body: { two_factor_token: token, credential, remember }, auth: false });
+  await finishTwoStep(result, remember);
+}
+
+/** The waiting sign-in is the one `token` belongs to, or the finish is refused before anything is sent. */
+function pendingFor(token: string) {
+  if (!pendingMaster || !pendingLogin || !pendingToken || token !== pendingToken) throw new AppError(EXPIRED, "Sign-in expired. Start again.");
+}
+
+async function finishTwoStep(result: LoginFinishResponse, remember: boolean) {
   if (!pendingMaster || !pendingLogin) throw new Error("Sign-in expired. Start again.");
   const master = pendingMaster;
   const who = pendingLogin;
   pendingMaster = null;
   pendingLogin = null;
+  pendingToken = null;
   // A token this browser had didn't spare the code (expired or revoked): it goes, unless a new one was asked for.
   await local.setRememberToken(who.server, who.email, remember && typeof result.remember_token === "string" ? result.remember_token : null);
   await finishLogin(master, result, who);
@@ -1130,6 +1157,7 @@ function unload() {
   pendingMaster?.free();
   pendingMaster = null;
   pendingLogin = null;
+  pendingToken = null;
 }
 
 export async function switchAccount(id: string) {

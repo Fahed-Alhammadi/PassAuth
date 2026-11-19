@@ -192,6 +192,8 @@ test("S2: which requests restart the vault timeout (reading never does; unlockin
     "logout",
     "setServer",
     "email2fa",
+    "twoStepKey:status",
+    "twoStepKey:cancel",
     "signInRequests",
     "files:missing",
     "deviceSignIn:start",
@@ -226,7 +228,7 @@ test("S2: which requests restart the vault timeout (reading never does; unlockin
   ]) {
     expect(activity(type), type).toBe("restart");
   }
-  for (const type of ["settings", "unlock", "login", "verify2fa", "deviceSignIn:finish"]) expect(activity(type), type).toBe("force");
+  for (const type of ["settings", "unlock", "login", "verify2fa", "twoStepKey:start", "deviceSignIn:finish"]) expect(activity(type), type).toBe("force");
   // Requests from pages and frames never count: a fill from the inline menu and a save from the prompt restart it themselves.
   for (const [type, r] of table) if (!r.from.includes("popup")) expect(r.activity, type).toBe(null);
   expect(table.has("no-such-request")).toBe(false);
@@ -266,6 +268,9 @@ const REQUESTS: Record<string, Record<string, Record<string, unknown>>> = {
     login: { email: "alex@example.com", password: "pw" },
     verify2fa: { token: "t", provider: "totp", code: "123456", remember: false },
     email2fa: { token: "t" },
+    "twoStepKey:start": { email: "alex@example.com", challenge: { token: "t", providers: ["passkey"], keyPage: true }, remember: false },
+    "twoStepKey:status": {},
+    "twoStepKey:cancel": {},
     unlock: { password: "pw" },
     lock: {},
     logout: {},
@@ -311,6 +316,8 @@ const REQUESTS: Record<string, Record<string, Record<string, unknown>>> = {
     "deviceSignIn:create": { account: "a1", body: { email: "alex@example.com", public_key: "k", access_code: "c".repeat(43), device_id: "d", device_name: "n", device_kind: "extension" } },
     "deviceSignIn:poll": { account: "a1", id: "r1", accessCode: "c".repeat(43) },
     "deviceSignIn:verify2fa": { account: "a1", token: "t", provider: "totp", code: "123456", remember: false },
+    "deviceSignIn:keyPage": { account: "a1" },
+    "deviceSignIn:verifyKey": { account: "a1", token: "t", remember: false },
     "deviceSignIn:finish": { account: "a1", signIn: { email: "alex@example.com", accessToken: "a", refreshToken: "r", bundle: {}, accountId: "acc-1", keys: "AQID" } },
     "deviceSignIn:discard": { account: "a1", accessToken: "a" },
     "files:missing": { id: "e1" },
