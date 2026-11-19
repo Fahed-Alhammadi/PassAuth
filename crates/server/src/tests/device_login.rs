@@ -1,5 +1,5 @@
 //! Approve a sign-in from another device: the whole flow with and without two-step
-//! login, remembered devices, access codes, the approval's proof, the single
+//! login (the approval is the second step), access codes, the approval's proof, the single
 //! exchange, denial, expiry and the sweeper, what ends open sign-ins, answers and
 //! exchanges racing each other, emails without an account, rate limits and the cap on
 //! shown requests, addresses, live-sync notices, the two-step policy and the admin
@@ -409,93 +409,52 @@ async fn approving_needs_the_opened_challenge() {
     );
 }
 
+/// The approval by the account's own signed-in, unlocked app is the second step:
+/// an account with two-step login gets the session and the key directly.
 #[tokio::test]
-async fn two_step_login_still_applies_and_the_key_comes_only_with_the_session() {
+async fn the_approval_is_the_second_step_and_the_key_comes_only_with_the_session() {
     let (app, state) = app_with_state().await;
-    let email = "dl-2fa@example.com";
-    let alice = register(&app, email, "pw-alice-1").await;
-    let ta = token(&app, email, "pw-alice-1").await;
-    let recovery = enable_totp(&app, email, "pw-alice-1", &ta).await;
+    let (email, pw) = ("dl-2fa@example.com", "pw-alice-1");
+    let alice = register(&app, email, pw).await;
+    let ta = token(&app, email, pw).await;
+    enable_totp(&app, email, pw, &ta).await;
+    // A password sign-in still asks for the code...
+    let (s, l) = login(&app, email, pw, "elsewhere").await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    assert_eq!(l["two_factor_required"], true, "{l}");
 
+    // ...an approved device sign-in doesn't, even when an older app sends a
+    // "remember this device" token along (ignored, not kept).
     let nd = NewDevice::new("tablet");
-    let id = id_of(&ask(&app, &nd, email).await);
+    let mut body = nd.body(email);
+    body["remember_token"] = json!("not-a-real-token");
+    let id = id_of(&ask_with(&app, body).await);
+    assert_eq!(kept(&state, &id).await.2, None);
     approve(&app, &alice, &ta, &nd, &id).await;
     let v = polled(&app, &id, &nd).await;
-    assert_eq!(
-        keys(&v),
-        BTreeSet::from([
-            "status",
-            "two_factor_required",
-            "two_factor_token",
-            "providers"
-        ]),
-        "no key and no session before two-step login: {v}"
-    );
-    assert_eq!(
-        (&v["status"], &v["two_factor_required"], &v["providers"]),
-        (
-            &json!("approved"),
-            &json!(true),
-            &json!(["totp", "recovery"])
-        )
-    );
-    assert_eq!(polled(&app, &id, &nd).await, json!({ "status": "used" }));
-    let tf = v["two_factor_token"].clone();
-    let verify = |code: &str, remember: bool| {
-        let body = json!({ "two_factor_token": tf, "provider": "recovery", "code": code, "remember": remember });
-        let app = app.clone();
-        async move { call(&app, Method::POST, "/api/auth/2fa/verify", None, body).await }
-    };
-    let (s, e) = verify("wrong-code", false).await;
-    assert_eq!(
-        (s, &e["error"]),
-        (StatusCode::BAD_REQUEST, &json!("invalid_code"))
-    );
-    assert!(e.get("sealed_key").is_none());
-    let (s, v) = verify(&recovery[0], true).await;
-    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "approved", "{v}");
+    assert!(v.get("two_factor_required").is_none(), "{v}");
+    assert!(v.get("two_factor_token").is_none(), "{v}");
+    assert_eq!(v["remember_token"], Value::Null);
     assert_eq!(
         nd.open(&v["sealed_key"], &id).as_bytes(),
         alice.unlocked.account_key.as_bytes()
     );
-    assert!(v["access_token"].is_string());
-    let remember = v["remember_token"].as_str().unwrap().to_owned();
+    let tn = v["access_token"].as_str().unwrap();
+    assert!(vault_in(&synced(&app, tn).await, &alice.vault_id).is_some());
     let events = stored_events(&state).await;
     assert_eq!(
         of_type(&events, "auth.signed_in").last().unwrap()["data"],
         json!({
-            "two_step": "recovery", "device_kind": "ios", "new_device": true,
+            "two_step": "device_approval", "device_kind": "ios", "new_device": true,
             "method": "device", "request": id,
         })
     );
-
-    // The device is remembered now: its next request skips two-step login...
-    let again = NewDevice::new("tablet");
-    let mut body = again.body(email);
-    body["remember_token"] = json!(remember);
-    let id2 = id_of(&ask_with(&app, body.clone()).await);
-    approve(&app, &alice, &ta, &again, &id2).await;
-    let v = polled(&app, &id2, &again).await;
-    assert!(v["access_token"].is_string(), "{v}");
-    assert_eq!(
-        again.open(&v["sealed_key"], &id2).as_bytes(),
-        alice.unlocked.account_key.as_bytes()
-    );
-    let events = stored_events(&state).await;
-    assert_eq!(
-        of_type(&events, "auth.signed_in").last().unwrap()["data"]["two_step"],
-        "remembered_device"
-    );
-    // ...but not with a wrong token, nor with the token from another device.
-    for (device, token) in [("tablet", "not-the-token"), ("laptop", remember.as_str())] {
-        let other = NewDevice::new(device);
-        let mut body = other.body(email);
-        body["remember_token"] = json!(token);
-        let id3 = id_of(&ask_with(&app, body).await);
-        approve(&app, &alice, &ta, &other, &id3).await;
-        let v = polled(&app, &id3, &other).await;
-        assert_eq!(v["two_factor_required"], true, "{device}: {v}");
-    }
+    // Exactly once.
+    assert_eq!(polled(&app, &id, &nd).await, json!({ "status": "used" }));
+    assert_eq!(kept(&state, &id).await, ("used".into(), None, None, None));
+    let left = ok(&app, Method::GET, "/api/account", &ta, json!(null)).await;
+    assert_eq!(left["recovery_codes_left"], 10, "no code was used up");
 }
 
 #[tokio::test]
@@ -663,7 +622,7 @@ async fn a_new_master_password_or_signing_out_the_others_ends_open_sign_ins() {
             (nd, id)
         }
     };
-    // A sign-in that waits for its two-step login: its token stops working.
+    // A password sign-in that waits for its two-step login: its token stops working.
     let dropped = |tf: Value| {
         let app = app.clone();
         async move {
@@ -679,14 +638,14 @@ async fn a_new_master_password_or_signing_out_the_others_ends_open_sign_ins() {
         }
     };
     for end in ["new master password", "sign out other sessions"] {
-        // One nobody answered, one approved and not yet taken, one taken that
-        // waits for its two-step login.
+        // One nobody answered and one approved and not yet taken; and a password
+        // sign-in at its two-step login.
         let waiting = NewDevice::new("w");
         let w = id_of(&ask(&app, &waiting, email).await);
         let (approved, a) = ask_approved("a").await;
-        let (at_two_step, t) = ask_approved("t").await;
-        let tf = polled(&app, &t, &at_two_step).await["two_factor_token"].clone();
-        assert!(tf.is_string(), "{end}");
+        let (_, l) = login(&app, email, pw, "t").await;
+        let tf = l["two_factor_token"].clone();
+        assert!(tf.is_string(), "{end}: {l}");
         if end == "new master password" {
             change_password(&app, email, pw, &ta).await;
         } else {
@@ -755,36 +714,30 @@ async fn a_disabled_account_gets_no_session_and_no_key() {
     let alice = register(&app, email, "pw-alice-1").await;
     let ta = token(&app, email, "pw-alice-1").await;
     let me = user_id(&app, &ta).await;
-    let recovery = enable_totp(&app, email, "pw-alice-1", &ta).await;
+    enable_totp(&app, email, "pw-alice-1", &ta).await;
     let late = NewDevice::new("late");
     let id = id_of(&ask(&app, &late, email).await);
     approve(&app, &alice, &ta, &late, &id).await;
-    let tf = polled(&app, &id, &late).await["two_factor_token"].clone();
-    // Disabled the moment the code arrives (as if in the same instant as the admin):
-    // the code is right, but the account's row says no.
+    // Disabled after the approval without ending the request (as if in the same
+    // instant as the admin): the exchange checks the account's row and says no.
     sqlx::query("UPDATE users SET disabled = 1 WHERE id = $1")
         .bind(&me)
         .execute(&state.db)
         .await
         .unwrap();
-    let (s, e) = call(
-        &app,
-        Method::POST,
-        "/api/auth/2fa/verify",
-        None,
-        json!({ "two_factor_token": tf, "provider": "recovery", "code": recovery[0] }),
-    )
-    .await;
+    let (s, e) = poll(&app, &id, &late.code).await;
     assert_eq!(
         (s, &e["error"]),
         (StatusCode::FORBIDDEN, &json!("account_disabled"))
     );
     assert!(e.get("sealed_key").is_none() && e.get("access_token").is_none());
+    assert_eq!(kept(&state, &id).await.1, None, "the key is gone");
     sqlx::query("UPDATE users SET disabled = 0 WHERE id = $1")
         .bind(&me)
         .execute(&state.db)
         .await
         .unwrap();
+    assert_eq!(polled(&app, &id, &late).await, json!({ "status": "used" }));
 
     // Disabled by the admin with an approval waiting: nothing to exchange, even
     // after the account is enabled again.
@@ -1185,12 +1138,30 @@ async fn the_two_step_policy_applies_to_approving_and_to_the_new_session() {
         (s, &e["error"]),
         (StatusCode::FORBIDDEN, &json!("two_step_required"))
     );
-    // ...and once it has one, the new device needs it too.
+    // ...once it has one, the approval is the new device's second step...
     enable_totp(&app, email, "pw-alice-1", &ta).await;
     assert_eq!(listed(&app, &ta).await.len(), 1);
     approve(&app, &alice, &ta, &nd, &id).await;
     let v = polled(&app, &id, &nd).await;
-    assert_eq!(v["two_factor_required"], true, "{v}");
+    assert!(v.get("two_factor_required").is_none(), "{v}");
+    let tn = v["access_token"].as_str().unwrap();
+    assert!(vault_in(&synced(&app, tn).await, &alice.vault_id).is_some());
+    // ...and the new session is still held to the policy: an account whose method
+    // went away (the admin reset it) after the approval gets in, but no further.
+    let me = user_id(&app, &ta).await;
+    let late = NewDevice::new("q");
+    let id = id_of(&ask(&app, &late, email).await);
+    approve(&app, &alice, &ta, &late, &id).await;
+    let path = format!("/api/admin/users/{me}/two-factor/reset");
+    let (s, _) = call(&app, Method::POST, &path, Some("test-admin"), json!(null)).await;
+    assert_eq!(s, StatusCode::OK);
+    let v = polled(&app, &id, &late).await;
+    let tn = v["access_token"].as_str().expect("a session").to_owned();
+    let (s, e) = call(&app, Method::GET, "/api/sync", Some(&tn), json!(null)).await;
+    assert_eq!(
+        (s, &e["error"]),
+        (StatusCode::FORBIDDEN, &json!("two_step_required"))
+    );
 }
 
 #[tokio::test]
@@ -1250,35 +1221,26 @@ async fn the_admin_switch_turns_the_feature_off() {
     approve(&app, &alice, &ta, &nd, &id).await;
     assert!(polled(&app, &id, &nd).await["access_token"].is_string());
 
-    // Off while a device sign-in waits at its two-step login: none of its steps
-    // goes on, and no code is used up.
-    let recovery = enable_totp(&app, email, "pw-alice-1", &ta).await;
-    for path in [
-        "/api/auth/2fa/email",
-        "/api/auth/2fa/passkey/start",
-        "/api/auth/2fa/verify",
-    ] {
-        switch(true).await;
-        let late = NewDevice::new("late");
-        let id = id_of(&ask(&app, &late, email).await);
-        approve(&app, &alice, &ta, &late, &id).await;
-        let tf = polled(&app, &id, &late).await["two_factor_token"].clone();
-        switch(false).await;
-        let body = json!({ "two_factor_token": tf, "provider": "recovery", "code": recovery[0] });
-        let (s, e) = call(&app, Method::POST, path, None, body).await;
-        assert_eq!(
-            (s, &e["error"]),
-            (StatusCode::FORBIDDEN, &off),
-            "{path}: {e}"
-        );
-        assert!(e.get("sealed_key").is_none() && e.get("access_token").is_none());
-    }
-    let left = ok(&app, Method::GET, "/api/account", &ta, json!(null)).await;
-    assert_eq!(left["recovery_codes_left"], 10, "no code was used up");
+    // Off between the approval and the exchange (two-step login on): no key, no
+    // session; on again, the approval still counts as the second step.
+    enable_totp(&app, email, "pw-alice-1", &ta).await;
+    let late = NewDevice::new("late");
+    let id = id_of(&ask(&app, &late, email).await);
+    approve(&app, &alice, &ta, &late, &id).await;
+    switch(false).await;
+    let (s, e) = poll(&app, &id, &late.code).await;
+    assert_eq!((s, &e["error"]), (StatusCode::FORBIDDEN, &off));
+    assert!(e.get("sealed_key").is_none() && e.get("access_token").is_none());
+    switch(true).await;
+    let v = polled(&app, &id, &late).await;
+    assert_eq!(
+        late.open(&v["sealed_key"], &id).as_bytes(),
+        alice.unlocked.account_key.as_bytes()
+    );
 }
 
 #[tokio::test]
-async fn a_security_key_finishes_a_device_sign_in_too() {
+async fn an_account_with_a_security_key_gets_in_with_the_approval_alone() {
     let (app, state) = app_with_state().await;
     let (email, pw) = ("dl-key@example.com", "pw-alice-1");
     let alice = register(&app, email, pw).await;
@@ -1294,7 +1256,7 @@ async fn a_security_key_finishes_a_device_sign_in_too() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{start}");
-    let (key, credential) = SoftKey::create(&start["options"]);
+    let (_key, credential) = SoftKey::create(&start["options"]);
     ok(
         &app,
         Method::POST,
@@ -1308,26 +1270,7 @@ async fn a_security_key_finishes_a_device_sign_in_too() {
     let id = id_of(&ask(&app, &nd, email).await);
     approve(&app, &alice, &ta, &nd, &id).await;
     let v = polled(&app, &id, &nd).await;
-    assert_eq!(v["providers"], json!(["passkey", "recovery"]), "{v}");
-    let tf = v["two_factor_token"].clone();
-    let (s, o) = call(
-        &app,
-        Method::POST,
-        "/api/auth/2fa/passkey/start",
-        None,
-        json!({ "two_factor_token": tf }),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK, "{o}");
-    let (s, v) = call(
-        &app,
-        Method::POST,
-        "/api/auth/2fa/passkey/finish",
-        None,
-        json!({ "two_factor_token": tf, "credential": key.assert(&o["options"], true) }),
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v.get("two_factor_required").is_none(), "{v}");
     assert_eq!(
         nd.open(&v["sealed_key"], &id).as_bytes(),
         alice.unlocked.account_key.as_bytes()
@@ -1336,7 +1279,7 @@ async fn a_security_key_finishes_a_device_sign_in_too() {
     let data = &of_type(&events, "auth.signed_in").last().unwrap()["data"];
     assert_eq!(
         (&data["two_step"], &data["method"]),
-        (&json!("passkey"), &json!("device"))
+        (&json!("device_approval"), &json!("device"))
     );
 }
 

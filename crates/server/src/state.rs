@@ -166,10 +166,6 @@ pub struct PendingTwoFactor {
     pub attempts: u32,
     /// Security-key challenge issued by `/auth/2fa/passkey/start`, if any.
     pub passkey: Option<webauthn_rs::prelude::SecurityKeyAuthentication>,
-    /// Set when the sign-in is a request another device approved (`auth_requests.rs`)
-    /// rather than the master password: the sealed account key waits here for the
-    /// session.
-    pub device_login: Option<DeviceLogin>,
     /// What the key page may show about this sign-in (`/auth/2fa/passkey/context`),
     /// set by `/auth/2fa/passkey/start`.
     pub key_context: Option<KeyContext>,
@@ -188,7 +184,6 @@ pub struct KeyContext {
 }
 
 /// A sign-in request another device approved, being exchanged for a session.
-#[derive(Clone)]
 pub struct DeviceLogin {
     pub request_id: String,
     /// The account key sealed by the approving app to the new device's public key
@@ -476,10 +471,9 @@ impl App {
         }
     }
 
-    /// Drop the account's sign-ins waiting for their two-step login: their token
-    /// stops working, and the sealed key of an approved device sign-in goes with it.
-    /// For a new master password, a disabled or deleted account, and signing
-    /// everyone else out.
+    /// Drop the account's password sign-ins waiting for their two-step login: their
+    /// token stops working. For a new master password, a disabled or deleted account,
+    /// and signing everyone else out.
     pub fn forget_pending_sign_ins(&self, user_id: &str) {
         self.two_factor.retain(|p| p.user_id != user_id);
     }

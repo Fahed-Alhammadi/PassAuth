@@ -330,8 +330,9 @@ const SCHEMA_V10: &[&str] = &[
 /// Sign-in requests a signed-in device approves (`auth_requests.rs`). `user_id` is
 /// set when the email belongs to an account that may sign in, else NULL (nobody sees
 /// the request; it expires). `email_hash` is a keyed hash of the email (per-email
-/// limit), `access_code_hash` and `remember_hash` SHA-256 of the new device's poll
-/// code and "remember this device" token; `sealed_key` is the account key sealed by
+/// limit), `access_code_hash` SHA-256 of the new device's poll code; `remember_hash`
+/// (its "remember this device" token) is no longer written since 0.16.1, where the
+/// approval became the second step, and only cleared on old rows; `sealed_key` is the account key sealed by
 /// the approving app to `requester_public_key`, kept only until the new device takes
 /// it. Status: `pending` → `approved` | `denied` | `expired`; `approved` → `used`
 /// (exchanged once) | `expired`. Rows go a day after they expire.

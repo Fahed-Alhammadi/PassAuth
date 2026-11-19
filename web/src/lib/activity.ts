@@ -130,6 +130,7 @@ const SIGN_IN_STEP: Record<string, string> = {
   passkey: "Second step: security key.",
   recovery: "Second step: recovery code.",
   remembered_device: "No second step: remembered device.",
+  device_approval: "Second step: approved on another device.",
 };
 
 const FAILURE: Record<string, string> = {

@@ -866,7 +866,7 @@ async fn login_finish(
     };
     if !providers.is_empty() && !remembered {
         return Ok(Json(two_factor_challenge(
-            &state, user_id, device, providers, None,
+            &state, user_id, device, providers,
         )));
     }
     let two_step = remembered.then_some("remembered_device");
@@ -884,16 +884,14 @@ async fn login_finish(
     ))
 }
 
-/// The answer that asks for two-step login (`two_factor_required`, a five-minute
-/// `two_factor_token`, the account's `providers` plus `recovery`), for a password
-/// sign-in or an approved sign-in request (`device_login`, whose sealed key then
-/// waits with the token for the session).
-pub(crate) fn two_factor_challenge(
+/// The answer that asks a password sign-in for two-step login
+/// (`two_factor_required`, a five-minute `two_factor_token`, the account's
+/// `providers` plus `recovery`).
+fn two_factor_challenge(
     state: &AppState,
     user_id: String,
     device: DeviceInfo,
     providers: Vec<String>,
-    device_login: Option<DeviceLogin>,
 ) -> Value {
     let token = state.two_factor.insert(
         PendingTwoFactor {
@@ -901,7 +899,6 @@ pub(crate) fn two_factor_challenge(
             device,
             attempts: 0,
             passkey: None,
-            device_login,
             key_context: None,
         },
         5 * 60,
@@ -961,10 +958,6 @@ async fn two_factor_verify(
         .two_factor
         .take(&b.two_factor_token)
         .ok_or(ApiError::expired("sign-in expired, start again"))?;
-    if pending.device_login.is_some() {
-        // Turned off on the admin page since: don't use up a code for nothing.
-        crate::auth_requests::enabled(&state)?;
-    }
     if let Some(left) = twofactor::lockout_left(&state.db, &pending.user_id).await? {
         return Err(ApiError::TooManyRequests(left));
     }
@@ -986,7 +979,7 @@ async fn two_factor_verify(
             &pending.device,
             remember,
             Some(method),
-            SignIn::after_two_step(&pending),
+            SignIn::Password,
         )
         .await?,
     ))
@@ -1039,9 +1032,6 @@ async fn two_factor_passkey_start(
         .two_factor
         .take(&b.two_factor_token)
         .ok_or(ApiError::expired("sign-in expired, start again"))?;
-    if pending.device_login.is_some() {
-        crate::auth_requests::enabled(&state)?;
-    }
     if let Some(left) = twofactor::lockout_left(&state.db, &pending.user_id).await? {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
         return Err(ApiError::TooManyRequests(left));
@@ -1164,9 +1154,6 @@ async fn two_factor_passkey_finish(
         state.two_factor.put_back(b.two_factor_token, pending, exp);
         return Err(ApiError::TooManyRequests(left));
     }
-    if pending.device_login.is_some() {
-        crate::auth_requests::enabled(&state)?;
-    }
     let Some(auth_state) = pending.passkey.take() else {
         state.two_factor.put_back(b.two_factor_token, pending, exp);
         return Err(ApiError::bad("ask for security key options first"));
@@ -1204,7 +1191,7 @@ async fn two_factor_passkey_finish(
             &pending.device,
             remember,
             Some(twofactor::PASSKEY),
-            SignIn::after_two_step(&pending),
+            SignIn::Password,
         )
         .await?,
     ))
@@ -1271,9 +1258,6 @@ async fn two_factor_send_email(
         .two_factor
         .take(&b.two_factor_token)
         .ok_or(ApiError::expired("sign-in expired, start again"))?;
-    if pending.device_login.is_some() {
-        crate::auth_requests::enabled(&state)?;
-    }
     limit_account(&state, format!("2fa-email:{}", pending.user_id), 5, 600)?;
     let providers = twofactor::enabled_providers(&state.db, &pending.user_id).await?;
     if providers.iter().any(|p| p == twofactor::EMAIL) {
@@ -1306,20 +1290,11 @@ pub(crate) enum SignIn<'a> {
     Device(&'a DeviceLogin),
 }
 
-impl<'a> SignIn<'a> {
-    /// How the sign-in that is finishing its two-step login began.
-    fn after_two_step(pending: &'a PendingTwoFactor) -> Self {
-        match &pending.device_login {
-            Some(login) => Self::Device(login),
-            None => Self::Password,
-        }
-    }
-}
-
 /// Create a session for `device`, alerting the user by email on new devices.
 /// The app that signed in ([`CLIENT_HEADER`]) is kept with the session; the
 /// sign-in goes into the activity log with the two-step method used, if any
-/// (`remembered_device` when this device may skip it), and for an approved
+/// (`remembered_device` when this device may skip it, `device_approval` for an
+/// approved sign-in request of an account with two-step login), and for an approved
 /// sign-in request `method: "device"` with the request's id. That sign-in's answer
 /// also carries the sealed account key (`sealed_key`).
 pub(crate) async fn issue_session(
@@ -1331,10 +1306,6 @@ pub(crate) async fn issue_session(
     two_step: Option<&str>,
     via: SignIn<'_>,
 ) -> ApiResult<Value> {
-    if let SignIn::Device(_) = via {
-        // Turned off while this sign-in was at its two-step login.
-        crate::auth_requests::enabled(state)?;
-    }
     let client = client_app(headers);
     let t = now();
     let known: i64 =

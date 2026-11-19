@@ -13,10 +13,13 @@
 //! keys (`POST /account/auth-requests/{id}`; the server never sees the account key).
 //! A stolen session alone can't approve. The first answer wins. The new device polls
 //! (`GET /auth/requests/{id}` with the code in [`ACCESS_CODE_HEADER`]) and exchanges
-//! an approved request exactly once: for a session, or, when the account has
-//! two-step login and the device isn't remembered, for the same two-step challenge
-//! as a password sign-in. The sealed key only ever goes out together with the
-//! session's tokens.
+//! an approved request exactly once, for a session; the sealed key only ever goes
+//! out together with the session's tokens. The approval is the second step: an
+//! account with two-step login isn't asked for it again (the 6-digit confirmation
+//! code the core shows on the approving app and the new device types stays, and an
+//! owner who approves a request they didn't start would still have to give that
+//! code away). The admin's `require_two_step` still applies to approving and to the
+//! new session (`policies.rs`).
 //!
 //! Emails without an account that may sign in (unknown, disabled, or not verified
 //! while the server requires it) get the same answer after the same time, and their
@@ -213,10 +216,9 @@ pub struct NewRequest {
     device_name: String,
     #[serde(default = "default_kind")]
     device_kind: String,
-    /// The device's "remember this device" token for this account, if it has one:
-    /// valid at the exchange, it skips two-step login as on a password sign-in.
-    #[serde(default)]
-    remember_token: Option<String>,
+    // `remember_token`, sent by apps for servers before 0.16.1 (a remembered device
+    // skipped two-step login here), is ignored like any unknown field: the approval
+    // is the second step now.
 }
 
 fn default_kind() -> String {
@@ -306,9 +308,9 @@ pub async fn create(
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO auth_requests (id, user_id, email_hash, requester_public_key, device_id,
-             device_name, device_kind, client, ip, access_code_hash, remember_hash, status,
-             created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+             device_name, device_kind, client, ip, access_code_hash, status, created_at,
+             expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(&id)
     .bind(&user_id)
@@ -320,7 +322,6 @@ pub async fn create(
     .bind(&client)
     .bind(&stored_ip)
     .bind(hash_token(&b.access_code))
-    .bind(b.remember_token.as_deref().map(hash_token))
     .bind(PENDING)
     .bind(t)
     .bind(t + TTL)
@@ -354,7 +355,6 @@ struct Row {
     device_name: String,
     device_kind: String,
     access_code_hash: String,
-    remember_hash: Option<String>,
     status: String,
     sealed_key: Option<String>,
     expires_at: i64,
@@ -382,8 +382,8 @@ pub async fn poll(
         .filter(|c| !c.is_empty())
         .ok_or(ApiError::NotFound)?;
     let row: Option<Row> = sqlx::query_as(
-        "SELECT id, user_id, device_id, device_name, device_kind, access_code_hash, remember_hash,
-                status, sealed_key, expires_at
+        "SELECT id, user_id, device_id, device_name, device_kind, access_code_hash, status,
+                sealed_key, expires_at
          FROM auth_requests WHERE id = $1",
     )
     .bind(&id)
@@ -399,13 +399,12 @@ pub async fn poll(
     exchange(&state, &headers, row).await
 }
 
-/// An approved request, exchanged exactly once: `{status: "approved", sealed_key,
-/// access_token, refresh_token, expires_in, remember_token, user_id, email, bundle}`
-/// (the session answer of a password sign-in), or `{status: "approved",
-/// two_factor_required, two_factor_token, providers}` when the account has two-step
-/// login and the device isn't remembered; `sealed_key` then comes with the session
-/// from `/auth/2fa/verify` or `/auth/2fa/passkey/finish`. A poll that loses the race
-/// for it answers `{status: "used"}`.
+/// An approved request, exchanged exactly once for `{status: "approved", sealed_key,
+/// access_token, refresh_token, expires_in, remember_token (always null), user_id,
+/// email, bundle}` (the session answer of a password sign-in). Never for a two-step
+/// challenge: the approval by the account's own signed-in, unlocked app is the second
+/// step (since 0.16.1; older servers asked an account with two-step login for it
+/// here). A poll that loses the race for it answers `{status: "used"}`.
 async fn exchange(state: &AppState, headers: &HeaderMap, row: Row) -> ApiResult<Json<Value>> {
     let (Some(user_id), Some(sealed_key)) = (row.user_id, row.sealed_key) else {
         return Err(anyhow::anyhow!("approved sign-in request without an account or a key").into());
@@ -452,10 +451,6 @@ async fn exchange(state: &AppState, headers: &HeaderMap, row: Row) -> ApiResult<
             "email_not_verified",
         ));
     }
-    let remembered = match &row.remember_hash {
-        Some(h) => auth::remembered_device(state, &user_id, &row.device_id, h).await?,
-        None => false,
-    };
     let device = DeviceInfo {
         id: row.device_id,
         name: row.device_name,
@@ -465,21 +460,22 @@ async fn exchange(state: &AppState, headers: &HeaderMap, row: Row) -> ApiResult<
         request_id: row.id,
         sealed_key,
     };
-    let providers = twofactor::enabled_providers(&state.db, &user_id).await?;
-    let mut out = if !providers.is_empty() && !remembered {
-        auth::two_factor_challenge(state, user_id, device, providers, Some(login))
-    } else {
-        auth::issue_session(
-            state,
-            headers,
-            &user_id,
-            &device,
-            None,
-            remembered.then_some("remembered_device"),
-            SignIn::Device(&login),
-        )
+    // The approval came from the account's own signed-in, unlocked app: that is the
+    // second step, so no two-step challenge here (the event says so).
+    let two_step = (!twofactor::enabled_providers(&state.db, &user_id)
         .await?
-    };
+        .is_empty())
+    .then_some("device_approval");
+    let mut out = auth::issue_session(
+        state,
+        headers,
+        &user_id,
+        &device,
+        None,
+        two_step,
+        SignIn::Device(&login),
+    )
+    .await?;
     out["status"] = APPROVED.into();
     Ok(Json(out))
 }
@@ -618,13 +614,6 @@ pub async fn answer(
         drop(tx);
         return answered_before(&state, &user, &id, status).await;
     };
-    if !b.approve {
-        // Nothing of the new device's is needed any more.
-        sqlx::query("UPDATE auth_requests SET remember_hash = NULL WHERE id = $1")
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?;
-    }
     let kind = if b.approve {
         "auth.request_approved"
     } else {
