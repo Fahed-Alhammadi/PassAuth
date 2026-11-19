@@ -40,7 +40,7 @@ import type {
 } from "../shared/types";
 import * as core from "../wasm/passauth_core";
 import { ApiError, api, forgetServerFeatures, iconsShown, logoutRemote, outdatedServer, refreshServerInfo, refuseOutdated, serverConfig, serverInfo, serverOutdated } from "./api";
-import { AVATAR_FEATURE, avatarSeqOf, avatars, deleteAvatar, refreshAvatar, uploadAvatar } from "./avatar";
+import { AVATAR_FEATURE, avatarSeqOf, avatars, deleteAvatar, refreshAvatar, showKeptAvatar, uploadAvatar } from "./avatar";
 import { initCore } from "./core";
 import { type DeviceMemory, mergedDeviceMemory, readDeviceMemory } from "./device-memory";
 import { capRevMemory, emptyRevMemory, forgetRev, itemRevOf, noteServed, type RevMemory, readRevMemory, rollbackNotice } from "./item-revs";
@@ -64,6 +64,7 @@ import {
   MANIFEST_FEATURE,
   MANIFEST_HELD,
   MANIFEST_HELD_TEXT,
+  MANIFEST_ITEM_WHERE_TEXT,
   MANIFEST_NOT_ACCEPTABLE_TEXT,
   MANIFEST_READER_TEXT,
   MANIFEST_REVIEW_TEXT,
@@ -386,10 +387,12 @@ export async function state(): Promise<PopupState> {
   const pictures = await avatars.many(Object.keys(l.accounts));
   for (const [id, a] of Object.entries(l.accounts)) {
     if (!a.server || !a.email) continue;
-    const avatar = pictures[id];
-    accounts.push({ id, email: a.email, name: a.name, server: a.server, status: id === l.activeId ? status : await statusOf(a, id, never), ...(avatar ? { avatar } : {}) });
+    const st = id === l.activeId ? status : await statusOf(a, id, never);
+    // A picture only for an unlocked account: a locked one shows its initials.
+    const avatar = st === "unlocked" ? pictures[id] : undefined;
+    accounts.push({ id, email: a.email, name: a.name, server: a.server, status: st, ...(avatar ? { avatar } : {}) });
   }
-  const avatar = pictures[l.activeId];
+  const avatar = status === "unlocked" ? pictures[l.activeId] : undefined;
   return {
     status,
     activeId: l.activeId,
@@ -692,11 +695,27 @@ function syncAvatar(id: string, user: unknown) {
   void refreshAvatar(id, avatarSeqOf(user), (sealed) => acct.openAvatar(sealed), stale).catch(logged("Fetching the profile picture"));
 }
 
+/** At unlock, before the popup asks for its state: the profile picture of `id` from its sealed copy on disk (no network; a failure only leaves the initials). */
+async function showAvatar(id: string) {
+  const acct = account;
+  const gen = generation;
+  if (!acct || currentId !== id) return;
+  const stale = () => gen !== generation || currentId !== id || account !== acct;
+  await showKeptAvatar(id, (sealed) => acct.openAvatar(sealed), stale).catch(logged("Opening the profile picture"));
+}
+
 /** Set the active account's profile picture (a JPEG the popup made, ≤ 256 KiB): sealed with the Account Key here, then uploaded. */
 export async function setAvatar(jpeg: Uint8Array) {
   if (!account || !currentId) throw lockedError();
   const acct = account;
-  await uploadAvatar(currentId, jpeg, (image) => acct.sealAvatar(image));
+  const id = currentId;
+  const gen = generation;
+  await uploadAvatar(
+    id,
+    jpeg,
+    (image) => acct.sealAvatar(image),
+    () => gen !== generation || currentId !== id || account !== acct,
+  );
 }
 
 /** Remove the active account's profile picture. */
@@ -967,6 +986,7 @@ function openVault(id: string, cached?: StoredSync): Promise<void> {
   const gen = generation;
   const p = (async () => {
     const copy = cached ?? (await syncCache.get(id));
+    await showAvatar(id);
     if (gen !== generation || currentId !== id || loaded) return;
     // Which vaults this browser had before this unlock (signed sharing, M1), from the copy just read.
     if (account) void earlierVaultIds(id, account, { copy });
@@ -1436,6 +1456,8 @@ async function acceptFull(data: SyncResponse, id: string) {
   stripPrivate(data.items);
   const merged = mergeSync(null, data);
   if (!merged || !account || currentId !== id) return;
+  await showAvatar(id);
+  if (!account || currentId !== id) return;
   await accept(withSignedInvitations(merged.snapshot, data), id, true, "all");
 }
 
@@ -2654,16 +2676,25 @@ export function notCheckedSummary(): { text: string; vaults: { id: string; name:
 
 /**
  * The live rows that aren't shown as items, for the end of the list: an item from a newer version of PassAuth (with
- * "Update PassAuth to see this item."), and an item that can't be opened (with its last known name, when this browser
- * has one). Nothing can be done with them here.
+ * "Update PassAuth to see this item."; for an owner or admin of its vault also where it can be deleted for good), and
+ * an item that can't be opened (with its last known name, when this browser has one). Nothing can be done with them
+ * here.
  */
 export function otherItems(): OtherItem[] {
   return [...unopened.values()].map((u) => ({
     id: u.id,
     title: u.kind === "newer" ? ITEM_NEWER_TITLE : ITEM_LOCKED_TITLE,
     ...(u.kind === "newer" ? { note: ITEM_NEWER_NOTE } : u.name ? { name: u.name } : {}),
+    // An owner or admin can delete an item from a newer version for good, though not from here: the row says where.
+    ...(u.kind === "newer" && canRemoveNewer(u.vaultId) ? { hint: MANIFEST_ITEM_WHERE_TEXT } : {}),
     vaultName: vaultName(u.vaultId),
   }));
+}
+
+/** Whether this account is an owner or admin of the vault (who can delete an item from a newer version, in the web vault or the desktop app). */
+function canRemoveNewer(vaultId: string): boolean {
+  const role = vaults.find((v) => v.id === vaultId)?.role;
+  return role === "owner" || role === "admin";
 }
 
 /** Whether the vault shows the manifest warning (its item pages say so too). */

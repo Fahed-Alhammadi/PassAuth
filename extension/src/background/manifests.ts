@@ -390,8 +390,11 @@ export function acceptVault(key: Pick<ManifestKey, "manifestAccept">, row: SyncV
   return { status: "no" };
 }
 
-/** How many requests one check may spend on a vault's manifest log (a log with more pages doesn't connect). */
-export const LOG_REQUESTS = 5;
+/**
+ * How many requests one check may spend on a vault's manifest log: 25 pages of up to 2000 entries each (a log with
+ * more pages doesn't connect).
+ */
+export const LOG_REQUESTS = 25;
 
 /** The log couldn't be fetched (no answer, a 5xx, a 429…): the sync answer isn't checked and isn't used. */
 export class LogUnavailable extends Error {}

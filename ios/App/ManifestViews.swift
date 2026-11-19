@@ -204,11 +204,13 @@ private struct MemoryProblemNotice: View {
 /// waits for it.
 ///
 /// After them, items that decrypt but that this app can't read (`VaultData.newer`): "Item from a
-/// newer version of PassAuth", with nothing to do but update.
+/// newer version of PassAuth", with nothing to do but update; the vault's owners and admins get
+/// "Delete for good" there too (such rows stand in the way of a key replacement).
 struct UnopenableItems: View {
     @Environment(AppModel.self) private var model
     let trashed: Bool
     @State private var deleting: UnopenableItem?
+    @State private var deletingNewer: NewerItem?
     @State private var busy = false
 
     var body: some View {
@@ -249,6 +251,7 @@ struct UnopenableItems: View {
         if !newer.isEmpty {
             Section {
                 ForEach(newer) { item in
+                    let manages = v?.vaults.first { $0.id == item.vaultId }.map { VaultRepository.mayDeleteNewer($0.role) } ?? false
                     HStack(spacing: 12) {
                         Image(systemName: "arrow.down.app").foregroundStyle(Color.paMuted)
                         VStack(alignment: .leading, spacing: 2) {
@@ -258,13 +261,40 @@ struct UnopenableItems: View {
                             Text(v?.vaultName(item.vaultId) ?? "Vault")
                                 .font(.footnote).foregroundStyle(Color.paMuted).lineLimit(1)
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("vault.newerItem.\(item.id)")
                         Spacer(minLength: 0)
+                        if manages {
+                            Button(ManifestText.deleteForGood, role: .destructive) { deletingNewer = item }
+                                .buttonStyle(.borderless)
+                                .disabled(busy)
+                                .accessibilityIdentifier("vault.newerItem.delete.\(item.id)")
+                        }
                     }
                     .frame(minHeight: 44)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("vault.newerItem.\(item.id)")
                 }
             }
+            .confirmationDialog(ManifestText.deleteForGood + "?", isPresented: Binding(get: { deletingNewer != nil }, set: { if !$0 { deletingNewer = nil } }),
+                                titleVisibility: .visible, presenting: deletingNewer) { item in
+                Button(ManifestText.deleteForGood, role: .destructive) { delete(newer: item) }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text(ManifestText.newerDeleteConfirm)
+            }
+        }
+    }
+
+    private func delete(newer item: NewerItem) {
+        guard !busy else { return }
+        busy = true
+        Task {
+            do {
+                try await model.repo.deleteNewer(item)
+                model.notify("Deleted.")
+            } catch {
+                model.notify(errorMessage(error))
+            }
+            busy = false
         }
     }
 

@@ -1121,6 +1121,16 @@ final class VaultManifestTests: XCTestCase {
         XCTAssertEqual(ManifestText.deleteConfirm, "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone.")
         XCTAssertEqual(ManifestText.newerItem, "Item from a newer version of PassAuth")
         XCTAssertEqual(ManifestText.newerItemNote, "Update PassAuth to see this item.")
+        XCTAssertEqual(ManifestText.newerDeleteConfirm, "This item was saved by a newer version of PassAuth. Update PassAuth to see it. Deleting it removes it for everyone.")
+        XCTAssertEqual(ManifestText.newerRekey, "This vault has items from a newer version of PassAuth. Update PassAuth, or have an owner delete them, then try again.")
+        // L1: a key replacement that stops at an item from a newer version says what to do.
+        XCTAssertEqual(VaultRepository.rekeyRefusal(CoreError.Invalid(message: "json: unknown variant `passport`"), name: "Work").message, ManifestText.newerRekey)
+        XCTAssertEqual(VaultRepository.rekeyRefusal(CoreError.DecryptFailed(message: "decrypt_failed"), name: "Work").message,
+                       "Some items in Work can't be decrypted, so its key can't be replaced yet.")
+        // Who may delete such an item for good: owners and admins.
+        XCTAssertEqual([Role.owner, .admin, .write, .read].map(VaultRepository.mayDeleteNewer), [true, true, false, false])
+        // L2: one check follows a vault's manifest log for 25 requests at most.
+        XCTAssertEqual(VaultManifest.logRequests, 25)
         XCTAssertEqual(ManifestText.confirmNoRecord, "Your server no longer shows a record of changes for this vault. If you continue, PassAuth stops checking this vault for missing, restored or out-of-date items until a new record is started.")
         XCTAssertEqual(ManifestText.notChecked, "This vault isn't being checked for missing or restored items.")
         XCTAssertEqual(ManifestText.memoryUnreadable, "PassAuth can't read this device's record of your vaults.")

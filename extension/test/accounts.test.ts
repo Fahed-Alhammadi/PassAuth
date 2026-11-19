@@ -78,7 +78,7 @@ test("the migration moves old entries once, behind schemaVersion", async () => {
   await migrate();
   expect((await local.get()).secretKeys).toStrictEqual({ [`${A}|${EMAIL}`]: "SK-OLD" });
   expect(stored("secretKeys")).toStrictEqual({ [`${A}|${EMAIL}`]: "SK-OLD" });
-  expect(fake.local.data.get("schemaVersion")).toBe(3);
+  expect(fake.local.data.get("schemaVersion")).toBe(4);
 });
 
 test("the same email on two servers keeps two Secret Keys", async () => {

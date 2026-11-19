@@ -1111,14 +1111,22 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(logs().map(\.query), ["after=8", "after=9", "after=10"])
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
         XCTAssertEqual(remembered(v)?.version, 11)
-        // More pages than a device follows (five requests): the log doesn't connect.
+        // More than five pages are followed (L2: 25 requests at most).
         ScriptedServer.requests = []
         v.manifestSeq = 18
         try v.add("Eighteen")
         try await repo.sync()
-        XCTAssertEqual(logs().count, 2 * VaultManifest.logRequests, "asked again in full before the warning, five requests each time")
+        XCTAssertEqual(logs().count, 7)
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(remembered(v)?.version, 18)
+        // More pages than a device follows (25 requests): the log doesn't connect.
+        ScriptedServer.requests = []
+        v.manifestSeq = 44
+        try v.add("Forty-four")
+        try await repo.sync()
+        XCTAssertEqual(logs().count, 2 * VaultManifest.logRequests, "asked again in full before the warning, 25 requests each time")
         XCTAssertEqual(repo.vault?.vaults.first?.manifest, .mismatch)
-        XCTAssertEqual(remembered(v)?.version, 11)
+        XCTAssertEqual(remembered(v)?.version, 18)
         // With whole pages again it connects, and the warning is gone.
         w.logPage = 2000
         try await repo.sync()
@@ -2745,6 +2753,78 @@ final class ManifestContractTests: XCTestCase {
         XCTAssertEqual(w.problems, [])
         // Deleting one that is gone meanwhile is nothing.
         try await repo.deleteUnopenable(live)
+    }
+
+    /// L1: an item from a newer version of PassAuth (it decrypts, this app can't read it) can
+    /// be deleted for good by the vault's owners and admins, live or trashed, with the same
+    /// manifest write as an item that can't be opened. Members who can only add and edit can't.
+    /// Nothing is warned or held for such rows, before or after.
+    func testAnItemFromANewerVersionIsDeletedByAnOwnerOrAdmin() async throws {
+        let (w, v) = try world()
+        v.manifestSeq = 4
+        try v.add("Shop")
+        let future = try v.add("Future", revision: 9)
+        let later = try v.add("Later", trashedAt: 1_700_000_900, revision: 10)
+        let unread: Set<String> = [future, later]
+        w.liveSync = true
+        let repo = try await repo(w, app: true) {
+            $0.itemDecrypt = { key, enc in
+                if unread.contains(enc.id) { throw CoreError.Invalid(message: "json: unknown variant `passport`") }
+                return try key.decryptItem(encrypted: enc)
+            }
+        }
+        XCTAssertEqual(repo.vault?.entries.map(\.item.name), ["Shop"])
+        XCTAssertEqual(Set(repo.vault?.newer.map(\.id) ?? []), unread)
+        XCTAssertEqual(repo.vault?.newer.first { $0.id == later }?.deletedAt, 1_700_000_900, "listed in the trash")
+        XCTAssertEqual(repo.vault?.unopenable, [])
+        XCTAssertEqual(repo.vault?.unopenableNotices.count, 0, "no notice")
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(repo.vault?.manifestWarnings.count, 0)
+        let live = try XCTUnwrap(repo.vault?.newer.first { $0.id == future })
+        // A reader and a member who can add and edit: no delete.
+        v.role = "read"
+        try await repo.sync()
+        await assertThrows("You can only view items in this vault.") { try await repo.deleteNewer(live) }
+        v.role = "write"
+        try await repo.sync()
+        await assertThrows("Only an owner or admin of this vault can delete this item.") { try await repo.deleteNewer(live) }
+        XCTAssertTrue(sent("DELETE", "/permanent").isEmpty, "nothing was sent")
+        XCTAssertEqual(Set(repo.vault?.newer.map(\.id) ?? []), unread)
+        // An admin: an ordinary manifest write without the row as it was synced.
+        v.role = "admin"
+        try await repo.sync()
+        var link = try v.link()
+        try await repo.deleteNewer(live)
+        var del = try XCTUnwrap(sent("DELETE", "/api/items/\(future)/permanent").last)
+        XCTAssertEqual(query(del)["revision"], "9")
+        XCTAssertEqual(query(del)["manifest_seq"], "5")
+        XCTAssertEqual(query(del)["manifest_prev"], link)
+        XCTAssertEqual(w.problems, [])
+        XCTAssertEqual(repo.vault?.newer.map(\.id), [later])
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        // The owner, a trashed row.
+        v.role = "owner"
+        try await repo.sync()
+        link = try v.link()
+        try await repo.deleteNewer(try XCTUnwrap(repo.vault?.newer.first))
+        del = try XCTUnwrap(sent("DELETE", "/api/items/\(later)/permanent").last)
+        XCTAssertEqual(query(del)["revision"], "10")
+        XCTAssertEqual(query(del)["manifest_seq"], "6")
+        XCTAssertEqual(query(del)["manifest_prev"], link)
+        XCTAssertEqual(w.problems, [])
+        XCTAssertEqual(repo.vault?.newer, [])
+        XCTAssertEqual(remembered(v), try mark(v))
+        // The vault stays ok and writable.
+        try await repo.createItem(named("Note"), vaultId: nil)
+        XCTAssertEqual(manifests(try XCTUnwrap(sent("POST", "/api/items").last)).first?.seq, 7)
+        try await repo.sync()
+        XCTAssertEqual(repo.vault?.vaults.first?.manifest, .ok)
+        XCTAssertEqual(w.problems, [])
+        XCTAssertEqual(Set(repo.vault?.entries.map(\.item.name) ?? []), ["Shop", "Note"])
+        // Deleting one that is gone meanwhile is nothing.
+        let deletes = sent("DELETE", "/permanent").count
+        try await repo.deleteNewer(live)
+        XCTAssertEqual(sent("DELETE", "/permanent").count, deletes)
     }
 
     /// A vault whose manifest is wrong as well is warned for that, and "Use the server's copy"

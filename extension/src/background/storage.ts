@@ -22,7 +22,7 @@
  */
 import type { Bundle, SyncResponse } from "@web/lib/types";
 import { log, logged } from "../shared/log";
-import { AVATAR_PREFIX } from "../shared/storage-keys";
+import { AVATAR_OPEN_PREFIX, AVATAR_PREFIX } from "../shared/storage-keys";
 import type { Settings } from "../shared/types";
 import { forgetLastUsed } from "./last-used";
 import type { StoredSync } from "./sync-rules";
@@ -239,7 +239,7 @@ export const local = {
       }
       await chrome.storage.local.set(patch);
       await chrome.storage.local.remove(`${AVATAR_PREFIX}${id}`);
-      await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id)]);
+      await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id), `${AVATAR_OPEN_PREFIX}${id}`]);
       await forgetLastUsed(id);
       await syncCache.clear(id);
       if (gone?.server && gone.userId) {
@@ -288,7 +288,8 @@ export const session = {
   },
   async clear(id?: string) {
     const aid = id ?? (await activeId());
-    await chrome.storage.session.remove([`unlocked:${aid}`, earlierKey(aid)]);
+    // With the keys goes what they opened for the popup: the profile picture (a locked account shows its initials).
+    await chrome.storage.session.remove([`unlocked:${aid}`, earlierKey(aid), `${AVATAR_OPEN_PREFIX}${aid}`]);
   },
 };
 

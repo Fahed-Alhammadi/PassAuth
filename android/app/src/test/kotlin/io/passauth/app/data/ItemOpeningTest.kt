@@ -15,6 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -195,7 +196,7 @@ class ItemOpeningTest {
     /**
      * T1 b (final review N9): a row that decrypts but holds something this app can't read (an item
      * type or format of a newer app) is "Item from a newer version of PassAuth": not unopenable (no
-     * delete, no notice), it doesn't block a first manifest, and its row counts in the manifest like
+     * notice; only an owner or admin can delete it, see the next test), it doesn't block a first manifest, and its row counts in the manifest like
      * any other. The core's and the app's own reader are both covered; the ciphertext here is a
      * real item, read by a reader that stands for an older app (the core's binding can't encrypt an
      * item type it doesn't know).
@@ -225,6 +226,52 @@ class ItemOpeningTest {
         assertEquals("the row is counted: without it the manifest doesn't pass", ManifestState.Unresolved,
             runBlocking { Manifests.judge(listOf(header), listOf(fine), mapOf(vaultId to key), emptyMap(), whole = true) }.states[vaultId])
         assertNotNull(Manifests.next(key, header, j.states[vaultId], emptyList(), listOf(saved(key, "i3", "New"))))
+    }
+
+    /**
+     * Final fixes L1 (final-c C4): an owner or admin of the vault can delete an item of a newer app
+     * for good, with the same manifest write as an item that can't be opened (the row as served,
+     * live, one request); members who can only write or read get no action, and nobody does while
+     * the vault's warning stands. Afterwards the vault passes and is written to as usual.
+     */
+    @Test
+    fun anOwnerOrAdminDeletesAnItemOfANewerAppForGood() {
+        assertTrue(Manifests.mayDeleteNewer(Role.Owner, ManifestState.Ok))
+        assertTrue(Manifests.mayDeleteNewer(Role.Admin, ManifestState.Ok))
+        assertTrue("a vault without a manifest", Manifests.mayDeleteNewer(Role.Owner, ManifestState.None))
+        assertTrue("beside an item that can't be opened", Manifests.mayDeleteNewer(Role.Admin, ManifestState.Unopenable))
+        for (state in ManifestState.entries) {
+            assertFalse("write access isn't enough ($state)", Manifests.mayDeleteNewer(Role.Write, state))
+            assertFalse(Manifests.mayDeleteNewer(Role.Read, state))
+            assertFalse(Manifests.mayDeleteNewer(null, state))
+        }
+        assertFalse("a warned vault is reviewed first", Manifests.mayDeleteNewer(Role.Owner, ManifestState.Unresolved))
+        assertEquals(
+            "This item was saved by a newer version of PassAuth. Update PassAuth to see it. Deleting it removes it for everyone.",
+            Manifests.DELETE_NEWER_CONFIRM,
+        )
+        assertEquals(
+            "This vault has items from a newer version of PassAuth. Update PassAuth, or have an owner delete them, then try again.",
+            Manifests.NEWER_NO_NEW_KEY,
+        )
+
+        val key = key()
+        val newer = saved(key, "i1", "Passport").copy(revision = 6)
+        val fine = saved(key, "i2", "Bank")
+        var header = SyncVault(vaultId, role = "owner", keyKind = "account", keyEpoch = epoch, seq = 4, manifestOk = true)
+        val (_, first) = Manifests.startBody(key, header, listOf(newer, fine))!!
+        header = header.copy(manifest = first.sealed, manifestSeq = first.seq, manifestPrev = first.prev)
+        // The row as served leaves the manifest; the request is the one an item that can't be opened is deleted with.
+        val m = Manifests.next(key, header, ManifestState.Ok, listOf(newer), emptyList())!!
+        assertEquals(first.seq + 1, m.seq)
+        assertTrue(Manifests.deletePath(newer, m).startsWith("/items/i1/permanent?revision=6&manifest_seq=${m.seq}&manifest_prev="))
+        assertEquals("not while the vault's record doesn't match", Manifests.HELD,
+            assertThrows(UserException::class.java) { Manifests.next(key, header, ManifestState.Unresolved, listOf(newer), emptyList()) }.message)
+        // Without the row the vault passes its new manifest and takes writes.
+        val after = header.copy(manifest = m.sealed, manifestSeq = m.seq, manifestPrev = m.prev)
+        val j = runBlocking { Manifests.judge(listOf(after), listOf(fine), mapOf(vaultId to key), mapOf(vaultId to first.mark), whole = true) }
+        assertEquals(ManifestState.Ok, j.states[vaultId])
+        assertNotNull(Manifests.next(key, after, j.states[vaultId], emptyList(), listOf(saved(key, "i3", "New"))))
     }
 
     /**

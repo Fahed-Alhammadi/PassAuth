@@ -630,7 +630,7 @@ test("the manifest log: pages are followed while the server says more, at most f
   expect(asked, "the next page goes on from the highest real entry").toStrictEqual([3, 5]);
   // A 404 or 400 (the caller's null), an answer that isn't a log: it doesn't connect.
   for (const none of [null, undefined, {}, { entries: "x" }, []]) expect(await collectLog(3, async () => none)).toBe(null);
-  // "More" forever: five requests, then it doesn't connect.
+  // "More" forever: 25 requests, then it doesn't connect.
   let n = 3;
   asked.length = 0;
   expect(
@@ -640,7 +640,7 @@ test("the manifest log: pages are followed while the server says more, at most f
     }),
   ).toBe(null);
   expect(asked).toHaveLength(LOG_REQUESTS);
-  expect(LOG_REQUESTS).toBe(5);
+  expect(LOG_REQUESTS).toBe(25);
   // "More" that leads nowhere (nothing higher, nothing at all, or only rubbish): not asked again.
   expect(await collectLog(3, async () => ({ entries: [e(3)], more: true }))).toBe(null);
   expect(await collectLog(3, async () => ({ entries: [], more: true }))).toBe(null);

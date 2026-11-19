@@ -248,12 +248,20 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                         }
                     }
                 }
-                // Items a newer app saved that this one can't read: listed, nothing to do but update.
+                // Items a newer app saved that this one can't read: listed; an owner or admin of the vault can delete them for good.
                 v?.newer.orEmpty().forEach { row ->
                     val vault = v?.vaults?.firstOrNull { it.id == row.vaultId } ?: return@forEach
                     item(key = "newer-item:${row.id}") {
                         val O = io.passauth.app.data.ItemOpening
-                        QuietCard(O.NEWER_ITEM, O.NEWER_NOTE, second = vault.name.takeIf { (v?.vaults?.size ?: 0) > 1 })
+                        val M = io.passauth.app.data.Manifests
+                        QuietCard(
+                            O.NEWER_ITEM, O.NEWER_NOTE, second = vault.name.takeIf { (v?.vaults?.size ?: 0) > 1 },
+                            ctx = ctx, action = M.DELETE_FOR_GOOD.takeIf { M.mayDeleteNewer(vault.role, vault.manifest) },
+                            confirmTitle = "${M.DELETE_FOR_GOOD}?", confirmSubtitle = vault.name, confirmBody = M.DELETE_NEWER_CONFIRM,
+                        ) {
+                            ctx.repo.deleteNewer(row)
+                            ctx.notify("Item deleted.")
+                        }
                     }
                 }
                 // This phone's own record of the vaults can't be read, again and again: said, with the way out.
@@ -482,19 +490,72 @@ private fun ManifestWarning(ctx: UiCtx, vault: io.passauth.app.data.VaultInfo, n
 
 /** A quiet standing line above the items (not a warning, nothing to do about it here): an optional [heading] and the [text]. */
 @Composable
-private fun QuietCard(heading: String?, text: String, second: String? = null) {
+private fun QuietCard(
+    heading: String?,
+    text: String,
+    second: String? = null,
+    ctx: UiCtx? = null,
+    action: String? = null,
+    confirmTitle: String = "",
+    confirmSubtitle: String? = null,
+    confirmBody: String = "",
+    run: suspend () -> Unit = {},
+) {
+    var confirm by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(Radius.card),
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, PassAuthTheme.colors.line),
         modifier = Modifier.fillMaxWidth().padding(top = Space.s),
     ) {
-        Column(Modifier.padding(Space.m)) {
+        Column(Modifier.padding(start = Space.m, end = Space.m, top = Space.m, bottom = if (action != null) Space.xs else Space.m)) {
             if (heading != null) Text(heading, style = MaterialTheme.typography.titleSmall, modifier = Modifier.semantics { heading() })
             Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (second != null) Text(second, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (action != null) {
+                TextButton(onClick = { confirm = true }, enabled = !busy, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text(action, color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
     }
+    if (confirm && action != null && ctx != null) {
+        ConfirmSheet(ctx, action, confirmTitle, confirmSubtitle, confirmBody, { confirm = false }, { busy = it }, run)
+    }
+}
+
+/** The sheet that confirms a card's [action] (always a destructive one) before [run]. */
+@Composable
+private fun ConfirmSheet(
+    ctx: UiCtx,
+    action: String,
+    title: String,
+    subtitle: String?,
+    body: String,
+    close: () -> Unit,
+    busy: (Boolean) -> Unit,
+    run: suspend () -> Unit,
+) {
+    io.passauth.app.ui.components.DecisionSheet(
+        onDismiss = close,
+        title = title,
+        subtitle = subtitle,
+        actions = {
+            io.passauth.app.ui.components.PrimaryButton(action, {
+                close()
+                busy(true)
+                ctx.launch {
+                    try {
+                        run()
+                    } finally {
+                        busy(false)
+                    }
+                }
+            }, danger = true)
+            io.passauth.app.ui.components.QuietActions { io.passauth.app.ui.components.QuietButton("Cancel", close) }
+        },
+    ) { io.passauth.app.ui.components.PromptText(body) }
 }
 
 /**
@@ -534,25 +595,7 @@ private fun WarningCard(
         }
     }
     if (confirm && action != null) {
-        io.passauth.app.ui.components.DecisionSheet(
-            onDismiss = { confirm = false },
-            title = confirmTitle,
-            subtitle = confirmSubtitle,
-            actions = {
-                io.passauth.app.ui.components.PrimaryButton(action, {
-                    confirm = false
-                    busy = true
-                    ctx.launch {
-                        try {
-                            run()
-                        } finally {
-                            busy = false
-                        }
-                    }
-                }, danger = true)
-                io.passauth.app.ui.components.QuietActions { io.passauth.app.ui.components.QuietButton("Cancel", { confirm = false }) }
-            },
-        ) { io.passauth.app.ui.components.PromptText(confirmBody) }
+        ConfirmSheet(ctx, action, confirmTitle, confirmSubtitle, confirmBody, { confirm = false }, { busy = it }, run)
     }
 }
 

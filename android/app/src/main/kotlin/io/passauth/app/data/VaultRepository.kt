@@ -393,6 +393,9 @@ class VaultRepository(
     /** The rows of the copy shown that don't open (by item id), for [deleteUnopenable]. */
     private var unopenableRows = mapOf<String, SyncItem>()
 
+    /** The live rows of the copy shown that hold an item of a newer app (by item id), for [deleteNewer]. */
+    private var newerRows = mapOf<String, SyncItem>()
+
     /** Public syncs: one in flight, one waiting ([SyncQueue]). */
     private val syncQueue = SyncQueue(scope)
     private val _vault = MutableStateFlow<VaultData?>(null)
@@ -1121,6 +1124,7 @@ class VaultRepository(
         manifestAcceptable = emptySet()
         manifestNoRecord = emptySet()
         unopenableRows = emptyMap()
+        newerRows = emptyMap()
         copy = null
         _vault.value = null
         _sharing.value = SharingStatus()
@@ -1731,6 +1735,7 @@ class VaultRepository(
         manifestAcceptable = acceptable
         manifestNoRecord = noRecord
         unopenableRows = opened.unopenable.associateBy { it.id }
+        newerRows = opened.newer.associateBy { it.id }
         // "No record" accepted and still none: said quietly until a manifest exists again (rule T3).
         val unwatched = manifestMemory?.takeIf { it.first == id }?.second.orEmpty().filterValues { it.notChecked && it.mark == null }.keys
         _vault.value = opened.data.copy(
@@ -2109,7 +2114,23 @@ class VaultRepository(
      * manifest when it has one. Nothing has to be opened for that. A vault whose manifest doesn't
      * pass is reviewed first ([useServerCopy]).
      */
-    suspend fun deleteUnopenable(item: UnopenableItem) = mutex.withLock {
+    suspend fun deleteUnopenable(item: UnopenableItem) =
+        deleteRowForGood(item.id, item.vaultId, { unopenableRows }) { vault ->
+            if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
+        }
+
+    /**
+     * "Delete for good" of an item a newer app saved ([Manifests.DELETE_NEWER_CONFIRM]): the same
+     * delete as [deleteUnopenable] (the row as served, with the vault's next manifest), for the
+     * vault's owners and admins only ([Manifests.mayDeleteNewer]).
+     */
+    suspend fun deleteNewer(item: NewerItem) =
+        deleteRowForGood(item.id, item.vaultId, { newerRows }) { vault ->
+            if (vault.role != Role.Owner && vault.role != Role.Admin) throw UserException("Only an owner or admin of this vault can delete this item.")
+        }
+
+    /** One row this app can't show ([rows]: by item id, as the copy shown holds it now) deleted on the server as it is; [allowed] throws for a member who may not. */
+    private suspend fun deleteRowForGood(itemId: String, vaultId: String, rows: () -> Map<String, SyncItem>, allowed: (VaultInfo) -> Unit) = mutex.withLock {
         var answer: JsonElement? = null
         var manifest: ManifestEntry? = null
         var sent = false
@@ -2117,11 +2138,11 @@ class VaultRepository(
             send = {
                 val v = requireVault()
                 requireOnline(v)
-                val vault = v.vaults.firstOrNull { it.id == item.vaultId } ?: throw UserException("Vault not found.")
-                if (vault.role == Role.Read) throw UserException("You can only view items in this vault.")
+                val vault = v.vaults.firstOrNull { it.id == vaultId } ?: throw UserException("Vault not found.")
+                allowed(vault)
                 // Gone meanwhile, or it opens now: nothing to delete.
-                val row = unopenableRows[item.id]?.takeIf { it.vaultId == item.vaultId } ?: return@place
-                val m = manifestEntry(item.vaultId, listOf(row), emptyList())
+                val row = rows()[itemId]?.takeIf { it.vaultId == vaultId } ?: return@place
+                val m = manifestEntry(vaultId, listOf(row), emptyList())
                 try {
                     answer = api.call(activeId(), Manifests.deletePath(row, m), method = "DELETE")
                     manifest = m
@@ -2133,7 +2154,7 @@ class VaultRepository(
             },
             resync = { syncLocked() },
         )
-        if (sent) afterWrite(item.vaultId, answer, answer?.let { LocalChange.Purge(item.id) }, manifest)
+        if (sent) afterWrite(vaultId, answer, answer?.let { LocalChange.Purge(itemId) }, manifest)
     }
 
     /**
@@ -2175,6 +2196,8 @@ class VaultRepository(
         val keptRows: Map<String, SyncItem> = emptyMap(),
         /** Rows of opened vaults that don't decrypt (rule T1 c; trashed ones when the copy has their key and data): listed to be deleted. */
         val unopenable: List<SyncItem> = emptyList(),
+        /** Live rows that decrypt but hold an item this app can't read (rule T1 b), as served: an owner or admin can delete them. */
+        val newer: List<SyncItem> = emptyList(),
         /** Items this decryption found served in an older version than this phone remembers or has (not the ones only kept from before). */
         val rollbacks: Set<String> = emptySet(),
     )
@@ -2244,7 +2267,7 @@ class VaultRepository(
         val rolledBack = mutableSetOf<String>()
         val unopenable = mutableListOf<SyncItem>()
         val unopenableNames = mutableMapOf<String, String?>()
-        val newer = mutableListOf<NewerItem>()
+        val newer = mutableListOf<SyncItem>()
         val rollbacks = mutableSetOf<String>()
         // What this phone has of an item: its copies' rows and the one shown now.
         fun known(id: String): List<SyncItem> =
@@ -2291,7 +2314,7 @@ class VaultRepository(
                     }
                     // An item of a newer app: listed as such; its row stays in the copy and counts in the manifest.
                     ItemOpening.Result.Newer -> {
-                        newer += NewerItem(served.id, served.vaultId)
+                        newer += served
                         continue
                     }
                     // An item that doesn't open isn't shown as one; its vault's manifest still counts it ([Manifests.judge]).
@@ -2353,9 +2376,9 @@ class VaultRepository(
             VaultData(
                 entries, vaults, snap.revision, invitations = invitations, rolledBack = rolledBack, keptNewer = keptNewer,
                 unopenable = unopenable.map { UnopenableItem(it.id, it.vaultId, unopenableNames[it.id], it.deletedAt != null) },
-                newer = newer,
+                newer = newer.map { NewerItem(it.id, it.vaultId) },
             ),
-            keys, headers, fresh, names, revUpdates, keptRows, unopenable, rollbacks,
+            keys, headers, fresh, names, revUpdates, keptRows, unopenable, newer, rollbacks,
         )
     }
 
@@ -3645,8 +3668,9 @@ class VaultRepository(
                         for (r in items) {
                             val json = try {
                                 oldKey.decryptItem(EncryptedItem(r.id, vaultId, r.itemKey ?: throw UserException(CANT_REKEY), r.data ?: throw UserException(CANT_REKEY)))
-                            } catch (_: CoreException) {
-                                throw UserException(CANT_REKEY)
+                            } catch (e: CoreException) {
+                                // An item of a newer app (it decrypts, this app can't read it): said with what to do about it.
+                                throw UserException(if (ItemOpening.isUnknownContent(e)) Manifests.NEWER_NO_NEW_KEY else CANT_REKEY)
                             }
                             val e = made.key.encryptItem(json, r.id, vaultId)
                             newRows += SyncItem(e.id, vaultId, e.key, e.data, deletedAt = r.deletedAt)

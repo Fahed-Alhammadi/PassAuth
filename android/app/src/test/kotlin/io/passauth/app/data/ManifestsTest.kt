@@ -465,11 +465,18 @@ class ManifestsTest {
             val j = s.judged(remembered, log = { _, after -> Manifests.fetchLog(after) { Json.parseToJsonElement(answer) } })
             assertEquals(answer, ManifestState.Unresolved, j.states[vaultId])
         }
-        // Pages are followed from the last entry; more than five requests is no log.
+        // Pages are followed from the last entry; more than 25 requests is no log (final fixes L2: was 5).
+        assertEquals(25, Manifests.LOG_REQUESTS)
         assertEquals(ManifestState.Ok, s.judged(remembered, log = s.logSource(page = 2)).states[vaultId])
         assertEquals(2, s.logRequests)
         s.logRequests = 0
-        repeat(4) { n -> s.otherDevice(emptyList(), listOf(row("y$n", "e$n"))) }
+        // 25 entries in 25 requests still connect…
+        repeat(22) { n -> s.otherDevice(emptyList(), listOf(row("y$n", "e$n"))) }
+        assertEquals(ManifestState.Ok, s.judged(remembered, log = s.logSource(page = 1)).states[vaultId])
+        assertEquals(25, s.logRequests)
+        // …a 26th request isn't made: no log, a mismatch.
+        s.logRequests = 0
+        s.otherDevice(emptyList(), listOf(row("y22", "e22")))
         assertEquals(ManifestState.Unresolved, s.judged(remembered, log = s.logSource(page = 1)).states[vaultId])
         assertEquals(Manifests.LOG_REQUESTS, s.logRequests)
         assertEquals(ManifestState.Ok, s.judged(remembered, log = s.logSource(page = 2)).states[vaultId])

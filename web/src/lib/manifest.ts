@@ -40,9 +40,18 @@ export const UNOPENABLE_ITEM = "Item that can't be opened";
 export const DELETE_FOR_GOOD = "Delete for good";
 export const DELETE_UNOPENABLE_BODY =
   "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. Deleting it removes it for everyone.";
-/** How a row is listed that decrypts but holds an item this app can't read (a type or format a later release added). No action. */
+/**
+ * How a row is listed that decrypts but holds an item this app can't read (a type or format a later release added).
+ * Its one action, "Delete for good", is for the vault's owners and admins only: anyone who can write can add such
+ * rows, and they stop a key replacement.
+ */
 export const NEWER_ITEM = "Item from a newer version of PassAuth";
 export const NEWER_ITEM_NOTE = "Update PassAuth to see this item.";
+export const DELETE_NEWER_BODY =
+  "This item was saved by a newer version of PassAuth. Update PassAuth to see it. Deleting it removes it for everyone.";
+/** Why a vault's key can't be replaced while it holds such rows, and what to do. */
+export const NEWER_ITEMS_REKEY =
+  "This vault has items from a newer version of PassAuth. Update PassAuth, or have an owner delete them, then try again.";
 /**
  * Whether the core's error for an item row says it decrypted but holds an item this app can't read (its JSON is no
  * item of this release: a type or format a later one added). The core names a failed decryption `decrypt_failed`;

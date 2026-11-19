@@ -34,7 +34,7 @@
  * (`acceptServerCopy`): when the served copy is consistent in itself any member accepts it on this device alone,
  * otherwise a member with write access stores a new record over it. A row that doesn't open never changes a vault's
  * verdict or holds its writes: the copy this session already opened is kept when only the served key fails, an item
- * from a newer app is listed as such, and anything else is listed with a notice and may be deleted for good by
+ * from a newer app is listed as such (an owner or admin may delete it for good), and anything else is listed with a notice and may be deleted for good by
  * someone who can edit (`purgeUnopenable`); nothing tells the user to. An answer with a lower revision than the one
  * shown is judged, not ignored, unless it can be a race (`fetchSync`). Every write into a vault with a manifest carries the next one
  * (`manifestFor`); when the vault changed meanwhile (409 `manifest_conflict`) the write syncs, checks and is sent again,
@@ -83,6 +83,7 @@ import {
   MANIFEST_TRIES,
   MANIFEST_UNCHECKED,
   NEWER_ITEM_NOTE,
+  NEWER_ITEMS_REKEY,
   isNewerItemError,
   ManifestMemory,
   TrashSeen,
@@ -206,7 +207,8 @@ export interface Vault {
  * - "unopenable": it doesn't decrypt (and this device holds no copy of it that it opened before). Listed as "Item
  *   that can't be opened", with "Delete for good" for members who can edit.
  * - "newer": it decrypts, but holds an item this app can't read (a type or format from a later release). Listed as
- *   "Item from a newer version of PassAuth" with "Update PassAuth to see this item."; never deletable here.
+ *   "Item from a newer version of PassAuth" with "Update PassAuth to see this item."; "Delete for good" only for the
+ *   vault's owners and admins.
  */
 export interface UnopenableItem {
   id: string;
@@ -1355,8 +1357,8 @@ class LogUnavailable extends Error {
   }
 }
 
-/** Requests for one vault's manifest log at most; a log that needs more pages doesn't connect. */
-const LOG_REQUESTS = 5;
+/** Requests for one vault's manifest log at most (25 × 2000 entries); a log that needs more pages doesn't connect. */
+const LOG_REQUESTS = 25;
 
 /**
  * A vault's manifest log after `after` (`GET /vaults/{id}/manifest-log`), all pages: null when the server's answer is
@@ -1576,6 +1578,9 @@ function checkRollback(revs: RevMemory, entry: VaultEntry, shown: VaultEntry | n
   return { ...entry, rollback: true };
 }
 
+/** Who may delete for good a row that holds an item from a newer app: the vault's owners and admins. */
+const mayDeleteNewer = (role: Role): boolean => role === "owner" || role === "admin";
+
 /** A row's decrypted item, or why there is none: "newer" (`isNewerItemError`) or "unopenable" (everything else). */
 function openRow(key: core.VaultKey, row: SyncItemRow): VaultEntry | "newer" | "unopenable" {
   const enc: EncryptedItem = { id: row.id, vault_id: row.vault_id, key: row.item_key, data: row.data };
@@ -1767,8 +1772,15 @@ function materialize(snap: Snapshot): void {
       failed.set(row.vault_id, (failed.get(row.vault_id) ?? 0) + 1);
       const status = manifestStatus.get(vault.id);
       if (newer.has(row.id)) {
-        // It decrypted, so it is the vault's own: from an app newer than this one. Listed, never deleted from here.
-        unopenable.push({ id: row.id, vaultId: vault.id, deletedAt: row.deleted_at ?? null, deletable: false, kind: "newer" });
+        // It decrypted, so it is the vault's own: from an app newer than this one. Listed; only an owner or admin may
+        // delete it for good (anyone who can write can add such rows, and they stop a key replacement).
+        unopenable.push({
+          id: row.id,
+          vaultId: vault.id,
+          deletedAt: row.deleted_at ?? null,
+          deletable: mayDeleteNewer(vault.role) && !unchecked.has(vault.id) && !unresolved(status),
+          kind: "newer",
+        });
         continue;
       }
       sealed.set(row.vault_id, (sealed.get(row.vault_id) ?? 0) + 1);
@@ -2200,7 +2212,7 @@ function acceptItemRevs(key: core.VaultKey, rows: readonly SyncItemRow[], mine: 
  * Delete for good a row that can't be opened (`State.unopenable`): nothing of it has to be read, the vault's next
  * manifest counts it out by the row as the server sent it. Live or in the trash, one request. Only for a row that
  * really doesn't decrypt: never one this device shows (also from a copy it opened before, when only the served key
- * fails), never one that holds an item from a newer app. A vault whose record doesn't check out needs
+ * fails). A row that holds an item from a newer app only for the vault's owners and admins. A vault whose record doesn't check out needs
  * `acceptServerCopy` first. When the vault changed meanwhile the request is built again from a fresh sync, at most
  * `MANIFEST_TRIES` times. Ends with a sync, which lifts the notice once no such row is left.
  */
@@ -2217,8 +2229,8 @@ export async function purgeUnopenable(id: string): Promise<void> {
     if (!v || !vault) throw new Error(ITEM_GONE);
     // Only a row that really doesn't open: everything else is deleted the ordinary way.
     if (decrypted.get(id)?.entry) throw new Error(ITEM_GONE);
-    // It decrypts: an item from a newer app, not one to delete from here.
-    if (newerRows.has(id)) throw new Error(NEWER_ITEM_NOTE);
+    // It decrypts: an item from a newer app. Only an owner or admin deletes it from here.
+    if (newerRows.has(id) && !mayDeleteNewer(v.role)) throw new Error(NEWER_ITEM_NOTE);
     if (v.role === "read") throw new Error("Only someone who can edit this vault can do this.");
     try {
       if (unchecked.has(v.id)) throw new Unchecked();
@@ -3280,6 +3292,7 @@ export async function removeMember(vaultId: string, userId: string, opts: Rotati
   // Rotation must re-encrypt every item, so check that all of them can be read before removing anyone.
   await sync();
   if (undecryptable.get(vaultId)) {
+    if (!unopenableRows.get(vaultId)) throw new Error(`${NEWER_ITEMS_REKEY} Nobody was removed.`);
     throw new Error(
       "Some items in this vault can't be decrypted, so PassAuth can't replace the vault key after removing this person. Nobody was removed.",
     );
@@ -3362,7 +3375,11 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
     if (unresolved(manifestStatus.get(vaultId))) throw new Error(MANIFEST_HELD);
     // Nor one whose check this sync couldn't finish.
     if (unchecked.has(vaultId)) throw new Error(MANIFEST_UNCHECKED);
-    if (undecryptable.get(vaultId)) throw new Error("Some items in this vault can't be decrypted, so its key can't be replaced yet.");
+    if (undecryptable.get(vaultId)) {
+      // Only rows from a newer app (nothing that doesn't decrypt): say what to do about them.
+      if (!unopenableRows.get(vaultId)) throw new Error(NEWER_ITEMS_REKEY);
+      throw new Error("Some items in this vault can't be decrypted, so its key can't be replaced yet.");
+    }
     // Every member and invitee gets the new key: a row that can't be read stops the replacement (nobody is skipped).
     let answer: MembersAnswer;
     if (signing) answer = await loadMembers(vaultId);

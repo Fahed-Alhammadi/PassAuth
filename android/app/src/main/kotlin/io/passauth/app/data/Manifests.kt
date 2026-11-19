@@ -129,6 +129,21 @@ object Manifests {
     const val DELETE_FOR_GOOD_CONFIRM = "This item can't be opened on this device. It may still open on another device or in a newer version of PassAuth. " +
         "Deleting it removes it for everyone."
 
+    /** "Delete for good" of an item of a newer app ([ItemOpening.NEWER_ITEM]): owners and admins only ([mayDeleteNewer]). */
+    const val DELETE_NEWER_CONFIRM = "This item was saved by a newer version of PassAuth. Update PassAuth to see it. Deleting it removes it for everyone."
+
+    /** A new vault key needs every item read and encrypted again: not while this app can't read one of them. */
+    const val NEWER_NO_NEW_KEY = "This vault has items from a newer version of PassAuth. Update PassAuth, or have an owner delete them, then try again."
+
+    /**
+     * May a member with [role] delete an item of a newer app for good? Only the vault's owners and
+     * admins (the personal vault's owner included), and, as for an item that can't be opened, not
+     * in a vault whose warning stands ([state]: reviewed first; the write itself needs a manifest
+     * that passed, [next]). Members who can only write or read see the row without an action.
+     */
+    fun mayDeleteNewer(role: Role?, state: ManifestState?): Boolean =
+        (role == Role.Owner || role == Role.Admin) && state != ManifestState.Unresolved
+
     /** A new vault key needs every item encrypted again: not while one of them doesn't open here. */
     const val UNOPENABLE_NO_NEW_KEY = "This vault's key can't be replaced on this device while an item in it can't be opened."
 
@@ -148,8 +163,11 @@ object Manifests {
     /** A write is sent at most this often when the vault changed elsewhere meanwhile. */
     const val ATTEMPTS = 3
 
-    /** `GET /vaults/{id}/manifest-log` is asked at most this often for one check (more pages: the log doesn't connect). */
-    const val LOG_REQUESTS = 5
+    /**
+     * `GET /vaults/{id}/manifest-log` is asked at most this often for one check of one vault (25 pages
+     * of 2000 entries; more pages: the log doesn't connect).
+     */
+    const val LOG_REQUESTS = 25
 
     /** The highest whole number every client and the server count with (2^53 − 1). */
     const val MAX_NUMBER = 9_007_199_254_740_991L

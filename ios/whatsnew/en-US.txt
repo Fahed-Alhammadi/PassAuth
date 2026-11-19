@@ -1,9 +1,11 @@
-New in 0.11.0
-• Sends with a password are now locked with that password: the link alone can no longer open the text, not even with the server's data. Your own devices still open and edit your Sends.
-• PassAuth now notices if your server ever sends an older version of an item. It warns you on the item and keeps the newer copy when it has one.
-• Personal vault keys are stored in a stronger format once every device on your account has this update.
+New in 0.12.0
+• PassAuth now keeps a record of the items in each vault and checks your server against it. If the server ever hides a change, brings back a deleted item or shows an older copy of a vault, you get a warning on that vault.
+• After you restore your server from a backup, the vaults that changed show a warning. Tap "Use the server's copy" once per vault to accept what the server has now.
+• Items that can't be opened are listed instead of hidden, and can be deleted. Items saved by a newer version of PassAuth are listed with a note to update.
+• Items in the trash are removed by your apps when their time is up, never sooner than seven days after this device first saw them there.
+• PassAuth now needs a server on version 0.12 or later, and tells you when a server is too old.
 
 Please test:
-1. Create a Send with a password, open its link in a browser and check the text only appears after the right password.
-2. Change the Send's password and remove it again; check the Send still opens each time.
-3. Edit a few logins on this phone and on another device and check nothing shows an "older version" warning.
+1. Add, edit, trash and restore a few items on this phone and on another device; check that no warning appears.
+2. Lock and unlock, and use AutoFill in Safari; check your logins are suggested as before.
+3. If you share a vault, change an item from another account and check it arrives here without a warning.

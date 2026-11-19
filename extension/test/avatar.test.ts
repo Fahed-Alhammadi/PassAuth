@@ -1,7 +1,8 @@
-// Profile pictures (server feature `avatar`): the background fetches and opens a picture only when `/sync`
-// `user.avatar_seq` changed, keeps it per account in storage.local (so a locked popup can show it), seals uploads
-// itself, and forgets the picture on sign-out and when the account is removed. The popup's resize keeps the JPEG
-// within 256 KiB.
+// Profile pictures (server feature `avatar`): the background fetches a picture only when `/sync` `user.avatar_seq`
+// changed, keeps only the sealed picture as the server sent it in storage.local, holds the opened one in
+// storage.session while the account is unlocked (rebuilt at unlock; a locked account shows its initials), seals
+// uploads itself, and forgets the picture on sign-out and when the account is removed. The popup's resize keeps the
+// JPEG within 256 KiB.
 
 import { beforeEach, expect, test, vi } from "vitest";
 import { type FakeChrome, installChrome } from "./chrome";
@@ -110,13 +111,16 @@ test("setting seals the JPEG before upload; removing deletes it; neither while l
   const put = server.requests.find((r) => r.method === "PUT" && r.path === "/account/avatar");
   expect(put?.body).toEqual({ avatar: sealed(JPEG) });
   expect(await avatars.get("a1")).toEqual({ seq: 1, dataUrl: `data:image/jpeg;base64,${toBase64(JPEG)}` });
+  expect(await avatars.kept("a1")).toEqual({ seq: 1, sealed: sealed(JPEG) });
   // The sync after our own change sees the number we already have.
   server.revision++;
   await vault.sync();
   expect(avatarGets()).toBe(0);
 
   await vault.removeAvatar();
-  expect(await avatars.get("a1")).toEqual({ seq: 2, dataUrl: null });
+  expect(await avatars.kept("a1")).toEqual({ seq: 2, sealed: null });
+  expect((await avatars.get("a1"))?.dataUrl ?? null).toBeNull();
+  expect((await vault.state()).avatar).toBeUndefined();
 
   await expectReject(vault.setAvatar(new Uint8Array([1, 2, 3])), (e) => /couldn't be used/.test(e.message));
   await expectReject(vault.setAvatar(Uint8Array.from({ length: MAX_AVATAR_BYTES + 1 }, (_, i) => JPEG[i] ?? 0)), (e) => /too large/.test(e.message));
@@ -128,13 +132,104 @@ test("signing out forgets the picture; so does removing the account", async () =
   await signedIn();
   await vault.setAvatar(JPEG);
   expect(await avatars.get("a1")).not.toBeNull();
+  expect(await avatars.kept("a1")).not.toBeNull();
   await vault.logout();
   expect(await avatars.get("a1")).toBeNull();
+  expect(await avatars.kept("a1")).toBeNull();
 
-  await avatars.set("a1", { seq: 3, dataUrl: "data:image/jpeg;base64,AA==" });
+  await avatars.keep("a1", { seq: 3, sealed: sealed(JPEG) });
+  await avatars.show("a1", { seq: 3, dataUrl: "data:image/jpeg;base64,AA==" });
   await fake.local.set({ accounts: { a1: accountRecord(), a2: accountRecord("https://other.test") } });
   await local.removeAccount("a1");
   expect(await avatars.get("a1")).toBeNull();
+  expect(await avatars.kept("a1")).toBeNull();
+});
+
+/** Everything in an area as one text: what someone reading the store would find. */
+const dump = (area: FakeChrome["local"]) => JSON.stringify([...area.data.entries()]);
+const PICTURE = `data:image/jpeg;base64,${toBase64(JPEG)}`;
+
+test("L4: after a sync with a picture nothing readable is on disk: storage.local holds only the sealed picture as the server sent it, the opened one is in storage.session", async () => {
+  await signedIn();
+  setElsewhere(JPEG);
+  await vault.sync();
+  await vi.waitFor(async () => expect((await avatars.get("a1"))?.dataUrl).toBe(PICTURE));
+  expect(fake.local.data.get("avatar:a1")).toStrictEqual({ seq: 1, sealed: sealed(JPEG) });
+  expect(dump(fake.local)).not.toContain("data:image/");
+  expect(fake.session.data.get("avatarOpen:a1")).toStrictEqual({ seq: 1, dataUrl: PICTURE });
+  // The same after this browser's own upload.
+  await vault.setAvatar(JPEG);
+  expect(fake.local.data.get("avatar:a1")).toStrictEqual({ seq: 2, sealed: sealed(JPEG) });
+  expect(dump(fake.local)).not.toContain("data:image/");
+});
+
+test("L4: a lock forgets the opened picture (the popup and the account switcher show initials); the unlock rebuilds it from the sealed copy without the network", async () => {
+  await signedIn();
+  setElsewhere(JPEG);
+  await vault.sync();
+  await vi.waitFor(async () => expect((await vault.state()).avatar).toBe(PICTURE));
+  await vault.lockAll();
+  expect(fake.session.data.has("avatarOpen:a1")).toBe(false);
+  expect(dump(fake.session)).not.toContain("data:image/");
+  let state = await vault.state();
+  expect([state.status, state.avatar, state.accounts[0]?.avatar]).toStrictEqual(["locked", undefined, undefined]);
+  // A picture left in memory for a locked account (it never is) still isn't shown.
+  await avatars.show("a1", { seq: 1, dataUrl: PICTURE });
+  expect((await vault.state()).accounts[0]?.avatar).toBeUndefined();
+  await avatars.hide(["a1"]);
+  // Unlock, offline: the picture is there as soon as the vault is open.
+  vi.stubGlobal("fetch", async () => Promise.reject(new TypeError("Failed to fetch")));
+  await fake.session.set({ "unlocked:a1": sessionKeys() });
+  expect(await vault.ensureUnlocked()).toBe(true);
+  state = await vault.state();
+  expect([state.status, state.avatar, state.accounts[0]?.avatar]).toStrictEqual(["unlocked", PICTURE, PICTURE]);
+  expect(avatarGets()).toBe(1);
+});
+
+test("L4: with several accounts only the unlocked ones show a picture; switching keeps each one's own", async () => {
+  await signedIn();
+  await vault.setAvatar(JPEG);
+  await fake.local.set({ accounts: { a1: accountRecord(), a2: accountRecord("https://other.test") }, active: "a1" });
+  // a2 is locked, with a sealed picture on disk from an earlier session.
+  await avatars.keep("a2", { seq: 5, sealed: sealed(JPEG) });
+  let state = await vault.state();
+  expect(state.accounts.map((a) => [a.id, a.status, a.avatar])).toStrictEqual([
+    ["a1", "unlocked", PICTURE],
+    ["a2", "locked", undefined],
+  ]);
+  await vault.switchAccount("a2");
+  state = await vault.state();
+  expect([state.status, state.avatar]).toStrictEqual(["locked", undefined]);
+  expect(state.accounts.map((a) => [a.id, a.status, a.avatar])).toStrictEqual([
+    ["a1", "unlocked", PICTURE],
+    ["a2", "locked", undefined],
+  ]);
+  await vault.lockAll();
+  expect((await vault.state()).accounts.map((a) => a.avatar)).toStrictEqual([undefined, undefined]);
+  expect(dump(fake.session)).not.toContain("data:image/");
+});
+
+test("L4: on update from 0.11.0 the opened picture kept on disk is removed (also for locked and removed accounts); it is never shown from there, and the next sync fetches the sealed one", async () => {
+  await signedIn();
+  setElsewhere(JPEG);
+  // As 0.11.0 left it: the opened picture, readable, under the same key.
+  await fake.local.set({ schemaVersion: 3, "avatar:a1": { seq: 1, dataUrl: PICTURE }, "avatar:gone": { seq: 2, dataUrl: PICTURE }, "avatar:a9": { seq: 4, sealed: "sealed:AA==" } });
+  expect(await avatars.kept("a1"), "not read as a kept picture").toBeNull();
+  expect((await vault.state()).avatar).toBeUndefined();
+  vi.resetModules();
+  const { migrate, SCHEMA_VERSION } = await import("../src/background/migrations");
+  await migrate();
+  expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(4);
+  expect(fake.local.data.get("schemaVersion")).toBe(SCHEMA_VERSION);
+  expect([fake.local.data.has("avatar:a1"), fake.local.data.has("avatar:gone")]).toStrictEqual([false, false]);
+  expect(fake.local.data.get("avatar:a9"), "a sealed one stays").toStrictEqual({ seq: 4, sealed: "sealed:AA==" });
+  expect(dump(fake.local)).not.toContain("data:image/");
+  // The next sync fetches the sealed picture again.
+  server.revision++;
+  await vault.sync();
+  await vi.waitFor(async () => expect((await vault.state()).avatar).toBe(PICTURE));
+  expect(fake.local.data.get("avatar:a1")).toStrictEqual({ seq: 1, sealed: sealed(JPEG) });
+  expect(avatarGets()).toBe(1);
 });
 
 test("an older server (no avatar_seq) never asks for a picture or offers one", async () => {

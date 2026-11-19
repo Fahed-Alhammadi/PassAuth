@@ -55,6 +55,7 @@ import {
   MANIFEST_UNCHECKED,
   ManifestMemory,
   NEWER_ITEM_NOTE,
+  NEWER_ITEMS_REKEY,
   VAULT_WARNING_READER,
   isNewerItemError,
   manifestsAsideKey,
@@ -1213,14 +1214,27 @@ describe("the chain of manifests (review 3 / core H1: fork, then join)", () => {
     expect(remembered()[A()]).toBe(8);
   });
 
-  it("a log that needs more than five requests doesn't connect", async () => {
+  it("a log of 25 requests connects (final fixes L2)", async () => {
     await signIn();
-    for (let n = 0; n < 13; n++) otherCreates(A(), `Other ${n}`);
-    w.logPage = 2;
+    for (let n = 0; n < 25; n++) otherCreates(A(), `Other ${n}`);
+    w.logPage = 1;
     w.calls = [];
     await syncNow();
     await settled();
-    expect(logCalls().length).toBe(10);
+    expect(logCalls().length).toBe(25);
+    expect(vaultState(A()).manifestWarning).toBeUndefined();
+    expect(remembered()[A()]).toBe(26);
+  });
+
+  it("a log that needs more than 25 requests doesn't connect", async () => {
+    await signIn();
+    for (let n = 0; n < 26; n++) otherCreates(A(), `Other ${n}`);
+    w.logPage = 1;
+    w.calls = [];
+    await syncNow();
+    await settled();
+    // 25 for the delta, 25 for the whole account fetched before the warning counts.
+    expect(logCalls().length).toBe(50);
     expect(vaultState(A()).manifestWarning).toBe(true);
     expect(remembered()[A()]).toBe(1);
   });
@@ -2448,9 +2462,10 @@ describe("rows that don't open (final review 1, T1; replaces the hold of rerevie
     });
   }
 
-  it("(b) an item from a newer app is listed as such: no notice, no warning, no hold, no delete, and other writes go on", async () => {
+  it("(b) an item from a newer app is listed as such: no notice, no warning, no hold, no delete for a member who only writes, and other writes go on", async () => {
     const spy = newerType("item-1");
     try {
+      w.vaults.get(A())!.role = "write";
       await signIn();
       expect(names()).toEqual(["Bank"]);
       expect(getState().unopenable).toEqual([{ id: "item-1", vaultId: A(), deletedAt: null, deletable: false, kind: "newer" }]);
@@ -2460,7 +2475,7 @@ describe("rows that don't open (final review 1, T1; replaces the hold of rerevie
       expect(remembered()[A()]).toBe(1);
       await createItem(A(), login("Shop"));
       expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 3 });
-      // Never deleted from here, whatever asks for it.
+      // Never deleted by a member who only writes, whatever asks for it.
       w.calls = [];
       await expect(purgeUnopenable("item-1")).rejects.toThrow(NEWER_ITEM_NOTE);
       expect(calls((c) => c.method === "DELETE")).toEqual([]);
@@ -2475,8 +2490,13 @@ describe("rows that don't open (final review 1, T1; replaces the hold of rerevie
       });
       await syncNow();
       expect(getState().unopenable).toMatchObject([{ id: "item-1", kind: "newer", deletable: false }]);
-      // A key replacement needs every item re-encrypted, which this app can't do for that one.
-      await expect(rotateVaultKey(A())).rejects.toThrow("can't be decrypted");
+      // A key replacement needs every item re-encrypted, which this app can't do for that one: it says what to do.
+      tamper(() => {
+        w.vaults.get(A())!.role = "owner";
+        return A();
+      });
+      await syncNow();
+      await expect(rotateVaultKey(A())).rejects.toThrow(NEWER_ITEMS_REKEY);
       expect(w.vaults.get(A())!.epoch).toBe(0);
     } finally {
       spy.mockRestore();
@@ -2485,6 +2505,63 @@ describe("rows that don't open (final review 1, T1; replaces the hold of rerevie
     await signIn();
     expect(names()).toEqual(["Bank", "Mail", "Shop"]);
     expect(getState().unopenable).toEqual([]);
+  });
+
+  it("(b) an owner or admin deletes an item from a newer app for good (final fixes L1): one request with the next manifest, the vault stays ok and its key can be replaced", async () => {
+    const spy = newerType("item-1");
+    try {
+      for (const role of ["admin", "owner"]) {
+        lock();
+        newWorld({ manifests: true });
+        w.vaults.get(A())!.role = role;
+        await signIn();
+        expect(getState().unopenable, role).toEqual([{ id: "item-1", vaultId: A(), deletedAt: null, deletable: true, kind: "newer" }]);
+        expect(vaultState(A()).manifestWarning).toBeUndefined();
+        w.calls = [];
+        await purgeUnopenable("item-1");
+        const deletes = calls((c) => c.method === "DELETE");
+        expect(deletes).toHaveLength(1);
+        expect(deletes[0].path).toContain("/items/item-1/permanent?revision=");
+        expect(deletes[0].path).toContain("&manifest_seq=2&manifest_prev=");
+        expect(w.items.has("item-1")).toBe(false);
+        expect(getState().unopenable).toEqual([]);
+        expect(getState().warnings).toEqual([]);
+        expect(vaultState(A()).manifestWarning).toBeUndefined();
+        expect(serverCheck(A())).toMatchObject({ status: "ok", version: 2, live: 1 });
+        expect(remembered()[A()]).toBe(2);
+        // The vault is written as usual.
+        await createItem(A(), login("Shop"));
+        expect(serverCheck(A())).toMatchObject({ status: "ok", version: 3, live: 2 });
+      }
+      // With the rows gone a key replacement works.
+      await rotateVaultKey(A());
+      expect(w.vaults.get(A())!.epoch).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("(b) the delete needs the vault's record to check out, like any other", async () => {
+    const spy = newerType("item-1");
+    try {
+      await signIn();
+      // The server takes an item away without a manifest for it.
+      tamper(() => {
+        w.items.delete("item-2");
+        w.tombs.push({ id: "item-2", vault_id: A(), at: w.clock });
+        return A();
+      });
+      await syncNow();
+      await settled();
+      expect(vaultState(A()).manifestWarning).toBe(true);
+      expect(getState().unopenable).toMatchObject([{ id: "item-1", kind: "newer", deletable: false }]);
+      w.calls = [];
+      await expect(purgeUnopenable("item-1")).rejects.toThrow();
+      expect(calls((c) => c.method === "DELETE")).toEqual([]);
+      expect(w.items.has("item-1")).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("(b) doesn't block a vault's first manifest, and is counted in it like any other row", async () => {

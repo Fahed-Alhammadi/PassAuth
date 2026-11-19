@@ -123,8 +123,26 @@ private fun host(server: String) = UrlMatcher.parse(server)?.host ?: server
 
 // ------------------------------------------------------------------ setup
 
+/**
+ * "Connect": [set] takes the address (it throws when no supported PassAuth server answers there);
+ * returns what to show on failure, null when connected. [onConnected] runs only then: "Change
+ * server" on the sign-in screen closes with it, so the sign-in for the new server shows (opened
+ * from there the screen is no longer left by the app's status, which stays "signed out").
+ */
+internal suspend fun connectServer(url: String, set: suspend (String) -> Unit, onConnected: (() -> Unit)?): String? {
+    try {
+        set(url)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        return errorMessage(e)
+    }
+    onConnected?.invoke()
+    return null
+}
+
 @Composable
-fun SetupScreen(ctx: UiCtx, initial: String = "", onCancel: (() -> Unit)? = null) {
+fun SetupScreen(ctx: UiCtx, initial: String = "", onCancel: (() -> Unit)? = null, onConnected: (() -> Unit)? = null) {
     var url by rememberSaveable { mutableStateOf(initial) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -133,11 +151,7 @@ fun SetupScreen(ctx: UiCtx, initial: String = "", onCancel: (() -> Unit)? = null
         busy = true
         error = null
         ctx.scope.launch {
-            try {
-                ctx.repo.setServer(url)
-            } catch (e: Exception) {
-                error = errorMessage(e)
-            }
+            error = connectServer(url, ctx.repo::setServer, onConnected)
             busy = false
         }
     }
@@ -202,7 +216,9 @@ fun LoginScreen(ctx: UiCtx) {
             },
         )
     }
-    if (changingServer) return SetupScreen(ctx, initial = state.server, onCancel = { changingServer = false })
+    if (changingServer) {
+        return SetupScreen(ctx, initial = state.server, onCancel = { changingServer = false }, onConnected = { changingServer = false })
+    }
     if (creating) {
         return RegisterScreen(ctx, onSignIn = { e, p, sk ->
             creating = false

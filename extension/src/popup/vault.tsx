@@ -405,6 +405,7 @@ export function OtherItems({ items }: { items: OtherItem[] }) {
                 <span>{o.title}</span>
               </span>
               <span className="sub">{o.note ?? [o.name, o.vaultName].filter(Boolean).join(" · ")}</span>
+              {o.hint && <span className="sub wrap">{o.hint}</span>}
             </div>
           </div>
         ))}

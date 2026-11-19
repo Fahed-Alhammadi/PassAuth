@@ -131,6 +131,8 @@ export interface OtherItem {
   id: string;
   title: string;
   note?: string;
+  /** For an owner or admin of the vault of an item from a newer version: where it can be deleted for good. */
+  hint?: string;
   name?: string;
   vaultName: string;
 }

@@ -139,6 +139,10 @@ public enum ManifestText {
     /// A row that decrypts but holds an item type or format this app doesn't know.
     public static let newerItem = "Item from a newer version of PassAuth"
     public static let newerItemNote = "Update PassAuth to see this item."
+    /// "Delete for good" on such a row (the vault's owners and admins only).
+    public static let newerDeleteConfirm = "This item was saved by a newer version of PassAuth. Update PassAuth to see it. Deleting it removes it for everyone."
+    /// A key replacement refused because the vault holds such rows (this app can't re-encrypt them).
+    public static let newerRekey = "This vault has items from a newer version of PassAuth. Update PassAuth, or have an owner delete them, then try again."
     /// This device's record of the vaults (the memory file) can't be read.
     public static let memoryUnreadable = "PassAuth can't read this device's record of your vaults."
     public static let memoryReset = "Reset on this device"
@@ -237,8 +241,8 @@ public enum VaultManifest {
     /// The link a first manifest names as its predecessor (32 zero bytes): never a remembered one.
     public static let zeroLink = String(repeating: "A", count: 43)
 
-    /// How many requests the manifest log of one vault may take (2000 entries each).
-    public static let logRequests = 5
+    /// How many requests the manifest log of one vault may take in one check (2000 entries each).
+    public static let logRequests = 25
 
     /// A link as it travels: 43 base64url characters (32 bytes).
     public static func isLink(_ t: String) -> Bool {

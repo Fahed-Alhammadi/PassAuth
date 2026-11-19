@@ -155,6 +155,7 @@ dialog.modal .input, dialog.modal .select { min-height: var(--control-h); }
 .item-row.other-row { gap: var(--space-3); min-height: 48px; padding-left: var(--space-4); }
 .item-row.other-row:hover { background: none; }
 .item-row.other-row .title { color: var(--ink-2); }
+.item-row.other-row .sub.wrap { white-space: normal; }
 .btn-fill { height: 32px; padding: 0 var(--space-3); font-size: var(--text-caption); font-weight: 600; background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
 .btn-fill:hover { background: var(--accent-fill); color: var(--on-accent); }
 

@@ -10,7 +10,7 @@ import { clearDraft, setEditorDirty, useDraft } from "../lib/drafts";
 import { attachFiles } from "../lib/files";
 import { isWeak } from "../lib/health";
 import { ROLLBACK_ITEM } from "../lib/item-revs";
-import { DELETE_FOR_GOOD, DELETE_UNOPENABLE_BODY, NEWER_ITEM, NEWER_ITEM_NOTE, UNOPENABLE_ITEM } from "../lib/manifest";
+import { DELETE_FOR_GOOD, DELETE_NEWER_BODY, DELETE_UNOPENABLE_BODY, NEWER_ITEM, NEWER_ITEM_NOTE, UNOPENABLE_ITEM } from "../lib/manifest";
 import { useBreachCheck, useHealthReport } from "../lib/health-session";
 import { authorName, passkeysMissingFrom, versionLabel, type ItemVersion } from "../lib/history";
 import { patternNote } from "../lib/patterns";
@@ -110,6 +110,7 @@ export function VaultPage() {
         : unopenable.filter((u) => (filter === "trash" ? u.deletedAt !== null : u.deletedAt === null && (filter === "all" || filter === `vault:${u.vaultId}`))),
     [unopenable, filter, deferredQuery],
   );
+  const deletingRow = deleting ? unopenable.find((u) => u.id === deleting) : undefined;
   const selected = items.find((e) => e.id === itemId);
   const newKind = itemId?.startsWith("new-") ? (itemId.slice(4) as ItemKind) : null;
   // A prepared edit (desktop: a verification code from a link) shows while its item's route is open.
@@ -231,7 +232,7 @@ export function VaultPage() {
         {deleting && (
           <ConfirmDialog
             title={`${DELETE_FOR_GOOD}?`}
-            subtitle={broken.find((u) => u.id === deleting)?.name ?? UNOPENABLE_ITEM}
+            subtitle={deletingRow?.kind === "newer" ? NEWER_ITEM : (deletingRow?.name ?? UNOPENABLE_ITEM)}
             icon="trash"
             action={DELETE_FOR_GOOD}
             busyAction="Deleting…"
@@ -242,7 +243,7 @@ export function VaultPage() {
               toast("Item deleted");
             }}
           >
-            <p className="card-text">{DELETE_UNOPENABLE_BODY}</p>
+            <p className="card-text">{deletingRow?.kind === "newer" ? DELETE_NEWER_BODY : DELETE_UNOPENABLE_BODY}</p>
           </ConfirmDialog>
         )}
       </section>

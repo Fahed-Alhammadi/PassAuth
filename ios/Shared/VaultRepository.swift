@@ -561,6 +561,9 @@ public final class VaultRepository {
     /// AutoFill extension: open the vault from the on-device copy first (fast, no network;
     /// shown as offline until a sync with the server succeeded).
     @ObservationIgnored public var preferCache = false
+    /// Tests only: how an item row is decrypted (nil: the core). Lets a test serve a row that
+    /// decrypts but that this app can't read, which the core's own encryption never makes.
+    @ObservationIgnored var itemDecrypt: (@Sendable (VaultKey, EncryptedItem) throws -> String)?
 
     public init(store: SecureStore, api: ApiClient) {
         self.store = store
@@ -1592,7 +1595,7 @@ public final class VaultRepository {
     private struct ManifestLogUnavailable: Error { let error: Error }
 
     /// `GET /vaults/{id}/manifest-log?after=<version>`: the entries after the version this device
-    /// remembers, as one JSON list (pages followed, five requests at most). nil: the server's
+    /// remembers, as one JSON list (pages followed, 25 requests at most). nil: the server's
     /// answer is that there is no such log (404, 400), an answer that isn't one, or more pages
     /// than a device follows: the manifest doesn't connect (a mismatch). Throws when no answer
     /// came (network, 5xx, 429, a lost session): not a verdict.
@@ -1664,9 +1667,10 @@ public final class VaultRepository {
         let fullRows = !trashSummary
         let revs = memory.revs?.revs
         let marks = memory.manifests
+        let decrypt = itemDecrypt ?? { try $0.decryptItem(encrypted: $1) }
         var opened = try await core {
             Self.open(account, served, previous: previous, invitations: invitations, sharing: sharing, revs: revs,
-                      manifests: marks, finalIncomplete: finalIncomplete, source: source, fullRows: fullRows)
+                      manifests: marks, finalIncomplete: finalIncomplete, source: source, fullRows: fullRows, decrypt: decrypt)
         }
         guard sessions[id] === session, activeId == id else { return nil }
         if case .server = source, !opened.needLog.isEmpty {
@@ -3109,15 +3113,34 @@ public final class VaultRepository {
     /// request. Live rows are deleted the same way as trashed ones. Another write in between is
     /// retried three times at most; an item that is gone or opens meanwhile is left alone.
     public func deleteUnopenable(_ item: UnopenableItem) async throws {
+        try await deleteUnread(id: item.id, vaultId: item.vaultId, newer: false)
+    }
+
+    /// "Delete for good" on an item from a newer version of PassAuth (after the user confirmed):
+    /// the vault's owners and admins only (the personal vault's owner included). The row is
+    /// removed exactly like one that can't be opened (`deleteUnopenable`).
+    public func deleteNewer(_ item: NewerItem) async throws {
+        try await deleteUnread(id: item.id, vaultId: item.vaultId, newer: true)
+    }
+
+    /// Who may delete an item from a newer version of PassAuth for good: owners and admins.
+    public nonisolated static func mayDeleteNewer(_ role: Role) -> Bool { role == .owner || role == .admin }
+
+    private func deleteUnread(id itemId: String, vaultId: String, newer: Bool) async throws {
         try await lock.run {
             let id = activeId
             var sends = 0
             var synced = false
             while true {
                 let v = try requireVault()
-                guard let u = v.unopenable.first(where: { $0.id == item.id && $0.vaultId == item.vaultId }) else { return }
+                // The row as it is listed now (re-read by id): gone or readable meanwhile is nothing.
+                let listed: (id: String, vaultId: String)? = newer
+                    ? v.newer.first { $0.id == itemId && $0.vaultId == vaultId }.map { ($0.id, $0.vaultId) }
+                    : v.unopenable.first { $0.id == itemId && $0.vaultId == vaultId }.map { ($0.id, $0.vaultId) }
+                guard let u = listed else { return }
                 guard let info = v.vaults.first(where: { $0.id == u.vaultId }) else { throw UserError("Vault not found.") }
                 if info.role == .read { throw UserError("You can only view items in this vault.") }
+                if newer && !Self.mayDeleteNewer(info.role) { throw UserError("Only an owner or admin of this vault can delete this item.") }
                 if info.manifest.pending {
                     // Not checked against the server's answer yet: once.
                     guard !synced else { throw UserError(ManifestText.unchecked) }
@@ -3340,13 +3363,20 @@ public final class VaultRepository {
             do {
                 json = try oldKey.decryptItem(encrypted: EncryptedItem(id: r.id, vaultId: vid, key: key, data: data))
             } catch {
-                throw UserError("Some items in \(name) can't be decrypted, so its key can't be replaced yet.")
+                throw rekeyRefusal(error, name: name)
             }
             let enc = try newKey.encryptItem(itemJson: json, id: r.id, vaultId: vid)
             items.append(Self.body(enc, keyEpoch: nil, revision: r.revision))
         }
         let meta = try newKey.encryptMeta(vaultId: vid, metaJson: (["name": .string(name)] as JSON).text)
         return (items, meta)
+    }
+
+    /// Why a key replacement stops at an item that can't be re-encrypted here: an item from a
+    /// newer version of PassAuth (it decrypts, the core can't read it) says what to do.
+    nonisolated static func rekeyRefusal(_ error: Error, name: String) -> UserError {
+        if decryptedButUnread(error) { return UserError(ManifestText.newerRekey) }
+        return UserError("Some items in \(name) can't be decrypted, so its key can't be replaced yet.")
     }
 
     /// After unlocking, a change to the vaults or a key replacement: add the emergency-access wraps

@@ -1039,7 +1039,7 @@ test("REVIEW (fork then join): a server that moves this browser onto another his
   expect(server.manifestErrors).toStrictEqual([]);
 });
 
-test("REVIEW (the chain): a manifest several steps ahead on this browser's own history checks out through the log, page by page; more than five pages don't connect", async () => {
+test("REVIEW (the chain): a manifest several steps ahead on this browser's own history checks out through the log, page by page; more than 25 pages don't connect", async () => {
   await signedIn();
   for (let n = 0; n < 4; n++) server.editElsewhere("i1", { notes: `edit ${n}` });
   server.logPage = 1;
@@ -1052,13 +1052,13 @@ test("REVIEW (the chain): a manifest several steps ahead on this browser's own h
   server.editElsewhere("i1", { notes: "one more" });
   await vault.sync();
   expect(logRequests().length).toBe(4);
-  // Seven steps ahead with one entry an answer: the fifth answer still says "more". The log doesn't connect.
-  for (let n = 0; n < 7; n++) server.editElsewhere("i2", { notes: `edit ${n}` });
+  // 27 steps ahead with one entry an answer: the 25th answer still says "more". The log doesn't connect (L2: 25 requests, was 5).
+  for (let n = 0; n < 27; n++) server.editElsewhere("i2", { notes: `edit ${n}` });
   const asked = logRequests().length;
   await vault.sync();
   expect(warned()).toStrictEqual([V]);
-  // Five for the delta, five for the full answer that decides.
-  expect(logRequests().length - asked).toBe(10);
+  // 25 for the delta, 25 for the full answer that decides.
+  expect(logRequests().length - asked).toBe(50);
   expect(await versions()).toStrictEqual({ [V]: 6 });
   // With the whole log in one answer it connects, and the warning goes by itself (the delta is still judged).
   // ROUND 2 (S9): things in the list that are no entries are left out, never fatal.
@@ -1072,7 +1072,7 @@ test("REVIEW (the chain): a manifest several steps ahead on this browser's own h
   await vault.sync();
   expect(warned()).toStrictEqual([]);
   expect(syncs().length - fetched, "one delta, no whole fetch").toBe(1);
-  expect(await versions()).toStrictEqual({ [V]: 13 });
+  expect(await versions()).toStrictEqual({ [V]: 33 });
 });
 
 test("REVIEW (the chain): when the log can't be fetched the answer isn't used: the previous copy and state stay, no warning, writes wait; the next sync decides", async () => {
@@ -1238,7 +1238,8 @@ test("ROUND 3 (T1c; was: a mismatch that held every write): an item that can't b
 
 test("ROUND 3 (T1b): an item that decrypts but isn't one this version reads (a type or format from a newer app) is listed as 'Item from a newer version of PassAuth' with 'Update PassAuth to see this item.': no notice, nothing held, it counts in the vault's record like any row, and it doesn't block a first manifest", async () => {
   const NEWER = "{ an item of a kind this version doesn't read";
-  const listed = [{ id: "i3", title: ITEM_NEWER_TITLE, note: ITEM_NEWER_NOTE, vaultName: "Personal" }];
+  // L1: for an owner or admin of the vault the row says where the item can be deleted for good (not here).
+  const listed = [{ id: "i3", title: ITEM_NEWER_TITLE, note: ITEM_NEWER_NOTE, hint: MANIFEST_ITEM_WHERE_TEXT, vaultName: "Personal" }];
   await signedIn();
   server.addElsewhere("i3", V, NEWER);
   await vault.sync();
@@ -1265,6 +1266,19 @@ test("ROUND 3 (T1b): an item that decrypts but isn't one this version reads (a t
   expect(row().manifest_seq).toBe(1);
   expect([vault.otherItems(), vault.manifestSummary()]).toStrictEqual([listed, null]);
   expect(server.manifestErrors).toStrictEqual([]);
+  // L1: an admin gets the pointer too; a member with only write or read access sees the row as before.
+  for (const role of ["admin", "write", "read"] as const) {
+    await signedIn({
+      before: () => {
+        row().role = role;
+        server.addElsewhere("i3", V, NEWER);
+      },
+    });
+    await vault.sync();
+    const { hint: _hint, ...plain } = listed[0]!;
+    expect(vault.otherItems(), role).toStrictEqual(role === "admin" ? listed : [plain]);
+    expect(vault.manifestSummary(), role).toBe(null);
+  }
 });
 
 test("REVIEW (deleted_at): in the trash is exactly 'deleted_at is not null'; a row with deleted_at 0 is never shown as live and makes the vault a mismatch", async () => {
@@ -1552,6 +1566,10 @@ test("ROUND 2 the popup: each warned vault with what it offers ('Use the server'
   expect(rows).toContain('Item that can&#x27;t be opened</span></span><span class="sub">Team<');
   expect(rows).toContain('Item from a newer version of PassAuth</span></span><span class="sub">Update PassAuth to see this item.<');
   expect(rows).not.toContain("<button");
+  // L1: with the pointer for an owner or admin, on a line of its own that wraps (still nothing to press).
+  const pointed = renderToStaticMarkup(createElement(OtherItems, { items: [{ id: "i3", title: ITEM_NEWER_TITLE, note: ITEM_NEWER_NOTE, hint: MANIFEST_ITEM_WHERE_TEXT, vaultName: "Personal" }] }));
+  expect(pointed).toContain('<span class="sub">Update PassAuth to see this item.</span><span class="sub wrap">It can be deleted for good in the web vault or the desktop app.</span>');
+  expect(pointed).not.toContain("<button");
   const outdated = render({ serverProblem: SERVER_UPDATE_TEXT });
   expect(outdated).toContain("Update your PassAuth server to keep using this app.");
   expect(render({})).toBe("");

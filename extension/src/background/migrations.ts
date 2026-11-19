@@ -6,6 +6,8 @@
  * that has shipped.
  */
 import { log } from "../shared/log";
+import { AVATAR_PREFIX } from "../shared/storage-keys";
+import { isKept } from "./avatar";
 import { ACCOUNT_FIELDS, type AccountData, accountKey, emptyAccount, readsWaitFor, serial } from "./storage";
 
 const VERSION_KEY = "schemaVersion";
@@ -69,6 +71,15 @@ const STEPS: { version: number; what: string; run: () => Promise<void> }[] = [
       const secretKeys = (raw.secretKeys ?? {}) as Record<string, string>;
       if (!Object.keys(secretKeys).some((k) => !k.includes("|"))) return;
       await chrome.storage.local.set({ secretKeys: migrateSecretKeys(secretKeys, (raw.accounts ?? {}) as Record<string, AccountData>) });
+    },
+  },
+  {
+    version: 4,
+    what: "opened profile pictures on disk (0.10 and 0.11) → removed; the sealed picture is fetched at the next sync",
+    async run() {
+      const all = (await chrome.storage.local.get(null)) as Raw;
+      const old = Object.keys(all).filter((k) => k.startsWith(AVATAR_PREFIX) && !isKept(all[k]));
+      if (old.length) await chrome.storage.local.remove(old);
     },
   },
 ];

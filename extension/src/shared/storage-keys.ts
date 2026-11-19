@@ -32,7 +32,13 @@ export const SIGN_IN_REQUESTS_PREFIX = "signInRequests:";
 export const SIGN_IN_PUT_OFF_KEY = "signInPutOff";
 
 /**
- * chrome.storage.local: an account's opened profile picture (`avatar:<account>`, background/avatar.ts `CachedAvatar`),
- * kept so the popup can show it while locked. Removed when the account signs out or is removed.
+ * chrome.storage.local: an account's profile picture, sealed as the server sent it (`avatar:<account>`,
+ * background/avatar.ts `KeptAvatar`). Removed when the account signs out or is removed.
  */
 export const AVATAR_PREFIX = "avatar:";
+
+/**
+ * chrome.storage.session: an unlocked account's opened profile picture (`avatarOpen:<account>`, background/avatar.ts
+ * `OpenedAvatar`), rebuilt from the sealed copy at unlock. Removed with the account's session keys.
+ */
+export const AVATAR_OPEN_PREFIX = "avatarOpen:";

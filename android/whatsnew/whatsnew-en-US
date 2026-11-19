@@ -1,3 +1,5 @@
-• Sends with a password are now locked with that password: the link alone can no longer open the text. Your own devices still open and edit your Sends.
-• PassAuth warns you if your server ever sends an older version of an item, and keeps the newer copy when it has one.
-• Personal vault keys use a stronger format once all your devices have this update.
+• PassAuth now keeps a record of the items in each vault and warns you if your server hides a change, brings back a deleted item or shows an older copy.
+• After a server restore, tap "Use the server's copy" once per vault to accept what the server has now.
+• Items that can't be opened are listed and can be deleted.
+• "Change server" now closes after it connects.
+• Needs a server on version 0.12 or later.
