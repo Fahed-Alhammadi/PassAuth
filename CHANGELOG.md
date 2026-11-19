@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.16.1 (2026-11-19)
+
+- Server: an approved device sign-in skips two-step login (e844c9a)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.16.0...server-0.16.1)
+
 ## 0.16.0 (2026-11-19)
 
 - Web + desktop: two-step key page and desktop hand-off (7fd1afa)
