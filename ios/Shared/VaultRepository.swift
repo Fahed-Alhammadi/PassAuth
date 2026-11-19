@@ -748,22 +748,50 @@ public final class VaultRepository {
             let result = try await api.call(id, "/auth/2fa/verify", body: [
                 "two_factor_token": .string(token), "provider": .string(provider), "code": .string(clean), "remember": .bool(remember),
             ], auth: false)
-            // Approved by another device, two-step login done: the session comes with the sealed key.
-            if let device = pendingDevice {
-                try await receiveDeviceApproval(device, result)
-                return .enterDeviceCode
-            }
-            guard let master = pendingMaster else { throw UserError("Sign-in expired. Start again.") }
-            pendingMaster = nil
-            if let t = result["remember_token"]?.string {
-                let k = pendingRemember
-                store.update { $0.secrets.rememberTokens[k] = t }
-            }
-            try await finishLogin(id, master, result)
-            try? await syncLocked()
-            afterOpen()
-            return .signedIn
+            return try await completeTwoFactor(id, result)
         }
+    }
+
+    /// Two-step login with a security key or passkey, first half: `/auth/2fa/passkey/start` and
+    /// the key page to open in the browser (`SecurityKeyHandoff.plan`). The token stays here.
+    public func startSecurityKey(token: String) async throws -> SecurityKeyHandoff.Plan {
+        let id = activeId
+        // The key page must be on the server this sign-in talks to (not only the options' rpId).
+        let server = store.get().file.accounts[id]?.server ?? ""
+        let result = try await api.call(id, "/auth/2fa/passkey/start", body: ["two_factor_token": .string(token)], auth: false)
+        return try SecurityKeyHandoff.plan(start: result, server: server)
+    }
+
+    /// Second half: the assertion the key page sent back (already checked against the plan's
+    /// challenge), sent as the web vault does; the rest of the sign-in as `verifyTwoFactor`.
+    @discardableResult
+    public func finishSecurityKey(token: String, credential: JSON, remember: Bool) async throws -> TwoStepNext {
+        try await lock.run {
+            let id = activeId
+            let result = try await api.call(id, "/auth/2fa/passkey/finish", body: [
+                "two_factor_token": .string(token), "credential": credential, "remember": .bool(remember),
+            ], auth: false)
+            return try await completeTwoFactor(id, result)
+        }
+    }
+
+    /// The session answer of a finished second step (code or security key).
+    private func completeTwoFactor(_ id: String, _ result: JSON) async throws -> TwoStepNext {
+        // Approved by another device, two-step login done: the session comes with the sealed key.
+        if let device = pendingDevice {
+            try await receiveDeviceApproval(device, result)
+            return .enterDeviceCode
+        }
+        guard let master = pendingMaster else { throw UserError("Sign-in expired. Start again.") }
+        pendingMaster = nil
+        if let t = result["remember_token"]?.string {
+            let k = pendingRemember
+            store.update { $0.secrets.rememberTokens[k] = t }
+        }
+        try await finishLogin(id, master, result)
+        try? await syncLocked()
+        afterOpen()
+        return .signedIn
     }
 
     public func sendTwoFactorEmail(token: String) async throws {

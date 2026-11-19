@@ -1,4 +1,5 @@
 import PassAuthCore
+import AuthenticationServices
 import PassAuthKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -275,12 +276,13 @@ private func providerLabel(_ p: String) -> String {
     case "totp": "Authenticator app"
     case "email": "Email code"
     case "recovery": "Recovery code"
+    case SecurityKeyHandoff.provider: SecurityKeyHandoff.methodName
     default: p
     }
 }
 
-/// Shown when the account's only two-step method besides recovery codes is a
-/// security key (WebAuthn), which the app can't use yet.
+/// Shown when the account's only two-step method besides recovery codes is a security key
+/// (WebAuthn) and the server has no key page for apps (`SecurityKeyHandoff.feature`).
 let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
 /// The code that the device which approved this sign-in shows (sign in with another device), the
@@ -345,27 +347,137 @@ struct TwoStepView: View {
     @State private var busy = false
     @State private var error: String?
     @State private var note: String?
+    /// The server has the key page for apps (`/api/config` `features`), so a security key works here.
+    @State private var keyPage = false
+    /// The browser hand-off of a security key sign-in while it runs (Cancel stops it).
+    @State private var keyTask: Task<Void, Never>?
+    @Environment(\.webAuthenticationSession) private var webAuth
 
     private var choices: [String] {
-        let known = providers.filter { ["totp", "email", "recovery"].contains($0) }
+        var usable = ["totp", "email", "recovery"]
+        if keyPage { usable.append(SecurityKeyHandoff.provider) }
+        let known = providers.filter { usable.contains($0) }
         return known.isEmpty ? ["totp"] : known
     }
 
-    /// Only a security key (unsupported here) besides recovery codes.
+    /// Only a security key (no key page on this server) besides recovery codes.
     private var securityKeyOnly: Bool {
-        providers.contains("passkey") && choices.allSatisfy { $0 == "recovery" }
+        !keyPage && providers.contains(SecurityKeyHandoff.provider) && choices.allSatisfy { $0 == "recovery" }
     }
 
     var body: some View {
         AuthFrame(title: "Two-step login") {
             if securityKeyOnly { Notice(text: securityKeyUnsupportedMessage) }
             if choices.count > 1 {
-                Picker("Verify with", selection: $provider) {
-                    ForEach(choices, id: \.self) { Text(providerLabel($0)).tag($0) }
+                Group {
+                    // The security key's long name doesn't fit a segmented control.
+                    if choices.contains(SecurityKeyHandoff.provider) {
+                        Picker("Verify with", selection: $provider) { methodOptions }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Picker("Verify with", selection: $provider) { methodOptions }
+                            .pickerStyle(.segmented)
+                    }
                 }
-                .pickerStyle(.segmented)
+                .disabled(keyTask != nil)
+                .accessibilityIdentifier("twoStep.method")
                 .onChange(of: provider) { code = ""; error = nil }
             }
+            if provider == SecurityKeyHandoff.provider {
+                securityKeyStep
+            } else {
+                codeStep
+            }
+        }
+        .onAppear { if provider.isEmpty { provider = choices[0] } }
+        .task {
+            keyPage = await model.repo.publicConfig()?.features.contains(SecurityKeyHandoff.feature) ?? false
+            if !choices.contains(provider) { provider = choices[0] }
+        }
+        .onDisappear { keyTask?.cancel() }
+    }
+
+    private var methodOptions: some View {
+        ForEach(choices, id: \.self) { Text(providerLabel($0)).tag($0) }
+    }
+
+    private var rememberToggle: some View {
+        Toggle(isOn: $remember) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Remember this device")
+                Text("Skip two-step login on this device for a while.").font(.footnote).foregroundStyle(Color.paMuted)
+            }
+        }
+    }
+
+    /// Security key or passkey: the server's key page opens in the browser.
+    @ViewBuilder private var securityKeyStep: some View {
+        Text(SecurityKeyHandoff.explanation)
+            .font(.subheadline).foregroundStyle(Color.paInk)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+        rememberToggle.disabled(keyTask != nil)
+        ErrorText(text: error)
+        if keyTask != nil {
+            Notice(text: SecurityKeyHandoff.waiting)
+            Text(SecurityKeyHandoff.warning)
+                .font(.footnote).foregroundStyle(Color.paMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("twoStep.keyWarning")
+            QuietActions { QuietButton(title: "Cancel") { keyTask?.cancel() } }
+        } else {
+            PrimaryButton(title: SecurityKeyHandoff.button, busy: busy, action: useSecurityKey)
+                .accessibilityIdentifier("twoStep.useSecurityKey")
+            QuietActions { QuietButton(title: "Back", action: onCancel) }
+        }
+    }
+
+    private func useSecurityKey() {
+        guard !busy, keyTask == nil else { return }
+        error = nil
+        let keep = remember
+        keyTask = Task {
+            defer { keyTask = nil; busy = false }
+            do {
+                let plan = try await model.repo.startSecurityKey(token: token)
+                try Task.checkCancellation()
+                let callback = try await openKeyPage(plan.url)
+                try Task.checkCancellation()
+                switch SecurityKeyHandoff.answer(callback, for: plan) {
+                case .cancelled?:
+                    return
+                case .credential(let credential)?:
+                    busy = true
+                    if try await model.repo.finishSecurityKey(token: token, credential: credential, remember: keep) == .enterDeviceCode {
+                        onDeviceCode()
+                    }
+                case nil:
+                    error = "The answer from the browser doesn't belong to this sign-in. Try again."
+                }
+            } catch is CancellationError {
+                // Cancelled here: back to the choice.
+            } catch let e as ASWebAuthenticationSessionError where e.code == .canceledLogin {
+                // Closed in the browser: back to the choice.
+            } catch {
+                self.error = errorMessage(error)
+                UIAccessibility.post(notification: .announcement, argument: self.error)
+            }
+        }
+    }
+
+    /// The key page in an ephemeral browser session; its answer comes back as `passauth://two-step-key#…`.
+    private func openKeyPage(_ url: URL) async throws -> URL {
+        if #available(iOS 17.4, *) {
+            return try await webAuth.authenticate(using: url, callback: .customScheme(SecurityKeyHandoff.callbackScheme),
+                                                  preferredBrowserSession: .ephemeral, additionalHeaderFields: [:])
+        }
+        return try await webAuth.authenticate(using: url, callbackURLScheme: SecurityKeyHandoff.callbackScheme, preferredBrowserSession: .ephemeral)
+    }
+
+    /// Authenticator app, email or recovery code.
+    @ViewBuilder private var codeStep: some View {
             AuthField(label: provider == "recovery" ? "Recovery code" : "6-digit code", text: $code, mono: true,
                       keyboard: provider == "recovery" ? .asciiCapable : .numberPad, content: .oneTimeCode, submit: verify)
             if provider == "email" {
@@ -382,18 +494,11 @@ struct TwoStepView: View {
                 .buttonStyle(.borderless).font(.subheadline.weight(.medium))
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Toggle(isOn: $remember) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Remember this device")
-                    Text("Skip two-step login on this device for a while.").font(.footnote).foregroundStyle(Color.paMuted)
-                }
-            }
+            rememberToggle
             if let note { Notice(text: note, kind: .ok) }
             ErrorText(text: error)
             PrimaryButton(title: busy ? "Verifying…" : "Verify and sign in", busy: busy, enabled: !code.trimmingCharacters(in: .whitespaces).isEmpty, action: verify)
             QuietActions { QuietButton(title: "Back", action: onCancel) }
-        }
-        .onAppear { if provider.isEmpty { provider = choices[0] } }
     }
 
     private func verify() {

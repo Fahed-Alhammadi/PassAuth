@@ -23,6 +23,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.RadioButton
+import androidx.compose.ui.semantics.Role
+import io.passauth.app.data.SecurityKeyHandoff
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Logout
@@ -447,21 +452,31 @@ private fun providerLabel(p: String) = when (p) {
     "totp" -> "Authenticator app"
     "email" -> "Email code"
     "recovery" -> "Recovery code"
+    "passkey" -> SecurityKeyHandoff.METHOD
     else -> p
 }
 
-/** Two-step methods the app can use (security keys / WebAuthn `passkey` are left out), authenticator app when none is known. */
-private fun twoStepChoices(providers: List<String>) =
-    providers.filter { it == "totp" || it == "email" || it == "recovery" }.ifEmpty { listOf("totp") }
+/**
+ * Two-step methods the app can use, in the server's order: security keys / passkeys (WebAuthn
+ * `passkey`) only when the server has the key page ([keyPage]); authenticator app when none is known.
+ */
+internal fun twoStepChoices(providers: List<String>, keyPage: Boolean) =
+    providers.filter { it == "totp" || it == "email" || it == "recovery" || (it == "passkey" && keyPage) }.distinct().ifEmpty { listOf("totp") }
 
 private const val SECURITY_KEY_UNSUPPORTED =
     "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
 
 @Composable
 private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: String, onCancel: () -> Unit) {
-    val choices = twoStepChoices(challenge.providers)
-    val securityKeyOnly = "passkey" in challenge.providers && choices.all { it == "recovery" }
-    var provider by rememberSaveable { mutableStateOf(choices.first()) }
+    // Whether the server has the key page; until known (or on an older server) security keys stay hidden.
+    var keyPage by remember { mutableStateOf(false) }
+    LaunchedEffect(challenge.token) {
+        if ("passkey" in challenge.providers) keyPage = runCatching { ctx.repo.securityKeyPageAvailable() }.getOrDefault(false)
+    }
+    val choices = twoStepChoices(challenge.providers, keyPage)
+    val securityKeyOnly = !keyPage && "passkey" in challenge.providers && choices.all { it == "recovery" }
+    var picked by rememberSaveable { mutableStateOf<String?>(null) }
+    val provider = picked?.takeIf { it in choices } ?: choices.first()
     var code by remember { mutableStateOf("") }
     var remember by rememberSaveable { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -469,7 +484,7 @@ private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: S
     var note by remember { mutableStateOf<String?>(null) }
 
     fun verify() {
-        if (busy || code.isBlank()) return
+        if (busy || code.isBlank() || provider == "passkey") return
         busy = true
         error = null
         ctx.scope.launch {
@@ -482,20 +497,50 @@ private fun TwoStepScreen(ctx: UiCtx, challenge: LoginResult.TwoFactor, email: S
         }
     }
 
+    fun pick(p: String) {
+        picked = p
+        code = ""
+        error = null
+    }
+
     AuthFrame("Two-step login") {
         if (securityKeyOnly) Alert(SECURITY_KEY_UNSUPPORTED)
         if (choices.size > 1) {
             Text("Verify with", style = MaterialTheme.typography.labelLarge, modifier = Modifier.fillMaxWidth())
-            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                choices.forEachIndexed { i, p ->
-                    SegmentedButton(
-                        selected = provider == p,
-                        onClick = { provider = p; code = ""; error = null },
-                        shape = SegmentedButtonDefaults.itemShape(i, choices.size),
-                        label = { Text(providerLabel(p), maxLines = 1, style = MaterialTheme.typography.labelMedium) },
-                    )
+            if ("passkey" in choices) {
+                // "Security key or passkey" doesn't fit a segment: one row per method.
+                Column(Modifier.fillMaxWidth().selectableGroup()) {
+                    choices.forEach { p ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                                .selectable(selected = provider == p, role = Role.RadioButton, onClick = { pick(p) })
+                                .padding(vertical = 4.dp),
+                        ) {
+                            RadioButton(selected = provider == p, onClick = null)
+                            Text(providerLabel(p), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.padding(start = 12.dp))
+                        }
+                    }
+                }
+            } else {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    choices.forEachIndexed { i, p ->
+                        SegmentedButton(
+                            selected = provider == p,
+                            onClick = { pick(p) },
+                            shape = SegmentedButtonDefaults.itemShape(i, choices.size),
+                            label = { Text(providerLabel(p), maxLines = 1, style = MaterialTheme.typography.labelMedium) },
+                        )
+                    }
                 }
             }
+        }
+        if (provider == "passkey") {
+            CheckRow("Remember this device", remember, { remember = it }, help = "Skip two-step login on this device for a while.")
+            ErrorText(error)
+            SecurityKeyPanel(ctx, challenge.token, remember) { error = it }
+            QuietActions { QuietButton("Back", onCancel) }
+            return@AuthFrame
         }
         TextInput(
             code, { code = it }, if (provider == "recovery") "Recovery code" else "6-digit code", mono = true,

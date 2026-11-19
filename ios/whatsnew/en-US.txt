@@ -1,11 +1,8 @@
-New in 0.12.0
-• PassAuth now keeps a record of the items in each vault and checks your server against it. If the server ever hides a change, brings back a deleted item or shows an older copy of a vault, you get a warning on that vault.
-• After you restore your server from a backup, the vaults that changed show a warning. Tap "Use the server's copy" once per vault to accept what the server has now.
-• Items that can't be opened are listed instead of hidden, and can be deleted. Items saved by a newer version of PassAuth are listed with a note to update.
-• Items in the trash are removed by your apps when their time is up, never sooner than seven days after this device first saw them there.
-• PassAuth now needs a server on version 0.12 or later, and tells you when a server is too old.
+New in 0.13.0
+• Two-step login with a security key or passkey now works in the app. When you choose "Security key or passkey", PassAuth opens your server's page in a secure browser sheet; touch your key or use your passkey there, and the app finishes signing you in.
+• Needs PassAuth server 0.16 or later for this. With an older server the app keeps offering your other two-step methods.
 
 Please test:
-1. Add, edit, trash and restore a few items on this phone and on another device; check that no warning appears.
-2. Lock and unlock, and use AutoFill in Safari; check your logins are suggested as before.
-3. If you share a vault, change an item from another account and check it arrives here without a warning.
+1. Add a security key or passkey for two-step login in the web vault (Settings → Account security).
+2. Sign out on this phone, sign in again and choose "Security key or passkey". Check the browser sheet opens, your key works, and you land in your vault.
+3. Start again and tap Cancel or close the sheet; check you return to the choice of methods without an error.

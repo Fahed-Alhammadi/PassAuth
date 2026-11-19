@@ -124,6 +124,7 @@ dependencies {
     implementation(libs.androidx.credentials)
     implementation(libs.androidx.autofill)
     implementation(libs.androidx.work)
+    implementation(libs.androidx.browser)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

@@ -184,6 +184,50 @@ final class DeviceLoginContractTests: XCTestCase {
         XCTAssertNil(repo.store.get().secrets.secretKeys["a@example.com"], "no Secret Key came along")
     }
 
+    /// Two-step login with a security key (the browser key page): start, the page's answer
+    /// checked against the challenge, finish with the token kept in the app.
+    func testSecurityKeyAfterTheApproval() async throws {
+        let created = try createAccount(accountId: try newId(), password: password, withSecretKey: false)
+        ScriptedServer.syncBodies = [try syncBody(created)]
+        ScriptedServer.answer("POST /api/auth/requests", 200, started())
+        let repo = repo()
+        _ = try await repo.beginDeviceLogin(email: "a@example.com")
+        let pub = try XCTUnwrap(ScriptedServer.recorded().first { $0.path == "/api/auth/requests" }?.body["public_key"] as? String)
+        ScriptedServer.answer("GET /api/auth/requests/\(requestId)", 200,
+                              #"{"status":"approved","two_factor_required":true,"two_factor_token":"TT","providers":["passkey","recovery"]}"#)
+        guard case .twoFactor = try await repo.awaitDeviceLogin() else { return XCTFail("two-step login first") }
+
+        ScriptedServer.answer("POST /api/auth/2fa/passkey/start", 200,
+                              #"{"options":{"publicKey":{"challenge":"AAECAwQFBgcICQoLDA0ODw","rpId":"fake.passauth.test","allowCredentials":[{"type":"public-key","id":"a2V5"}],"userVerification":"preferred","timeout":60000}},"key_page":"https://fake.passauth.test/two-step/key"}"#)
+        let plan = try await repo.startSecurityKey(token: "TT")
+        let start = try XCTUnwrap(ScriptedServer.recorded().first { $0.path == "/api/auth/2fa/passkey/start" })
+        XCTAssertEqual(start.body["two_factor_token"] as? String, "TT")
+        XCTAssertNil(start.headers["Authorization"])
+        XCTAssertFalse(plan.url.absoluteString.contains("TT"), "the token never leaves the app")
+
+        let client = #"{"type":"webauthn.get","challenge":"AAECAwQFBgcICQoLDA0ODw","origin":"https://fake.passauth.test"}"#
+        let cred: JSON = ["id": "a2V5", "rawId": "a2V5", "type": "public-key", "clientExtensionResults": [:],
+                          "response": ["clientDataJSON": .string(SecurityKeyHandoff.base64urlEncode(Data(client.utf8))),
+                                       "authenticatorData": "YXV0aA", "signature": "c2ln", "userHandle": nil]]
+        XCTAssertTrue(plan.url.absoluteString.hasSuffix("&state=\(plan.state)"))
+        let back = try XCTUnwrap(URL(string: "passauth://two-step-key#v=1&state=\(plan.state)&credential=\(SecurityKeyHandoff.base64urlEncode(cred.data))"))
+        guard case .credential(let credential)? = SecurityKeyHandoff.answer(back, for: plan) else { return XCTFail("the page's answer") }
+
+        let approval = try approve(created, pub, secretKey: nil)
+        ScriptedServer.answer("POST /api/auth/2fa/passkey/finish", 200, try session(created, sealed: approval.sealed, remember: "REM", status: false))
+        let next = try await repo.finishSecurityKey(token: "TT", credential: credential, remember: true)
+        XCTAssertEqual(next, .enterDeviceCode)
+        let finish = try XCTUnwrap(ScriptedServer.recorded().first { $0.path == "/api/auth/2fa/passkey/finish" })
+        XCTAssertEqual(finish.body["two_factor_token"] as? String, "TT")
+        XCTAssertEqual(finish.body["remember"] as? Bool, true)
+        let sent = try XCTUnwrap(finish.body["credential"] as? [String: Any])
+        XCTAssertEqual(sent["id"] as? String, "a2V5")
+        XCTAssertEqual((sent["response"] as? [String: Any])?["signature"] as? String, "c2ln")
+        try await repo.confirmDeviceLogin(code: approval.code)
+        XCTAssertEqual(repo.state.status, .unlocked)
+        XCTAssertEqual(repo.store.get().secrets.rememberTokens["\(server)|a@example.com"], "REM")
+    }
+
     func testDeniedForgedAndCancelledRequestsSignNobodyIn() async throws {
         let created = try createAccount(accountId: try newId(), password: password, withSecretKey: false)
         let repo = repo()

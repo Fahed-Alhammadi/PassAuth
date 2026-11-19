@@ -21,6 +21,8 @@ camerax = "1.6.2"
 zxing = "3.5.4"
 # 2.10.x is the last WorkManager line for compileSdk 36.
 work = "2.10.5"
+# Auth Tab (1.9+) for two-step sign-in on the server's key page; 1.10.0 still builds against compileSdk 36.
+browser = "1.10.0"
 junit = "4.13.2"
 
 [libraries]
@@ -35,6 +37,7 @@ androidx-fragment = { module = "androidx.fragment:fragment-ktx", version.ref = "
 androidx-credentials = { module = "androidx.credentials:credentials", version.ref = "credentials" }
 androidx-autofill = { module = "androidx.autofill:autofill", version.ref = "autofill" }
 androidx-work = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
+androidx-browser = { module = "androidx.browser:browser", version.ref = "browser" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }

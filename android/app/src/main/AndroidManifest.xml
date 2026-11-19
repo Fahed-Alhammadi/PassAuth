@@ -22,6 +22,10 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- Browsers with Custom Tabs / Auth Tab: two-step sign-in opens the server's key page in one. -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
     </queries>
 
     <application
@@ -46,6 +50,25 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Two-step sign-in with a security key: the server's key page returns here (passauth://two-step-key)
+             when the browser has no Auth Tab. Forwards only to a sign-in waiting for it, then finishes:
+             no UI, own empty task affinity, never in recents (no task hijacking). -->
+        <activity
+            android:name=".TwoStepKeyActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="passauth" android:host="two-step-key" />
             </intent-filter>
         </activity>
 

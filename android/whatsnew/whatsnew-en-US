@@ -1,5 +1,2 @@
-• PassAuth now keeps a record of the items in each vault and warns you if your server hides a change, brings back a deleted item or shows an older copy.
-• After a server restore, tap "Use the server's copy" once per vault to accept what the server has now.
-• Items that can't be opened are listed and can be deleted.
-• "Change server" now closes after it connects.
-• Needs a server on version 0.12 or later.
+• Two-step login with a security key or passkey now works in the app. PassAuth opens your server's page in the browser; touch your key or use your passkey there, and the app finishes signing you in.
+• Needs PassAuth server 0.16 or later for this.

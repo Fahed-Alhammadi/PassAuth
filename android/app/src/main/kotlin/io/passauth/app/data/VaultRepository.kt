@@ -683,19 +683,48 @@ class VaultRepository(
         LoginResult.Done
     }
 
-    suspend fun verifyTwoFactor(token: String, provider: String, code: String, remember: Boolean) {
+    suspend fun verifyTwoFactor(token: String, provider: String, code: String, remember: Boolean) =
+        completeTwoFactor(
+            "/auth/2fa/verify",
+            buildJsonObject {
+                put("two_factor_token", token)
+                put("provider", provider)
+                put("code", code.trim().replace(" ", ""))
+                put("remember", remember)
+            },
+        )
+
+    /** Whether the server has the key page for security keys (`/api/config` feature `two_step_key_page`). */
+    suspend fun securityKeyPageAvailable(): Boolean = features()?.contains(SecurityKeyHandoff.FEATURE) == true
+
+    /** What `/auth/2fa/passkey/start` answered (the request options and the server's key page), and the server it was asked. */
+    class SecurityKeyStart(val options: JsonObject, val keyPage: String?, val server: String)
+
+    /** Two-step login with a security key, step 1: the request options for [token] (the token stays in the app). */
+    suspend fun startSecurityKey(token: String): SecurityKeyStart {
+        val id = mutex.withLock { pendingDeviceLogin?.record ?: activeId() }
+        val r = api.call(id, "/auth/2fa/passkey/start", auth = false, body = buildJsonObject { put("two_factor_token", token) }).jsonObject
+        val options = r["options"] as? JsonObject ?: throw UserException("The server didn't send security key options. Use another method.")
+        return SecurityKeyStart(options, r.strOrNull("key_page"), store.get().accounts[id]?.server.orEmpty())
+    }
+
+    /** Step 2: the assertion the key page returned, checked by the server against [token]'s challenge. */
+    suspend fun finishSecurityKey(token: String, credential: JsonObject, remember: Boolean) =
+        completeTwoFactor(
+            "/auth/2fa/passkey/finish",
+            buildJsonObject {
+                put("two_factor_token", token)
+                put("credential", credential)
+                put("remember", remember)
+            },
+        )
+
+    /** A two-step answer ([path] with [body]) that ends in a session: the same for every method. */
+    private suspend fun completeTwoFactor(path: String, body: JsonObject) {
         mutex.withLock {
             val device = pendingDeviceLogin
             val id = device?.record ?: activeId()
-            val result = api.call(
-                id, "/auth/2fa/verify", auth = false,
-                body = buildJsonObject {
-                    put("two_factor_token", token)
-                    put("provider", provider)
-                    put("code", code.trim().replace(" ", ""))
-                    put("remember", remember)
-                },
-            ).jsonObject
+            val result = api.call(id, path, auth = false, body = body).jsonObject
             if (device != null) {
                 // An approved device sign-in: the answer carries the sealed account key with the session.
                 // The approving app's code comes next; "remember this device" is kept only once it is confirmed.
