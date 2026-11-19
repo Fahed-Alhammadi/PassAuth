@@ -1,2 +1,5 @@
-• Two-step login with a security key or passkey now works in the app. PassAuth opens your server's page in the browser; touch your key or use your passkey there, and the app finishes signing you in.
-• Needs PassAuth server 0.16 or later for this.
+• Autofill works in more places: apps get your website logins when the website vouches for the app, and Samsung Internet, Edge, Firefox and other browsers can ask PassAuth.
+• No match? "Choose a login…" fills one once or remembers it for that app.
+• Chrome: turn on Settings → Autofill services → Autofill using another service.
+• Screens that only ask for a verification code can be filled.
+• Permissions moved out of Settings; change them in Android settings.
