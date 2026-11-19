@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.16.0 (2026-11-19)
+
+- Web + desktop: two-step key page and desktop hand-off (7fd1afa)
+- Server: security-key key page for apps, sign-in context endpoint; WASM byte params only Uint8Array (b096101)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.15.0...server-0.16.0)
+
 ## 0.15.0 (2026-11-19)
 
 - Last fixes before release: owners can delete newer-version items, longer log catch-up, sealed picture at rest in the extension (bab9a6b)
