@@ -6,6 +6,17 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.15.0 (2026-11-19)
+
+- Last fixes before release: owners can delete newer-version items, longer log catch-up, sealed picture at rest in the extension (bab9a6b)
+- Security review round 3: warnings kept with the copy, honest handling of unopenable items, root sign-in (262dede)
+- Security review round 2: every warning has a way out, verified copy never replaced (ee5e8bc)
+- Security review round 1: manifest hash chain and client hardening (106ac72)
+- Apps: verify and keep vault manifests; require signed sharing on the server (1e1379a)
+- Vault manifests: authenticated record of each vault's item set (core, server) (0b835c3)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.14.0...server-0.15.0)
+
 ## 0.14.0 (2026-11-18)
 
 - Apps: bound wraps, Send v2 and item rollback warnings (260e0ac)
