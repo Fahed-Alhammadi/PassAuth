@@ -48,7 +48,7 @@
       }
     },
     "deep-link": {
-      "desktop": { "schemes": ["otpauth", "apple-otpauth"] }
+      "desktop": { "schemes": ["otpauth", "apple-otpauth", "passauth"] }
     }
   }
 }

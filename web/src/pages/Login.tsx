@@ -6,20 +6,24 @@ import { ErrorText, Icon, PasswordField, SheetActions, type IconName } from "../
 import { SERVER_UPDATE_NEEDED, errorMessage, friendlyError, hasErrorCode, hasFeature, serverTooOld, usePublicConfig } from "../lib/api";
 import { CODE_FORMAT, CODE_STOPPED, DEVICE_LOGIN_FEATURE, codeDigits, countdown, wrongCodeText, type DeviceLoginRun, type DeviceLoginState } from "../lib/device-login";
 import { startDeviceLogin } from "../lib/device-login-client";
+import { KEY_PAGE_FEATURE, KEY_PAGE_MISMATCH, KEY_PAGE_WARNING, keyPageUrl, keyPageWaiter } from "../lib/key-page";
 import { getDesktop } from "../lib/platform";
 import { afterSignIn } from "../lib/routes";
 import { server } from "../lib/server";
 import {
   cancelPendingSignIn,
   confirmDeviceLogin,
+  finishTwoFactorPasskey,
   getState,
   lastEmail,
   login,
   logout,
   rememberedSecretKey,
   sendTwoFactorEmail,
+  startTwoFactorPasskey,
   useVault,
   verifyTwoFactor,
+  type TwoStepOutcome,
   verifyTwoFactorPasskey,
   WRONG_CREDENTIALS,
 } from "../lib/vault";
@@ -33,9 +37,13 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 const PROVIDER_ICON: Record<string, IconName> = { totp: "phone", email: "mail", passkey: "key", recovery: "note" };
 
-/** Methods this page can offer: security keys only where the browser can run WebAuthn (not in the desktop app's WebView). */
-function usableProviders(providers: string[]) {
-  const here = (p: string) => p !== "passkey" || (!getDesktop() && webauthnSupported());
+/**
+ * Methods this page can offer: security keys where the browser can run WebAuthn, or (`handOff`) where the app hands the
+ * ceremony to the server's key page in the browser (desktop app, servers with `two_step_key_page`). The desktop app's
+ * WebView itself can't run WebAuthn for the server.
+ */
+function usableProviders(providers: string[], handOff: boolean) {
+  const here = (p: string) => p !== "passkey" || handOff || (!getDesktop() && webauthnSupported());
   return providers.filter((p) => p in PROVIDER_LABEL && here(p));
 }
 
@@ -78,11 +86,16 @@ export function LoginPage() {
   // A server too old for this app: nothing is sent to it, and the screen says what to do.
   const outdated = serverTooOld(config);
   const canUseDevice = !outdated && hasFeature(config, DEVICE_LOGIN_FEATURE);
+  // Desktop: two-step login with a security key goes through the server's key page in the browser.
+  const handOff = !!desktop?.securityKeyHandOff && hasFeature(config, KEY_PAGE_FEATURE);
+  /** Desktop: the key page is open in the browser and the app waits for its answer. */
+  const [waitingKey, setWaitingKey] = useState(false);
 
   // Leaving the page ends a request that is still waiting, and drops a sign-in waiting for its two-step login.
   useEffect(
     () => () => {
       deviceRun.current?.cancel();
+      keyPageWaiter.cancel();
       cancelPendingSignIn();
     },
     [],
@@ -93,7 +106,7 @@ export function LoginPage() {
   if ((status === "unlocked" || status === "two-step") && !device) return <Navigate to={next} replace />;
 
   function showTwoStep(token: string, providers: string[]) {
-    const usable = usableProviders(providers);
+    const usable = usableProviders(providers, handOff);
     setTwoFactor({ token, providers: usable });
     setProvider(usable[0] ?? "recovery");
     setHint(
@@ -209,24 +222,48 @@ export function LoginPage() {
     }
   }
 
+  /** Desktop: open the server's key page in the browser and wait for it to hand the signed assertion back. */
+  async function securityKeyHandOff(token: string): Promise<TwoStepOutcome | null> {
+    const start = await startTwoFactorPasskey(token);
+    // Only the connected server's own page (https, host = relying party = this server's host).
+    const page = keyPageUrl(start.key_page, start.options, "app", server.origin());
+    if (!page || !desktop) throw new Error(KEY_PAGE_MISMATCH);
+    const answer = keyPageWaiter.expect(start.options, page.state);
+    setWaitingKey(true);
+    try {
+      await desktop.openUrl(page.url);
+    } catch (e) {
+      keyPageWaiter.cancel();
+      throw e;
+    }
+    const credential = await answer;
+    setWaitingKey(false);
+    // Cancelled (on the page or here): back to the choice, without an error.
+    if (!credential) return null;
+    return finishTwoFactorPasskey(token, credential, remember);
+  }
+
   async function securityKey() {
     if (!twoFactor) return;
     setBusy(true);
     setError(null);
     try {
-      if ((await verifyTwoFactorPasskey(twoFactor.token, remember)) === "confirm") askDeviceCode();
-      else signedIn();
+      const outcome = handOff ? await securityKeyHandOff(twoFactor.token) : await verifyTwoFactorPasskey(twoFactor.token, remember);
+      if (outcome === "confirm") askDeviceCode();
+      else if (outcome === "done") signedIn();
     } catch (err) {
       setError(friendlyError(err));
     } finally {
+      setWaitingKey(false);
       setBusy(false);
     }
   }
 
   const usePasskey = provider === "passkey";
 
-  const pickProvider = (p: string) => (setProvider(p), setCode(""), setError(null));
+  const pickProvider = (p: string) => (keyPageWaiter.cancel(), setProvider(p), setCode(""), setError(null));
   const startOver = () => {
+    keyPageWaiter.cancel();
     if (device) return stopDevice();
     setTwoFactor(null);
     setCode("");
@@ -283,7 +320,11 @@ export function LoginPage() {
               </div>
             )}
             {usePasskey ? (
-              <p className="card-text">Insert or tap your security key, or use the fingerprint, face or PIN prompt on this device.</p>
+              <p className="card-text">
+                {handOff
+                  ? "PassAuth opens your server's page in the browser. Touch your security key or use your passkey there."
+                  : "Insert or tap your security key, or use the fingerprint, face or PIN prompt on this device."}
+              </p>
             ) : (
               <div className="field">
                 <label htmlFor="two-step-code">{provider === "recovery" ? "Recovery code" : provider === "email" ? "Code from the email" : "6-digit code from your authenticator app"}</label>
@@ -327,7 +368,17 @@ export function LoginPage() {
                 </button>
               }
             >
-              {usePasskey ? (
+              {usePasskey && waitingKey ? (
+                <>
+                  <p className="muted small" role="status">
+                    Waiting for your security key…
+                  </p>
+                  <p className="small">{KEY_PAGE_WARNING}</p>
+                  <button type="button" className="btn btn-block" onClick={() => keyPageWaiter.cancel()}>
+                    Cancel
+                  </button>
+                </>
+              ) : usePasskey ? (
                 <button type="button" className="btn btn-accent btn-block" disabled={busy} onClick={securityKey} autoFocus>
                   {busy ? "Waiting for your security key…" : "Use security key"}
                 </button>

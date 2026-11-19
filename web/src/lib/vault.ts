@@ -876,8 +876,18 @@ export async function sendTwoFactorEmail(token: string) {
 
 /** Two-step login with a security key or passkey: server challenge → browser WebAuthn → session. */
 export async function verifyTwoFactorPasskey(token: string, remember: boolean): Promise<TwoStepOutcome> {
-  const { options } = await api<{ options: unknown }>("/auth/2fa/passkey/start", { body: { two_factor_token: token }, auth: false });
+  const { options } = await startTwoFactorPasskey(token);
   const credential = await getCredential(options);
+  return finishTwoFactorPasskey(token, credential, remember);
+}
+
+/** The security-key challenge for a waiting sign-in; `key_page` (servers with `two_step_key_page`) = the server's key page. */
+export async function startTwoFactorPasskey(token: string): Promise<{ options: unknown; key_page?: unknown }> {
+  return api<{ options: unknown; key_page?: unknown }>("/auth/2fa/passkey/start", { body: { two_factor_token: token }, auth: false });
+}
+
+/** Send the signed assertion (from this browser, or handed back by the key page) and finish the sign-in. */
+export async function finishTwoFactorPasskey(token: string, credential: unknown, remember: boolean): Promise<TwoStepOutcome> {
   const result = await api("/auth/2fa/passkey/finish", { body: { two_factor_token: token, credential, remember }, auth: false });
   return finishPending(result);
 }

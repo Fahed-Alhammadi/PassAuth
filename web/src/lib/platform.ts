@@ -24,6 +24,12 @@ export interface DesktopHooks {
   copySecret(value: string): Promise<void>;
   /** Open a web address in the user's browser. */
   openUrl(url: string): Promise<void>;
+  /**
+   * The app receives `passauth://two-step-key` links and feeds them to `keyPageWaiter` (web/src/lib/key-page.ts), so
+   * two-step login with a security key goes through the server's key page in the browser (servers with
+   * `two_step_key_page`). Without it the sign-in page hides the method, as the WebView can't run WebAuthn for the server.
+   */
+  securityKeyHandOff?: boolean;
   /** The OS keychain, one entry per name (already scoped to the connected server). */
   secrets: {
     get(name: string): Promise<string | null>;

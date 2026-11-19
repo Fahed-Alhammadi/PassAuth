@@ -814,7 +814,8 @@ pub fn run() {
             }
         }))
         // otpauth:// and apple-otpauth:// links (schemes in tauri.conf.json): the webview reads them with
-        // `getCurrent` / `onOpenUrl` and offers to add the verification code to a login.
+        // `getCurrent` / `onOpenUrl` and offers to add the verification code to a login. passauth://two-step-key
+        // links bring back the server's key page's answer for a two-step login with a security key (src/keylink.ts).
         .plugin(tauri_plugin_deep_link::init())
         // Size and position only: a window hidden at quit must still appear on the next launch.
         .plugin(
@@ -878,10 +879,11 @@ pub fn run() {
             // `register_all` spawns update-desktop-database + xdg-mime, so skip it when already registered).
             #[cfg(target_os = "linux")]
             if handle.env().appimage.is_some()
-                && !app.deep_link().is_registered("otpauth").unwrap_or(false)
+                // passauth: the newest scheme, so an AppImage registered by an older version registers again.
+                && !app.deep_link().is_registered("passauth").unwrap_or(false)
                 && let Err(e) = app.deep_link().register_all()
             {
-                eprintln!("couldn't register the otpauth link handler: {e}");
+                eprintln!("couldn't register the link handlers: {e}");
             }
             app.listen(VAULT_STATE, move |event| {
                 let unlocked = event.payload() == "true";

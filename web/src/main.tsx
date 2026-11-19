@@ -12,6 +12,7 @@ import { App } from "./App";
 import { boot } from "./lib/vault";
 import { applyTheme } from "./lib/prefs";
 import { isSendPage } from "./lib/sends";
+import { isKeyPagePath } from "./lib/key-page";
 
 applyTheme();
 
@@ -34,11 +35,15 @@ function showStartupError(e: unknown) {
   root.append(main);
 }
 
+// The security-key page (an app opened it for a two-step login) needs neither the encryption module nor this browser's
+// session: it only signs the options in its address and hands the answer back.
+const keyPage = isKeyPagePath(location.pathname);
+
 try {
-  await init();
+  if (!keyPage) await init();
   // boot() never throws: an unreachable server shows a retry screen inside the app. The public Send page is for anyone
   // with the link: it never touches this browser's session (nothing of the vault is loaded there).
-  if (!isSendPage(location.pathname)) await boot();
+  if (!keyPage && !isSendPage(location.pathname)) await boot();
   createRoot(root).render(
     <StrictMode>
       <App />

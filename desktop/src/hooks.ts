@@ -67,6 +67,7 @@ export async function hooks(): Promise<DesktopHooks> {
     },
     copySecret: (value) => invoke("copy_secret", { value }),
     openUrl: (url) => openUrl(url),
+    securityKeyHandOff: true,
     secrets,
     vaultTimeout: vaultTimeoutHook,
     app: await appHook(),

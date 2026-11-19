@@ -44,6 +44,7 @@ import {
 import { formatBytes } from "../lib/sizes";
 import { makeAvatarJpeg, removeAvatar, uploadAvatar, useAvatarUrl } from "../lib/avatar";
 import { createCredential, webauthnSupported } from "../lib/webauthn";
+import { KEY_PAGE_FEATURE } from "../lib/key-page";
 import {
   acceptConsent,
   acceptInvitation,
@@ -1124,6 +1125,8 @@ export function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInf
   const desktop = isDesktop();
   const supported = !desktop && webauthnSupported();
   const canAdd = account.passkeys_available && supported && account.passkeys.length < 10;
+  // Servers with the key page: every app can use a key to sign in (through the server's page in the browser).
+  const keyPage = hasFeature(usePublicConfig(), KEY_PAGE_FEATURE);
 
   return (
     <section className="card" aria-labelledby="passkeys-title">
@@ -1166,14 +1169,21 @@ export function PasskeysCard({ account, onAdd, onRemove }: { account: AccountInf
       {!account.passkeys_available ? (
         <p className="small muted">This server's DOMAIN setting isn't its full public address, so security keys can't be set up. Ask your PassAuth administrator.</p>
       ) : desktop ? (
-        <p className="small muted">Add or use security keys from the web vault in a browser.</p>
+        <p className="small muted">{keyPage ? "Add security keys from the web vault in a browser." : "Add or use security keys from the web vault in a browser."}</p>
       ) : !supported ? (
         <p className="small muted">This browser can't use security keys here. Open the web vault over https (or localhost) in a current browser.</p>
       ) : null}
-      <div className="alert alert-warn small" role="note">
-        The phone apps, browser extension and desktop app can't use a security key for two-step login yet. If you sign in there, keep an authenticator app
-        or email codes turned on as well. Recovery codes work everywhere.
-      </div>
+      {keyPage ? (
+        <p className="small muted">
+          The phone apps, browser extension and desktop app open this server's page in your browser to use a security key. Older versions of the apps
+          can't, so keep your recovery codes.
+        </p>
+      ) : (
+        <div className="alert alert-warn small" role="note">
+          The phone apps, browser extension and desktop app can't use a security key for two-step login yet. If you sign in there, keep an authenticator app
+          or email codes turned on as well. Recovery codes work everywhere.
+        </div>
+      )}
     </section>
   );
 }

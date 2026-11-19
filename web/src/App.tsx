@@ -24,6 +24,8 @@ import { TwoStepRequiredPage } from "./pages/TwoStepRequired";
 import { SendsPage } from "./pages/Sends";
 import { SendViewPage } from "./pages/SendView";
 import { EmergencyVaultPage } from "./pages/Emergency";
+import { TwoStepKeyDonePage, TwoStepKeyPage } from "./pages/TwoStepKey";
+import { KEY_DONE_PATH, KEY_PAGE_PATH } from "./lib/key-page";
 
 /**
  * The site root. Signed out, it is the sign-in page: the web vault's sign-in lives at `https://<server>/`, never at
@@ -168,6 +170,9 @@ export const routes: RouteObject[] = [
   { path: "/admin/:section", element: <AdminPage /> },
   // Public: anyone with a Send's link opens it here, with or without an account (never signed in for it).
   { path: "/send/:id", element: <SendViewPage /> },
+  // Public: an app (desktop, extension, phone) opens the server's key page in a browser for a security key's two-step login.
+  { path: KEY_PAGE_PATH, element: <TwoStepKeyPage /> },
+  { path: KEY_DONE_PATH, element: <TwoStepKeyDonePage /> },
   {
     element: <RequireUnlocked />,
     children: [
