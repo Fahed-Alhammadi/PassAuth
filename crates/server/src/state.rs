@@ -42,6 +42,9 @@ pub struct App {
     pub reauth: Expiring<String>,
     /// Security-key registrations in progress (`passkeys.rs`).
     pub passkey_registrations: Expiring<PendingPasskeyRegistration>,
+    /// Security-key challenge → its two-factor token, for the key page's context
+    /// lookup (the token itself never leaves the server this way).
+    pub passkey_challenges: Expiring<String>,
     /// WebAuthn relying party from `DOMAIN`; `None` when it isn't a usable URL.
     pub webauthn: Option<webauthn_rs::Webauthn>,
     pub limiter: RateLimiter,
@@ -167,6 +170,21 @@ pub struct PendingTwoFactor {
     /// rather than the master password: the sealed account key waits here for the
     /// session.
     pub device_login: Option<DeviceLogin>,
+    /// What the key page may show about this sign-in (`/auth/2fa/passkey/context`),
+    /// set by `/auth/2fa/passkey/start`.
+    pub key_context: Option<KeyContext>,
+}
+
+/// The sign-in a security-key challenge belongs to, as the key page shows it.
+#[derive(Clone)]
+pub struct KeyContext {
+    /// The challenge of the latest `/auth/2fa/passkey/start` (base64url, as sent).
+    pub challenge: String,
+    /// The app that started it (`ios`, `android`, …), if it said.
+    pub client: Option<String>,
+    /// The address the server saw for it.
+    pub ip: Option<String>,
+    pub started_at: i64,
 }
 
 /// A sign-in request another device approved, being exchanged for a session.
@@ -344,6 +362,7 @@ impl App {
         let state = Arc::new(Self {
             webauthn,
             passkey_registrations: Expiring::default(),
+            passkey_challenges: Expiring::default(),
             signups: std::sync::RwLock::new(signups),
             signups_verify: std::sync::atomic::AtomicBool::new(signups_verify),
             log_level: std::sync::RwLock::new(log_level),
@@ -489,6 +508,7 @@ impl App {
         self.two_factor.sweep();
         self.reauth.sweep();
         self.passkey_registrations.sweep();
+        self.passkey_challenges.sweep();
         self.admin_pending.sweep();
         self.limiter.sweep();
         let t = now();

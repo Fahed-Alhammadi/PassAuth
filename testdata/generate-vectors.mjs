@@ -33,8 +33,10 @@
 // parameter of every export, as its passauth_core.d.ts declares them, must refuse a number, boolean,
 // object or array with a clean Error("expected a string"), without a trap and without growing WASM
 // memory (review L1: wasm-bindgen's own string passing trusted the type and could trap or allocate
-// gigabytes). A new export is covered without listing it here; a new class needs a fixture in
-// `instances`.
+// gigabytes), and every Uint8Array parameter must refuse a string, a plain array, another typed
+// array, an ArrayBuffer or a forged Uint8Array (its prototype or tag on something else) with
+// Error("expected bytes") and take a Uint8Array, a Buffer or a Uint8Array from another realm. A new export
+// is covered without listing it here; a new class needs a fixture in `instances`.
 //
 // Building needs what scripts/build-wasm.sh needs: Rust with the wasm32-unknown-unknown target and
 // the wasm-bindgen CLI in the version of Cargo.lock. Consumers: crates/core/tests/vectors.rs,
@@ -47,6 +49,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { domainToASCII, fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -2227,10 +2230,67 @@ function checkStringArguments(core, memory, dts) {
     });
   }
   if (checks < 500) throw new Error(`only ${checks} string-argument checks ran`);
+
+  // Byte parameters (`Uint8Array` in the .d.ts) take only a Uint8Array (or a subclass such as
+  // Buffer): wasm-bindgen's own conversion turned a string into zeros of its length and coerced a
+  // plain array. Anything else throws Error("expected bytes").
+  // Forgeries too: a Uint8Array prototype or a "Uint8Array" tag on something else.
+  const tagged = (v) => Object.defineProperty(v, Symbol.toStringTag, { value: "Uint8Array" });
+  const notBytes = ["abc", "", [1, 2, 3], [], { length: 3 }, 5, true, null, undefined, {}, Object("x"), new Uint16Array(2), new Int8Array(2), new Uint8ClampedArray(2), new ArrayBuffer(4), new DataView(new ArrayBuffer(4)),
+    Object.setPrototypeOf({ length: 3 }, Uint8Array.prototype), tagged({ length: 3 }), tagged(new DataView(new ArrayBuffer(4))), tagged([1, 2, 3]), runInNewContext("new Uint16Array(2)"), runInNewContext("[1, 2, 3]")];
+  let byteChecks = 0;
+  let byteParams = 0;
+  const callWith = (sig, args) => {
+    try {
+      if (!sig.owner) core[sig.name](...args);
+      else if (sig.name === "constructor") Reflect.construct(core[sig.owner], args);
+      else if (sig.static) core[sig.owner][sig.name](...args);
+      else instances[sig.owner][sig.name](...args);
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  };
+  for (const sig of signatures) {
+    const label = sig.owner ? `${sig.owner}.${sig.name}` : sig.name;
+    sig.params.forEach((param, at) => {
+      if (param.type !== "Uint8Array") return;
+      byteParams++;
+      for (const bad of notBytes) {
+        const error = callWith(sig, sig.params.map((p, i) => (i === at ? bad : placeholder(p.type))));
+        if (!(error instanceof Error) || error.constructor !== Error || error.message !== "expected bytes") {
+          throw new Error(`${label}(${param.name} = ${describe(bad)}) did not throw Error("expected bytes"): ${error?.constructor?.name}: ${error?.message ?? "returned"}`);
+        }
+        byteChecks++;
+      }
+      // A real Uint8Array (and a Buffer) gets past the check (the call may still fail on content).
+      for (const good of [new Uint8Array([1, 2, 3]), Buffer.from([1, 2, 3]), runInNewContext("new Uint8Array([1, 2, 3])")]) {
+        const error = callWith(sig, sig.params.map((p, i) => (i === at ? good : placeholder(p.type))));
+        if (error?.message === "expected bytes") throw new Error(`${label}(${param.name} = ${good.constructor.name}${good instanceof Uint8Array ? "" : " from another realm"}) was refused`);
+      }
+    });
+  }
+  if (byteParams < 9) throw new Error(`only ${byteParams} byte parameters found in passauth_core.d.ts`);
+  if (byteChecks < byteParams * notBytes.length) throw new Error(`only ${byteChecks} byte-argument checks ran`);
   if (memory.buffer.byteLength !== before) {
     throw new Error(`WASM memory grew from ${before} to ${memory.buffer.byteLength} bytes during the string-argument check`);
   }
-  // The instance still works.
+  // The instance still works, bytes included.
+  const fileKey = core.fileNewKey();
+  const plain = new TextEncoder().encode("bytes ✓");
+  const sealed = core.fileEncrypt(fileKey, "item", "file", plain);
+  if (Buffer.from(core.fileDecrypt(fileKey, "item", "file", sealed)).toString() !== "bytes ✓") {
+    throw new Error("fileEncrypt/fileDecrypt don't round-trip a Uint8Array");
+  }
+  const enc = new core.FileEncryptor(fileKey, "item", "file2");
+  const parts = [enc.push(plain.subarray(0, 3)), enc.push(Buffer.from(plain.subarray(3))), enc.finish()];
+  const dec = new core.FileDecryptor(fileKey, "item", "file2");
+  const back = [...parts.map((p) => dec.push(p)), dec.finish()];
+  if (Buffer.concat(back).toString() !== "bytes ✓") throw new Error("FileEncryptor/FileDecryptor don't round-trip pieces (subarray, Buffer)");
+  const foreign = runInNewContext("(b) => new Uint8Array(b)")([...sealed]);
+  if (Buffer.from(core.fileDecrypt(fileKey, "item", "file", foreign)).toString() !== "bytes ✓") throw new Error("fileDecrypt doesn't take a Uint8Array from another realm");
+  enc.free();
+  dec.free();
   const key = core.sendNewKey();
   if (core.sendDecrypt(key, "data", core.sendEncrypt(key, "data", "still fine ✓")) !== "still fine ✓") {
     throw new Error("the WASM instance broke during the string-argument check");

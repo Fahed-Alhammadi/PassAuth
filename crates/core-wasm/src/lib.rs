@@ -13,6 +13,13 @@
 //! object there reached the allocator with a bogus length (a trap, undefined behaviour, or
 //! gigabytes of memory never given back; review L1). `unchecked_param_type` keeps the
 //! `.d.ts` types as they were.
+//!
+//! Byte parameters are the same: a `JsValue` that `bytes` accepts only when it is a
+//! genuine `Uint8Array` (or a subclass such as Node's `Buffer`, also from another
+//! realm), else `Error("expected bytes")`.
+//! wasm-bindgen's own `&[u8]` conversion copied whatever came (a string became zeros
+//! of its length, a plain array was coerced). `bytes` makes the same single copy into
+//! WASM memory that wasm-bindgen made.
 
 use passauth_core::crypto::SymmetricKey;
 use passauth_core::file::{self, FileKey};
@@ -43,6 +50,40 @@ fn js_err(e: Error) -> JsError {
 fn string(v: JsValue) -> R<String> {
     v.as_string()
         .ok_or_else(|| JsError::new("expected a string"))
+}
+
+/// A byte argument (see the module docs).
+fn bytes(v: &JsValue) -> R<Vec<u8>> {
+    uint8_array(v).map(js_sys::Uint8Array::to_vec)
+}
+
+thread_local! {
+    /// The getter of `%TypedArray%.prototype[Symbol.toStringTag]`.
+    static TYPED_ARRAY_TAG: js_sys::Function = {
+        let uint8 = js_sys::Object::get_prototype_of(&js_sys::Uint8Array::new_with_length(0).into());
+        let typed = js_sys::Object::get_prototype_of(&uint8.into());
+        let desc = js_sys::Object::get_own_property_descriptor(&typed, &js_sys::Symbol::to_string_tag().into());
+        js_sys::Reflect::get(&desc, &"get".into())
+            .expect("typed array tag getter")
+            .unchecked_into()
+    };
+}
+
+/// `v` as a `Uint8Array`, also one from another realm (an iframe, `vm`), where
+/// `instanceof` fails. The tag getter reads the internal slot: it is undefined for
+/// anything that isn't a real typed array, whatever its prototype or own
+/// `Symbol.toStringTag` says, so only a genuine `Uint8Array` (or subclass) passes.
+fn uint8_array(v: &JsValue) -> R<&js_sys::Uint8Array> {
+    let genuine = v.is_object()
+        && TYPED_ARRAY_TAG
+            .with(|get| get.call0(v).ok())
+            .and_then(|tag| tag.as_string())
+            .is_some_and(|tag| tag == "Uint8Array");
+    if genuine {
+        Ok(v.unchecked_ref())
+    } else {
+        Err(JsError::new("expected bytes"))
+    }
 }
 
 /// An optional string argument: `undefined` and `null` are none.
@@ -342,8 +383,11 @@ impl Account {
     /// Seal the account's profile picture (image bytes, ≤ 256 KiB; the apps send a
     /// small square JPEG) with its key, for `PUT /api/account/avatar`.
     #[wasm_bindgen(js_name = sealAvatar)]
-    pub fn seal_avatar(&self, image: &[u8]) -> R<String> {
-        self.0.seal_avatar(image).map_err(js_err)
+    pub fn seal_avatar(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Uint8Array")] image: JsValue,
+    ) -> R<String> {
+        self.0.seal_avatar(&bytes(&image)?).map_err(js_err)
     }
 
     /// The image bytes from what `sealAvatar` made. Throws `decrypt_failed` for
@@ -645,8 +689,11 @@ impl FileEncryptor {
 
     /// More plaintext (any size; ~64 KiB–1 MiB pieces keep WASM memory small).
     /// Returns the ciphertext ready so far (may be empty).
-    pub fn push(&mut self, chunk: &[u8]) -> R<Vec<u8>> {
-        self.0.push(chunk).map_err(js_err)
+    pub fn push(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "Uint8Array")] chunk: JsValue,
+    ) -> R<Vec<u8>> {
+        self.0.push(&bytes(&chunk)?).map_err(js_err)
     }
 
     /// The rest of the ciphertext. The encryptor can't be used afterwards.
@@ -678,8 +725,11 @@ impl FileDecryptor {
     }
 
     /// More ciphertext (any size). Returns the plaintext ready so far (may be empty).
-    pub fn push(&mut self, chunk: &[u8]) -> R<Vec<u8>> {
-        self.0.push(chunk).map_err(js_err)
+    pub fn push(
+        &mut self,
+        #[wasm_bindgen(unchecked_param_type = "Uint8Array")] chunk: JsValue,
+    ) -> R<Vec<u8>> {
+        self.0.push(&bytes(&chunk)?).map_err(js_err)
     }
 
     /// The last piece of plaintext; throws `decrypt_failed` if the file was cut short.
@@ -1086,18 +1136,23 @@ pub fn login_phrase_choices(
 #[wasm_bindgen(js_name = accountFromSessionBytes)]
 pub fn account_from_session_bytes(
     #[wasm_bindgen(unchecked_param_type = "string")] account_id: JsValue,
-    bytes: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] bytes: JsValue,
 ) -> R<Account> {
     let account_id = string(account_id)?;
-    if bytes.len() != 64 {
+    let array = uint8_array(&bytes)?;
+    if array.length() != 64 {
         return Err(JsError::new("invalid session data"));
     }
+    // Straight into a fixed buffer (no heap copy of the account key), wiped on return.
+    let mut bytes = zeroize::Zeroizing::new([0u8; 64]);
+    array.copy_to(&mut bytes[..]);
     let account_key = SymmetricKey::from_slice(&bytes[..32]).map_err(js_err)?;
-    let secret: [u8; 32] = bytes[32..].try_into().expect("checked length");
+    let mut secret = zeroize::Zeroizing::new([0u8; 32]);
+    secret.copy_from_slice(&bytes[32..]);
     Ok(Account(UnlockedAccount {
         account_id,
         account_key,
-        keypair: passauth_core::crypto::KeyPair::from_secret_bytes(secret),
+        keypair: passauth_core::crypto::KeyPair::from_secret_bytes(*secret),
     }))
 }
 
@@ -1372,11 +1427,12 @@ pub fn file_encrypt(
     #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
     #[wasm_bindgen(unchecked_param_type = "string")] item_id: JsValue,
     #[wasm_bindgen(unchecked_param_type = "string")] attachment_id: JsValue,
-    plaintext: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] plaintext: JsValue,
 ) -> R<Vec<u8>> {
     let (key, item_id, attachment_id) = (string(key)?, string(item_id)?, string(attachment_id)?);
+    let plaintext = bytes(&plaintext)?;
     let key = FileKey::from_b64(&key).map_err(js_err)?;
-    file::encrypt(&key, &item_id, &attachment_id, plaintext).map_err(js_err)
+    file::encrypt(&key, &item_id, &attachment_id, &plaintext).map_err(js_err)
 }
 
 /// Decrypt a whole (small) file at once; throws `decrypt_failed` unless it is whole and authentic.
@@ -1385,11 +1441,12 @@ pub fn file_decrypt(
     #[wasm_bindgen(unchecked_param_type = "string")] key: JsValue,
     #[wasm_bindgen(unchecked_param_type = "string")] item_id: JsValue,
     #[wasm_bindgen(unchecked_param_type = "string")] attachment_id: JsValue,
-    ciphertext: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] ciphertext: JsValue,
 ) -> R<Vec<u8>> {
     let (key, item_id, attachment_id) = (string(key)?, string(item_id)?, string(attachment_id)?);
+    let ciphertext = bytes(&ciphertext)?;
     let key = FileKey::from_b64(&key).map_err(js_err)?;
-    file::decrypt(&key, &item_id, &attachment_id, ciphertext).map_err(js_err)
+    file::decrypt(&key, &item_id, &attachment_id, &ciphertext).map_err(js_err)
 }
 
 /// Derive master keys from what prelogin returned (`{ account_id, kdf, secret_key_required }`).
@@ -1428,12 +1485,13 @@ pub fn opaque_register_start(master: &MasterKeys) -> R<OpaqueStart> {
 
 #[wasm_bindgen(js_name = opaqueRegisterFinish)]
 pub fn opaque_register_finish(
-    state: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] state: JsValue,
     master: &MasterKeys,
     #[wasm_bindgen(unchecked_param_type = "string")] response: JsValue,
 ) -> R<String> {
+    let state = bytes(&state)?;
     let response = string(response)?;
-    opaque::register_finish(state, &master.0.login, &response).map_err(js_err)
+    opaque::register_finish(&state, &master.0.login, &response).map_err(js_err)
 }
 
 #[wasm_bindgen(js_name = opaqueLoginStart)]
@@ -1448,23 +1506,25 @@ pub fn opaque_login_start(master: &MasterKeys) -> R<OpaqueStart> {
 /// Throws `decrypt_failed` when the password or Secret Key is wrong.
 #[wasm_bindgen(js_name = opaqueLoginFinish)]
 pub fn opaque_login_finish(
-    state: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] state: JsValue,
     master: &MasterKeys,
     #[wasm_bindgen(unchecked_param_type = "string")] response: JsValue,
 ) -> R<String> {
+    let state = bytes(&state)?;
     let response = string(response)?;
-    opaque::login_finish(state, &master.0.login, &response).map_err(js_err)
+    opaque::login_finish(&state, &master.0.login, &response).map_err(js_err)
 }
 
 /// Parse an export from another password manager. Throws `password_required`
 /// for password-protected files when `password` is missing.
 #[wasm_bindgen(js_name = importFile)]
 pub fn import_file(
-    data: &[u8],
+    #[wasm_bindgen(unchecked_param_type = "Uint8Array")] data: JsValue,
     #[wasm_bindgen(unchecked_optional_param_type = "string | null")] password: JsValue,
 ) -> R<JsValue> {
+    let data = bytes(&data)?;
     let password = opt_string(password)?;
-    to_js(&import::import(data, password.as_deref()).map_err(js_err)?)
+    to_js(&import::import(&data, password.as_deref()).map_err(js_err)?)
 }
 
 /// The browser's clock (std's SystemTime isn't available in wasm32).

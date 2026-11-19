@@ -32,8 +32,8 @@ use crate::passkeys;
 use crate::policies;
 use crate::settings::Num;
 use crate::state::{
-    AppState, Class, DeviceInfo, DeviceLogin, PendingLogin, PendingRegistration, PendingTwoFactor,
-    Sessions, SyncNotice, ct_eq, hash_token, normalize_email, random_token,
+    AppState, Class, DeviceInfo, DeviceLogin, KeyContext, PendingLogin, PendingRegistration,
+    PendingTwoFactor, Sessions, SyncNotice, ct_eq, hash_token, normalize_email, random_token,
 };
 use crate::twofactor;
 
@@ -138,6 +138,7 @@ pub fn routes() -> Router<AppState> {
         .route("/2fa/email", post(two_factor_send_email))
         .route("/2fa/passkey/start", post(two_factor_passkey_start))
         .route("/2fa/passkey/finish", post(two_factor_passkey_finish))
+        .route("/2fa/passkey/context", get(two_factor_passkey_context))
         .route("/refresh", post(refresh))
         .route("/logout", post(logout))
         .route("/verify-email", post(verify_email))
@@ -901,6 +902,7 @@ pub(crate) fn two_factor_challenge(
             attempts: 0,
             passkey: None,
             device_login,
+            key_context: None,
         },
         5 * 60,
     );
@@ -1030,6 +1032,7 @@ async fn two_factor_failed(
 /// Assertion options for the account's security keys (`allowCredentials`).
 async fn two_factor_passkey_start(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(b): Json<TwoFactorEmail>,
 ) -> ApiResult<Json<Value>> {
     let (exp, mut pending) = state
@@ -1063,9 +1066,81 @@ async fn two_factor_passkey_start(
     let (options, auth_state) = webauthn
         .start_securitykey_authentication(&creds)
         .map_err(|e| anyhow::anyhow!("webauthn authentication start: {e:?}"))?;
+    let options = passkeys::options(&options)?;
     pending.passkey = Some(auth_state);
+    if let Some(challenge) = options["publicKey"]["challenge"].as_str() {
+        pending.key_context = Some(KeyContext {
+            challenge: challenge.to_owned(),
+            client: key_page_client(&headers),
+            ip: visitor_ip(&state, &headers),
+            started_at: now(),
+        });
+        state.passkey_challenges.put_back(
+            challenge.to_owned(),
+            b.two_factor_token.clone(),
+            exp.min(now() + passkeys::CHALLENGE_TTL),
+        );
+    }
     state.two_factor.put_back(b.two_factor_token, pending, exp);
-    Ok(Json(json!({ "options": passkeys::options(&options)? })))
+    Ok(Json(json!({
+        "options": options,
+        "key_page": passkeys::key_page(&state),
+    })))
+}
+
+/// The app types the key page names (`X-PassAuth-Client` name part).
+const KEY_PAGE_CLIENTS: &[&str] = &[
+    "web",
+    "desktop",
+    "extension",
+    "ios",
+    "android",
+    "macos-autofill",
+];
+
+fn key_page_client(headers: &HeaderMap) -> Option<String> {
+    let app = client_app(headers)?;
+    let name = app.split_once('/').map_or(app.as_str(), |(n, _)| n);
+    KEY_PAGE_CLIENTS.contains(&name).then(|| name.to_owned())
+}
+
+#[derive(Deserialize)]
+struct KeyContextQuery {
+    challenge: String,
+}
+
+/// `GET /auth/2fa/passkey/context?challenge=…`: what the key page shows about the
+/// sign-in waiting for this security-key challenge (which app, device name,
+/// address, when), so a person sent a key page by someone else can see it isn't
+/// theirs. Public; never the email, user id or token. 404 for an unknown, finished
+/// or expired challenge alike. Challenges are not logged.
+async fn two_factor_passkey_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<KeyContextQuery>,
+) -> ApiResult<Json<Value>> {
+    let ip = client_ip(&state, &headers);
+    limit(&state, format!("2fa-key-context:{ip}"), 30, 60)?;
+    if q.challenge.is_empty() || q.challenge.len() > 128 {
+        return Err(ApiError::NotFound);
+    }
+    let token = state
+        .passkey_challenges
+        .peek(&q.challenge, Clone::clone)
+        .ok_or(ApiError::NotFound)?;
+    let found = state.two_factor.peek(&token, |p| {
+        let ctx = p.key_context.as_ref()?;
+        // Only the latest challenge of a sign-in still waiting for its key.
+        (p.passkey.is_some() && ctx.challenge == q.challenge).then(|| {
+            json!({
+                "client": ctx.client,
+                "device_name": (!p.device.name.trim().is_empty()).then(|| p.device.name.clone()),
+                "ip": ctx.ip,
+                "started_at": ctx.started_at,
+            })
+        })
+    });
+    found.flatten().map(Json).ok_or(ApiError::NotFound)
 }
 
 #[derive(Deserialize)]

@@ -47,6 +47,29 @@ pub fn relying_party(state: &crate::state::App) -> ApiResult<&Webauthn> {
     })
 }
 
+/// The web vault's key page (`DOMAIN` + `/two-step/key`): apps that can't run
+/// WebAuthn for this relying party themselves (desktop, extension, phones)
+/// open it in a browser with the request options in the URL fragment and get
+/// the assertion back, then call `/auth/2fa/passkey/finish` with their own
+/// two-factor token. `None` when security keys are unavailable.
+///
+/// Only for an https `DOMAIN`: the apps open nothing else, so with plain http
+/// (a LAN test install) the method stays web-vault-only.
+pub fn key_page(state: &crate::state::App) -> Option<String> {
+    state.webauthn.as_ref()?;
+    let domain = &state.config.domain;
+    if !domain
+        .get(..8)
+        .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        return None;
+    }
+    Some(format!(
+        "https://{}/two-step/key",
+        domain[8..].trim_end_matches('/')
+    ))
+}
+
 /// WebAuthn user handle: our user ids are UUIDs; anything else is hashed into one.
 pub fn user_handle(user_id: &str) -> Uuid {
     Uuid::parse_str(user_id).unwrap_or_else(|_| {

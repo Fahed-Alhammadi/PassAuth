@@ -619,6 +619,11 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
     if state.icons.enabled() {
         features.push("icons");
     }
+    // Security keys through the web vault's key page (`/two-step/key`) for
+    // apps that hand the ceremony to a browser; needs an https `DOMAIN`.
+    if crate::passkeys::key_page(&state).is_some() {
+        features.push("two_step_key_page");
+    }
     Json(json!({
         "name": "PassAuth",
         "version": env!("CARGO_PKG_VERSION"),

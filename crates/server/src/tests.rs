@@ -1917,6 +1917,10 @@ async fn passkey_challenge(app: &Router, email: &str, pw: &str) -> (StatusCode, 
         json!({ "two_factor_token": tf }),
     )
     .await;
+    if s == StatusCode::OK {
+        // No key page for an http DOMAIN (test: http://localhost).
+        assert!(o["key_page"].is_null(), "{o}");
+    }
     (s, tf, o["options"].clone())
 }
 
@@ -2466,6 +2470,158 @@ fn new_item(vault: (&str, &SymmetricKey), name: &str) -> (String, Value) {
     let id = uuid::Uuid::new_v4().to_string();
     let body = item_body(&id, vault, name);
     (id, body)
+}
+
+#[tokio::test]
+async fn key_page_only_for_an_https_domain() {
+    for (domain, page) in [
+        // No scheme: no relying party at all.
+        ("vault.example.com", None),
+        // Plain http: security keys work in the web vault, but no key page.
+        ("http://vault.example.com", None),
+        (
+            "https://vault.example.com",
+            Some("https://vault.example.com/two-step/key"),
+        ),
+        (
+            "HTTPS://vault.example.com/",
+            Some("https://vault.example.com/two-step/key"),
+        ),
+    ] {
+        let mut config = test_config().await;
+        config.domain = domain.into();
+        let state = App::new(config).await.unwrap();
+        assert_eq!(
+            crate::passkeys::key_page(&state).as_deref(),
+            page,
+            "{domain}"
+        );
+        let app = crate::router(state);
+        let (_, v) = call(&app, Method::GET, "/api/config", None, json!(null)).await;
+        let features: Vec<String> = serde_json::from_value(v["features"].clone()).unwrap();
+        assert_eq!(
+            features.iter().any(|f| f == "two_step_key_page"),
+            page.is_some(),
+            "{domain}: {v}"
+        );
+    }
+}
+
+/// `GET /auth/2fa/passkey/context`: what the key page shows about a waiting sign-in.
+#[tokio::test]
+async fn key_page_context() {
+    let app = app().await;
+    let (email, pw) = ("kim@example.com", "pw-kim-1234");
+    register(&app, email, pw).await;
+    let t = token(&app, email, pw).await;
+    let ra = reauth_token(&app, email, pw, &t).await;
+    let (s, start) = call_with(
+        &app,
+        Method::POST,
+        "/api/account/2fa/passkey/register/start",
+        Some(&t),
+        &[("x-reauth-token", &ra)],
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{start}");
+    let (key, credential) = SoftKey::create(&start["options"]);
+    let (s, v) = call(&app, Method::POST, "/api/account/2fa/passkey/register/finish", Some(&t),
+        json!({ "registration_id": start["registration_id"], "name": "Key", "credential": credential })).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    let context = |challenge: &str| {
+        let app = app.clone();
+        let path = format!("/api/auth/2fa/passkey/context?challenge={challenge}");
+        async move { call(&app, Method::GET, &path, None, json!(null)).await }
+    };
+    let (s, l) = login(&app, email, pw, "d-ctx").await;
+    assert_eq!(s, StatusCode::OK, "{l}");
+    let tf = l["two_factor_token"].clone();
+    // Nothing started yet.
+    assert_eq!(
+        context("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let before = crate::db::now();
+    let (s, o) = call_with(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        &[("x-passauth-client", "android/0.13.0")],
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{o}");
+    let challenge = o["options"]["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (s, v) = context(&challenge).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let fields: Vec<&String> = v.as_object().unwrap().keys().collect();
+    assert_eq!(fields, ["client", "device_name", "ip", "started_at"], "{v}");
+    assert_eq!(v["client"], "android");
+    assert_eq!(v["device_name"], "Test device");
+    assert!(v["ip"].is_null() || v["ip"].is_string(), "{v}");
+    assert!(v["started_at"].as_i64().unwrap() >= before, "{v}");
+    let text = v.to_string();
+    assert!(
+        !text.contains(email) && !text.contains(tf.as_str().unwrap()),
+        "{v}"
+    );
+
+    // Unknown and malformed challenges look the same.
+    for bad in ["nope", "", &"A".repeat(200)] {
+        let (s, v) = context(bad).await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "{bad}: {v}");
+        assert_eq!(v["error"], "not_found");
+    }
+    // A new start replaces the challenge: the old one is gone; an unknown app is null.
+    let (s, o2) = call_with(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/start",
+        None,
+        &[("x-passauth-client", "toaster/1.0")],
+        json!({ "two_factor_token": tf }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{o2}");
+    assert_eq!(context(&challenge).await.0, StatusCode::NOT_FOUND);
+    let challenge = o2["options"]["publicKey"]["challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (s, v) = context(&challenge).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(v["client"].is_null(), "{v}");
+    // Finished: 404.
+    let (s, ok) = call(
+        &app,
+        Method::POST,
+        "/api/auth/2fa/passkey/finish",
+        None,
+        json!({ "two_factor_token": tf, "credential": key.assert(&o2["options"], true) }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{ok}");
+    assert_eq!(context(&challenge).await.0, StatusCode::NOT_FOUND);
+
+    // Rate limit: 30 lookups a minute per address.
+    let mut limited = false;
+    for _ in 0..40 {
+        let (s, v) = context("nope").await;
+        if s == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(v["error"], "rate_limited");
+            limited = true;
+            break;
+        }
+    }
+    assert!(limited);
 }
 
 #[tokio::test]
@@ -8027,6 +8183,16 @@ async fn the_send_page_is_the_web_vault_without_a_referrer() {
     let home = get_raw(&app, "/").await;
     assert_eq!(home.headers()["referrer-policy"], "same-origin");
     let csp = home.headers()["content-security-policy"].clone();
+    // The security-key page apps open in a browser (and its done page) is the
+    // web vault's document with the same CSP, signed out.
+    for path in ["/two-step/key", "/two-step/key/done"] {
+        let resp = get_raw(&app, path).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        assert_eq!(resp.headers()["content-security-policy"], csp, "{path}");
+        assert_eq!(resp.headers()["x-frame-options"], "DENY", "{path}");
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.starts_with(b"<!doctype html>"), "{path}");
+    }
     for path in [
         "/send/AAAAAAAAAAAAAAAAAAAAAA",
         "/send/AAAAAAAAAAAAAAAAAAAAAA/",
