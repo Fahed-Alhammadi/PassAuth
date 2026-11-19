@@ -45,6 +45,21 @@ object AddSite {
         is FillTarget.App -> webDomain.isNullOrBlank()
     }
 
+    /** The fill entry that opens the picker: apps rarely have a login saved for them yet, so "Choose a login…". */
+    fun entryTitle(app: Boolean): String = if (app) "Choose a login…" else "Add this site to a login…"
+
+    /**
+     * Offer the picker entry on this form? Nothing matched, the place may be added to a login
+     * ([allowed]), it isn't a code-only screen, and it is a sign-in form: a password field, or
+     * for an app also a user-name-only first step. [hasTargets]: the vault has a login to pick.
+     */
+    fun offerEntry(allowed: Boolean, matched: Boolean, form: LoginForm<*>, app: Boolean, hasTargets: () -> Boolean): Boolean {
+        val otpOnly = form.fillIds.isEmpty() && form.otp != null
+        if (!allowed || matched || otpOnly) return false
+        if (form.password == null && !(app && form.username != null)) return false
+        return hasTargets()
+    }
+
     /** The address added to the login: the page origin, or `androidapp://<package>`. */
     fun address(target: FillTarget): String = AutofillMatcher.saveUrl(target)
 
@@ -81,6 +96,20 @@ object AddSite {
         if (!p.writable || alreadyMatches(target, login, defaultMatch, p.personal)) return@mapNotNull null
         Target(id, name, login.username, siteOf(login), p.personal, p.vault)
     }.sortedByDescending { it.personal }
+
+    /**
+     * [targets] with the logins saved for one of [guesses] (base domains an app's package name
+     * points to, [AppLinks.candidates]) first, otherwise in the same order. Only ordering: the user
+     * still picks and confirms the login.
+     */
+    fun <K> guessesFirst(targets: List<Target<K>>, guesses: List<String>, login: (K) -> Login?): List<Target<K>> {
+        if (guesses.isEmpty()) return targets
+        val set = guesses.toSet()
+        return targets.sortedBy { t ->
+            val l = login(t.id)
+            if (l != null && l.urls.any { u -> AppLinks.webBase(u, UrlMatcher::baseDomain) in set }) 0 else 1
+        }
+    }
 
     /**
      * The save sheet's "Add this site" rows: the user's OWN (personal, editable) logins for other
@@ -122,6 +151,10 @@ object AddSite {
     /** The picker's confirmation text. */
     fun confirmText(t: Target<*>, place: String, here: String = "site"): String {
         val name = t.name.ifEmpty { "This login" }
+        if (here == "app") {
+            val same = if (t.site.isNotEmpty()) "Remember it only if $place uses your ${t.site} account." else "Remember it only if $place uses the same account."
+            return "Remember it, and PassAuth suggests $name in $place from now on. $same"
+        }
         val same = if (t.site.isNotEmpty()) "Add a $here only when it uses the same account as ${t.site}." else "Add a $here only when it uses the same account."
         return "$name will be suggested and filled on $place. Its user name and password stay the same. $same"
     }

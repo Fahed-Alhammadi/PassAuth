@@ -54,13 +54,13 @@ class PassAuthAutofillService : AutofillService() {
     private suspend fun respond(request: FillRequest, parsed: ParsedStructure, started: Long): FillResponse? {
         val form = parsed.form
         if (form.isEmpty) return null
-        val target = engine.target(parsed) ?: return null
+        val found = engine.target(parsed) ?: return null
         val state = graph.loadedState()
         if (state.status == Status.Setup || state.status == Status.LoggedOut) return null
         val ids = (form.fillIds + listOfNotNull(form.otp?.id)).distinct()
-        val offerSave = engine.offerSave(target)
+        val offerSave = engine.offerSave(found)
         // With the vault open, Android's save dialog can say whether a saved login gets updated.
-        fun saveInfo(vault: io.passauth.app.data.VaultData?) = if (!offerSave) null else AutofillResponses.saveInfo(
+        fun saveInfo(vault: io.passauth.app.data.VaultData?, target: FillTarget) = if (!offerSave) null else AutofillResponses.saveInfo(
             this, form,
             AutofillAuthActivity.sender(this, AutofillAuthActivity.MODE_NEVER, key = AutofillMatcher.neverSaveKey(target)),
             vault?.let { engine.saveHint(it, target) },
@@ -70,7 +70,9 @@ class PassAuthAutofillService : AutofillService() {
         // (its activity returns the logins straight away when the vault turns out to be unlocked).
         val left = (VAULT_DEADLINE_MS - (SystemClock.elapsedRealtime() - started)).coerceAtLeast(MIN_VAULT_WAIT_MS)
         val vault = withTimeoutOrNull(left) { graph.awaitVault() }
-        val save = saveInfo(vault)
+        // An app: also the websites that vouch for it (asset links), within what is left of the budget.
+        val target = if (vault == null) found else engine.linked(found, vault, (LINK_DEADLINE_MS - (SystemClock.elapsedRealtime() - started)).coerceIn(0, MAX_LINK_WAIT_MS))
+        val save = saveInfo(vault, target)
         val b = FillResponse.Builder()
         if (vault == null) {
             // Locked: the user unlocks in PassAuth, which then returns the matching logins.
@@ -90,11 +92,13 @@ class PassAuthAutofillService : AutofillService() {
         val parsed = StructureParser.parse(structure)
         graph.scope.launch {
             try {
-                val target = engine.target(parsed)
+                val found = engine.target(parsed)
                 val creds = engine.submitted(parsed.form)
-                if (target == null || creds == null || !engine.offerSave(target)) return@launch callback.onSuccess()
-                val label = (target as? FillTarget.App)?.let { engine.appLabel(it.packageName) ?: parsed.windowTitle }
+                if (found == null || creds == null || !engine.offerSave(found)) return@launch callback.onSuccess()
+                val label = (found as? FillTarget.App)?.let { engine.appLabel(it.packageName) ?: parsed.windowTitle }
                 val vault = graph.awaitVault()
+                // An app: also the logins of websites that vouch for it (asset links).
+                val target = if (vault == null) found else engine.linked(found, vault)
                 val account = graph.repo.state.value.activeId
                 // Through PassAuth's own sheet (the typed login stays in memory, never in the intent).
                 fun askInSheet() {
@@ -148,8 +152,9 @@ class PassAuthAutofillService : AutofillService() {
             if (vault == null || p.accountId != account) return@launch
             if (graph.repo.state.value.let { it.activeId != account || it.status != Status.Unlocked }) return@launch
             try {
-                val plan = SaveRule.withoutSheet(engine.planSave(vault, p.target, p.username, p.password))
-                engine.applySave(vault, p.target, p.username, p.password, p.appLabel, plan)?.let { toast(it) }
+                val target = engine.linked(p.target, vault)
+                val plan = SaveRule.withoutSheet(engine.planSave(vault, target, p.username, p.password))
+                engine.applySave(vault, target, p.username, p.password, p.appLabel, plan)?.let { toast(it) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -167,5 +172,8 @@ class PassAuthAutofillService : AutofillService() {
         const val MIN_VAULT_WAIT_MS = 250L
         const val HARD_LIMIT_MS = 4_500L
         const val SHEET_GRACE_MS = 3_000L
+        /** Asset links checks for apps end by then (from the request), leaving time to answer. */
+        const val LINK_DEADLINE_MS = 4_000L
+        const val MAX_LINK_WAIT_MS = 2_000L
     }
 }

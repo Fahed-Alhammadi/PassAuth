@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -68,6 +67,7 @@ import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.UiCtx
 import io.passauth.app.ui.authenticate
 import io.passauth.app.ui.biometricsAvailable
+import io.passauth.app.ui.settings.ChromeAutofillHint
 import io.passauth.app.ui.settings.SystemServices
 import io.passauth.app.ui.theme.PassAuthTheme
 
@@ -90,8 +90,8 @@ fun PermissionsIntroScreen(ctx: UiCtx) {
                 Text("PassAuth", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
             PromptHeader("Set up PassAuth", "Choose what PassAuth may use on this phone.")
-            GroupCard { Column(Modifier.padding(horizontal = Space.l, vertical = Space.xs)) { PermissionList(ctx, intro = true) } }
-            PromptText("Everything is optional. You can change it later in Settings → Permissions.", Modifier.padding(horizontal = Space.xs))
+            GroupCard { Column(Modifier.padding(horizontal = Space.l, vertical = Space.xs)) { PermissionList(ctx) } }
+            PromptText("Everything is optional. You can change it later in Android settings.", Modifier.padding(horizontal = Space.xs))
         }
         Column(
             Modifier.widthIn(max = 560.dp).padding(start = Space.l, end = Space.l, top = Space.m, bottom = Space.s),
@@ -104,20 +104,8 @@ fun PermissionsIntroScreen(ctx: UiCtx) {
     }
 }
 
-/** Settings → Permissions: the same list with each one's current state. */
 @Composable
-fun ColumnScope.PermissionsSettings(ctx: UiCtx) {
-    PermissionList(ctx, intro = false)
-    HorizontalDivider(color = PassAuthTheme.colors.line)
-    Text(
-        "PassAuth doesn't use your location, contacts or notifications.",
-        style = MaterialTheme.typography.bodySmall,
-        color = PassAuthTheme.colors.muted,
-    )
-}
-
-@Composable
-private fun PermissionList(ctx: UiCtx, intro: Boolean) {
+private fun PermissionList(ctx: UiCtx) {
     val context = LocalContext.current
     val activity = ctx.activity
     // Re-read everything when PassAuth comes back from Android's settings or a permission dialog.
@@ -145,18 +133,14 @@ private fun PermissionList(ctx: UiCtx, intro: Boolean) {
         Feature.Camera to camera,
         Feature.Autofill to PermissionModel.service(autofillOn),
         Feature.Passkeys to PermissionModel.service(providerOn),
-        Feature.Biometrics to PermissionModel.biometrics(
-            biometricCode,
-            enabled = if (intro) null else ctx.state.biometricEnabled,
-            chosen = ctx.state.onboarding.offerBiometric,
-        ),
+        Feature.Biometrics to PermissionModel.biometrics(biometricCode, chosen = ctx.state.onboarding.offerBiometric),
     )
     rows.forEachIndexed { n, (feature, access) ->
         // Inset to the text column (past the icon), like every list in the app.
         if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
-        PermissionRow(feature, access, intro) { action ->
+        PermissionRow(feature, access) { action ->
             when (action) {
-                Action.Request -> if (feature == Feature.Camera) requestCamera.launch(Manifest.permission.CAMERA) else ctx.turnOnBiometricUnlock()
+                Action.Request -> requestCamera.launch(Manifest.permission.CAMERA)
                 Action.OpenAppSettings -> openAppSettings(context)
                 Action.OpenSystemScreen -> if (feature == Feature.Autofill) {
                     if (!SystemServices.openAutofillSettings(context)) ctx.notify("Open Android settings → Passwords, passkeys & accounts to choose PassAuth.")
@@ -167,6 +151,10 @@ private fun PermissionList(ctx: UiCtx, intro: Boolean) {
                 Action.Choose -> ctx.launch { ctx.repo.updateOnboarding { it.copy(offerBiometric = true) } }
                 Action.None -> Unit
             }
+        }
+        // Chrome also needs its own switch before it asks PassAuth (only when Chrome is installed).
+        if (feature == Feature.Autofill) {
+            ChromeAutofillHint(ctx, resumes, Modifier.padding(start = 24.dp + Space.m, bottom = 12.dp))
         }
     }
 }
@@ -179,17 +167,16 @@ private fun icon(feature: Feature): ImageVector = when (feature) {
 }
 
 @Composable
-private fun PermissionRow(feature: Feature, access: Access, intro: Boolean, onAction: (Action) -> Unit) {
+private fun PermissionRow(feature: Feature, access: Access, onAction: (Action) -> Unit) {
     val title = PermissionModel.title(feature)
-    // "On" is already shown by the checkmark. On the first-launch screen everything starts
-    // "not asked", so only the unusual states get a status line there.
-    val showStatus = access != Access.On &&
-        (!intro || access in setOf(Access.Blocked, Access.Chosen, Access.NotSetUp, Access.Unavailable))
+    // "On" is already shown by the checkmark. Everything starts "not asked", so only the unusual
+    // states get a status line.
+    val showStatus = access in setOf(Access.Blocked, Access.Chosen, Access.NotSetUp, Access.Unavailable)
     // Large fonts: the button goes under the text so neither gets squeezed.
     val stacked = LocalDensity.current.fontScale >= 1.5f
     val trailing: @Composable () -> Unit = {
         val label = PermissionModel.actionLabel(feature, access)
-        val action = PermissionModel.action(feature, access, intro)
+        val action = PermissionModel.action(feature, access)
         when {
             // Quiet: the page's one filled button is "Continue".
             label != null && action != Action.None -> TextButton(
@@ -207,8 +194,7 @@ private fun PermissionRow(feature: Feature, access: Access, intro: Boolean, onAc
         }
     }
     Row(
-        // Settings' card column already spaces its children.
-        Modifier.fillMaxWidth().padding(vertical = if (intro) 12.dp else 2.dp),
+        Modifier.fillMaxWidth().padding(vertical = 12.dp),
         verticalAlignment = if (stacked) Alignment.Top else Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Space.m),
     ) {

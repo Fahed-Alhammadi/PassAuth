@@ -22,7 +22,7 @@ class PermissionsTest {
         // A record without a server (fresh install) still counts as first launch.
         assertTrue(Stored(accounts = mapOf("a" to AccountData())).showPermissionsIntro)
         assertFalse(Stored(onboarding = Onboarding(permissionsShown = true)).showPermissionsIntro)
-        // Already using the app (upgrade): not shown, it's in Settings → Permissions.
+        // Already using the app (upgrade): not shown; changes go through Android's settings.
         assertFalse(Stored(accounts = mapOf("a" to AccountData(server = "https://vault.example.com"))).showPermissionsIntro)
     }
 
@@ -48,24 +48,21 @@ class PermissionsTest {
     @Test
     fun biometricStates() {
         val ok = BiometricManager.BIOMETRIC_SUCCESS
-        assertEquals(Access.Off, PermissionModel.biometrics(ok, enabled = null, chosen = false))
-        assertEquals(Access.Chosen, PermissionModel.biometrics(ok, enabled = null, chosen = true))
-        assertEquals(Access.Off, PermissionModel.biometrics(ok, enabled = false, chosen = true))
-        assertEquals(Access.On, PermissionModel.biometrics(ok, enabled = true, chosen = false))
-        assertEquals(Access.NotSetUp, PermissionModel.biometrics(BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED, null, false))
-        assertEquals(Access.Unavailable, PermissionModel.biometrics(BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE, null, true))
+        assertEquals(Access.Off, PermissionModel.biometrics(ok, chosen = false))
+        assertEquals(Access.Chosen, PermissionModel.biometrics(ok, chosen = true))
+        assertEquals(Access.NotSetUp, PermissionModel.biometrics(BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED, false))
+        assertEquals(Access.Unavailable, PermissionModel.biometrics(BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE, true))
     }
 
     @Test
     fun actionsAndLabels() {
-        assertEquals(Action.Request, PermissionModel.action(Feature.Camera, Access.NotAsked, intro = true))
-        assertEquals(Action.OpenAppSettings, PermissionModel.action(Feature.Camera, Access.Blocked, intro = false))
-        assertEquals(Action.OpenSystemScreen, PermissionModel.action(Feature.Autofill, Access.Off, intro = true))
-        assertEquals(Action.OpenSystemScreen, PermissionModel.action(Feature.Passkeys, Access.Off, intro = false))
-        assertEquals(Action.Choose, PermissionModel.action(Feature.Biometrics, Access.Off, intro = true))
-        assertEquals(Action.Request, PermissionModel.action(Feature.Biometrics, Access.Off, intro = false))
-        assertEquals(Action.Enroll, PermissionModel.action(Feature.Biometrics, Access.NotSetUp, intro = true))
-        assertEquals(Action.None, PermissionModel.action(Feature.Camera, Access.On, intro = true))
+        assertEquals(Action.Request, PermissionModel.action(Feature.Camera, Access.NotAsked))
+        assertEquals(Action.OpenAppSettings, PermissionModel.action(Feature.Camera, Access.Blocked))
+        assertEquals(Action.OpenSystemScreen, PermissionModel.action(Feature.Autofill, Access.Off))
+        assertEquals(Action.OpenSystemScreen, PermissionModel.action(Feature.Passkeys, Access.Off))
+        assertEquals(Action.Choose, PermissionModel.action(Feature.Biometrics, Access.Off))
+        assertEquals(Action.Enroll, PermissionModel.action(Feature.Biometrics, Access.NotSetUp))
+        assertEquals(Action.None, PermissionModel.action(Feature.Camera, Access.On))
 
         assertEquals("Allow", PermissionModel.actionLabel(Feature.Camera, Access.NotAsked))
         assertEquals("Turn on", PermissionModel.actionLabel(Feature.Autofill, Access.Off))

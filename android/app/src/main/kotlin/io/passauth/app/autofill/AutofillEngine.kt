@@ -11,10 +11,14 @@ import io.passauth.app.data.Login
 import io.passauth.app.data.LoginUrl
 import io.passauth.app.data.Role
 import io.passauth.app.data.UrlMatch
+import io.passauth.app.data.UrlMatcher
 import io.passauth.app.data.VaultData
 import io.passauth.core.sha256
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** Autofill decisions shared by the service and its unlock activity. */
@@ -45,6 +49,38 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
     }
 
     private fun settings() = graph.repo.state.value.settings
+
+    /**
+     * [target] with the websites it is verified for ([FillTarget.App.linkedDomains]): for an app,
+     * the candidate domains ([AppLinks.candidates], only domains the vault has logins for) whose
+     * asset links list the app with its installed signing certificate. Cached answers first; the
+     * rest are fetched in parallel, each within [timeoutMs] (0: cache only). Websites and apps
+     * without candidates come back unchanged.
+     */
+    suspend fun linked(target: FillTarget, vault: VaultData, timeoutMs: Long = 2_000): FillTarget {
+        val app = target as? FillTarget.App ?: return target
+        val candidates = appGuesses(vault, app)
+        if (candidates.isEmpty()) return app
+        val prints = certFingerprints(app.packageName)
+        if (prints.isEmpty()) return app
+        val relations = AssetLinks.APP_LOGIN_RELATIONS
+        suspend fun check(base: String): Boolean {
+            val hosts = AppLinks.assetLinkHosts(base)
+            if (hosts.any { graph.assetLinks.cached(it, app.packageName, prints, relations) == true }) return true
+            if (timeoutMs <= 0) return false
+            return withTimeoutOrNull(timeoutMs) {
+                hosts.any { h -> graph.assetLinks.cached(h, app.packageName, prints, relations) ?: graph.assetLinks.verify(h, app.packageName, prints, relations) }
+            } ?: false
+        }
+        val verified = coroutineScope { candidates.map { base -> async { base.takeIf { check(it) } } }.awaitAll() }.filterNotNull()
+        return if (verified.isEmpty()) app else app.copy(linkedDomains = verified.toSet())
+    }
+
+    /** Domains an app may belong to by its package name, among those the vault has logins for (unverified: only for sorting the picker). */
+    fun appGuesses(vault: VaultData, app: FillTarget.App): List<String> {
+        val bases = AppLinks.loginBases(vault.entries.mapNotNull { it.item.login }, UrlMatcher::baseDomain)
+        return AppLinks.candidates(app.packageName, bases, UrlMatcher::baseDomain)
+    }
 
     /**
      * Matching logins for the target (the PassAuth server's own web vault is an ordinary website;
@@ -94,8 +130,12 @@ class AutofillEngine(private val context: Context, private val graph: AppGraph) 
     }
 
     /** The logins [target] can be added to ("Add this site to a login", see [AddSite.targets]). */
-    fun addSiteTargets(vault: VaultData, target: FillTarget): List<AddSite.Target<String>> =
-        AddSite.targets(target, logins(vault), settings().defaultMatch, placeOf(vault))
+    fun addSiteTargets(vault: VaultData, target: FillTarget): List<AddSite.Target<String>> {
+        val all = AddSite.targets(target, logins(vault), settings().defaultMatch, placeOf(vault))
+        val app = target as? FillTarget.App ?: return all
+        // An app: logins of the domains its package name points to come first (a guess, never filled by itself).
+        return AddSite.guessesFirst(all, appGuesses(vault, app)) { id -> vault.get(id)?.item?.login }
+    }
 
     /**
      * The save sheet's "Add this site" rows for what was typed ([AddSite.sameAccountElsewhere]):

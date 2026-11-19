@@ -49,19 +49,19 @@ object PermissionModel {
     fun service(enabled: Boolean): Access = if (enabled) Access.On else Access.Off
 
     /**
-     * Fingerprint / face unlock from [BiometricManager.canAuthenticate] (strong biometrics).
-     * [enabled]: on for the active account (Settings); null on the first-launch screen,
-     * where [chosen] means it will be offered after sign-in.
+     * Fingerprint / face unlock from [BiometricManager.canAuthenticate] (strong biometrics), on the
+     * first-launch screen: [chosen] means it will be offered after sign-in (turned on later in
+     * Settings → Account security).
      */
-    fun biometrics(code: Int, enabled: Boolean?, chosen: Boolean): Access = when {
-        enabled == true -> Access.On
+    fun biometrics(code: Int, chosen: Boolean): Access = when {
         code == BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> Access.NotSetUp
         code != BiometricManager.BIOMETRIC_SUCCESS -> Access.Unavailable
-        enabled == null && chosen -> Access.Chosen
+        chosen -> Access.Chosen
         else -> Access.Off
     }
 
-    fun action(feature: Feature, access: Access, intro: Boolean): Action = when (access) {
+    /** What a row's button does on the first-launch screen (Android settings handle changes later). */
+    fun action(feature: Feature, access: Access): Action = when (access) {
         Access.On, Access.Chosen, Access.Unavailable -> Action.None
         Access.Blocked -> Action.OpenAppSettings
         Access.NotSetUp -> Action.Enroll
@@ -69,7 +69,7 @@ object PermissionModel {
             Feature.Camera -> Action.Request
             Feature.Autofill, Feature.Passkeys -> Action.OpenSystemScreen
             // First launch: nobody is signed in yet, so remember the choice.
-            Feature.Biometrics -> if (intro) Action.Choose else Action.Request
+            Feature.Biometrics -> Action.Choose
         }
     }
 

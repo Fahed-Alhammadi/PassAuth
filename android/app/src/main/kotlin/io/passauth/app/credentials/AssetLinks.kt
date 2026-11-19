@@ -21,6 +21,10 @@ import okhttp3.Request
  */
 object AssetLinks {
     const val GET_LOGIN_CREDS = "delegate_permission/common.get_login_creds"
+    const val HANDLE_ALL_URLS = "delegate_permission/common.handle_all_urls"
+
+    /** What links a site's logins to an app for autofill: either relation (the site vouches for the app). */
+    val APP_LOGIN_RELATIONS = setOf(GET_LOGIN_CREDS, HANDLE_ALL_URLS)
 
     /** SHA-256 as upper-case hex pairs separated by colons ("AB:CD:…"), the assetlinks format. */
     fun fingerprint(sha256: ByteArray): String = sha256.joinToString(":") { "%02X".format(it.toInt() and 0xff) }
@@ -28,18 +32,18 @@ object AssetLinks {
     private fun normFingerprint(s: String) = s.trim().uppercase(Locale.ROOT).replace(":", "")
 
     /**
-     * Does the assetlinks.json [json] grant [relation] to the Android app [packageName]
+     * Does the assetlinks.json [json] grant one of [relations] to the Android app [packageName]
      * signed with a certificate whose SHA-256 is one of [certFingerprints]? Malformed
      * files or statements grant nothing. `include` statements are not followed.
      */
-    fun allows(json: String, packageName: String, certFingerprints: List<String>, relation: String = GET_LOGIN_CREDS): Boolean {
+    fun allows(json: String, packageName: String, certFingerprints: List<String>, relations: Set<String> = setOf(GET_LOGIN_CREDS)): Boolean {
         val statements = runCatching { AppJson.parseToJsonElement(json) as? JsonArray }.getOrNull() ?: return false
         val wanted = certFingerprints.map(::normFingerprint).filter { it.length == 64 }.toSet()
         if (wanted.isEmpty()) return false
         return statements.any { st ->
             val o = st as? JsonObject ?: return@any false
-            val relations = (o["relation"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
-            if (relation !in relations) return@any false
+            val granted = (o["relation"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.orEmpty()
+            if (granted.none { it in relations }) return@any false
             val target = o["target"] as? JsonObject ?: return@any false
             if ((target["namespace"] as? JsonPrimitive)?.contentOrNull != "android_app") return@any false
             if ((target["package_name"] as? JsonPrimitive)?.contentOrNull != packageName) return@any false
@@ -83,8 +87,13 @@ class AssetLinksVerifier(base: OkHttpClient, private val urlFor: (String) -> Str
         return json
     }
 
-    /** Does [domain] let [packageName] (signed with [certFingerprints]) use its sign-in credentials? */
-    suspend fun verify(domain: String, packageName: String, certFingerprints: List<String>): Boolean {
+    /** Does [domain] let [packageName] (signed with [certFingerprints]) use its sign-in credentials ([relations])? */
+    suspend fun verify(
+        domain: String,
+        packageName: String,
+        certFingerprints: List<String>,
+        relations: Set<String> = setOf(AssetLinks.GET_LOGIN_CREDS),
+    ): Boolean {
         val json = try {
             fetch(domain)
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -92,14 +101,19 @@ class AssetLinksVerifier(base: OkHttpClient, private val urlFor: (String) -> Str
         } catch (_: Exception) {
             null
         } ?: return false
-        return AssetLinks.allows(json, packageName, certFingerprints)
+        return AssetLinks.allows(json, packageName, certFingerprints, relations)
     }
 
     /** A cached answer only (no network), or null if unknown. */
-    fun cached(domain: String, packageName: String, certFingerprints: List<String>): Boolean? {
+    fun cached(
+        domain: String,
+        packageName: String,
+        certFingerprints: List<String>,
+        relations: Set<String> = setOf(AssetLinks.GET_LOGIN_CREDS),
+    ): Boolean? {
         val c = cache[domain] ?: return null
         if (SystemClock.elapsedRealtime() - c.at >= 3_600_000) return null
-        return c.json != null && AssetLinks.allows(c.json, packageName, certFingerprints)
+        return c.json != null && AssetLinks.allows(c.json, packageName, certFingerprints, relations)
     }
 
     private companion object {

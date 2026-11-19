@@ -20,8 +20,12 @@ sealed interface FillTarget {
         val host: String get() = UrlMatcher.parse(pageUrl)?.hostname ?: domain
     }
 
-    /** A native app, matched by logins with the website `androidapp://<package>`. */
-    data class App(val packageName: String) : FillTarget {
+    /**
+     * A native app, matched by logins with the website `androidapp://<package>`, and by logins
+     * saved for one of [linkedDomains]: base domains whose Digital Asset Links list this app with
+     * its installed signing certificate (checked by the service, see [AppLinks]; empty until then).
+     */
+    data class App(val packageName: String, val linkedDomains: Set<String> = emptySet()) : FillTarget {
         val uri: String get() = "$ANDROID_APP_SCHEME$packageName"
     }
 
@@ -79,7 +83,7 @@ object AutofillMatcher {
      * Is [login] allowed for [target]? Web: a website matches the page (default match from
      * settings; the core never takes an `androidapp://` address for a website) and no website
      * would be an https → http downgrade (the extension's refusal). App: one of its websites is
-     * `androidapp://<package>`. [allowRegex]: the login is in one of the user's own vaults
+     * `androidapp://<package>`, or a website of a domain verified for the app ([FillTarget.App.linkedDomains]). [allowRegex]: the login is in one of the user's own vaults
      * ([VaultData.isPersonal]), the only place its regular expressions count: anyone can share a
      * vault with the user and plant a slow or catch-all pattern.
      */
@@ -91,7 +95,9 @@ object AutofillMatcher {
      * into the core for all of them; only logins that match are checked for a downgrade.
      */
     private fun matching(target: FillTarget, logins: List<Login>, defaultMatch: UrlMatch, allowRegex: (Int) -> Boolean): List<Int> = when (target) {
-        is FillTarget.App -> logins.indices.filter { i -> logins[i].urls.any { isAppUrl(it, target.packageName) } }
+        is FillTarget.App -> logins.indices.filter { i ->
+            logins[i].urls.any { isAppUrl(it, target.packageName) || AppLinks.isLinkedUrl(it, target.linkedDomains, UrlMatcher::baseDomain) }
+        }
         is FillTarget.Web -> {
             val page = target.pageUrl
             val saved = logins.flatMapIndexed { i, l -> val allow = allowRegex(i); l.urls.map { SavedUrl(it.url, it.match.wire, allow) } }

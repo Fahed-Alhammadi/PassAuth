@@ -17,7 +17,6 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -127,7 +126,6 @@ import io.passauth.app.ui.components.Tile
 import io.passauth.app.ui.HEALTH
 import io.passauth.app.ui.Route
 import io.passauth.app.ui.UiCtx
-import io.passauth.app.ui.permissions.PermissionsSettings
 import io.passauth.app.ui.permissions.turnOnBiometricUnlock
 import io.passauth.app.ui.biometricsAvailable
 import io.passauth.app.ui.components.Alert
@@ -180,7 +178,6 @@ private val SECTIONS = listOf(
     Section("account", "Account", Icons.Filled.Person, TileColors.Blue),
     Section("security", "Account security", Icons.Filled.Lock, TileColors.Blue),
     Section("autofill", "Autofill", Icons.Filled.Key, TileColors.Orange),
-    Section("permissions", "Permissions", Icons.Filled.PanTool, TileColors.Gray),
     Section("vault", "Vault options", Icons.Filled.Inventory2, TileColors.Purple),
     Section("appearance", "Appearance", Icons.Filled.Palette, TileColors.Pink),
     Section("about", "About PassAuth", Icons.Filled.Info, TileColors.Gray),
@@ -190,7 +187,7 @@ private fun section(key: String) = SECTIONS.first { it.key == key }
 
 /**
  * Settings: the account card on top, then one group per job without header labels (like the iOS app): what you do
- * with the vault, how it's protected and filled, how the app looks and what it may use, and About. Everything about
+ * with the vault, how it's protected and filled, how the app looks, and About. Everything about
  * the account itself (switching, adding, locking, logging out, deleting) is on the Account page behind the card.
  */
 @Composable
@@ -235,11 +232,7 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
                     TileDivider()
                     PageRow(ctx, section("autofill"))
                 }
-                TileGroup {
-                    PageRow(ctx, section("appearance"))
-                    TileDivider()
-                    PageRow(ctx, section("permissions"))
-                }
+                TileGroup { PageRow(ctx, section("appearance")) }
                 Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
                     TileGroup { PageRow(ctx, section("about")) }
                     Text(
@@ -265,7 +258,6 @@ fun SettingsScreen(ctx: UiCtx, section: String?) {
                         when (open.key) {
                             "security" -> Security(ctx)
                             "autofill" -> Autofill(ctx)
-                            "permissions" -> PermissionsSettings(ctx)
                             "vault" -> VaultOptions(ctx)
                             else -> Appearance(ctx)
                         }
@@ -651,10 +643,10 @@ private fun ColumnScope.Autofill(ctx: UiCtx) {
         "Create and use passkeys, and sign in with saved passwords, through Android's Credential Manager.",
         if (providerOn) "Change" else "Use PassAuth",
     ) { if (!SystemServices.openProviderSettings(context)) ctx.notify("Open Android settings → Passwords, passkeys & accounts to turn on PassAuth.") }
-    Muted("In Chrome on Android, also choose \"Autofill using another service\" in Chrome's settings (Autofill services), then restart Chrome.")
+    ChromeAutofillHint(ctx, resumes)
     HorizontalDivider(color = PassAuthTheme.colors.line)
     SelectField("Default URI match detection", MATCHES, s.defaultMatch, { v -> ctx.update { it.copy(defaultMatch = v) } })
-    Muted("${matchHelp(s.defaultMatch)} Applies to websites set to \"Default\" in an item. Apps match logins with the website androidapp://<package name>.")
+    Muted("${matchHelp(s.defaultMatch)} Applies to websites set to \"Default\" in an item. Apps match logins with the website androidapp://<package name>, and logins of websites that list the app in their Digital Asset Links.")
     ToggleRow(
         "Copy verification code automatically", s.autoCopyTotp, { v -> ctx.update { it.copy(autoCopyTotp = v) } },
         help = "After filling a login that has an authenticator key, the current code is copied so you can paste it.",

@@ -79,10 +79,12 @@ class AutofillResponses(private val context: Context, private val inline: Inline
      * can be copied at the moment the user picks the login.
      */
     @Suppress("DEPRECATION")
-    fun dataset(e: Entry, form: LoginForm<AutofillId>, auth: IntentSender?, otpCode: String? = null): Dataset? {
+    fun dataset(e: Entry, form: LoginForm<AutofillId>, auth: IntentSender?, otpCode: String? = null, codeOnly: Boolean = false): Dataset? {
         val login = e.item.login ?: return null
-        val title = e.item.name.ifEmpty { "Untitled" }
-        val b = Dataset.Builder(presentations(title, subtitle(e))).setId(e.id)
+        val name = e.item.name.ifEmpty { "Untitled" }
+        // Only a code field on the screen: say what gets filled, and from which login.
+        val (title, sub) = if (codeOnly) "Verification code" to listOfNotNull(name, subtitle(e)).joinToString(" · ") else name to subtitle(e)
+        val b = Dataset.Builder(presentations(title, sub)).setId(e.id)
         var any = false
         if (auth != null) {
             (form.fillIds + listOfNotNull(form.otp?.id)).forEach { b.setValue(it, null); any = true }
@@ -105,13 +107,13 @@ class AutofillResponses(private val context: Context, private val inline: Inline
     }
 
     /**
-     * "Add this site to a login…" / "Add this app to a login…": opens PassAuth's picker, which
-     * adds the place to the chosen login and hands that login back to fill.
+     * "Add this site to a login…" / "Choose a login…" (apps): opens PassAuth's picker, which
+     * fills the chosen login and adds the place to it ([AddSite.entryTitle]).
      */
     @Suppress("DEPRECATION")
     fun addSiteDataset(ids: List<AutofillId>, app: Boolean, place: String, auth: IntentSender): Dataset? {
         if (ids.isEmpty()) return null
-        val b = Dataset.Builder(presentations(if (app) "Add this app to a login…" else "Add this site to a login…", place.ifEmpty { null })).setId("add-site")
+        val b = Dataset.Builder(presentations(AddSite.entryTitle(app), place.ifEmpty { null })).setId("add-site")
         ids.forEach { b.setValue(it, null) }
         return b.setAuthentication(auth).build()
     }

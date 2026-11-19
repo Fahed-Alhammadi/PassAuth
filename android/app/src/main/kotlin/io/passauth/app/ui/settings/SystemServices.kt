@@ -33,6 +33,31 @@ object SystemServices {
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }.isSuccess
 
+    /** Chrome's release channels, stable first. */
+    private val CHROME = listOf("com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary")
+
+    /** The installed Chrome (stable first), or null. Chrome asks a separate autofill service only when told to in its own settings. */
+    fun chromePackage(context: Context): String? = CHROME.firstOrNull { pkg ->
+        runCatching { context.packageManager.getApplicationInfo(pkg, 0).enabled }.getOrDefault(false)
+    }
+
+    /**
+     * Chrome's autofill settings (where "Autofill using another service" is), through the intent
+     * Chrome documents for this; Chrome itself when that isn't there (older versions).
+     */
+    fun openChromeAutofillSettings(context: Context, pkg: String): Boolean = runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_APPLICATION_PREFERENCES)
+                .addCategory(Intent.CATEGORY_DEFAULT)
+                .addCategory(Intent.CATEGORY_APP_BROWSER)
+                .addCategory(Intent.CATEGORY_PREFERENCE)
+                .setPackage(pkg)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.recoverCatching {
+        context.startActivity(context.packageManager.getLaunchIntentForPackage(pkg)!!.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }.isSuccess
+
     /** Android's Credential Manager provider settings (or the Passwords & accounts screen). */
     fun openProviderSettings(context: Context): Boolean = runCatching {
         CredentialManager.create(context).createSettingsPendingIntent().send()

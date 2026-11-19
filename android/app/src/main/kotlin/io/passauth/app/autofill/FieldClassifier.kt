@@ -30,6 +30,8 @@ data class FieldInfo<T>(
     /** Currently shown text (for save requests). */
     val value: String? = null,
     val focused: Boolean = false,
+    /** Longest text the field takes (`maxTextLength` / HTML `maxlength`); 0 when unknown. */
+    val maxLength: Int = 0,
 )
 
 /** The login fields found in one request, in document order. */
@@ -55,13 +57,22 @@ object FieldClassifier {
     private val OTP_HINT = Regex("otp|totp|2fa|mfa|one.?time|verification|auth.?code|security.?code", RegexOption.IGNORE_CASE)
     private val PASSWORD_HINT = Regex("pass(word|wd|code)?\\b|pwd|passwort|mot.?de.?passe|contrase", RegexOption.IGNORE_CASE)
     private val SEARCH_HINT = Regex("search|query|find", RegexOption.IGNORE_CASE)
+    /** "code" fields that are a verification code only when short (`sms_code`, "Enter code"), not a postal or promo code. */
+    private val CODE_HINT = Regex("(^|[^a-z])code([^a-z]|$)|code$", RegexOption.IGNORE_CASE)
+    private val NOT_OTP_CODE = Regex("post|zip|promo|coupon|voucher|gift|referr|invite|country|area|dial|discount|captcha|qr", RegexOption.IGNORE_CASE)
+
+    /** Resource ids of browsers' address bars (and compatibility-mode structures): never a login field. */
+    val URL_BAR_IDS = setOf(
+        "url_bar", "location_bar_edit_text", "mozac_browser_toolbar_url_view", "url_edit_text", "url_field",
+        "omnibarTextInput", "search_box", "addressbar_url", "url", "address_bar_edit_text", "urlbar", "edit_url",
+    )
     private val TEXT_TYPES = setOf("text", "email", "tel", "")
 
     // Android hint constants (View.AUTOFILL_HINT_*, androidx HintConstants) and HTML autocomplete
     // tokens, lower-cased with separators removed.
     private val PASSWORD_HINTS = setOf("password", "currentpassword", "newpassword")
     private val USERNAME_HINTS = setOf("username", "newusername", "emailaddress", "email", "webauthn")
-    private val OTP_HINTS = setOf("smsotpcode", "onetimecode", "2faappotpcode", "otp", "smsotp")
+    private val OTP_HINTS = setOf("smsotpcode", "onetimecode", "2faappotpcode", "otp", "smsotp", "emailotpcode")
     /** Phone numbers are used as usernames by some apps: a candidate next to a password field. */
     private val PHONE_HINTS = setOf("phone", "phonenumber", "tel", "phonenational", "telnational")
 
@@ -130,8 +141,9 @@ object FieldClassifier {
 
     /** Classify one field on its own; [Username] here means "clearly a username field". */
     fun classify(f: FieldInfo<*>): FieldKind {
+        if (f.htmlTag == null && f.idEntry != null && f.idEntry in URL_BAR_IDS) return FieldKind.Other
         val hints = f.autofillHints.map(::norm).filter { it.isNotEmpty() } + autocomplete(f).split(' ').map(::norm).filter { it.isNotEmpty() }
-        if (hints.any { it in OTP_HINTS }) return FieldKind.Otp
+        if (hints.any { it in OTP_HINTS || (it.contains("otp") && !it.startsWith("cc")) }) return FieldKind.Otp
         if (hints.any { it in PASSWORD_HINTS }) return FieldKind.Password
         if (hints.any { it in USERNAME_HINTS }) return FieldKind.Username
         if (hints.any { it in OTHER_HINTS || it.startsWith("creditcard") || it.startsWith("postal") || it.startsWith("cc") }) {
@@ -143,8 +155,10 @@ object FieldClassifier {
         if (f.htmlTag != null) {
             if (!f.htmlTag.equals("input", ignoreCase = true)) return FieldKind.Other
             if (type == "password") return FieldKind.Password
+            val digits = type == "number" || type == "tel" || f.htmlAttrs["inputmode"].equals("numeric", ignoreCase = true)
+            if (type == "number") return if (OTP_HINT.containsMatchIn(t) || shortCode(f, t, number = true)) FieldKind.Otp else FieldKind.Other
             if ((type ?: "") !in TEXT_TYPES) return FieldKind.Other
-            if (OTP_HINT.containsMatchIn(t)) return FieldKind.Otp
+            if (OTP_HINT.containsMatchIn(t) || shortCode(f, t, number = digits)) return FieldKind.Otp
             if (SEARCH_HINT.containsMatchIn(t)) return FieldKind.Other
             if (type == "email" || USER_HINT.containsMatchIn(t)) return FieldKind.Username
             return FieldKind.Other
@@ -155,7 +169,7 @@ object FieldClassifier {
         }
         // Verification codes are often number fields.
         val number = f.inputType and InputType.TYPE_MASK_CLASS == InputType.TYPE_CLASS_NUMBER
-        if ((number || isTextLike(f)) && OTP_HINT.containsMatchIn(t)) return FieldKind.Otp
+        if ((number || isTextLike(f)) && (OTP_HINT.containsMatchIn(t) || shortCode(f, t, number))) return FieldKind.Otp
         if (!isTextLike(f)) return FieldKind.Other
         if (SEARCH_HINT.containsMatchIn(t)) return FieldKind.Other
         if (isEmailInputType(f.inputType)) return FieldKind.Username
@@ -163,6 +177,18 @@ object FieldClassifier {
         if (f.inputType == 0 && PASSWORD_HINT.containsMatchIn(t) && !USER_HINT.containsMatchIn(t)) return FieldKind.Password
         if (USER_HINT.containsMatchIn(t)) return FieldKind.Username
         return FieldKind.Other
+    }
+
+    /**
+     * A short code field: named "code" (not a postal, promo… code) and taking 4–10 characters or
+     * digits only; or a digits-only field of exactly 6 with nothing else said about it (the usual
+     * verification code box).
+     */
+    private fun shortCode(f: FieldInfo<*>, t: String, number: Boolean): Boolean {
+        if (NOT_OTP_CODE.containsMatchIn(t) || USER_HINT.containsMatchIn(t) || SEARCH_HINT.containsMatchIn(t)) return false
+        val short = f.maxLength in 4..10
+        if (CODE_HINT.containsMatchIn(t) && (short || number)) return true
+        return number && f.maxLength == 6 && !PASSWORD_HINT.containsMatchIn(t)
     }
 
     /**
@@ -192,6 +218,7 @@ object FieldClassifier {
 
     /** A text field without hints that rule it out as a username (search boxes, other hint types). */
     private fun plainCandidate(f: FieldInfo<*>): Boolean {
+        if (f.idEntry != null && f.idEntry in URL_BAR_IDS) return false
         val hints = f.autofillHints.map(::norm).filter { it.isNotEmpty() }
         if (hints.any { it !in PHONE_HINTS }) return false
         val t = text(f)

@@ -217,7 +217,7 @@ data class Stored(
 
     /**
      * Show the permissions screen: only on a first launch (never shown, and no server
-     * connected yet — people who already use the app find it in Settings → Permissions).
+     * connected yet). Later changes go through Android's settings.
      */
     val showPermissionsIntro: Boolean
         get() = !onboarding.permissionsShown && accounts.values.none { it.server.isNotEmpty() }
