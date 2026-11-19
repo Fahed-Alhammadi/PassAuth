@@ -1,8 +1,6 @@
-New in 0.13.0
-• Two-step login with a security key or passkey now works in the app. When you choose "Security key or passkey", PassAuth opens your server's page in a secure browser sheet; touch your key or use your passkey there, and the app finishes signing you in.
-• Needs PassAuth server 0.16 or later for this. With an older server the app keeps offering your other two-step methods.
+New in 0.13.1
+• The Permissions page left Settings. PassAuth still asks for what it needs when you first open it; to change a permission later, use the Settings app.
 
 Please test:
-1. Add a security key or passkey for two-step login in the web vault (Settings → Account security).
-2. Sign out on this phone, sign in again and choose "Security key or passkey". Check the browser sheet opens, your key works, and you land in your vault.
-3. Start again and tap Cancel or close the sheet; check you return to the choice of methods without an error.
+1. Open Settings in PassAuth and check the list looks right without the Permissions row.
+2. Sign in with a security key or passkey for two-step login (new in 0.13.0) and check you land in your vault.
