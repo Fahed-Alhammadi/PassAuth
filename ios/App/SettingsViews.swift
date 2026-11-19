@@ -33,14 +33,13 @@ private func lastSyncText(_ t: Double) -> String {
 }
 
 enum SettingsPage: String, Hashable, CaseIterable {
-    case account, security, autofill, permissions, vault, appearance, about, export
+    case account, security, autofill, vault, appearance, about, export
 
     var title: String {
         switch self {
         case .account: "Account"
         case .security: "Account security"
         case .autofill: "AutoFill"
-        case .permissions: "Permissions"
         case .vault: "Vault options"
         case .appearance: "Appearance"
         case .about: "About PassAuth"
@@ -53,7 +52,6 @@ enum SettingsPage: String, Hashable, CaseIterable {
         case .account: "person.crop.circle"
         case .security: "lock.shield.fill"
         case .autofill: "key.fill"
-        case .permissions: "hand.raised.fill"
         case .vault: "archivebox.fill"
         case .appearance: "paintpalette.fill"
         case .about: "info"
@@ -65,7 +63,7 @@ enum SettingsPage: String, Hashable, CaseIterable {
         switch self {
         case .security, .account: Color.Tile.blue
         case .autofill: Color.Tile.orange
-        case .permissions, .about: Color.Tile.gray
+        case .about: Color.Tile.gray
         case .vault, .export: Color.Tile.purple
         case .appearance: Color.Tile.pink
         }
@@ -177,7 +175,6 @@ struct SettingsTab: View {
                 .paRow()
                 Section {
                     pageLink(.appearance)
-                    pageLink(.permissions)
                 }
                 .paRow()
                 Section {
@@ -242,7 +239,6 @@ struct SettingsPageView: View {
             case .account: AccountPage()
             case .security: SecurityPage()
             case .autofill: AutofillPage()
-            case .permissions: PermissionsPage()
             case .vault: VaultOptionsPage()
             case .appearance: AppearancePage()
             case .about: AboutPage()

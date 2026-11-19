@@ -12,8 +12,8 @@ enum PermissionKind: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Current status of each permission, and the actions that ask for them. Shared by the
-/// first-launch screen and Settings → Permissions.
+/// Current status of each permission, and the actions that ask for them, for the
+/// first-launch screen.
 @MainActor
 @Observable
 final class PermissionCenter {
@@ -262,8 +262,6 @@ struct PermissionRow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dynamicTypeSize) private var typeSize
     let kind: PermissionKind
-    /// On the first-launch screen "Not asked" goes without saying.
-    var intro = false
 
     var body: some View {
         let p = model.permissions
@@ -299,9 +297,8 @@ struct PermissionRow: View {
 
     private func showsStatusLine(_ s: PermissionStatus) -> Bool {
         switch s {
-        case .allowed: false
-        // On the first-launch screen only what blocks the button matters.
-        case .notAsked, .unknown: !intro
+        // "Not asked" goes without saying; only what blocks the button matters.
+        case .allowed, .notAsked, .unknown: false
         default: true
         }
     }
@@ -360,7 +357,7 @@ struct PermissionsIntroView: View {
                     VStack(alignment: .leading, spacing: PA.Space.s) {
                         Text("Set up PassAuth").font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
                             .accessibilityAddTraits(.isHeader)
-                        Text("Choose what PassAuth may use. Allow only what you need; you can change it later in Settings → Permissions.")
+                        Text("Choose what PassAuth may use. Allow only what you need; you can change it later in the Settings app.")
                             .font(.subheadline).foregroundStyle(Color.paMuted)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -368,7 +365,7 @@ struct PermissionsIntroView: View {
                 }
                 Section {
                     ForEach(PermissionKind.allCases) { k in
-                        PermissionRow(kind: k, intro: true)
+                        PermissionRow(kind: k)
                     }
                 }
                 .paRow()
@@ -389,25 +386,6 @@ struct PermissionsIntroView: View {
 
     private func finish() {
         Task { await model.permissions.markIntroShown() }
-    }
-}
-
-/// Settings → Permissions: the same list with the current status.
-struct PermissionsPage: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.scenePhase) private var scenePhase
-
-    var body: some View {
-        Section {
-            ForEach(PermissionKind.allCases) { k in
-                PermissionRow(kind: k).paRow()
-            }
-        } footer: {
-            Text("Turn these on or off any time in the Settings app. iOS doesn't let apps read the local network setting; PassAuth shows what it saw at its last check.")
-        }
-        .task(id: scenePhase) {
-            if scenePhase == .active { await model.permissions.refresh() }
-        }
     }
 }
 
