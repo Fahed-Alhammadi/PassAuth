@@ -87,7 +87,7 @@
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3l2.5-6 4 12 2.5-6h6"/></svg><h3>Works offline</h3><p>The extension and the apps keep an encrypted copy of your vault on the device, so you can unlock it and fill logins when your server is out of reach.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5V4.5M7.5 9l4.5-4.5L16.5 9M4.5 16.5v3.5h15v-3.5"/></svg><h3>Export anytime</h3><p>Take your vault with you as a file whenever you like, and print an Emergency Kit with everything you need to get back in.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12.5l6.5-6.5a3 3 0 0 1 4.2 4.2l-8 8a5 5 0 0 1-7-7l7.5-7.5"/></svg><h3>File attachments</h3><p>Keep documents and photos with the item they belong to. They're encrypted on your device before they upload.</p></li>
-        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 11.5l17-7-5 16-4-6.5z"/><path d="M11.5 14l4-4"/></svg><h3>Send</h3><p>Share a note or a password with anyone through an encrypted link that expires. The key stays in the link, so your server can't read it.</p></li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 11.5l17-7-5 16-4-6.5z"/><path d="M11.5 14l4-4"/></svg><h3>Send</h3><p>Share a note or a password with anyone through an encrypted link that expires. The key stays in the link, so your server can't read it, and a Send with a password opens only with that password.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg><h3>Emergency access</h3><p>Let someone you trust ask for view-only access to your personal vaults. You choose how long they wait, and you can say no in that time.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h3l2-4 3 8 2-4h6"/><circle cx="12" cy="12" r="9"/></svg><h3>Password health</h3><p>Find weak and reused passwords, and check them against known breaches. Only the first five characters of a password's hash leave your device.</p></li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="11" height="8" rx="1.5"/><rect x="15.5" y="9" width="5.5" height="10" rx="1.2"/><path d="M6 17h6"/></svg><h3>Sign in with another device</h3><p>Approve a new device from one you're already signed in on. You match a short phrase, then type a code on the new device.</p></li>
@@ -109,6 +109,7 @@
             <li>Website addresses saved with your logins</li>
             <li>Verification codes and passkeys</li>
             <li>Cards, identities and secure notes</li>
+            <li>Your profile picture</li>
           </ul>
         </div>
         <div class="col seen-col">
@@ -127,6 +128,7 @@
         <div><dt>Keys</dt><dd>Argon2id, optionally mixed with a 128-bit Secret Key that never leaves your devices.</dd></div>
         <div><dt>Encryption</dt><dd>Every item has its own key and is sealed with XChaCha20-Poly1305, bound to its vault so it can't be swapped.</dd></div>
         <div><dt>Sharing</dt><dd>Vault keys are sealed to each member, and every share and member list is signed. Your apps check the signatures and remember the keys they've seen, so a server can't plant a vault, add a member or bring back an old key.</dd></div>
+        <div><dt>Vault records</dt><dd>Every vault carries an encrypted record of its items, chained from one version to the next. Your apps check the server against it and warn if it hides a change, brings back a deleted item or serves an older copy.</dd></div>
         <div><dt>Two-step login</dt><dd>A second step at sign-in: an authenticator app, an email code, a security key or a passkey in the web vault. Recovery codes cover a lost device.</dd></div>
       </dl>
       <p class="more"><a href="https://github.com/Fahed-Alhammadi/PassAuth/blob/main/docs/ARCHITECTURE.md">Read the security design</a></p>

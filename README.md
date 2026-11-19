@@ -27,7 +27,9 @@
 - **Zero knowledge.** Items are encrypted on your device. The server never sees your master password and can't read your vault, including item names and website addresses.
 - **Everything in one place.** Logins, verification codes, passkeys, cards, identities and notes.
 - **Made for sharing.** Share vaults with family or a team. Each share is signed by the person who made it and checked by your apps, so your server can't add people or slip in a vault of its own.
-- **Files and Send.** Attach files to items, and share text through encrypted links that expire.
+- **Notices tampering.** Your apps keep a record of every vault's items and check the server against it. If a server hides a change, brings back a deleted item or serves an older copy of a vault or an item, you get a warning.
+- **Files and Send.** Attach files to items, and share text through encrypted links that expire. A Send with a password can only be opened with that password, not with the link alone.
+- **Profile pictures.** Add a picture to your account. It's encrypted like your items, so the server can't see it.
 - **Emergency access.** Let someone you trust ask for view-only access to your personal vaults after a waiting period you choose.
 - **Password health.** Find weak and reused passwords, and check them against known breaches without sending the passwords anywhere.
 - **Sign in with another device.** Approve a new device from one where you're already signed in, with a matching phrase and code.
@@ -65,7 +67,7 @@ The desktop app is the web vault in its own window. It remembers your server's a
 - Windows (64-bit): [PassAuth-Windows-x64-setup.exe](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Windows-x64-setup.exe)
 - Linux (x86_64): [PassAuth-Linux-x86_64.AppImage](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-x86_64.AppImage), or [.deb](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-amd64.deb) for Debian and Ubuntu and [.rpm](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Linux-x86_64.rpm) for Fedora and openSUSE
 
-Updates: the app checks GitHub for new versions once a day and asks before installing. Every version is on the [releases page](https://github.com/Fahed-Alhammadi/PassAuth/releases). The macOS app is signed and notarized, so it opens without warnings. Windows shows a SmartScreen warning on first run until the builds are code-signed; choose "More info" → "Run anyway".
+Updates: the app checks GitHub for new versions once a day and asks before installing. Every update is signed, and the app installs only updates with a valid signature. Every version is on the [releases page](https://github.com/Fahed-Alhammadi/PassAuth/releases). The macOS app is signed and notarized, so it opens without warnings. Windows shows a SmartScreen warning on first run until the builds are code-signed; choose "More info" → "Run anyway".
 
 ## Install the server
 
@@ -80,7 +82,7 @@ docker compose up -d
 
 Put it behind HTTPS (the apps require it), open your domain and create your account. The admin page is at `/admin`: users, invitations, sign-ups, email and server settings, plus two-step login for the admin page itself. The [self-hosting guide](docs/SELF_HOSTING.md) covers every step: HTTPS with a reverse proxy, email, updates, backups and all settings.
 
-To update: `docker compose pull && docker compose up -d`. Database changes apply on start. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
+To update: `docker compose pull && docker compose up -d`. Database changes apply on start. Update the server before the apps: current apps need server 0.12 or later and tell you when a server is too old. What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 
@@ -88,6 +90,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key, and every share and member list is signed (Ed25519, bound to the X25519 key). Apps check the signatures, remember the keys they've seen and refuse an older vault key, so a server can't plant a vault, add a member or roll a key back. Fingerprints let you confirm who you share with.
+- **Vault records:** every vault carries an encrypted record of its items, chained by hashes from one version to the next. Apps check each answer from the server against it and warn when items are missing, deleted items come back, or a vault or an item is older than one they've already seen. After you restore your server from a backup, each device asks you once per changed vault to accept the server's copy.
 - **Server:** runs as your PUID:PGID user on a read-only filesystem with no Linux capabilities (it starts as root only to prepare its data folder).
 - **Admin page:** user name and password, optional two-step login with an authenticator app and recovery codes, and optionally reachable only from your own networks (`PASSAUTH_ADMIN_ALLOWED_NETWORKS`).
 
