@@ -120,7 +120,7 @@ struct OfflineItemSection: View {
                     .paRow()
                     .accessibilityIdentifier("offline.decide")
             }
-            Button(role: .destructive) { confirmDiscard = true } label: { Label(OfflineText.discard, systemImage: "arrow.uturn.backward") }
+            Button(role: .destructive) { confirmDiscard = true } label: { Label(OfflineText.discard, systemImage: "arrow.uturn.backward").foregroundStyle(Color.paDanger) }
                 .paRow()
                 .accessibilityIdentifier("offline.discard")
         }

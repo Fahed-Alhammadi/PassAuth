@@ -174,7 +174,7 @@ struct ItemView: View {
                         } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
                             .disabled(busy).paRow()
                         if entry.pending == nil {
-                            Button(role: .destructive) { confirmPurge = true } label: { Label("Delete forever", systemImage: "trash.slash") }
+                            Button(role: .destructive) { confirmPurge = true } label: { Label("Delete forever", systemImage: "trash.slash").foregroundStyle(Color.paDanger) }
                                 .disabled(busy).paRow()
                         }
                     } else {
@@ -183,7 +183,7 @@ struct ItemView: View {
                                 .disabled(busy).paRow()
                                 .accessibilityIdentifier("moveItem")
                         }
-                        Button(role: .destructive) { confirmTrash = true } label: { Label("Move to trash", systemImage: "trash") }
+                        Button(role: .destructive) { confirmTrash = true } label: { Label("Move to trash", systemImage: "trash").foregroundStyle(Color.paDanger) }
                             .disabled(busy).paRow()
                     }
                 }

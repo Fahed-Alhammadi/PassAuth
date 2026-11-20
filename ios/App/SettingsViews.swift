@@ -319,7 +319,7 @@ private struct AccountPage: View {
         Section {
             Button { model.run { await model.repo.lockActive() } } label: { Label("Lock", systemImage: "lock") }
                 .accessibilityIdentifier("account.lock")
-            Button(role: .destructive) { confirmLogout = true } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right") }
+            Button(role: .destructive) { confirmLogout = true } label: { Label("Log out", systemImage: "rectangle.portrait.and.arrow.right").foregroundStyle(Color.paDanger) }
                 .accessibilityIdentifier("logout")
         } footer: {
             Text("Locking keeps the encrypted vault on this device. Logging out removes it.")
