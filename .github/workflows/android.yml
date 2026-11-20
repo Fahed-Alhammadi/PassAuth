@@ -71,7 +71,8 @@ jobs:
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           # The default also installs the retired "tools" package, which no longer exists.
-          packages: platform-tools
+          # compileSdk 37 (targetSdk stays 36): OkHttp 5.5+ requires compiling against API 37.
+          packages: platform-tools platforms;android-37.0
       - name: Install NDK
         run: sdkmanager --install "ndk;29.0.14206865" >/dev/null && echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -121,7 +122,8 @@ jobs:
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           # The default also installs the retired "tools" package, which no longer exists.
-          packages: platform-tools
+          # compileSdk 37 (targetSdk stays 36): OkHttp 5.5+ requires compiling against API 37.
+          packages: platform-tools platforms;android-37.0
       - name: Install NDK
         run: sdkmanager --install "ndk;29.0.14206865" >/dev/null && echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
