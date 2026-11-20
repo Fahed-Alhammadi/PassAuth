@@ -116,13 +116,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      # Plain cargo-audit, not rustsec/audit-check: that action posts a check run named "Security audit", and when
+      # core.yml audits the same commit the two collide ("Not Found - update-a-check-run") whenever there are
+      # warnings. Fails on vulnerabilities only; ignores come from .cargo/audit.toml (run from the repo root).
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: desktop/src-tauri
+          tool: cargo-audit
+      - run: cargo audit --file desktop/src-tauri/Cargo.lock
 
   autofill:
     name: macOS AutoFill extension
