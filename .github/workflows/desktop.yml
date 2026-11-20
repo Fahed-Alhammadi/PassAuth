@@ -16,9 +16,8 @@
 # is built unsigned and Gatekeeper warns on first open (Control-click → Open).
 # Windows: unsigned for now; SmartScreen warns until a code-signing certificate is added.
 # Updater signatures: TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD are secrets of
-# the `desktop-release` environment, which needs the owner's approval for every run of the build
-# job (Actions → the run → Review deployments): no signed update can be built without it. The
-# matching public key is in desktop/src-tauri/tauri.conf.json.
+# the `desktop-release` environment, which only v* tags and main (manual runs) may use; no approval
+# step (owner decision 2026-11-20). The matching public key is in desktop/src-tauri/tauri.conf.json.
 name: Desktop
 
 on:
