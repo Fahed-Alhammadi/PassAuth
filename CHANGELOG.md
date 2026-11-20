@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.17.0 (2026-11-20)
+
+- Sign-in request push notifications (iOS first) via a push relay (d7f41de)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.16.1...server-0.17.0)
+
 ## 0.16.1 (2026-11-19)
 
 - Server: an approved device sign-in skips two-step login (e844c9a)
