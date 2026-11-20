@@ -10,6 +10,7 @@ import { type ItemKind, KIND_LABEL } from "@web/lib/types";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { callPopup } from "../shared/protocol";
 import type { ItemList, ItemSummary, OtherItem } from "../shared/types";
+import { AddSiteConfirm } from "./add-site";
 import { activeTab, type Ctx, hostOf, msg } from "./ctx";
 import { Notices } from "./notices";
 import { searchItems } from "./search";
@@ -36,6 +37,8 @@ interface Row {
   key: string;
   item: ItemSummary;
   canFill: boolean;
+  /** A search result not saved for the page that can get it (editable login): "Fill" asks to add the site first. */
+  canAddSite?: boolean;
 }
 
 export function VaultList({
@@ -66,6 +69,9 @@ export function VaultList({
   const [showFilter, setShowFilter] = useState(!!(filter.kind || filter.folder !== null || filter.favorite || filter.vault !== null));
   const [favOpen, setFavOpen] = useState<boolean | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  /** Logins the page's site can be added to (`addSite:targets`), loaded when a search starts on a web page. */
+  const [addable, setAddable] = useState<Set<string> | null>(null);
+  const [adding, setAdding] = useState<ItemSummary | null>(null);
   const bodyRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -130,6 +136,23 @@ export function VaultList({
 
   const suggestedIds = new Set(data?.suggested.map((i) => i.id));
   const searching = filtering(filter);
+
+  // Fresh for every load of the list (an item edited or a site added since).
+  useEffect(() => {
+    void version;
+    setAddable(null);
+  }, [version]);
+  useEffect(() => {
+    if (!searching || !pageUrl || addable) return;
+    let alive = true;
+    callPopup("addSite:targets", { url: pageUrl }).then(
+      (t) => alive && setAddable(new Set(t.map((i) => i.id))),
+      () => alive && setAddable(new Set()),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [searching, pageUrl, addable]);
   const vaults = data ? [...new Map(data.all.map((i) => [i.vaultId ?? i.vaultName, i.vaultName])).entries()] : [];
   const folders = data ? [...new Set(data.all.map((i) => i.folder).filter(Boolean))].sort() : [];
   const keep = (i: ItemSummary) =>
@@ -144,7 +167,11 @@ export function VaultList({
   const newLogin = () => ctx.go({ tab: "vault", page: "new", kind: "login" });
   const addToExisting = () => pageUrl && ctx.go({ tab: "vault", page: "addSite", url: pageUrl });
   const rowsOf = (name: string, items: ItemSummary[]): Row[] =>
-    items.map((item) => ({ key: `${name}:${item.id}`, item, canFill: suggestedIds.has(item.id) && item.kind === "login" && (item.hasPassword || !!item.username) }));
+    items.map((item) => {
+      const fillable = item.kind === "login" && (item.hasPassword || !!item.username);
+      const canFill = suggestedIds.has(item.id) && fillable;
+      return { key: `${name}:${item.id}`, item, canFill, canAddSite: !canFill && fillable && tabId !== undefined && !!addable?.has(item.id) };
+    });
   if (data && searching) {
     sections.push({
       title: filter.query.trim() ? "Search results" : "Filtered items",
@@ -352,6 +379,19 @@ export function VaultList({
         </div>
       )}
       <Notices ctx={ctx} data={data} tabId={tabId} />
+      {adding && pageUrl && (
+        <AddSiteConfirm
+          item={adding}
+          url={pageUrl}
+          tabId={tabId}
+          ctx={ctx}
+          onClose={() => setAdding(null)}
+          onDone={() => {
+            setAdding(null);
+            ctx.go({ tab: "vault", page: "list" });
+          }}
+        />
+      )}
       <p className="sr-only" role="status">
         {data && searching ? `${results.length} ${results.length === 1 ? "result" : "results"}` : ""}
       </p>
@@ -368,7 +408,7 @@ export function VaultList({
             {s.rows.length ? (
               <div className="list">
                 {s.rows.map((r) => (
-                  <ItemRow key={r.key} row={r} ctx={ctx} tabStop={r.key === tabStop} onFocusRow={setActiveKey} onFill={() => fill(r.item.id)} />
+                  <ItemRow key={r.key} row={r} ctx={ctx} tabStop={r.key === tabStop} onFocusRow={setActiveKey} onFill={() => (r.canFill ? fill(r.item.id) : setAdding(r.item))} />
                 ))}
               </div>
             ) : s.collapsed ? null : (
@@ -505,6 +545,10 @@ function ItemRow({ row, ctx, tabStop, onFocusRow, onFill }: { row: Row; ctx: Ctx
         <button type="button" className="btn btn-fill" aria-label={`Fill ${who}`} tabIndex={tab} onClick={onFill}>
           Fill
         </button>
+      ) : row.canAddSite ? (
+        <button type="button" className="btn btn-fill" aria-label={`Fill ${who} and add this site to it`} title="Not saved for this site yet: add it and fill" tabIndex={tab} onClick={onFill}>
+          Fill
+        </button>
       ) : i.url ? (
         <a className="btn btn-icon" href={i.url} target="_blank" rel="noreferrer" aria-label={`Open ${i.host || i.name}`} title="Open website" tabIndex={tab}>
           <Icon name="external" />
@@ -523,6 +567,7 @@ function ItemRow({ row, ctx, tabStop, onFocusRow, onFill }: { row: Row; ctx: Ctx
       ) : null}
       <Menu label={`More options for ${who}`} trigger={<Icon name="dots" />} tabIndex={tab}>
         {row.canFill && <MenuItem onClick={onFill}>Fill on this page</MenuItem>}
+        {row.canAddSite && <MenuItem onClick={onFill}>Fill and add this site…</MenuItem>}
         <MenuItem onClick={open}>View</MenuItem>
         <MenuItem onClick={() => ctx.go({ tab: "vault", page: "edit", id: i.id })}>Edit</MenuItem>
         <MenuItem

@@ -3,10 +3,10 @@
  * to confirm in a small PassAuth window first (user presence). User
  * verification (the UV flag) is reported only when the master password was
  * entered for this request, or in this browser session within the last
- * VERIFIED_MS (unlock, sign-in, reauth; never for keys restored from disk with
- * the timeout "never"). A site that requires it gets a master-password field
- * in that window when the last entry is older; "preferred" gets UV only when
- * it is recent; "discouraged" never.
+ * VERIFIED_MS (unlock, sign-in, reauth), or the vault timeout is "never" (the
+ * unlocked vault counts, also with keys restored from disk; `passkeyVerified`).
+ * A site that requires it gets a master-password field in that window when
+ * neither holds; "preferred" gets UV only when one holds; "discouraged" never.
  *
  * A page can ask to sign in without a user gesture (a two-step page asks as it
  * loads), but not over and over against the user: after the user cancels in a
@@ -42,7 +42,7 @@ import { NEW_LOGIN, type PasskeyTarget, passkeyDefaultTarget, passkeySaveTargets
 import { local } from "./storage";
 import { notifyTab } from "./toast";
 import { isKeyPageRequest } from "./two-step-key";
-import { allEntries, canWrite, createItem, type Entry, ensureUnlocked, getEntry, isPersonal, owner, recentlyVerified, stillOwner, updateItem, vaultName, verifyMasterPassword } from "./vault";
+import { allEntries, canWrite, createItem, type Entry, ensureUnlocked, getEntry, isPersonal, owner, passkeyVerified, stillOwner, updateItem, vaultName, verifyMasterPassword } from "./vault";
 
 /** The confirmation window has closed by the time the passkey is saved: the storage limit is said inside the page (PassAuth's own words, no vault data). */
 const QUOTA_NOTE = pageText`PassAuth couldn't save the passkey. You've reached this server's storage limit. Delete items or ask the server's admin.`;
@@ -194,7 +194,7 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   // The request belongs to the account unlocked now: re-checked after the window, before anything is signed or saved.
   const who = owner();
   const uv = userVerification(kind, msg.options);
-  const needsPassword = uv === "required" && !(await recentlyVerified());
+  const needsPassword = uv === "required" && !(await passkeyVerified());
   const base = { origin: msg.origin, rpId, uv, needsPassword, tabId: msg.tabId, frameId: msg.frameId, bridgeId: msg.bridgeId, documentId: msg.documentId, activated: msg.activated };
   const wait = timeoutOf(msg.options);
 
@@ -410,7 +410,7 @@ export async function decide(id: string, accept: boolean, credentialId?: string,
     if (p.needsPassword && password) {
       await verifyMasterPassword(password);
       verified = true;
-    } else verified = await recentlyVerified();
+    } else verified = await passkeyVerified();
     if (p.uv === "required" && !verified) {
       p.needsPassword = true;
       throw new AppError(PASSWORD_REQUIRED, "Enter your master password to continue.");

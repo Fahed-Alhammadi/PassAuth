@@ -94,6 +94,7 @@ const v = vi.hoisted(() => {
     owner: () => ({ id: "a1", generation: 1 }),
     stillOwner: () => true,
     recentlyVerified: async () => false,
+    passkeyVerified: async () => false,
     verifyMasterPassword: nothing,
     lockStatus: async () => (data.unlocked ? "unlocked" : "locked"),
     wrapForPin: async () => ({ wrapped: {}, base: {}, owner: { id: "a1", generation: 1 } }),

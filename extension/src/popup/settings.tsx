@@ -660,6 +660,8 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
           {settings.vaultTimeout === "never" && (
             <div className="alert alert-error small">
               With "Never", your vault key is stored on this device without the master password protecting it. Anyone who can use this browser profile can open your vault.
+              <br />
+              Passkeys don't ask for your master password either: the unlocked vault counts as your confirmation.
             </div>
           )}
           <label className="field">

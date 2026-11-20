@@ -23,6 +23,7 @@ const v = vi.hoisted(() => {
     owner: () => ({ id: "a1", generation: data.generation }),
     stillOwner: (o: { generation: number }) => o.generation === data.generation,
     recentlyVerified: async () => data.verified,
+    passkeyVerified: async () => data.verified,
     verifyMasterPassword: async (password: string) => {
       if (password !== "pw") throw new Error("Wrong master password or Secret Key.");
       data.verified = true;

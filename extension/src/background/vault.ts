@@ -780,6 +780,16 @@ export async function recentlyVerified(ms = VERIFIED_MS) {
   return typeof at === "number" && Date.now() - at < ms && Date.now() >= at;
 }
 
+/**
+ * Passkey user verification (WebAuthn UV): a recent master-password entry, or, with the vault timeout "Never", the
+ * unlocked vault itself (the user chose to never be asked again on this device; what the phones do with their
+ * unlock). Keys restored from disk at a browser start therefore count only under "Never".
+ */
+export async function passkeyVerified() {
+  if (await recentlyVerified()) return true;
+  return !!account && (await local.get()).settings.vaultTimeout === "never";
+}
+
 /** Check the master password again, locally (passkey user verification); throws a user-facing error. */
 export async function verifyMasterPassword(password: string) {
   if (!account || !bundle) throw lockedError();

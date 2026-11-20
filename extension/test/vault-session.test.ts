@@ -113,6 +113,27 @@ test('S4: a lock forgets the entry; keys from disk (timeout "never") after a bro
   expect(await vault.recentlyVerified()).toBe(false);
 });
 
+test('passkey verification: with timeout "never" the unlocked vault counts, also keys from disk after a restart', async () => {
+  await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1", settings: { vaultTimeout: "never" } });
+  await fake.local.set({ accounts: { a1: { ...accountRecord(), persistedKeys: sessionKeys() } } });
+  // Browser restart: nothing in session storage, the keys come from disk.
+  expect(await vault.ensureUnlocked()).toBe(true);
+  expect(await vault.recentlyVerified()).toBe(false);
+  expect(await vault.passkeyVerified()).toBe(true);
+  // Locked: nothing counts.
+  await vault.lockAll();
+  expect(await vault.passkeyVerified()).toBe(false);
+});
+
+test("passkey verification: any other timeout needs a recent master-password entry", async () => {
+  await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1", settings: { vaultTimeout: 15 } });
+  await fake.session.set({ "unlocked:a1": sessionKeys() });
+  expect(await vault.ensureUnlocked()).toBe(true);
+  expect(await vault.passkeyVerified()).toBe(false);
+  await vault.unlock("pw");
+  expect(await vault.passkeyVerified()).toBe(true);
+});
+
 test("S4: checking the master password in the passkey window counts as an entry; a wrong one doesn't", async () => {
   await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1" });
   await fake.session.set({ "unlocked:a1": sessionKeys() });
