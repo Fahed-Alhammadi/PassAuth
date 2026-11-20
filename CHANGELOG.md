@@ -6,6 +6,16 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.19.1 (2026-11-20)
+
+- Image: Bump rust (#19) (dbbfec1)
+- Image: Bump node from `add5c17` to `5df7998` (#20) (d8a9e46)
+- Web deps: Bump the web-minor group in /web with 3 updates (#22) (1b4d9fc)
+- Rust deps: Bump tokio-tungstenite from 0.29.0 to 0.30.0 (#29) (8707fca)
+- Rust deps: Bump the rust-minor group with 5 updates (#28) (dfe38cd)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.19.0...server-0.19.1)
+
 ## 0.19.0 (2026-11-20)
 
 - Phone search covers every website; web vault Duplicate logins in Password health (458ba15)
