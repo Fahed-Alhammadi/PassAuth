@@ -1,0 +1,94 @@
+# Dependabot: weekly (Monday) dependency updates, kept quiet on purpose: minor/patch bumps come as ONE grouped PR per
+# folder, major bumps as their own PRs, at most 5 open PRs per folder. Security updates are on in the repo settings.
+# Merging an update only runs CI; nothing is released until a release tag is pushed.
+version: 2
+updates:
+  # Rust workspace (core, server, ffi, wasm). crates/vendor/sqlx-sqlite is a path patch: Dependabot leaves it alone.
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Rust deps" }
+    groups:
+      rust-minor:
+        update-types: [minor, patch]
+
+  # Desktop app (Tauri) has its own Cargo.lock
+  - package-ecosystem: cargo
+    directory: /desktop/src-tauri
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Desktop Rust deps" }
+    groups:
+      desktop-rust-minor:
+        update-types: [minor, patch]
+
+  # Web (pnpm/npm)
+  - package-ecosystem: npm
+    directory: /web
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Web deps" }
+    groups:
+      web-minor:
+        update-types: [minor, patch]
+
+  # Extension (pnpm/npm)
+  - package-ecosystem: npm
+    directory: /extension
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Extension deps" }
+    groups:
+      extension-minor:
+        update-types: [minor, patch]
+
+  # Desktop (pnpm/npm)
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Desktop deps" }
+    groups:
+      desktop-minor:
+        update-types: [minor, patch]
+
+  # Relay (pnpm/npm)
+  - package-ecosystem: npm
+    directory: /relay
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Relay deps" }
+    groups:
+      relay-minor:
+        update-types: [minor, patch]
+
+  # Android app (Gradle version catalog)
+  - package-ecosystem: gradle
+    directory: /android
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Android deps" }
+    groups:
+      android-minor:
+        update-types: [minor, patch]
+
+  # Server container image
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "Image" }
+    groups:
+      image-minor:
+        update-types: [minor, patch]
+
+  # GitHub Actions (keeps the commit-SHA pins and their version comments current)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 5
+    commit-message: { prefix: "CI" }
+    groups:
+      actions:
+        patterns: ["*"]
