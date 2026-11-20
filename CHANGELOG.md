@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.19.0 (2026-11-20)
+
+- Phone search covers every website; web vault Duplicate logins in Password health (458ba15)
+- Offline changes in iOS, Android, desktop and extension; Android identifier-first and Credential Manager saves (2514916)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.18.0...server-0.19.0)
+
 ## 0.18.0 (2026-11-20)
 
 - Android sign-in request notifications (FCM) through the push relay (26d6306)
