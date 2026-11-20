@@ -129,6 +129,20 @@ describe("cards", () => {
   });
 });
 
+describe("user-name-first sign-in (fill offers)", () => {
+  test("only the user name field shows (the password appears after Continue): the frame has a login form", () => {
+    page(
+      `<form><input id="account_name_text_field" type="text" aria-label="Email or Phone Number"><input id="password_text_field" type="password" style="display:none"><button>Continue</button></form>`,
+    );
+    expect(hasFields(new Scan(), "login")).toBe(true);
+  });
+
+  test("a search box or a name field alone is no login form", () => {
+    page(`<form><input name="q" type="search" aria-label="Search"></form><form><input name="name"></form>`);
+    expect(hasFields(new Scan(), "login")).toBe(false);
+  });
+});
+
 describe("identities", () => {
   test("an address form: name, street, city and postal code are identity fields; its e-mail too", () => {
     const f = page(

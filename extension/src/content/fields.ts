@@ -319,7 +319,9 @@ export function fieldKind(el: Element | null, scan: Scan): FieldKind | null {
 
 /** The kinds of fill a frame can take (for fill offers): whether it has a login, card or identity form. */
 export function hasFields(scan: Scan, what: "login" | "card" | "identity"): boolean {
-  if (what === "login") return scan.passwords().length > 0 || !!otpField(scan);
+  // A user-name-first sign-in (Apple ID, Google, Microsoft) shows no password field until "Continue": its user name
+  // field alone counts, the one fillLogin would fill there.
+  if (what === "login") return scan.passwords().length > 0 || !!otpField(scan) || !!usernameFieldFor(null, scan);
   if (what === "card") return scan.fields.some((f) => scan.usable(f) && !!scan.cardPart(f));
   return scan.fields.some((f) => scan.usable(f) && !!scan.identityPart(f));
 }
