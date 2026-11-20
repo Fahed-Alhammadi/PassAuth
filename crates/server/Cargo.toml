@@ -40,5 +40,5 @@ libc = "0.2.191"
 [dev-dependencies]
 passauth-core = { path = "../core", features = ["insecure-test-kdf"] }
 tower = { version = "0.5", features = ["util"] }
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 flate2 = "1.1"
