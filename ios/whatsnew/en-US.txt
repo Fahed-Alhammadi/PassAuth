@@ -1,6 +1,11 @@
-New in 0.13.1
-• The Permissions page left Settings. PassAuth still asks for what it needs when you first open it; to change a permission later, use the Settings app.
+New in 0.14.0
+• Sign-in request notifications: when you sign in on a new device with "Sign in with another device", your iPhone now gets a notification. Tap it, unlock PassAuth and approve the request as before (matching words and a 6-digit code). Notifications never show your email or server.
+• Turn them on from the card in your vault, or in Settings → Account security → Sign-in request notifications.
+
+Needs a PassAuth server 0.17.0 or later (with push notifications switched on in the admin page, the default).
 
 Please test:
-1. Open Settings in PassAuth and check the list looks right without the Permissions row.
-2. Sign in with a security key or passkey for two-step login (new in 0.13.0) and check you land in your vault.
+1. Tap "Turn on" on the vault card and allow notifications.
+2. Lock PassAuth and close it. On a computer, open the web vault, choose "Sign in with another device" and type your email.
+3. Check a "Sign-in request" notification arrives within a few seconds.
+4. Tap it: PassAuth opens, asks you to unlock, then shows the request. Approve it and finish signing in on the computer.

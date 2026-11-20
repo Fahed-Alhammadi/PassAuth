@@ -11,6 +11,8 @@
 //! key to the public key and opens the request's `challenge`, a random value the
 //! server sealed to the account's own public key, to prove it holds the account's
 //! keys (`POST /account/auth-requests/{id}`; the server never sees the account key).
+//! Phones with a push token registered for one of the account's sessions are woken
+//! through the push relay as well (`push.rs`).
 //! A stolen session alone can't approve. The first answer wins. The new device polls
 //! (`GET /auth/requests/{id}` with the code in [`ACCESS_CODE_HEADER`]) and exchanges
 //! an approved request exactly once, for a session; the sealed key only ever goes
@@ -91,8 +93,8 @@ const MAX_CLAIMED_TEXT: usize = 64;
 const ACCESS_CODE_MIN: usize = 22;
 const ACCESS_CODE_MAX: usize = 128;
 /// A new request is answered no sooner than this after it arrived, with or without
-/// an account behind the email: the only work that differs (one activity-log row and
-/// an in-memory notice) hides well inside it.
+/// an account behind the email: the only work that differs (one activity-log row, an
+/// in-memory notice and starting the push task) hides well inside it.
 const MIN_CREATE_TIME: Duration = Duration::from_millis(100);
 
 /// Header carrying the access code when polling. Never in the URL: reverse proxies
@@ -338,6 +340,9 @@ pub async fn create(
     tx.commit().await?;
     if let Some(user) = &user_id {
         state.notify_user(user, Notice::AuthRequest(id.clone()));
+        // Phones with a push token hear about it too, from a task of its own: this
+        // answer never waits for the database or the relay (`push.rs`).
+        crate::push::notify_auth_request(&state, user);
     }
     tokio::time::sleep_until(started + MIN_CREATE_TIME).await;
     Ok(Json(json!({

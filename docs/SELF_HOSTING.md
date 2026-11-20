@@ -81,7 +81,8 @@ Open `/admin` on your server (e.g. `https://vault.example.com/admin`) and sign i
 - allow file attachments (on by default) and set the largest file (100 MB by default, up to 4096 MB) and the attachment storage per user (1 GB by default, 0 = no limit); set a per-user storage limit to cap disk use,
 - keep a free-disk reserve (1024 MB by default, 0 = off): below it nothing new is stored, but sign-in, sync and deleting keep working, so you can free space safely. The overview shows the free space,
 - allow emergency access (on by default): users can let a trusted contact on this server request view-only access to their personal vaults after a waiting period they choose (1–90 days). Confirming a contact gives them a key to those vaults only (not shared vaults, not Sends); removing a contact changes the keys of those vaults. The waiting period is enforced by the server, not by encryption, and an approved contact keeps what they had. Contacts confirmed before the server moved to these keys (database migration 13) have to be confirmed again; the apps say so. If emergency contacts were confirmed on 0.10.0 or earlier, backups made before the upgrade still hold the account keys sealed to them: delete those backups. The upgrade erases the keys from the database (on SQLite it also rebuilds the file once, with `VACUUM`, which needs free disk space about twice the size of the database plus the free-disk reserve; until there is enough, the log warns at each start and the rebuild waits); PostgreSQL keeps old row versions until it vacuums, so run `VACUUM` once on the PassAuth database after upgrading,
-- turn the password breach check on or off (on by default: the web vault sends Have I Been Pwned only the first 5 characters of a password's hash, and only when the user asks; the server isn't involved).
+- turn the password breach check on or off (on by default: the web vault sends Have I Been Pwned only the first 5 characters of a password's hash, and only when the user asks; the server isn't involved),
+- turn push notifications for sign-in requests on or off, and choose the push relay (see [Push notifications](#push-notifications)).
 
 These settings are saved in the database and take effect at once, without a restart.
 
@@ -145,6 +146,27 @@ To switch to the short files (nothing is lost; your data in `./data` stays as it
 
 Your `SIGNUPS_*`, `SMTP_*`, `ICON_SERVICE` and `LOG_LEVEL` values are still read as starting values while they are in `.env`. Once you have saved the same settings on the admin page, you can delete those lines.
 
+## Push notifications
+
+When someone starts signing in to an account on a new device and asks to approve it from a signed-in one, the account's iPhones get a notification ("Sign-in request"), even while PassAuth is closed. Tapping it opens the app, which shows the request after it is unlocked. This is on by default.
+
+Apple delivers notifications only to apps signed with the app publisher's key, so your server can't send them to Apple itself. It asks the **push relay** instead, a small service run by the PassAuth publisher on Cloudflare (`https://passauth-push.uaealhammadi.com`). For each signed-in iPhone the server sends the relay:
+
+- the phone's push token (a random identifier Apple gives the app, not tied to the account),
+- whether it is a test build or an App Store build,
+- that it is a sign-in request.
+
+The relay never gets the account, its email, the request or anything in a vault. Like any website it sees where the request comes from (your server's IP address) and when. It sends Apple a fixed text, the same for everyone, and keeps nothing. The approval works exactly as without notifications: the phone fetches the request from your server over its own signed-in connection, and the person still compares the words and approves it in the app.
+
+On the admin page, under **Features**:
+
+- **Push notifications for sign-in requests**: turn it off and the server stops sending them, forgets every phone's push token, and the apps stop registering. Requests still appear in the apps while they are open.
+- **Push relay address**: point the server at another relay, e.g. one you run yourself from the PassAuth source (`relay/`; it needs the publisher's Apple key to reach the App Store app, so this is mostly for people who build the iOS app themselves). It must be an `https://` address.
+
+You can also set the starting values in `.env` (optional): `PASSAUTH_PUSH=off`, `PASSAUTH_PUSH_RELAY_URL=https://push.example.com`. What you save on the admin page wins.
+
+A phone's push token is kept with its sign-in on your server and deleted when it signs out, is signed out, the sign-in expires, or the account is deleted.
+
 ## Back up
 
 All data is in `./data`. To back up the SQLite database while PassAuth keeps running:
@@ -198,6 +220,7 @@ Set on the admin page (saved in the database, no restart). The `.env` names stil
 | Sign-ups: open, closed or limited to email domains | `SIGNUPS_ALLOWED`, `SIGNUPS_DOMAINS_WHITELIST` |
 | New accounts must confirm their email address | `SIGNUPS_VERIFY` (default: on when email is set up) |
 | Show website icons | `ICON_SERVICE` (`internal` or `off`), `ICON_CACHE_DIR` |
+| Push notifications for sign-in requests, Push relay address | `PASSAUTH_PUSH` (`on` or `off`, default on), `PASSAUTH_PUSH_RELAY_URL` (optional, default the publisher's relay) |
 | Server log | `LOG_LEVEL` |
 | Email delivery | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_FROM_NAME` |
 | Admin sign-in | `ADMIN_TOKEN` (an Argon2 hash from `passauth-server hash-admin-token`; used only when `PASSAUTH_ADMIN_PASSWORD` is not set) |

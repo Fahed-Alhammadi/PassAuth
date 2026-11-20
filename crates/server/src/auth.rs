@@ -1468,6 +1468,7 @@ async fn refresh(
             .bind(&id)
             .execute(&mut *tx)
             .await?;
+        crate::push::drop_orphans(&mut tx, &user_id).await?;
         if done.rows_affected() > 0 {
             Event::new("session.revoked")
                 .target(&user_id)
@@ -1542,6 +1543,7 @@ async fn logout(State(state): State<AppState>, user: AuthUser) -> ApiResult<Json
         .bind(&user.session_id)
         .execute(&mut *tx)
         .await?;
+    crate::push::drop_orphans(&mut tx, &user.user_id).await?;
     Event::new("session.signed_out")
         .by(&user)
         .record(&mut tx, &state)

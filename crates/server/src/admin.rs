@@ -406,6 +406,7 @@ async fn set_disabled(
             .bind(id)
             .execute(&mut *tx)
             .await?;
+        crate::push::drop_orphans(&mut tx, id).await?;
         crate::auth_requests::cancel_open(&mut tx, id).await?;
     }
     let kind = if disabled {
@@ -452,6 +453,7 @@ async fn revoke_sessions(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
+    crate::push::drop_orphans(&mut tx, &id).await?;
     crate::auth_requests::cancel_open(&mut tx, &id).await?;
     Event::new("admin.sessions_revoked")
         .by_admin(&admin)
@@ -748,6 +750,9 @@ fn settings_json(state: &AppState) -> Json<Value> {
         "signups_verify": state.signups_verify(),
         "breach_check": state.breach_check(),
         "event_ip": state.numbers.event_ip(),
+        "push_enabled": state.push.enabled(),
+        "push_relay_url": state.push.relay_url(),
+        "push_relay_default": crate::push::DEFAULT_RELAY_URL,
         "smtp": smtp,
         "ranges": settings::ranges_json(),
         "switches": settings::switches_json(),
@@ -758,7 +763,13 @@ fn settings_json(state: &AppState) -> Json<Value> {
 }
 
 /// Keys of `GET /admin/settings` that `PUT` ignores (they are changed elsewhere or not at all).
-const READ_ONLY: &[&str] = &["log_levels", "smtp", "ranges", "switches"];
+const READ_ONLY: &[&str] = &[
+    "log_levels",
+    "smtp",
+    "ranges",
+    "switches",
+    "push_relay_default",
+];
 
 /// A change on the admin page. Every field may be left out (unchanged), so older
 /// admin pages and scripts can send only what they know.
@@ -771,6 +782,10 @@ struct GeneralSettings {
     breach_check: Option<bool>,
     /// The activity log keeps IP addresses (turning it off also erases the kept ones).
     event_ip: Option<bool>,
+    /// Sign-in request push notifications (`push.rs`).
+    push_enabled: Option<bool>,
+    /// Where they are sent (`push::check_relay_url`).
+    push_relay_url: Option<String>,
     /// The numbers (`settings::Num`, e.g. `"session_days": 30`) and switches
     /// (`settings::Flag`, e.g. `"require_two_step": true`) by name; `null` = unchanged.
     #[serde(flatten)]
@@ -813,6 +828,12 @@ async fn set_settings(
     {
         return Err(ApiError::bad(format!("unknown log level {level:?}")));
     }
+    let relay = b
+        .push_relay_url
+        .as_deref()
+        .map(crate::push::check_relay_url)
+        .transpose()
+        .map_err(ApiError::bad)?;
     // Names of what changes, for the activity log.
     let mut changed: Vec<&str> = Vec::new();
     let bit = |on: bool| if on { "1" } else { "0" };
@@ -836,6 +857,12 @@ async fn set_settings(
             state.breach_check(),
         ),
         (EVENT_IP, "event_ip", b.event_ip, state.numbers.event_ip()),
+        (
+            crate::push::ENABLED_SETTING,
+            "push_enabled",
+            b.push_enabled,
+            state.push.enabled(),
+        ),
     ];
     for (row, name, value, now_on) in switches {
         if let Some(on) = value {
@@ -844,6 +871,18 @@ async fn set_settings(
                 changed.push(name);
             }
         }
+    }
+    if let Some(url) = &relay {
+        db::set_setting(&mut *tx, crate::push::RELAY_SETTING, url).await?;
+        if *url != state.push.relay_url() {
+            changed.push("push_relay_url");
+        }
+    }
+    if b.push_enabled == Some(false) {
+        // Off: no phone is kept registered (the apps register again once it is back on).
+        sqlx::query("DELETE FROM push_tokens")
+            .execute(&mut *tx)
+            .await?;
     }
     if b.event_ip == Some(false) {
         // Off also forgets the addresses already kept.
@@ -888,6 +927,12 @@ async fn set_settings(
     if let Some(on) = b.event_ip {
         state.numbers.set_event_ip(on);
     }
+    if let Some(on) = b.push_enabled {
+        state.push.set_enabled(on);
+    }
+    if let Some(url) = relay {
+        state.push.set_relay_url(url);
+    }
     let fewer_versions = numbers
         .iter()
         .any(|(n, v)| *n == Num::ItemVersionsKept && *v < state.num(Num::ItemVersionsKept));
@@ -906,6 +951,8 @@ async fn set_settings(
         signups_verify = state.signups_verify(),
         breach_check = state.breach_check(),
         event_ip = state.numbers.event_ip(),
+        push_enabled = state.push.enabled(),
+        push_relay_url = %state.push.relay_url(),
         changed = ?numbers.iter().map(|(n, v)| format!("{}={v}", n.spec().name))
             .chain(flags.iter().map(|(f, on)| format!("{}={on}", f.spec().name)))
             .collect::<Vec<_>>(),

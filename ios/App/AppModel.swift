@@ -17,6 +17,8 @@ final class AppModel {
     @ObservationIgnored private(set) var liveSync: LiveSync!
     @ObservationIgnored private(set) var backgroundRefresh: BackgroundRefresh!
     let permissions: PermissionCenter
+    /// Sign-in request notifications (permission, APNs token, registration with the servers).
+    let push = PushCenter.shared
     /// Password health of the unlocked vault (Settings → Password health, notes on item pages).
     let health: HealthSession
     /// Attachment uploads in progress (item pages).
@@ -61,6 +63,7 @@ final class AppModel {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { SecureStore.wipeAll() }
         skipPermissionsIntro = ProcessInfo.processInfo.arguments.contains("-PASkipPermissions")
+        if ProcessInfo.processInfo.arguments.contains("-PAResetState") { PushCenter.shared.resetForTests() }
         #else
         skipPermissionsIntro = false
         #endif
@@ -104,9 +107,19 @@ final class AppModel {
             ShareSheet.dismissAll()
             AttachmentTransfer.cleanUp()
         }
+        push.attach(repo)
+        // Vault timeout "Log out": the servers forget this device's notification token first.
+        lockManager.beforeLogout = { [push] in await push.unregisterAll() }
     }
 
     var state: AppState { repo.state }
+
+    /// Log out of the active account (Log out buttons): its server forgets this device's
+    /// notification token first (best effort; the server also drops it with the session).
+    func logOut() async {
+        await push.unregister(state.activeId)
+        await repo.logout()
+    }
 
     func notify(_ text: String) {
         noticeTask?.cancel()
@@ -212,6 +225,8 @@ final class LockManager {
     private var lastActivity = LockManager.now()
     private var lastScheduled: UInt64 = 0
     private var timer: Task<Void, Never>?
+    /// Runs before the "Log out" timeout action signs every account out.
+    var beforeLogout: (@MainActor () async -> Void)?
 
     init(repo: VaultRepository) { self.repo = repo }
 
@@ -274,8 +289,14 @@ final class LockManager {
         timer?.cancel()
         guard repo.anyUnlocked else { return }
         let action = repo.state.settings.timeoutAction
+        let before = beforeLogout
         Task {
-            if action == .logout { await repo.logoutAll() } else { await repo.lockAll() }
+            if action == .logout {
+                // Lock first (nothing stays open while the servers are asked), then sign out.
+                await repo.lockAll()
+                await before?()
+                await repo.logoutAll()
+            } else { await repo.lockAll() }
         }
     }
 }

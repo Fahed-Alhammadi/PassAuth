@@ -142,6 +142,7 @@ private struct VaultList: View {
             }
             if q.isEmpty && !filter.active {
                 VaultNotices(target: $noticeTarget)
+                PushOfferCard()
             }
             if filter.active {
                 Section {
@@ -445,7 +446,7 @@ struct AccountMenu: View {
         .accessibilityLabel("Account menu: \(s.name.isEmpty ? s.email : s.name)")
         .accessibilityIdentifier("accountMenu")
         .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))

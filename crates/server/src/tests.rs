@@ -22,12 +22,15 @@ mod device_login;
 mod emergency;
 mod hardening;
 mod manifest;
+mod push;
 mod sec789;
 mod signing;
 
-/// Undoes migrations 17 (vault manifests), 16 (Send v2), 15 (profile pictures) and 14
-/// (signed sharing), for tests that go back to an older schema.
+/// Undoes migrations 18 (push tokens), 17 (vault manifests), 16 (Send v2), 15 (profile
+/// pictures) and 14 (signed sharing), for tests that go back to an older schema.
 const UNDO_MIGRATION_14: &[&str] = &[
+    "DROP TABLE push_tokens",
+    "DELETE FROM schema_version WHERE version = 18",
     "DROP TABLE vault_manifest_log",
     "ALTER TABLE vaults DROP COLUMN manifest",
     "ALTER TABLE vaults DROP COLUMN manifest_seq",
@@ -2654,7 +2657,8 @@ async fn config_lists_the_api_version_and_features() {
             "sends",
             "emergency_access",
             "login_with_device",
-            "icons"
+            "icons",
+            "push"
         ])
     );
     assert_eq!(v["trash_days"], 0);

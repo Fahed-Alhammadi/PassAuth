@@ -1,0 +1,35 @@
+# Push relay (relay/): the Cloudflare Worker that sends sign-in request notifications to Apple for every PassAuth
+# server. Push to main / pull request: type checks, lints and tests it. Deploying is by hand from a computer that has
+# Keys/ (see relay/README.md); CI holds no Cloudflare or Apple keys.
+name: Relay
+
+on:
+  push:
+    branches: [main]
+    paths: ["relay/**", ".github/workflows/relay.yml"]
+  pull_request:
+    paths: ["relay/**", ".github/workflows/relay.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: relay
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npx vp check --no-fmt
+      - run: npm test

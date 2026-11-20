@@ -326,7 +326,7 @@ private struct AccountPage: View {
         }
         .paRow()
         .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
@@ -432,6 +432,7 @@ private struct SecurityPage: View {
                  : "Set up Face ID or Touch ID in the Settings app to use this.")
         }
         .paRow()
+        PushSettingsSection()
         Section {
             NavigationLink { ChangePasswordPage() } label: {
                 PageRow(title: "Change master password", help: "Also turns the Secret Key on or off.", symbol: "key")

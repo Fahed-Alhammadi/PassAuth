@@ -16,6 +16,7 @@ mod mail;
 mod passkeys;
 mod policies;
 mod privileges;
+mod push;
 mod sends;
 mod settings;
 mod signing;
@@ -145,8 +146,8 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
-/// Housekeeping every minute: expired in-memory state, icon cache, sessions and
-/// email codes, emergency access requests whose waiting period ended, and sign-in
+/// Housekeeping every minute: expired in-memory state, icon cache, sessions (and
+/// the push tokens of ended ones) and email codes, emergency access requests whose waiting period ended, and sign-in
 /// requests (expired, deleted a day later); every ten
 /// minutes the trash (admin setting `trash_days`), old tombstones
 /// (`tombstone_days`), old activity-log entries (`event_days`), Sends past their
@@ -184,6 +185,11 @@ async fn sweeper(state: AppState) {
         ] {
             sweep_step(what, sqlx::query(sql).bind(cutoff).execute(&state.db)).await;
         }
+        sweep_step(
+            "forgetting push tokens of ended sessions",
+            push::sweep(&state),
+        )
+        .await;
         sweep_step(
             "approving waited emergency access requests",
             emergency::approve_waited(&state),
@@ -575,8 +581,9 @@ const API_VERSION: u32 = 2;
 /// `breach_check` while the admin allows it, `item_history` while the admin
 /// keeps item versions (`item_versions_kept` above 0), `sends` while Send is on,
 /// `attachments` while attachments are on and have a folder, `emergency_access`
-/// and `login_with_device` while they are on, and `icons` while the website-icon
-/// service is on (`/api/icons/{host}` answers 404 otherwise, so apps don't ask).
+/// and `login_with_device` while they are on, `icons` while the website-icon
+/// service is on (`/api/icons/{host}` answers 404 otherwise, so apps don't ask), and
+/// `push` while sign-in request push notifications are on (`push.rs`).
 const FEATURES: &[&str] = &[
     "key_epoch",
     "idempotent_create",
@@ -618,6 +625,10 @@ async fn public_config(State(state): State<AppState>) -> Json<Value> {
     }
     if state.icons.enabled() {
         features.push("icons");
+    }
+    // Phone apps register a push token (`PUT /account/push`) only while this is listed.
+    if state.push.enabled() {
+        features.push("push");
     }
     // Security keys through the web vault's key page (`/two-step/key`) for
     // apps that hand the ceremony to a browser; needs an https `DOMAIN`.

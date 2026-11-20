@@ -85,6 +85,9 @@ pub mod code {
     pub const EMERGENCY_VAULTS_CHANGED: &str = "emergency_vaults_changed";
     /// 403: the admin turned signing in with another device's approval off.
     pub const LOGIN_WITH_DEVICE_DISABLED: &str = "login_with_device_disabled";
+    /// 409: the admin turned sign-in request push notifications off; no push token is
+    /// kept (`/api/config` doesn't list `push` then).
+    pub const PUSH_DISABLED: &str = "push_disabled";
     /// 507: the server's disk is down to the admin's free-space reserve
     /// (`min_free_disk_mb`); nothing new is stored until space is freed. Reading,
     /// syncing and deleting still work.

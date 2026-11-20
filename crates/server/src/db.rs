@@ -158,6 +158,7 @@ const MIGRATIONS: &[(i64, &[&str])] = &[
     (15, SCHEMA_V15),
     (16, SCHEMA_V16),
     (17, SCHEMA_V17),
+    (18, SCHEMA_V18),
 ];
 
 /// Server-wide settings the admin can change at runtime (override the env defaults).
@@ -472,6 +473,25 @@ const SCHEMA_V17: &[&str] = &[
         created_at BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY (vault_id, seq)
     )",
+];
+
+/// Sign-in request push notifications (`push.rs`): the push token a signed-in app
+/// registered for its session (`session_id`; the row goes away with the session), the
+/// account it belongs to, the push service (`platform`, `apns`), the device token
+/// (lower-case hex) and the APNs environment (`production` or `sandbox`). A token
+/// lives in one row at most: registering it again moves it to the new session.
+const SCHEMA_V18: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS push_tokens (
+        session_id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        token TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS push_tokens_user ON push_tokens (user_id)",
+    "CREATE INDEX IF NOT EXISTS push_tokens_token ON push_tokens (token)",
 ];
 
 /// Migration 12: the ids of vaults deleted before it, as far as the database still

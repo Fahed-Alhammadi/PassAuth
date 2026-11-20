@@ -355,7 +355,7 @@ struct TwoStepPage: View {
             if gate {
                 Section {
                     Button(role: .destructive) {
-                        model.run { await model.repo.logout() }
+                        model.run { await model.logOut() }
                     } label: {
                         Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
                     }

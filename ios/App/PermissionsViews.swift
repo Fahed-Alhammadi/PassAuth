@@ -8,7 +8,7 @@ import UIKit
 
 /// The permissions and system features PassAuth uses, in the order they're listed.
 enum PermissionKind: String, CaseIterable, Identifiable {
-    case autofill, biometrics, camera, localNetwork
+    case autofill, biometrics, notifications, camera, localNetwork
     var id: String { rawValue }
 }
 
@@ -34,6 +34,7 @@ final class PermissionCenter {
         switch k {
         case .autofill: autofill
         case .biometrics: biometrics
+        case .notifications: PushCenter.shared.permission
         case .camera: camera
         case .localNetwork: localNetwork
         }
@@ -44,6 +45,7 @@ final class PermissionCenter {
     func refresh() async {
         camera = PermissionRules.camera(AVCaptureDevice.authorizationStatus(for: .video).rawValue)
         refreshBiometrics()
+        await PushCenter.shared.refreshPermission()
         let local = memory.localNetwork
         if local == .allowed || local == .denied, !busy.contains(.localNetwork) {
             busy.insert(.localNetwork)
@@ -76,6 +78,8 @@ final class PermissionCenter {
         busy.insert(k)
         defer { busy.remove(k) }
         switch k {
+        case .notifications:
+            await PushCenter.shared.requestPermission()
         case .camera:
             _ = await AVCaptureDevice.requestAccess(for: .video)
             camera = PermissionRules.camera(AVCaptureDevice.authorizationStatus(for: .video).rawValue)
@@ -143,6 +147,7 @@ final class PermissionCenter {
         switch k {
         case .autofill: "AutoFill passwords & passkeys"
         case .biometrics: biometryName
+        case .notifications: "Notifications"
         case .camera: "Camera"
         case .localNetwork: "Local network"
         }
@@ -152,6 +157,7 @@ final class PermissionCenter {
         switch k {
         case .autofill: "Fill logins, passkeys and verification codes in Safari and other apps."
         case .biometrics: "Unlock your vault without typing your master password."
+        case .notifications: "Sign-in requests: get notified when you sign in on another device, and approve it here."
         case .camera: "Scan the QR code when you add two-step login to an item."
         case .localNetwork: "Only needed if your server is on your home network, such as http://192.168.1.20."
         }
@@ -161,6 +167,7 @@ final class PermissionCenter {
         switch k {
         case .autofill: "key.viewfinder"
         case .biometrics: biometryType == .touchID ? "touchid" : biometryType == .opticID ? "opticid" : "faceid"
+        case .notifications: "bell.badge"
         case .camera: "camera"
         case .localNetwork: "network"
         }

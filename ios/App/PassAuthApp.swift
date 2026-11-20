@@ -15,11 +15,22 @@ struct PassAuthApp: App {
     }
 }
 
-/// Registers the Background App Refresh handler before the app finishes launching.
+/// Registers the Background App Refresh handler and the notification delegate before the app
+/// finishes launching (a tap that launched the app is delivered right after), and passes the
+/// APNs device token on.
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         BackgroundRefresh.register()
+        PushCenter.shared.start()
         return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        PushCenter.shared.received(token: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        // No token (no network, simulator without push, entitlement missing): nothing registers.
     }
 }
 
@@ -81,6 +92,8 @@ struct RootView: View {
                 // The AutoFill extension may have rotated tokens or saved a passkey meanwhile.
                 model.repo.store.reload()
                 Task { await model.repo.refreshIfStale() }
+                // Notifications may have been turned on or off in the Settings app meanwhile.
+                Task { await model.push.refreshPermission() }
             }
             if phase == .background { model.backgroundRefresh.schedule() }
         }
@@ -95,6 +108,15 @@ struct RootView: View {
             } else {
                 model.authRequests.clear()
             }
+        }
+        // A sign-in (or another account signed in): register this device for sign-in request notifications.
+        .onChange(of: state.accounts.filter { $0.status == .locked || $0.status == .unlocked }.map(\.id).joined(separator: ","), initial: true) { _, _ in
+            Task { await model.push.sync() }
+        }
+        // A sign-in request notification was tapped (or arrived on screen): ask for the open
+        // requests now; locked, the unlock screen is shown and unlocking asks.
+        .onChange(of: model.push.signInRequests) { _, _ in
+            if state.status == .unlocked && !state.twoStepRequired { Task { await model.authRequests.refresh() } }
         }
         .onChange(of: state.settings.theme) { _, t in applyTheme(t) }
         .onChange(of: state.settings.vaultTimeout) { _, _ in model.lockManager.settingsChanged() }

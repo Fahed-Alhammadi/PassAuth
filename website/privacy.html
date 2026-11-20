@@ -28,7 +28,7 @@
 <main class="doc" id="main">
   <div class="wrap">
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated: 19 November 2026</p>
+    <p class="updated">Last updated: 20 November 2026</p>
 
     <p>PassAuth is a self-hosted password manager. This policy covers the PassAuth Android, iOS and desktop apps, the PassAuth browser extension, the web vault and the PassAuth server software. You choose the PassAuth server the apps connect to. It is run by you, or by the organization that gave you an account, not by the PassAuth developer.</p>
 
@@ -49,7 +49,8 @@
       <li>The desktop app checks GitHub (github.com) for a new version once a day and whenever you ask it to. That request sends your IP address and the app's version to GitHub, and nothing else. Website icons fetched from your server may be cached on the device, as a browser would cache them.</li>
       <li>Password health in the web vault, the desktop app and the iPhone and Android apps can check your passwords against Have I Been Pwned (api.pwnedpasswords.com), a public list of passwords found in data breaches, but only when you press "Check for exposed passwords". For each password, your device works out its SHA-1 hash and sends only the first 5 characters of it. The answer lists every breached hash that starts with those characters, padded with made-up entries so its size gives nothing away, and the comparison happens on your device. Your passwords and their full hashes never leave your device, and your PassAuth server isn't involved. Have I Been Pwned also sees your IP address, as with any web request. The admin of your PassAuth server can turn this check off.</li>
       <li>The apps sync in the background: the desktop app every 2 hours by default (you can change or turn this off), the Android and iOS apps when the system allows. A background sync only refreshes the encrypted copy of your vault from your server; it doesn't unlock the vault or send anything new.</li>
-      <li>Nothing is sent to the PassAuth developer. The apps and the extension contain no analytics, advertising, tracking or third-party services.</li>
+      <li>If you allow notifications in the iPhone app and your PassAuth server has sign-in request notifications on, your server sends your phone's push token (a random identifier Apple gives the app for notifications) to the PassAuth push relay whenever someone asks to sign in to your account on a new device. The relay is run by the PassAuth developer on Cloudflare and passes the notification on to Apple. It gets only the push token, whether the app is a test or App Store build, and that it is a sign-in request, plus your server's IP address and the time, as with any web request. It never gets your account, your email address, the request or anything from your vault, keeps nothing, and the notification text is the same for everyone. The push token is kept on your PassAuth server only while you are signed in on that phone. You can turn notifications off in the app or in iOS Settings, and the admin of your PassAuth server can turn them off or use another relay.</li>
+      <li>Apart from that push token, nothing is sent to the PassAuth developer. The apps and the extension contain no analytics, advertising, tracking or third-party services.</li>
     </ul>
 
     <h2>On your devices</h2>

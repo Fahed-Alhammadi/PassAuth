@@ -132,6 +132,11 @@ targets:
         keychain-access-groups:
           - $(AppIdentifierPrefix)io.passauth.shared
         com.apple.developer.authentication-services.autofill-credential-provider: true
+        # Sign-in request notifications (App/PushNotifications.swift). Development here: the
+        # App Store export (ExportOptions.plist, method app-store-connect) re-signs with the
+        # distribution profile, which sets it to production. The app tells its server which
+        # one to use (PushRules.environment: sandbox in Debug, production in Release).
+        aps-environment: development
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.passauth.app

@@ -170,23 +170,13 @@ impl IconService {
                     None
                 }
             });
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default TLS versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         Self {
             enabled: AtomicBool::new(config.icon_service),
             disk,
             mem: DashMap::new(),
             inflight: DashMap::new(),
             permits: Semaphore::new(MAX_CONCURRENT),
-            tls: tokio_rustls::TlsConnector::from(Arc::new(tls)),
+            tls: tls_connector(),
             last_disk_sweep: AtomicI64::new(0),
         }
     }
@@ -407,6 +397,22 @@ impl IconService {
             send(tcp, req, read, url.clone()).await
         }
     }
+}
+
+/// TLS for outgoing HTTP/1.1 requests (website icons, the push relay): ring, the
+/// Mozilla roots built in (`webpki-roots`), no client certificate.
+pub(crate) fn tls_connector() -> tokio_rustls::TlsConnector {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default TLS versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    tokio_rustls::TlsConnector::from(Arc::new(tls))
 }
 
 #[derive(Debug)]

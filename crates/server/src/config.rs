@@ -62,6 +62,12 @@ pub struct Config {
     /// Folder for attachment files (`ATTACHMENTS_DIR`, see [`attachments_dir_for`]);
     /// `None`: attachments are unavailable.
     pub attachments_dir: Option<String>,
+    /// `PASSAUTH_PUSH` (default on): the starting value of the admin page's
+    /// `push_enabled` (sign-in request push notifications, `push.rs`).
+    pub push: bool,
+    /// `PASSAUTH_PUSH_RELAY_URL` (optional): the starting value of the admin page's
+    /// `push_relay_url`; `None` = [`crate::push::DEFAULT_RELAY_URL`].
+    pub push_relay_url: Option<String>,
 }
 
 fn var(name: &str) -> Result<Option<String>> {
@@ -272,6 +278,13 @@ impl Config {
             icon_service,
             icon_cache_dir,
             attachments_dir,
+            push: flag("PASSAUTH_PUSH", true)?,
+            push_relay_url: var("PASSAUTH_PUSH_RELAY_URL")?
+                .map(|u| {
+                    crate::push::check_relay_url(&u)
+                        .map_err(|e| anyhow::anyhow!("PASSAUTH_PUSH_RELAY_URL: {e}"))
+                })
+                .transpose()?,
             smtp,
             domain,
         })
@@ -307,6 +320,8 @@ impl Config {
             icon_service: true,
             icon_cache_dir: None,
             attachments_dir: None,
+            push: true,
+            push_relay_url: None,
         }
     }
 }

@@ -674,7 +674,7 @@ async fn a_new_master_password_or_signing_out_the_others_ends_open_sign_ins() {
 
 /// A new master password (here the same one under a new key-derivation salt) from
 /// the session of `token`, which stays signed in; works with two-step login on.
-async fn change_password(app: &Router, email: &str, pw: &str, token: &str) {
+pub(super) async fn change_password(app: &Router, email: &str, pw: &str, token: &str) {
     let mut bundle: AccountBundle =
         serde_json::from_value(synced(app, token).await["bundle"].clone()).unwrap();
     bundle.kdf.salt = b64(&random_salt());

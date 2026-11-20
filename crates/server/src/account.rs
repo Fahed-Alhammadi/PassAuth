@@ -58,6 +58,10 @@ pub fn routes() -> Router<AppState> {
         .route("/events", get(events::account_events))
         .route("/auth-requests", get(crate::auth_requests::list))
         .route("/auth-requests/{id}", post(crate::auth_requests::answer))
+        .route(
+            "/push",
+            put(crate::push::register).delete(crate::push::unregister),
+        )
         .merge(crate::signing::routes())
 }
 
@@ -300,6 +304,7 @@ async fn keys_finish(
         .execute(&mut *tx)
         .await?
         .rows_affected();
+    crate::push::drop_orphans(&mut tx, &user.user_id).await?;
     sqlx::query(
         "UPDATE devices SET remember_hash = NULL, remember_expires = NULL WHERE user_id = $1",
     )
@@ -758,6 +763,7 @@ async fn revoke_session(
         .bind(&user.user_id)
         .execute(&mut *tx)
         .await?;
+    crate::push::drop_orphans(&mut tx, &user.user_id).await?;
     if done.rows_affected() > 0 {
         Event::new("session.revoked")
             .by(&user)
@@ -783,6 +789,7 @@ async fn revoke_other_sessions(
         .bind(&user.session_id)
         .execute(&mut *tx)
         .await?;
+    crate::push::drop_orphans(&mut tx, &user.user_id).await?;
     // Nor does a sign-in still on its way (an approved device, a two-step login).
     crate::auth_requests::cancel_open(&mut tx, &user.user_id).await?;
     Event::new("session.revoked_others")
@@ -814,6 +821,7 @@ async fn forget_device(
     .bind(&device_id)
     .fetch_all(&mut *tx)
     .await?;
+    crate::push::drop_orphans(&mut tx, &user.user_id).await?;
     let device = sqlx::query("DELETE FROM devices WHERE user_id = $1 AND id = $2")
         .bind(&user.user_id)
         .bind(&device_id)
@@ -882,6 +890,10 @@ pub async fn delete_user(state: &AppState, user_id: &str, event: Event) -> ApiRe
     let mut tx = state.db.begin().await?;
     // A write first (SQLite then never has to upgrade a read transaction).
     sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM push_tokens WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;

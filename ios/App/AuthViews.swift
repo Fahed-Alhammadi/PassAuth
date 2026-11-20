@@ -669,7 +669,7 @@ struct UnlockView: View {
             OtherAccounts()
         }
         .confirmationDialog("Log out?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Log out", role: .destructive) { model.run { await model.repo.logout() } }
+            Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(LogoutCopy.message(email: state.email, others: state.accounts.count > 1))

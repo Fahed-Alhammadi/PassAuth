@@ -61,6 +61,8 @@ pub struct App {
     /// their vaults in full once.
     pub sync_generation: String,
     pub icons: IconService,
+    /// Sign-in request push notifications: the admin's switch and relay (`push.rs`).
+    pub push: crate::push::PushService,
     /// Attachment files (`files.rs`); `None` when the server has no folder it can
     /// write them to (attachments are then unavailable).
     pub files: Option<crate::files::FileStore>,
@@ -297,6 +299,16 @@ impl App {
             config.signups_verify,
         );
         let icons_on = flag(db::setting(&db, "icon_service").await?, config.icon_service);
+        let (push_on, push_relay) = crate::push::starting(
+            config.push,
+            config.push_relay_url.as_deref(),
+            db::setting(&db, crate::push::ENABLED_SETTING)
+                .await?
+                .as_deref(),
+            db::setting(&db, crate::push::RELAY_SETTING)
+                .await?
+                .as_deref(),
+        );
         let numbers = Numbers::load(&db).await?;
         let sync_generation =
             db::server_secret(&db, SYNC_GENERATION, || b64(&random_bytes::<9>().unwrap())).await?;
@@ -367,6 +379,7 @@ impl App {
             admin_2fa_setup: std::sync::Mutex::new(None),
             mailer: Arc::new(mailer),
             icons,
+            push: crate::push::PushService::new(push_on, push_relay),
             files,
             config,
             db,

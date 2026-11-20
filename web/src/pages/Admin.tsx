@@ -7,6 +7,7 @@ import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, PasswordInput, Sheet
 import { EVENT_TYPES, type ActivityEvent, type DescribeContext } from "../lib/activity";
 import { hasFeature, usePublicConfig } from "../lib/api";
 import { clientId } from "../lib/platform";
+import { normalizeRelayUrl, relayUrlProblem } from "../lib/push-relay";
 import { formatBytes } from "../lib/sizes";
 import { EventList } from "./Activity";
 import "../styles/tools.css";
@@ -73,6 +74,12 @@ interface Settings {
   trash_days?: number;
   /** Password health may ask Have I Been Pwned (older servers omit it). */
   breach_check?: boolean;
+  /** Sign-in request push notifications to phones (older servers omit the three). */
+  push_enabled?: boolean;
+  /** The push relay's address. */
+  push_relay_url?: string;
+  /** The relay used when none is set: the publisher's. */
+  push_relay_default?: string;
   /** Range and default of every limit by name; the limits' values are fields of the same name (older servers omit both). */
   ranges?: Record<string, LimitRange>;
   /** Default of every on/off setting by name (Send, account policies); their values are booleans of the same name. */
@@ -553,7 +560,7 @@ function Dashboard({ token, onAuthLost }: { token: string; onAuthLost: (message:
     case "features":
       body = (
         <>
-          <SettingsCard key="features" only={["icons", "breach"]} settings={settings} call={call} reload={load} />
+          <SettingsCard key="features" only={["icons", "breach", "push"]} settings={settings} call={call} reload={load} />
           {limits(["Send", "Emergency access"])}
         </>
       );
@@ -1259,16 +1266,21 @@ function ActivityCard({ users, call, user, onUser }: { users: User[]; call: Call
 /** "Empty trash after" choices in days; 0 keeps the trash until someone empties it. */
 const TRASH_DAYS = [0, 30, 60, 90];
 
-type ServerSetting = "verify" | "icons" | "breach" | "log" | "trash";
+type ServerSetting = "verify" | "icons" | "breach" | "push" | "log" | "trash";
 
 /** Some of the server's own settings (`PUT /admin/settings` takes any subset), so each section saves only what it shows. */
-function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[]; settings: Settings; call: Call; reload: () => Promise<void> }) {
+export function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[]; settings: Settings; call: Call; reload: () => Promise<void> }) {
   const has = (k: ServerSetting) => only.includes(k);
   const [level, setLevel] = useState(settings.log_level);
   const [icons, setIcons] = useState(settings.icons);
   const [verify, setVerify] = useState(settings.signups_verify);
   const hasBreach = has("breach") && typeof settings.breach_check === "boolean";
   const [breach, setBreach] = useState(settings.breach_check ?? true);
+  const hasPush = has("push") && typeof settings.push_enabled === "boolean";
+  const [push, setPush] = useState(settings.push_enabled ?? true);
+  const [relay, setRelay] = useState(settings.push_relay_url ?? "");
+  const relayProblem = hasPush ? relayUrlProblem(relay) : null;
+  const relayChanged = hasPush && normalizeRelayUrl(relay) !== settings.push_relay_url;
   // Only servers that can empty the trash by themselves report trash_days; with `ranges` it is set under Limits.
   const trashDaysNow = typeof settings.trash_days === "number" ? settings.trash_days : undefined;
   const hasTrash = has("trash") && trashDaysNow !== undefined && !settings.ranges;
@@ -1281,10 +1293,15 @@ function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[];
     (has("icons") && icons !== settings.icons) ||
     (has("verify") && verify !== settings.signups_verify) ||
     (hasBreach && breach !== settings.breach_check) ||
+    (hasPush && (push !== settings.push_enabled || relayChanged)) ||
     (hasTrash && trashDays !== trashDaysNow);
 
   async function save(e: FormEvent) {
     e.preventDefault();
+    if (relayProblem) {
+      setError(relayProblem);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -1295,6 +1312,7 @@ function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[];
           ...(has("icons") ? { icons } : {}),
           ...(has("verify") ? { signups_verify: verify } : {}),
           ...(hasBreach ? { breach_check: breach } : {}),
+          ...(hasPush ? { push_enabled: push, ...(relayChanged ? { push_relay_url: normalizeRelayUrl(relay) } : {}) } : {}),
           ...(hasTrash ? { trash_days: trashDays } : {}),
         },
       });
@@ -1338,6 +1356,40 @@ function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[];
             <input type="checkbox" role="switch" className="switch" checked={breach} onChange={(e) => setBreach(e.target.checked)} />
           </label>
         )}
+        {hasPush && (
+          <>
+            <label className="setting">
+              <span className="setting-text">
+                <span className="setting-title">Push notifications for sign-in requests</span>
+                <span className="setting-desc">
+                  When someone asks to sign in to an account on a new device, the account's phones get a notification, even while the app is closed.
+                  It goes through the push relay, which only sees the phone's push token and when to notify: never the account, its email or anything in
+                  a vault. When off, the apps see requests only while they're open.
+                </span>
+              </span>
+              <input type="checkbox" role="switch" className="switch" checked={push} onChange={(e) => setPush(e.target.checked)} />
+            </label>
+            <label className="field">
+              <span>Push relay address</span>
+              <input
+                className="input"
+                type="url"
+                inputMode="url"
+                value={relay}
+                onChange={(e) => setRelay(e.target.value)}
+                placeholder={settings.push_relay_default ?? "https://"}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={!push}
+                aria-invalid={relayProblem ? true : undefined}
+              />
+              <span className="field-hint">
+                The relay passes each notification on to Apple. Change it only if you run a relay of your own
+                {settings.push_relay_default ? ` (the default is ${settings.push_relay_default})` : ""}.
+              </span>
+            </label>
+          </>
+        )}
         {has("log") && (
           <label className="field">
             <span>How much to log</span>
@@ -1374,7 +1426,7 @@ function SettingsCard({ only, settings, call, reload }: { only: ServerSetting[];
             {busy ? "Saving…" : "Save changes"}
           </button>
           <span className="small muted">
-            Takes effect immediately and replaces {[has("verify") && "SIGNUPS_VERIFY", has("icons") && "ICON_SERVICE", has("log") && "LOG_LEVEL"].filter(Boolean).join(" and ") || "the setting"} from the server's .env file.
+            Takes effect immediately and replaces {[has("verify") && "SIGNUPS_VERIFY", has("icons") && "ICON_SERVICE", hasPush && "PASSAUTH_PUSH", has("log") && "LOG_LEVEL"].filter(Boolean).join(" and ") || "the setting"} from the server's .env file.
           </span>
         </div>
       </form>
