@@ -14,7 +14,7 @@
 		"typecheck": "cf workers types && vp check --no-fmt --no-lint"
 	},
 	"devDependencies": {
-		"@cloudflare/vite-plugin": "2.0.0-rc.0",
+		"@cloudflare/vite-plugin": "2.0.0-rc.1",
 		"@cloudflare/vitest-plugin": "1.8.4",
 		"cf": "1.0.0-rc.2",
 		"typescript": "7.0.2",
