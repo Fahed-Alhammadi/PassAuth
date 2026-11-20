@@ -1,6 +1,6 @@
 [versions]
 # Newest stable releases that still build against compileSdk 36 (newer AndroidX/OkHttp releases require 37).
-agp = "9.5.0"
+agp = "9.5.2"
 kotlin = "2.4.21"
 composeBom = "2026.06.01"
 activityCompose = "1.13.0"
@@ -14,20 +14,20 @@ fragment = "1.9.1"
 credentials = "1.6.0"
 autofill = "1.3.0"
 coroutines = "1.11.0"
-serialization = "1.12.0"
-okhttp = "5.4.0"
+serialization = "1.13.0"
+okhttp = "5.5.1"
 jna = "5.19.1"
 camerax = "1.6.2"
 zxing = "3.5.4"
 # 2.10.x is the last WorkManager line for compileSdk 36.
-work = "2.10.5"
+work = "2.12.0"
 # Auth Tab (1.9+) for two-step sign-in on the server's key page; 1.10.0 still builds against compileSdk 36.
 browser = "1.10.0"
 # Sign-in request notifications (FCM). firebase-messaging alone (no BoM, no analytics): 26.0.2 is the
 # newest release; its AARs and androidx dependencies still build against compileSdk 36.
 firebaseMessaging = "26.0.2"
 # GoogleApiAvailability (phones without Google Play services hide the offer); the version messaging 26.0.2 uses.
-playServicesBase = "18.9.0"
+playServicesBase = "18.11.1"
 junit = "4.13.2"
 
 [libraries]
