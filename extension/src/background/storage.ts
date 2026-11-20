@@ -22,7 +22,7 @@
  */
 import type { Bundle, SyncResponse } from "@web/lib/types";
 import { log, logged } from "../shared/log";
-import { AVATAR_OPEN_PREFIX, AVATAR_PREFIX } from "../shared/storage-keys";
+import { AVATAR_OPEN_PREFIX, AVATAR_PREFIX, OFFLINE_CHANGES_PREFIX } from "../shared/storage-keys";
 import type { Settings } from "../shared/types";
 import { forgetLastUsed } from "./last-used";
 import type { StoredSync } from "./sync-rules";
@@ -238,7 +238,7 @@ export const local = {
         Object.assign(patch, { secretKeys, rememberTokens });
       }
       await chrome.storage.local.set(patch);
-      await chrome.storage.local.remove(`${AVATAR_PREFIX}${id}`);
+      await chrome.storage.local.remove([`${AVATAR_PREFIX}${id}`, `${OFFLINE_CHANGES_PREFIX}${id}`]);
       await chrome.storage.session.remove([`unlocked:${id}`, pinKey(id), `${AVATAR_OPEN_PREFIX}${id}`]);
       await forgetLastUsed(id);
       await syncCache.clear(id);
@@ -378,6 +378,43 @@ export const scratch = {
   },
   set: (key: string, value: unknown) => chrome.storage.session.set({ [key]: value }),
   remove: (key: string | string[]) => chrome.storage.session.remove(key),
+};
+
+// ---------------------------------------------------------- offline changes
+
+/** An account's offline changes as stored: the sealed list and how many changes it holds (readable while locked). */
+export interface StoredChanges {
+  sealed: string;
+  count: number;
+}
+
+const changesKey = (id: string) => `${OFFLINE_CHANGES_PREFIX}${id}`;
+const readChanges = async (id: string): Promise<StoredChanges | null> => {
+  const v = (await chrome.storage.local.get(changesKey(id)))[changesKey(id)] as Partial<StoredChanges> | undefined;
+  return v && typeof v.sealed === "string" && typeof v.count === "number" ? { sealed: v.sealed, count: v.count } : null;
+};
+
+/**
+ * Offline changes per account (`offlineChanges:<id>`, written by background/vault.ts). Writes go through the storage
+ * write queue (`serial`), so a removal (Log out) queued after a write always runs after it.
+ */
+export const offlineChanges = {
+  get: (id: string): Promise<StoredChanges | null> => readChanges(id),
+  /** How many changes wait, per account (0 for none). */
+  async counts(ids: readonly string[]): Promise<Record<string, number>> {
+    if (!ids.length) return {};
+    const raw = (await chrome.storage.local.get(ids.map(changesKey))) as Record<string, Partial<StoredChanges> | undefined>;
+    return Object.fromEntries(ids.map((id) => [id, typeof raw[changesKey(id)]?.count === "number" ? (raw[changesKey(id)]?.count as number) : 0]));
+  },
+  /** Read-modify-write in the queue: `fn` gets what is stored and returns what to store (null: remove it). */
+  update: (id: string, fn: (current: StoredChanges | null) => StoredChanges | null): Promise<StoredChanges | null> =>
+    serial(async () => {
+      const next = fn(await readChanges(id));
+      if (next && next.count > 0) await chrome.storage.local.set({ [changesKey(id)]: next });
+      else await chrome.storage.local.remove(changesKey(id));
+      return next;
+    }),
+  clear: (id: string) => serial(() => chrome.storage.local.remove(changesKey(id))),
 };
 
 // ------------------------------------------------------------- sync cache

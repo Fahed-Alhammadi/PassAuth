@@ -3,7 +3,8 @@ import { clientName } from "../lib/platform";
 import { LogoMark } from "../components/Logo";
 import { ErrorText, PasswordField, SheetActions } from "../components/ui";
 import { friendlyError } from "../lib/api";
-import { getBundle, logout, rememberedSecretKey, unlock, useVault } from "../lib/vault";
+import { getBundle, rememberedSecretKey, unlock, useVault } from "../lib/vault";
+import { signOut } from "../components/OfflineChanges";
 
 export function UnlockPage() {
   const { email } = useVault();
@@ -61,7 +62,7 @@ export function UnlockPage() {
           <ErrorText error={error} />
           <SheetActions
             quiet={
-              <button type="button" className="btn btn-text" onClick={logout}>
+              <button type="button" className="btn btn-text" onClick={() => void signOut()}>
                 Sign out
               </button>
             }

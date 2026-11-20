@@ -16,6 +16,8 @@
  * - "This vault isn't being checked for missing or restored items." for a vault whose "no record" was accepted;
  * - "PassAuth can't read this device's record of your vaults." with "Reset on this device" (after a confirmation);
  * - a server this version refuses;
+ * - offline changes waiting to sync or needing a decision (background "offline changes"), with Review/Decide;
+ * - offline changes that couldn't be opened: dropped (dismissible) or kept unread (writes refused);
  * - signed sharing (background/signed-sharing.ts): shared vaults that failed a check and aren't used, a person whose
  *   keys changed (with their new fingerprint and "Trust the new key" once the user compared it), account-wide warnings,
  *   and invitations that can't be accepted as they are.
@@ -29,7 +31,7 @@ import { DISMISSED_KEY, FILL_PROBLEM_PREFIX } from "../shared/storage-keys";
 import type { ItemList, PolicyNotices, SharingNotice } from "../shared/types";
 import type { Ctx } from "./ctx";
 
-type Dismissed = { policy?: string; invitations?: string; sharing?: string; rollback?: string };
+type Dismissed = { policy?: string; invitations?: string; sharing?: string; rollback?: string; offline?: string };
 
 /** "1 vault invitation is waiting", "3 vault invitations are waiting". */
 export const invitationsText = (n: number) => (n === 1 ? "1 vault invitation is waiting" : `${n} vault invitations are waiting`);
@@ -296,10 +298,38 @@ export function Notices({ ctx, data, tabId }: { ctx: Ctx; data: ItemList | null;
   const memory = data?.memory;
   const notChecked = data?.notChecked;
   const serverProblem = data?.serverProblem;
+  const offline = data?.offline;
+  const offlineNotice = data?.offlineNotice && data.offlineNotice.key !== dismissed.offline ? data.offlineNotice : null;
   const refresh = () => ctx.go({ tab: "vault", page: "list" });
-  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !memory && !notChecked && !serverProblem) return null;
+  if (!problem && !policyShown && !invitesShown && !signIns && !sharingShown && !rollbackShown && !manifest && !memory && !notChecked && !serverProblem && !offline && !offlineNotice) return null;
   return (
     <div className="notices">
+      {offlineNotice &&
+        (offlineNotice.key === null ? (
+          // Not dismissible: the list is kept as it is and no change can wait on this device until it can be read.
+          <div className="alert alert-warn small notice" role="status">
+            <div className="grow">
+              <span>{offlineNotice.text}</span>
+            </div>
+          </div>
+        ) : (
+          <Notice tone="warn" onDismiss={() => dismiss("offline", offlineNotice.key as string)}>
+            <span>{offlineNotice.text}</span>
+          </Notice>
+        ))}
+      {offline && (
+        // Not dismissible: the sync status of changes made offline ("N changes waiting to sync" / "… need your decision").
+        <div className={`alert ${offline.decide ? "alert-warn" : "alert-info"} small notice`} role="status">
+          <div className="grow">
+            <span>
+              {offline.text}.{" "}
+              <button type="button" className="link" onClick={() => ctx.go({ tab: "vault", page: "changes" })}>
+                {offline.decide ? "Decide" : "Review"}
+              </button>
+            </span>
+          </div>
+        </div>
+      )}
       {signIns && (
         // Not dismissible: a sign-in waits for an answer until it is given or the request expires.
         <div className="alert alert-warn small notice" role="note">

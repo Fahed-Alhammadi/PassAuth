@@ -130,7 +130,40 @@ import {
   type PublicIdentity,
   type SignedMemberRow,
 } from "./signing";
-import { secretStore } from "./platform";
+import {
+  DELETED_TEXT,
+  MOVED_TEXT,
+  LIST_DROPPED,
+  LIST_UNREADABLE,
+  OfflineChangeError,
+  CONFLICT_TEXT,
+  HAS_CHANGE,
+  MAX_TRIES,
+  NEEDS_CONNECTION,
+  changeFor,
+  classifyFailure,
+  conflictKind,
+  decideSend,
+  emptyList,
+  holdReason,
+  mergeChange,
+  overlay,
+  parseList,
+  removeChange,
+  replaceChange,
+  resolveConflict,
+  serializeList,
+  waitsAfter,
+  type ChangeList,
+  type ConflictKind,
+  type Failure,
+  type NewChange,
+  type OfflineChange,
+  type Resolution,
+  type SentBody,
+  type ServerRow,
+} from "./offline-changes";
+import { getDesktop, secretStore } from "./platform";
 import { server } from "./server";
 import { encryptedSizeBound } from "./sizes";
 import { getCredential } from "./webauthn";
@@ -281,6 +314,16 @@ export interface State {
    * (status "unreachable"); in an open vault syncing stopped and what is shown stays, with a notice.
    */
   serverOutdated: boolean;
+  /**
+   * Offline changes (desktop app only; ARCHITECTURE "Offline changes"): this account's changes that wait to be sent,
+   * oldest first. `items` already shows them; this is for markers, the sync status and decisions. Empty while locked.
+   */
+  offlineChanges: OfflineChange[];
+  /**
+   * About the stored list itself: it can't be read (nothing is written over it then), or it didn't open for this
+   * account and was removed. Null otherwise.
+   */
+  offlineNotice: string | null;
 }
 
 const initial: State = {
@@ -304,6 +347,8 @@ const initial: State = {
   unopenable: [],
   deviceRecordUnreadable: false,
   serverOutdated: false,
+  offlineChanges: [],
+  offlineNotice: null,
 };
 let state: State = initial;
 let account: core.Account | null = null;
@@ -379,6 +424,17 @@ let checksOn = false;
 let accountWrapsV2 = false;
 /** Item edit counters this device saw for the unlocked account (`item-revs.ts`); loaded at the first sync. */
 let revMemory: RevMemory | null = null;
+/** The items as the server's copy holds them (what `materialize` made), before offline changes are applied on top. */
+let serverItems: VaultEntry[] = [];
+/** Offline changes (desktop): the unlocked account's list, and the account it belongs to. Memory only while unlocked. */
+let changes: ChangeList = emptyList();
+let changesFor: string | null = null;
+/** The stored list couldn't be read (not a decryption failure): nothing is written over it until it can be. */
+let changesUnreadable = false;
+/** The last request found no server (no answer, or 502/503/504): saves go into the list until a sync answers again. */
+let offlineHint = false;
+/** Held changes, by change id: the number of checked syncs when they were held (they are tried again after a newer one). */
+let heldSeen = new Map<string, number>();
 const subs = new Set<() => void>();
 
 function set(patch: Partial<State>) {
@@ -685,6 +741,13 @@ function dropKeys() {
   fullNext = false;
   avatars.clear();
   signed.endSigning();
+  serverItems = [];
+  changes = emptyList();
+  changesFor = null;
+  changesUnreadable = false;
+  offlineHint = false;
+  heldSeen = new Map();
+  if (state.offlineChanges.length || state.offlineNotice) set({ offlineChanges: [], offlineNotice: null });
   if (old.length || state.items.length || state.invitations.length || state.blockedVaults.length || state.consents.length || state.unopenable.length || state.deviceRecordUnreadable)
     set({ vaults: [], items: [], invitations: [], blockedVaults: [], consents: [], keyChanges: [], signingNotice: null, unopenable: [], deviceRecordUnreadable: false });
   old.forEach((v) => v.key.free());
@@ -1017,6 +1080,7 @@ export function endSession(accessToken: string) {
  * login first: the gate is showing and the keys stay for `continueAfterTwoStep`. Other failures are thrown.
  */
 async function openVault(): Promise<boolean> {
+  await openVaultChanges();
   try {
     await sync();
   } catch (e) {
@@ -1029,6 +1093,43 @@ async function openVault(): Promise<boolean> {
   void refreshPolicyViolations().catch(() => {});
   vaultKeysChanged();
   return true;
+}
+
+/** Before the first sync after the keys are in memory: this account's offline changes (desktop). */
+async function openVaultChanges() {
+  if (!offlineOn() || !account || !bundle) return;
+  const accountId = bundle.account_id;
+  const gen = generation;
+  let list = emptyList();
+  let notice: string | null = null;
+  try {
+    const sealed = await offlineStore()!.get(accountId);
+    if (gen !== generation || !account) return;
+    if (sealed) list = parseList(account.openOfflineChanges(sealed));
+  } catch (e) {
+    if (gen !== generation || !account) return;
+    if (!(e instanceof Error && e.message === "decrypt_failed")) {
+      // Can't be read now (storage error, a newer list format, damaged): kept as it is, and nothing is written over it.
+      changes = emptyList();
+      changesFor = null;
+      changesUnreadable = true;
+      set({ offlineNotice: LIST_UNREADABLE });
+      return;
+    }
+    // Doesn't open for this account: dropped (replaced at the next change), and the user is told.
+    list = emptyList();
+    notice = LIST_DROPPED;
+  }
+  if (gen !== generation || !account) return;
+  changes = list;
+  changesFor = accountId;
+  changesUnreadable = false;
+  if (notice || state.offlineNotice) set({ offlineNotice: notice });
+}
+
+/** Hide the notice that an unopenable list was removed (the one about an unreadable list stays). */
+export function dismissOfflineNotice() {
+  if (state.offlineNotice === LIST_DROPPED) set({ offlineNotice: null });
 }
 
 let afterVaultKeys: (() => Promise<void>) | null = null;
@@ -1531,6 +1632,7 @@ function adopt(snap: Snapshot, checked: Verdicts, checks: Map<string, VaultCheck
   noRecordVaults = recordless;
   materialize(snap);
   void signed.flushPins().catch(() => {});
+  afterCheckedSync();
 }
 
 /**
@@ -1849,6 +1951,7 @@ function materialize(snap: Snapshot): void {
   if (rollbacks.shown) warnings.push(ROLLBACK_SHOWN);
   else if (rollbacks.kept) warnings.push(ROLLBACK_KEPT);
   items.sort((a, b) => byName.compare(a.item.name, b.item.name));
+  serverItems = items;
   decrypted = copies;
   openedFrom = opened;
   undecryptable = failed;
@@ -1869,19 +1972,20 @@ function materialize(snap: Snapshot): void {
     return verdicts ? { ...shown, trust: trust ?? { kind: "refused" as const, reason: signed.CHECK_LATER } } : shown;
   });
   invitationNames = names;
-  const changes = new Map<string, KeyChange>();
-  for (const b of blocked) if (b.changed) changes.set(b.changed.identity.user_id, b.changed);
-  for (const inv of invitations) if (inv.trust?.kind === "refused" && inv.trust.changed) changes.set(inv.trust.changed.identity.user_id, inv.trust.changed);
+  const changedKeys = new Map<string, KeyChange>();
+  for (const b of blocked) if (b.changed) changedKeys.set(b.changed.identity.user_id, b.changed);
+  for (const inv of invitations) if (inv.trust?.kind === "refused" && inv.trust.changed) changedKeys.set(inv.trust.changed.identity.user_id, inv.trust.changed);
   set({
     status: "unlocked",
     vaults,
-    items,
+    items: withChanges(items, vaults),
+    offlineChanges: changes.changes,
     revision: snap.revision,
     warnings,
     invitations,
     blockedVaults: blocked,
     consents,
-    keyChanges: [...changes.values()],
+    keyChanges: [...changedKeys.values()],
     signingNotice: verdicts ? (signed.signingProblem() ?? signed.pinsNotice()) : null,
     unopenable,
     name: snap.user.name,
@@ -1894,6 +1998,7 @@ function materialize(snap: Snapshot): void {
       ]),
     ],
   });
+  retryWhileWaiting();
   // Profile picture: fetched and opened only when its number changed (servers with `avatar`).
   void avatars.note(snap.user.avatar_seq, (sealed) => acct.openAvatar(sealed));
   // Handles the new state no longer uses (a vault gone, or its key replaced).
@@ -1994,7 +2099,7 @@ async function manifestUpkeep(snap: Snapshot, gen: number): Promise<void> {
       let next: Snapshot | null = base;
       if (mayStart(true, row, status, memory.get(row.id))) {
         // Not over an item the server sent older than this device saw it: the first manifest would seal that copy.
-        if (state.items.some((e) => e.vaultId === row.id && e.rollback)) continue;
+        if (serverItems.some((e) => e.vaultId === row.id && e.rollback)) continue;
         next = await startManifest(base, row, rows, gen);
       } else if (mayPurge(row, status)) next = await purgeDue(base, row, rows, gen);
       if (!next) return;
@@ -2445,6 +2550,7 @@ export async function resync(): Promise<void> {
   connectSocket();
   // Higher: something new. Lower: the server went back (a restored backup); the sync judges it (`fetchSync`).
   if (r.revision !== state.revision) await sync();
+  else kickSender();
 }
 
 // -------------------------------------------------------------- save target
@@ -2559,7 +2665,7 @@ function storedRow(enc: EncryptedItem, answer: WriteAnswer, base: SyncItemRow | 
 }
 
 /** The vault an item is in, read before a write that names only the item. */
-const vaultOf = (id: string): string | undefined => synced?.items.get(id)?.vault_id ?? state.items.find((x) => x.id === id)?.vaultId;
+const vaultOf = (id: string): string | undefined => synced?.items.get(id)?.vault_id ?? serverItems.find((x) => x.id === id)?.vaultId;
 
 /**
  * Send a write encrypted with a vault key. When the server has replaced that key since our last sync (409
@@ -2597,6 +2703,32 @@ export async function createItem(vaultId: string, item: Item, id: string = newIt
   requireWritableServer();
   const now = Math.floor(Date.now() / 1000);
   const data = { ...item, created_at: now, updated_at: now };
+  if (!offlineOn()) return postItem(vaultId, data, id);
+  const waitAs = (sent: SentBody | null) => queueChange({ kind: "create", vault_id: vaultId, item_id: id, base_revision: null, item: data, sent });
+  if (knownOffline()) {
+    vaultFor(vaultId);
+    await waitAs(null);
+    return id;
+  }
+  let body: SentBody | null = null;
+  try {
+    return await postItem(vaultId, data, id, async (b) => {
+      body = b;
+    });
+  } catch (e) {
+    if (!waitsAfter(failureOf(e))) throw e;
+    noteOffline();
+    await waitAs(body);
+    return id;
+  }
+}
+
+/**
+ * POST a new item (`data` as it is to be stored). `onBody` gets the body's encrypted part before each request is sent
+ * (the offline sender keeps it as `sent`). An id that exists already with other content: the earlier try is
+ * overwritten (`dedupe`, the editor's retry), or `item_exists` is thrown (the offline sender decides itself).
+ */
+async function postItem(vaultId: string, data: Item, id: string, onBody?: (b: SentBody) => Promise<void>, dedupe = true): Promise<string> {
   let sent: { enc: EncryptedItem; answer: WriteAnswer; manifest: ManifestEntry | null };
   try {
     sent = await manifestTries(() =>
@@ -2604,15 +2736,16 @@ export async function createItem(vaultId: string, item: Item, id: string = newIt
         const v = vaultFor(vaultId);
         const enc = v.key.encryptItem(data, id, vaultId) as EncryptedItem;
         const manifest = manifestFor(vaultId, v.key, [], [{ id, deleted_at: null, data: enc.data }]);
+        await onBody?.({ key: enc.key, data: enc.data, key_epoch: v.epoch ?? null });
         return { enc, manifest, answer: await api<WriteAnswer>("/items", { body: { ...enc, ...epochOf(v), ...manifestsOf(manifest) } }) };
       }),
     );
   } catch (e) {
-    if (!itemExists(e)) throw e;
+    if (!dedupe || !itemExists(e)) throw e;
     // An earlier try with this id was saved. This try was encrypted afresh, so the server can't tell it's the same
     // item: save this content over the saved one.
     await catchUp();
-    const saved = state.items.find((x) => x.id === id);
+    const saved = serverItems.find((x) => x.id === id);
     if (!saved) throw e;
     await saveOver(saved, { ...data, created_at: saved.item.created_at }, vaultId);
     return id;
@@ -2636,13 +2769,35 @@ export async function updateItem(entry: VaultEntry, item: Item, vaultId = entry.
   if (next.login && old && old !== next.login.password && next.password_history[0]?.password !== old) {
     next.password_history = [{ password: old, changed_at: now }, ...next.password_history].slice(0, 20);
   }
-  await saveOver(entry, next, vaultId);
+  if (!offlineOn()) return saveOver(entry, next, vaultId);
+  requireWritableServer();
+  // A change of this item that is being sent right now finishes first (its outcome decides where this one goes).
+  await flightOf(entry.id);
+  const move = vaultId !== entry.vaultId;
+  const pending = changeFor(changes, entry.id);
+  if (pending || knownOffline()) {
+    // Moves need a connection; an item with a change waiting takes no move until that change is sent or decided.
+    if (move) throw new Error(pending ? HAS_CHANGE : NEEDS_CONNECTION);
+    return queueChange({ kind: "edit", vault_id: entry.vaultId, item_id: entry.id, base_revision: entry.revision, item: next });
+  }
+  // An item created on this device and sent meanwhile: the edit starts from the server's copy of it.
+  const base = entry.enc.key ? entry : (serverItems.find((x) => x.id === entry.id) ?? entry);
+  let body: SentBody | null = null;
+  try {
+    await saveOver(base, next, vaultId, async (b) => {
+      body = b;
+    });
+  } catch (e) {
+    if (move || !waitsAfter(failureOf(e))) throw e;
+    noteOffline();
+    await queueChange({ kind: "edit", vault_id: base.vaultId, item_id: base.id, base_revision: base.revision, item: next, sent: body });
+  }
 }
 
 /** `putItem`, then show the result. A move changes two vaults but answers only the target's number: never shown as sent. */
-async function saveOver(base: VaultEntry, next: Item, vaultId: string) {
+async function saveOver(base: VaultEntry, next: Item, vaultId: string, onBody?: (b: SentBody) => Promise<void>) {
   requireWritableServer();
-  const sent = await putItem(base, next, vaultId);
+  const sent = await putItem(base, next, vaultId, onBody);
   // An earlier try had been stored: the sync that found out already shows it.
   if (!sent) return;
   const own =
@@ -2698,7 +2853,12 @@ function holds(entry: VaultEntry, next: Item, vaultId: string) {
  * follow, and the edit is sent again while the item itself is unchanged, at most `MANIFEST_TRIES` sends in all. The
  * returned `manifest` is the item's (new) vault's.
  */
-async function putItem(base: VaultEntry, next: Item, vaultId: string): Promise<{ enc: EncryptedItem; answer: WriteAnswer; from: string; manifest: ManifestEntry | null } | null> {
+async function putItem(
+  base: VaultEntry,
+  next: Item,
+  vaultId: string,
+  onBody?: (b: SentBody) => Promise<void>,
+): Promise<{ enc: EncryptedItem; answer: WriteAnswer; from: string; manifest: ManifestEntry | null } | null> {
   let retried = false;
   for (let sends = 1; ; sends++) {
     try {
@@ -2711,6 +2871,7 @@ async function putItem(base: VaultEntry, next: Item, vaultId: string): Promise<{
       const after: ManifestRow = { id: base.id, deleted_at: synced?.items.get(base.id)?.deleted_at ?? base.deletedAt ?? null, data: enc.data };
       const left = move ? manifestFor(base.vaultId, vaultFor(base.vaultId).key, [base.id], []) : null;
       const manifest = manifestFor(vaultId, v.key, move ? [] : [base.id], [after]);
+      await onBody?.({ key: enc.key, data: enc.data, key_epoch: v.epoch ?? null });
       const answer = await api<WriteAnswer>(`/items/${base.id}`, { method: "PUT", body: { ...enc, revision: base.revision, ...epochOf(v), ...manifestsOf(left, manifest) } });
       return { enc, answer, from: base.vaultId, manifest };
     } catch (e) {
@@ -2718,7 +2879,7 @@ async function putItem(base: VaultEntry, next: Item, vaultId: string): Promise<{
       if (!keyChanged(e) && !revisionConflict(e) && !raced) throw e;
       if (raced && sends >= MANIFEST_TRIES) throw triesOver(e);
       await catchUp();
-      const fresh = state.items.find((x) => x.id === base.id);
+      const fresh = serverItems.find((x) => x.id === base.id);
       if (!fresh) throw new Error(ITEM_GONE);
       if (fresh.deletedAt === base.deletedAt && holds(fresh, next, vaultId)) return null;
       if (!sameItem(fresh, base)) throw new Error(CHANGED_ELSEWHERE);
@@ -2738,7 +2899,12 @@ async function putItem(base: VaultEntry, next: Item, vaultId: string): Promise<{
  * at most `MANIFEST_TRIES` sends in all, unless the item is gone or already where it should be (null: nothing to do).
  * Vaults without a manifest get the request from before.
  */
-async function changeItemState(id: string, kind: "trash" | "restore" | "purge"): Promise<{ vaultId: string | undefined; answer: WriteAnswer; manifest: ManifestEntry | null } | null> {
+async function changeItemState(
+  id: string,
+  kind: "trash" | "restore" | "purge",
+  /** The offline sender: a 409 `revision_conflict` is thrown (it decides again itself) instead of tried again here. */
+  once = false,
+): Promise<{ vaultId: string | undefined; answer: WriteAnswer; manifest: ManifestEntry | null } | null> {
   const path = kind === "trash" ? `/items/${id}` : kind === "restore" ? `/items/${id}/restore` : `/items/${id}/permanent`;
   const method = kind === "restore" ? "POST" : "DELETE";
   requireWritableServer();
@@ -2756,7 +2922,7 @@ async function changeItemState(id: string, kind: "trash" | "restore" | "purge"):
       const params = manifest && row ? [`revision=${row.revision}`, ...manifestQuery(manifest)] : [];
       return { vaultId, manifest, answer: await api<WriteAnswer>(withQuery(path, params), { method }) };
     } catch (e) {
-      if (!mustCatchUp(e) && !(manifest && revisionConflict(e))) throw e;
+      if (!mustCatchUp(e) && !(manifest && revisionConflict(e) && !once)) throw e;
       if (sends >= MANIFEST_TRIES) throw triesOver(e);
       await catchUp();
       const fresh = synced?.items.get(id);
@@ -2767,12 +2933,39 @@ async function changeItemState(id: string, kind: "trash" | "restore" | "purge"):
 }
 
 export async function trashItem(id: string) {
-  const w = await changeItemState(id, "trash");
+  if (!offlineOn()) return sendTrash(id);
+  requireWritableServer();
+  await flightOf(id);
+  const waitAs = () => {
+    const vaultId = changeFor(changes, id)?.vault_id ?? vaultOf(id);
+    if (!vaultId) throw new Error(ITEM_GONE);
+    return queueChange({ kind: "trash", vault_id: vaultId, item_id: id, base_revision: synced?.items.get(id)?.revision ?? null, item: null });
+  };
+  if (changeFor(changes, id) || knownOffline()) return waitAs();
+  try {
+    await sendTrash(id);
+  } catch (e) {
+    if (!waitsAfter(failureOf(e))) throw e;
+    noteOffline();
+    await waitAs();
+  }
+}
+
+async function sendTrash(id: string, once = false) {
+  const w = await changeItemState(id, "trash", once);
   // The server stamps when it went to the trash, so it is fetched rather than guessed.
   if (w) await settle(w.vaultId, w.answer, undefined, w.manifest);
 }
 
+/** Restore, delete for good and moves need a connection, and an item with a change waiting takes none of them. */
+function requireNoChange(id: string) {
+  if (!offlineOn()) return;
+  if (changeFor(changes, id)) throw new Error(HAS_CHANGE);
+  if (knownOffline()) throw new Error(NEEDS_CONNECTION);
+}
+
 export async function restoreItem(id: string) {
+  requireNoChange(id);
   const w = await changeItemState(id, "restore");
   if (!w) return;
   const { vaultId, answer } = w;
@@ -2789,6 +2982,7 @@ export async function restoreItem(id: string) {
 }
 
 export async function purgeItem(id: string) {
+  requireNoChange(id);
   const w = await changeItemState(id, "purge");
   if (!w) return;
   const { vaultId, answer } = w;
@@ -2800,6 +2994,347 @@ export async function purgeItem(id: string) {
     revs.flush();
   }
   await settle(vaultId, answer, vaultId ? (vaultSeq) => ({ kind: "remove", id, vaultId, vaultSeq }) : undefined, w.manifest);
+}
+
+// --------------------------------------------------------- offline changes
+
+/**
+ * Offline changes (ARCHITECTURE "Offline changes"), desktop app only: the platform's `offlineChanges` store is the
+ * capability, so the browser web vault (no store) writes as before. Rules are in `offline-changes.ts`; here they are
+ * stored (sealed with the account key), shown on top of the copy (`withChanges`) and sent (`kickSender`).
+ */
+const offlineStore = () => getDesktop()?.offlineChanges ?? null;
+const offlineOn = (): boolean => offlineStore() !== null;
+/** Whether offline changes are kept on this platform (the desktop app). */
+export const offlineChangesOn = offlineOn;
+
+const knownOffline = (): boolean => offlineHint || (typeof navigator !== "undefined" && navigator.onLine === false);
+function noteOffline() {
+  offlineHint = true;
+}
+
+/** A failed request, described for the pure rules. */
+function failureOf(e: unknown): Failure {
+  if (e instanceof UnreachableError) return { unreachable: true, ...(e.status ? { status: e.status } : {}) };
+  if (e instanceof ApiError) return { status: e.status, code: e.code };
+  return {};
+}
+
+/** The items to show: the server's copy with this account's offline changes on top. */
+function withChanges(items: VaultEntry[], vaults: readonly Vault[] = state.vaults): VaultEntry[] {
+  if (!changes.changes.length) return items;
+  return overlay(items, changes, new Set(vaults.map((v) => v.id)), (a, b) => byName.compare(a.item.name, b.item.name));
+}
+
+/** Show the list as it is now (items, markers, the sync status). */
+function publishChanges() {
+  retryWhileWaiting();
+  if (state.status !== "unlocked" && state.status !== "two-step") return;
+  set({ items: withChanges(serverItems), offlineChanges: changes.changes });
+}
+
+let storing: Promise<void> = Promise.resolve();
+
+/** Keep `next` as the list (memory at once, then sealed in the store, writes in order) and show it. */
+async function storeChanges(next: ChangeList): Promise<void> {
+  const acct = account;
+  if (changesUnreadable) throw new OfflineChangeError(LIST_UNREADABLE);
+  const accountId = changesFor ?? bundle?.account_id ?? null;
+  if (!acct || !accountId) throw new Error(LOCKED);
+  const sealed = next.changes.length ? acct.sealOfflineChanges(serializeList(next)) : null;
+  changes = next;
+  changesFor = accountId;
+  publishChanges();
+  const store = offlineStore()!;
+  const write = storing.catch(() => {}).then(() => store.set(accountId, sealed));
+  storing = write;
+  await write;
+}
+
+/** Put a change into the list (merged with the item's change, if it has one), then try to send it. */
+async function queueChange(c: Omit<NewChange, "id" | "created_at">): Promise<void> {
+  if (!account || state.status !== "unlocked") throw new Error(LOCKED);
+  const next = mergeChange(changes, { ...c, id: core.newId(), created_at: Date.now() });
+  await storeChanges(next);
+  kickSender();
+}
+
+/** The change being sent right now, by item id (a new change to that item waits for it). */
+const flights = new Map<string, Promise<unknown>>();
+async function flightOf(itemId: string): Promise<void> {
+  await flights.get(itemId)?.catch(() => {});
+}
+
+let sendRun: Promise<void> | null = null;
+let sendAgain = false;
+/** Inside the sender's own syncs: the checked syncs they make don't start another run or count for held changes. */
+let senderSyncs = 0;
+/** Checked syncs taken over since unlock (not counting the sender's own): held changes are tried again after a newer one. */
+let checkedSyncs = 0;
+
+function afterCheckedSync() {
+  offlineHint = false;
+  // The sender's own syncs (and the write paths' syncs inside a send) don't start another run.
+  if (senderSyncs) return;
+  checkedSyncs++;
+  kickSender();
+}
+
+/**
+ * Send the waiting changes: one run at a time per app (one account is unlocked), while unlocked, oldest first,
+ * stopping at the first failure without an answer. A kick during a run makes one more run after it.
+ */
+export function kickSender() {
+  if (!offlineOn() || !changes.changes.length || state.status !== "unlocked") return;
+  if (sendRun) {
+    sendAgain = true;
+    return;
+  }
+  sendRun = (async () => {
+    do {
+      sendAgain = false;
+      await sendWaiting();
+    } while (sendAgain && state.status === "unlocked" && changes.changes.length);
+  })()
+    .catch(() => {})
+    .finally(() => {
+      sendRun = null;
+    });
+}
+
+async function sendWaiting() {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+  const gen = generation;
+  for (const { id } of [...changes.changes]) {
+    if (gen !== generation || state.status !== "unlocked") return;
+    const c = changes.changes.find((x) => x.id === id);
+    if (!c || c.state === "conflict") continue;
+    if (c.state === "held" && (heldSeen.get(c.id) ?? -1) >= checkedSyncs) continue;
+    senderSyncs++;
+    const flight: Promise<"offline" | "next"> = sendOne(c.id, gen).finally(() => {
+      senderSyncs--;
+      if (flights.get(c.item_id) === flight) flights.delete(c.item_id);
+    });
+    flights.set(c.item_id, flight);
+    if ((await flight) === "offline") {
+      noteOffline();
+      return;
+    }
+  }
+}
+
+/** The server's row for an item, as the last checked sync holds it. */
+function serverRow(itemId: string): ServerRow | null {
+  const r = synced?.items.get(itemId);
+  return r ? { vault_id: r.vault_id, revision: r.revision, data: r.data, deleted_at: r.deleted_at ?? null } : null;
+}
+
+/** A sync made by the sender (inside a flight, so it counts as the sender's own, see `senderSyncs`). */
+const senderSync = catchUp;
+
+async function sendOne(changeId: string, gen: number): Promise<"offline" | "next"> {
+  const current = () => (gen === generation ? changes.changes.find((x) => x.id === changeId) : undefined);
+  const update = async (patch: Partial<OfflineChange>) => {
+    const c = current();
+    if (c) await storeChanges(replaceChange(changes, { ...c, ...patch }));
+  };
+  const hold = async (reason: string) => {
+    heldSeen.set(changeId, checkedSyncs);
+    await update({ state: "held", reason });
+  };
+  const conflict = (why: "changed" | "deleted" | "moved") =>
+    update({ state: "conflict", reason: why === "deleted" ? DELETED_TEXT : why === "moved" ? MOVED_TEXT : CONFLICT_TEXT });
+  const done = async () => {
+    if (current()) await storeChanges(removeChange(changes, changeId));
+  };
+  const keepSent = async (body: SentBody) => update({ sent: body });
+  let decisions = 0;
+  let races = 0;
+  let renamed = false;
+  for (;;) {
+    const c = current();
+    if (!c) return "next";
+    // Never into a vault this sync didn't check and open, one that has a warning, or one this account can't write.
+    const v = state.vaults.find((x) => x.id === c.vault_id);
+    // Refused by signed sharing or waiting for consent: a warning, not gone.
+    const refused = state.blockedVaults.some((b) => b.id === c.vault_id) || state.consents.some((b) => b.id === c.vault_id);
+    const warning = refused || (!!v && (!!v.manifestWarning || unchecked.has(v.id)));
+    const held = holdReason(v || refused ? { writable: v ? v.role !== "read" : true, warning } : null);
+    if (held) {
+      await hold(held);
+      return "next";
+    }
+    let row = serverRow(c.item_id);
+    // In another vault now (moved on another device): changed elsewhere for an edit or trash.
+    if (row && row.vault_id !== c.vault_id && c.kind !== "create") {
+      await conflict("moved");
+      return "next";
+    }
+    if (row && row.vault_id !== c.vault_id) row = { ...row, data: "" };
+    const stored = row ? (serverItems.find((x) => x.id === c.item_id)?.item ?? null) : null;
+    const step = decideSend(c, row, stored);
+    try {
+      switch (step.step) {
+        case "done":
+          await done();
+          return "next";
+        case "conflict":
+          await conflict(step.why);
+          return "next";
+        case "new-id":
+          // Once only: an id taken twice is held.
+          if (renamed) {
+            await hold(friendlyError(new ApiError(409, "item_exists", "item id already exists")));
+            return "next";
+          }
+          renamed = true;
+          await update({ item_id: core.newId(), sent: null });
+          continue;
+        case "post":
+          requireWritableServer();
+          await postItem(c.vault_id, c.item as Item, c.item_id, keepSent, false);
+          break;
+        case "put": {
+          const base = serverItems.find((x) => x.id === c.item_id);
+          if (!base || base.revision !== step.revision) throw new Error("This item can't be opened on this device, so your change can't be sent.");
+          await saveOver(base, c.item as Item, c.vault_id, keepSent);
+          break;
+        }
+        case "trash":
+          await sendTrash(c.item_id, true);
+          break;
+      }
+      // Sent. A change merged into it meanwhile can't be (a new change to an item waits for its flight).
+      await done();
+      return "next";
+    } catch (e) {
+      if (gen !== generation) return "next";
+      const kind = classifyFailure(failureOf(e));
+      if (kind === "offline") return "offline";
+      if (kind === "revision" || kind === "exists" || (e instanceof Error && (e.message === CHANGED_ELSEWHERE || e.message === ITEM_GONE))) {
+        // Sync and decide again (a create whose id exists: done if it holds what was sent, else a new id).
+        if (++decisions >= MAX_TRIES && kind !== "exists") {
+          await conflict(serverRow(c.item_id) ? "changed" : "deleted");
+          return "next";
+        }
+        try {
+          await senderSync();
+        } catch (s) {
+          if (classifyFailure(failureOf(s)) === "offline") return "offline";
+          throw s;
+        }
+        continue;
+      }
+      if (kind === "retry") {
+        if (++races >= MAX_TRIES) {
+          await hold(friendlyError(e));
+          return "next";
+        }
+        try {
+          await senderSync();
+        } catch {
+          return "offline";
+        }
+        continue;
+      }
+      // Any other answer (or a vault that no longer checks out): held with the app's wording.
+      await hold(friendlyError(e));
+      return "next";
+    }
+  }
+}
+
+// When the connection comes back, sync (which sends what waits).
+if (typeof window !== "undefined") {
+  window.addEventListener("online", () => {
+    offlineHint = false;
+    if (offlineOn() && state.status === "unlocked" && changes.changes.length) void sync().catch(() => {});
+  });
+}
+
+/** While changes wait for the connection (unlocked), a sync every minute, in case the connection came back without an `online` event. */
+let retryTimer: ReturnType<typeof setInterval> | null = null;
+function retryWhileWaiting() {
+  // Only changes that wait for the connection: held ones are tried again after the next ordinary sync.
+  const waiting = state.status === "unlocked" && changes.changes.some((c) => c.state === "waiting");
+  if (!waiting) {
+    if (retryTimer) clearInterval(retryTimer);
+    retryTimer = null;
+    return;
+  }
+  retryTimer ??= setInterval(() => {
+    if (state.status !== "unlocked" || !changes.changes.some((c) => c.state === "waiting")) return retryWhileWaiting();
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    void sync().catch(() => {});
+  }, 60_000);
+}
+
+/** Discard this change: it is removed from the list (the item shows the server's copy again). */
+export async function discardChange(itemId: string): Promise<void> {
+  await flightOf(itemId);
+  const c = changeFor(changes, itemId);
+  if (c) await storeChanges(removeChange(changes, c.id));
+}
+
+/** What the decision sheet of an item's conflict shows: this device's version and the server's. */
+export interface ConflictView {
+  change: OfflineChange;
+  kind: ConflictKind;
+  /** The server's current version (null: deleted on another device). */
+  other: VaultEntry | null;
+  /** The item is in another vault now (moved on another device). */
+  moved: boolean;
+}
+
+export function conflictView(itemId: string): ConflictView | null {
+  const change = changeFor(changes, itemId);
+  if (!change || change.state !== "conflict") return null;
+  const row = serverRow(change.item_id);
+  const kind = conflictKind(change, row);
+  if (!kind) return null;
+  const moved = !!row && row.vault_id !== change.vault_id;
+  return { change, kind, moved, other: row ? (serverItems.find((x) => x.id === change.item_id) ?? null) : null };
+}
+
+/** The user's answer to a conflict; then the sender goes on (nothing is sent before they answer). */
+export async function resolveChange(itemId: string, answer: Resolution): Promise<void> {
+  const c = changeFor(changes, itemId);
+  if (!c) return;
+  const next = resolveConflict(changes, c.id, answer, serverRow(itemId), core.newId());
+  heldSeen.delete(c.id);
+  await storeChanges(next);
+  kickSender();
+}
+
+/**
+ * How many changes wait for the signed-in account, for the warning before they are deleted: a number while unlocked,
+ * null while locked when a list is stored (it can't be read then), 0 when there is none or on other platforms.
+ */
+export async function pendingChangeCount(): Promise<number | null> {
+  const store = offlineStore();
+  if (!store) return 0;
+  if (account && changesFor) return changes.changes.length;
+  const accountId = bundle?.account_id;
+  if (!accountId) return 0;
+  try {
+    return (await store.get(accountId)) ? null : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Delete the signed-in account's list (Log out, Change server, Delete account: after the warning). */
+export async function deleteOfflineChanges(): Promise<void> {
+  const store = offlineStore();
+  const accountId = changesFor ?? bundle?.account_id;
+  changes = emptyList();
+  heldSeen = new Map();
+  if (state.offlineChanges.length) publishChanges();
+  if (!store || !accountId) return;
+  await storing.catch(() => {});
+  await store.set(accountId, null).catch(() => {});
+  changesUnreadable = false;
+  if (state.offlineNotice) set({ offlineNotice: null });
 }
 
 // ---------------------------------------------------------------- history
@@ -3461,7 +3996,7 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
       }
       // Signed (also a vault re-keyed for this account alone, without a roster): each item with the revision it was
       // re-encrypted from (older servers ignore it).
-      const items = state.items
+      const items = serverItems
         .filter((e) => e.vaultId === vaultId)
         .map((e) => ({ ...(fresh.encryptItem(e.item, e.id, vaultId) as EncryptedItem), ...(signing ? { revision: e.revision } : {}) }));
       const meta = v ? fresh.encryptMeta(vaultId, { name: v.name }) : undefined;
@@ -3471,7 +4006,7 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
       const row = vaultRow(vaultId);
       let manifest: ManifestEntry | null = null;
       if (row && manifestSeq(row)) {
-        const stored = state.items.filter((e) => e.vaultId === vaultId);
+        const stored = serverItems.filter((e) => e.vaultId === vaultId);
         const held = [...(synced?.items.values() ?? [])].filter((r) => r.vault_id === vaultId).length;
         // Every item of the vault is re-encrypted (none hidden as undecryptable), at the epoch this sync verified.
         if (manifestStatus.get(vaultId) !== "ok" || v?.epoch === undefined || row.key_epoch !== v.epoch || held !== items.length) throw new Error(MANIFEST_HELD);

@@ -352,3 +352,36 @@ html.sheet-window:not(.fitted) { overflow: hidden; }
 /* An item's files: a thin bar while one downloads. */
 .file-progress { display: block; height: 3px; margin-top: var(--space-1); border-radius: 2px; background: var(--surface-2); overflow: hidden; }
 .file-progress i { display: block; height: 100%; background: var(--accent); transition: width 120ms; }
+
+/* Offline changes (offline.tsx): the item marker, the item page's box, the "Waiting to sync" page and the decision
+   sheet "Changed on another device" (comparison of both versions above the choices). Tokens only: light and dark. */
+.offline-mark { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-size: var(--text-caption); font-weight: 500; color: var(--accent-ink); }
+.offline-mark > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.offline-mark svg { flex: none; }
+.offline-mark.held { color: var(--warn); }
+.offline-mark.conflict { color: var(--danger); }
+.item-row .offline-mark.sub { color: var(--accent-ink); }
+.item-row .offline-mark.sub.held { color: var(--warn); }
+.item-row .offline-mark.sub.conflict { color: var(--danger); }
+.offline-box { display: grid; gap: var(--space-2); padding: var(--space-3); border-radius: var(--radius-s, 8px); background: var(--accent-soft); }
+.offline-box.held { background: var(--warn-soft); }
+.offline-box.conflict { background: var(--danger-soft); }
+.offline-box .offline-mark > span { white-space: normal; }
+.offline-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.offline-intro { margin: 0; }
+.offline-row .main[disabled] { cursor: default; }
+.offline-row .txt { display: grid; min-width: 0; }
+.pop-sheet { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.pop-sheet .sheet .choice-sub { white-space: normal; }
+.pop-sheet .sheet .choices { max-height: none; }
+.diff { display: grid; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); overflow: hidden; }
+.diff-row { display: grid; gap: 2px; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
+.diff-row:first-child { border-top: 0; }
+.diff-row.differs { background: var(--warn-soft); }
+.diff-label { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-caption); font-weight: 600; color: var(--ink-2); }
+.diff-flag { padding: 0 6px; border-radius: 999px; border: 1px solid currentColor; font-size: 0.7rem; line-height: 1.5; color: var(--warn); }
+.diff-show { margin-left: auto; height: 24px; padding: 0 6px; font-size: var(--text-caption); }
+.diff-side { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: var(--space-2); font-size: var(--text-caption); }
+.diff-who { color: var(--ink-3); }
+.diff-value { color: var(--ink); overflow-wrap: anywhere; white-space: pre-wrap; }
+.diff-value.mono { font-family: var(--mono); }

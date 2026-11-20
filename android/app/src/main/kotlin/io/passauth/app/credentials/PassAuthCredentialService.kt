@@ -14,6 +14,7 @@ import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.AuthenticationAction
 import androidx.credentials.provider.BeginCreateCredentialRequest
 import androidx.credentials.provider.BeginCreateCredentialResponse
+import androidx.credentials.provider.BeginCreatePasswordCredentialRequest
 import androidx.credentials.provider.BeginCreatePublicKeyCredentialRequest
 import androidx.credentials.provider.BeginGetCredentialRequest
 import androidx.credentials.provider.BeginGetCredentialResponse
@@ -51,9 +52,18 @@ class PassAuthCredentialService : CredentialProviderService() {
         graph.scope.launch {
             try {
                 val state = graph.loadedState()
-                if (request !is BeginCreatePublicKeyCredentialRequest || state.status == Status.Setup || state.status == Status.LoggedOut) {
-                    return@launch callback.onResult(BeginCreateCredentialResponse())
+                if (state.status == Status.Setup || state.status == Status.LoggedOut) return@launch callback.onResult(BeginCreateCredentialResponse())
+                // Passwords: apps (and allowlisted browsers) saving through Credential Manager; the save rule decides in the activity.
+                if (request is BeginCreatePasswordCredentialRequest) {
+                    if (passwordTarget(this@PassAuthCredentialService, request.callingAppInfo ?: return@launch callback.onResult(BeginCreateCredentialResponse())) == null) {
+                        return@launch callback.onResult(BeginCreateCredentialResponse())
+                    }
+                    val entry = CreateEntry.Builder(state.email, io.passauth.app.autofill.AutofillAuthActivity.credentialSave(this@PassAuthCredentialService))
+                        .setDescription("Save the password in PassAuth (${state.email}).")
+                        .build()
+                    return@launch callback.onResult(BeginCreateCredentialResponse.Builder().addCreateEntry(entry).build())
                 }
+                if (request !is BeginCreatePublicKeyCredentialRequest) return@launch callback.onResult(BeginCreateCredentialResponse())
                 // Only offer what PassAuth can do: ES256, platform authenticator.
                 val options = runCatching { WebAuthn.parseCreate(request.requestJson) }.getOrNull()
                 if (options == null || !WebAuthn.supports(options)) return@launch callback.onResult(BeginCreateCredentialResponse())

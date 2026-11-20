@@ -126,7 +126,7 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
                     confirmDelete = false
                     ctx.launch {
                         ctx.repo.trashItem(entry)
-                        ctx.notify("Moved to trash. You can restore it from the web vault.")
+                        ctx.notify(if (ctx.repo.vault.value?.change(entry.id) != null) "Moved to trash on this device. It's sent when PassAuth reaches your server." else "Moved to trash. You can restore it from the web vault.")
                         back()
                     }
                 }, danger = true)
@@ -180,6 +180,7 @@ fun ItemScreen(ctx: UiCtx, id: String, fromHealth: Boolean = false) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             if (entry.id in v.rolledBack) Alert(io.passauth.app.data.ItemRevs.ITEM_WARNING, AlertKind.Error)
+            v.change(entry.id)?.let { ChangeCard(ctx, i.name.ifEmpty { "Untitled" }, it) }
             CardSection(null) {
                 Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     SiteIcon(i.siteHost, i.name, ctx.state.server, ctx.state.showSiteIcons, ctx.graph.icons, 44.dp, login = i.kind == io.passauth.app.data.ItemKind.Login)

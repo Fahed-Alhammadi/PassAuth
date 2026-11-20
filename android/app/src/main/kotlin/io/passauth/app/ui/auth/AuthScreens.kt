@@ -851,6 +851,8 @@ fun LogoutSheet(ctx: UiCtx, close: () -> Unit) {
             if (many) "This account, its offline copy and biometric unlock are removed from this device. Your vault stays on your server."
             else "You'll need your master password to sign in again. Your vault stays on your server.",
         )
+        // Offline changes that haven't been sent go with the account's data on this device.
+        io.passauth.app.data.OfflineChanges.lostWarning(state.pendingChanges)?.let { io.passauth.app.ui.components.WarningNote(it) }
     }
 }
 

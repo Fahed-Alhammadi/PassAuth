@@ -13,6 +13,9 @@ export function setSecretsHost(h: string) {
   host = h;
 }
 
+/** The connected server's host, which scopes what the app keeps per server. */
+export const secretsHost = () => host;
+
 /** False once the OS keychain turned out to be unavailable and secrets live in WebView storage instead. */
 export const keychainAvailable = () => !useLocalStorage;
 

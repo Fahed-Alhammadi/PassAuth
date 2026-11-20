@@ -110,6 +110,7 @@ class PassAuthApp : Application() {
         // Decrypted attachment copies handed out a while ago go when the app leaves the screen.
         ProcessLifecycleOwner.get().lifecycle.addObserver(graph.files)
         graph.lock.watchScreen(this)
+        watchConnection()
         // Vault timeout "never": stay unlocked across app restarts.
         graph.restoreJob = graph.scope.launch { runCatching { graph.repo.restorePersisted() } }
         // Background sync follows the setting and whether any account is signed in
@@ -123,6 +124,30 @@ class PassAuthApp : Application() {
                         .onFailure { Log.w("PassAuth", "Background sync could not be scheduled", it) }
                 }
         }
+    }
+
+    /**
+     * Offline changes: writes wait in the list while the OS reports no usable network, and the
+     * sender runs when it comes back (a sync first; [io.passauth.app.data.VaultRepository.connectionBack]).
+     */
+    private fun watchConnection() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val up = java.util.concurrent.atomic.AtomicBoolean(true)
+        graph.repo.networkAvailable = { up.get() }
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                    val now = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    val back = now && !up.getAndSet(now)
+                    if (back) graph.repo.connectionBack()
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    up.set(false)
+                }
+            })
+            if (cm.activeNetwork == null) up.set(false)
+        }.onFailure { Log.w("PassAuth", "Network changes can't be watched", it) }
     }
 }
 

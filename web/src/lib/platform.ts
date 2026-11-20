@@ -40,6 +40,17 @@ export interface DesktopHooks {
   vaultTimeout?: VaultTimeoutHook;
   /** Desktop shell settings (start at login, Dock, background sync). Settings shows the card only when present. */
   app?: DesktopAppHook;
+  /**
+   * Offline changes (ARCHITECTURE "Offline changes"): where the app keeps each account's change list, sealed with the
+   * account key (null deletes it). Present = the capability is on: saves made while the server can't be reached wait
+   * and are sent later. The browser web vault has no store, so its writes fail as before.
+   */
+  offlineChanges?: OfflineChangeStore;
+}
+
+export interface OfflineChangeStore {
+  get(accountId: string): Promise<string | null>;
+  set(accountId: string, sealed: string | null): Promise<void>;
 }
 
 export interface DesktopAppSettings {

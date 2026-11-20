@@ -16,6 +16,9 @@ export type Route =
   | { tab: "vault"; page: "new"; kind: ItemKind; prefill?: Prefill }
   /** Add the page at `url` to one of the user's logins. */
   | { tab: "vault"; page: "addSite"; url: string }
+  /** Offline changes waiting to sync, and the decision sheet for one in conflict. */
+  | { tab: "vault"; page: "changes" }
+  | { tab: "vault"; page: "conflict"; id: string }
   | { tab: "generator" }
   | { tab: "settings"; section?: string };
 

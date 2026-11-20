@@ -75,6 +75,8 @@ struct SetupView: View {
 struct LoginView: View {
     @Environment(AppModel.self) private var model
     @State private var changingServer = false
+    /// Offline changes of this account wait on the device: Change server says they will be lost.
+    @State private var confirmChangeServer = false
     @State private var creating = false
     @State private var withDevice = false
     /// The server offers signing in with another device (`login_with_device`); hidden while unknown.
@@ -149,12 +151,20 @@ struct LoginView: View {
                     .disabled(busy)
                     .accessibilityIdentifier("signInWithDevice")
                 }
-                LinkRow(text: hostOf(state.server), action: "Change server") { changingServer = true }
+                LinkRow(text: hostOf(state.server), action: "Change server") {
+                    if model.repo.offlineCount() > 0 { confirmChangeServer = true } else { changingServer = true }
+                }
                 LinkRow(text: "New to PassAuth?", action: "Create account") { creating = true }
                 OtherAccounts()
             }
             .onAppear { if email.isEmpty { email = state.email } }
             .task(id: state.server) { deviceLoginOffered = await model.repo.deviceLoginAvailable() }
+            .confirmationDialog("Change server?", isPresented: $confirmChangeServer, titleVisibility: .visible) {
+                Button("Change server", role: .destructive) { changingServer = true }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(OfflineText.lost(model.repo.offlineCount()) ?? "")
+            }
         }
     }
 
@@ -672,7 +682,7 @@ struct UnlockView: View {
             Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(LogoutCopy.message(email: state.email, others: state.accounts.count > 1))
+            Text(LogoutCopy.message(email: state.email, others: state.accounts.count > 1, pending: model.repo.offlineCount()))
         }
         // Offer Face ID / Touch ID right away, once, and only while the app is on screen (with
         // "Immediately" the vault locks as the app goes to the background, where the Keychain
@@ -719,10 +729,12 @@ struct UnlockView: View {
 
 /// The log-out confirmation, in the same words wherever it is asked.
 enum LogoutCopy {
-    static func message(email: String, others: Bool) -> String {
-        others
+    /// `pending`: offline changes not sent yet (they are lost with the account's copy).
+    static func message(email: String, others: Bool, pending: Int = 0) -> String {
+        let text = others
             ? "This removes \(email) from this device, with its offline copy and biometric unlock. Your vault stays on your server."
             : "This device forgets the offline copy of your vault, and you'll need your master password to sign in again. Your vault stays on your server."
+        return OfflineText.lost(pending).map { $0 + " " + text } ?? text
     }
 }
 

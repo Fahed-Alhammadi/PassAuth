@@ -85,6 +85,9 @@ val MATCH_OPTIONS = listOf(
     UrlMatch.Never to "Never",
 )
 
+/** Said after a save that waits on this phone (offline changes). */
+private const val WAITING_NOTE = "Saved on this device. It's sent when PassAuth reaches your server."
+
 /** New item or edit an existing one (the web vault's item editor). */
 @Composable
 fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null, fromHealth: Boolean = false) {
@@ -148,11 +151,11 @@ fun EditScreen(ctx: UiCtx, id: String? = null, kind: ItemKind? = null, fromHealt
                 if (entry != null) {
                     // The editor never changes the file list: it is the one of the item as read.
                     ctx.repo.updateItem(entry, io.passauth.app.data.Attachments.withListOf(clean, entry.item))
-                    ctx.notify("Changes saved.")
+                    ctx.notify(if (ctx.repo.vault.value?.change(entry.id) != null) WAITING_NOTE else "Changes saved.")
                     done(entry.id)
                 } else {
                     val newId = ctx.repo.createItem(clean, vaultId, id = newItemId)
-                    ctx.notify("Item saved.")
+                    ctx.notify(if (ctx.repo.vault.value?.change(newId) != null) WAITING_NOTE else "Item saved.")
                     done(newId)
                 }
             } catch (e: ConflictException) {

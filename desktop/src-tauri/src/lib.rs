@@ -3,6 +3,7 @@
 //! self-clearing clipboard and file saving (`files`: safe names, the downloaded-from-the-internet mark).
 
 mod files;
+mod offline;
 mod transfer;
 
 use std::collections::HashMap;
@@ -846,6 +847,8 @@ pub fn run() {
             prepare_relaunch,
             autofill_handoff,
             autofill_handoff_clear,
+            offline::offline_changes_get,
+            offline::offline_changes_set,
             transfer::upload_start,
             transfer::upload_chunk,
             transfer::upload_finish,

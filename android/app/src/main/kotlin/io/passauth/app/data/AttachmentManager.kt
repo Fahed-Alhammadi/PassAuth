@@ -235,7 +235,7 @@ class AttachmentManager(private val context: Context, private val repo: VaultRep
         while (true) {
             val entry = currentEntry(itemId)
             try {
-                repo.updateItem(entry, Attachments.add(entry.item, listOf(att)))
+                repo.updateItem(entry, Attachments.add(entry.item, listOf(att)), queueable = false)
                 return
             } catch (e: Exception) {
                 if (attempt >= 3 || !retrySave(e) || repo.vault.value == null) throw e
@@ -249,7 +249,7 @@ class AttachmentManager(private val context: Context, private val repo: VaultRep
     /** Remove a file: the item is saved without it first, then the server deletes the file (a file already gone is fine). */
     suspend fun remove(itemId: String, attachmentId: String) {
         val entry = currentEntry(itemId)
-        repo.updateItem(entry, Attachments.remove(entry.item, attachmentId))
+        repo.updateItem(entry, Attachments.remove(entry.item, attachmentId), queueable = false)
         runCatching { repo.deleteStoredAttachment(attachmentId) }
     }
 
@@ -294,7 +294,7 @@ class AttachmentManager(private val context: Context, private val repo: VaultRep
             return DownloadedFile(dest, account, generation)
         } catch (e: java.io.IOException) {
             dir.deleteRecursively()
-            throw UserException(UNREACHABLE)
+            throw UnreachableException()
         } catch (e: TransferCancelled) {
             dir.deleteRecursively()
             throw UserException(LOCKED_TEXT)

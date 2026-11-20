@@ -58,6 +58,9 @@ public struct Entry: Identifiable, Sendable {
     /// The server sent an older version of this item than this device saw (`ItemRollback`): the
     /// newer copy is shown when this device had one.
     public var rolledBack = false
+    /// This item has a change on this device that isn't on the server yet (offline change list,
+    /// `OfflineQueue.overlay`); nil: none.
+    public var pending: OfflineMark?
 
     public init(id: String, item: Item, vaultId: String, revision: Int64, enc: EncryptedItem, deletedAt: Int64?, rolledBack: Bool = false) {
         self.id = id
@@ -447,7 +450,7 @@ public final class VaultRepository {
     @ObservationIgnored private var vaultHeaders: [String: SyncVault] = [:]
     /// The active account's copy behind `vault` (ciphertext, cursor, vault numbers): the base of
     /// the next delta sync and of local changes after this device's writes.
-    @ObservationIgnored private var copy: (account: String, snapshot: SyncSnapshot)?
+    @ObservationIgnored var copy: (account: String, snapshot: SyncSnapshot)?
     /// Public syncs: one in flight, one waiting (`SyncQueue`).
     @ObservationIgnored private let syncQueue = SyncQueue()
     /// Vault manifests: the work after a sync (first manifests, old trash) is running; the syncs
@@ -544,8 +547,34 @@ public final class VaultRepository {
         #endif
     }()
 
-    /// The active account's decrypted vault; nil while locked.
+    /// The active account's decrypted vault as shown (the copy with this device's offline changes
+    /// on top, `OfflineQueue.overlay`); nil while locked.
     public private(set) var vault: VaultData?
+    /// The active account's decrypted copy as the server last had it (what writes, checks and
+    /// the sender work on); `vault` follows it.
+    var served: VaultData? {
+        didSet { vault = served.map { OfflineQueue.overlay($0, offlineChanges) } }
+    }
+    /// The active account's offline changes (opened from the sealed list while unlocked).
+    public internal(set) var offlineChanges: [OfflineChange] = [] {
+        didSet { vault = served.map { OfflineQueue.overlay($0, offlineChanges) } }
+    }
+    /// The active account's stored list can't be opened (a newer version's list, a damaged
+    /// file): nothing is written over it, so saves can't wait and nothing is sent.
+    public internal(set) var offlineUnreadable = false
+    /// The last save went into the offline list (the editor and the save sheet say so).
+    public internal(set) var lastWriteQueued = false
+    /// The OS says there is no network (the app's path monitor; nil: not watched).
+    @ObservationIgnored public var networkAvailable: Bool?
+    /// The sender is running / another run was asked for meanwhile.
+    @ObservationIgnored var sendingOffline = false
+    @ObservationIgnored var sendAgain = false
+    /// The body of this write's last request that may have reached the server (kept in the
+    /// offline change when the request got no answer).
+    @ObservationIgnored var lastAttempt: OfflineAttempt?
+    /// Saves without an answer wait in the offline list (iOS app and AutoFill); tests of the
+    /// rules for apps without the list (the macOS AutoFill extension) turn it off.
+    @ObservationIgnored var queuesOffline = OfflineQueue.enabled
 
     /// Emergency access (the app only): the client, made once (`emergency`), and the vault notice
     /// about the contact list the server sent (nil: none). Cleared when the vault closes.
@@ -657,6 +686,8 @@ public final class VaultRepository {
         await lock.run {
             dropDeviceLogin()
             closeSession(activeId)
+            // Another server: the changes waiting for the old one go (the sign-in screen warned).
+            store.deleteOfflineChanges(activeId)
             store.update { st in
                 let id = st.file.accounts[st.file.activeId] != nil ? st.file.activeId : UUID().uuidString.lowercased()
                 var a = st.file.accounts[id] ?? AccountData()
@@ -1040,7 +1071,9 @@ public final class VaultRepository {
         invitationNames = [:]
         invitationChains = [:]
         copy = nil
-        vault = nil
+        served = nil
+        offlineChanges = []
+        offlineUnreadable = false
         emergencyNotice = nil
         sharingNotice = nil
         serverProblem = nil
@@ -1109,6 +1142,7 @@ public final class VaultRepository {
             pendingMaster = nil
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            store.deleteOfflineChanges(id)
             forgetAvatar(id)
             let listed = s.file.accounts.filter { $0.value.isListed }
             if listed.count > 1 || listed[id] == nil {
@@ -1126,8 +1160,9 @@ public final class VaultRepository {
         }
     }
 
-    private func removeAccount(_ id: String) async {
+    func removeAccount(_ id: String) async {
         sharingMemory.clear(id)
+        store.deleteOfflineChanges(id)
         forgetAvatar(id)
         store.update { s in
             s.file.accounts[id] = nil
@@ -1351,8 +1386,13 @@ public final class VaultRepository {
         } else if vault?.offline == true {
             await lock.run {
                 guard activeId == id, let v = vault, v.offline, syncPosition == have else { return }
-                vault?.offline = false
+                served?.offline = false
             }
+        }
+        // Saves the AutoFill extension put in the list meanwhile go out now.
+        if queuesOffline, isApp, activeId == id, let session = sessions[id] {
+            loadOfflineChanges(id, session)
+            if !offlineChanges.isEmpty { syncForOfflineChanges() }
         }
     }
 
@@ -1395,7 +1435,7 @@ public final class VaultRepository {
             // A server this app doesn't use (Part S): the copy shown stays, read-only as when offline.
             if let e = error as? UserError, e.message == ServerSupport.updateServer, sessions[id] === session, activeId == id,
                vault != nil, copy?.account == id {
-                vault?.offline = true
+                served?.offline = true
             }
             guard fallbackToCache, sessions[id] === session, activeId == id else { throw error }
             let cached: Checked?
@@ -1409,7 +1449,7 @@ public final class VaultRepository {
                     var empty = VaultData()
                     empty.offline = true
                     copy = nil
-                    vault = empty
+                    served = empty
                     return
                 }
                 throw error
@@ -1421,6 +1461,8 @@ public final class VaultRepository {
         guard let checked, sessions[id] === session, activeId == id else { return }
         try await commit(id, session, checked, offline: offline, store: fromServer ? .synced : .none)
         if fromServer && upkeep { await maintainManifests(id, session) }
+        // Offline changes go out after every sync whose checks ran (the sender waits for the lock).
+        if fromServer && !offline { scheduleOfflineSend() }
         // What a background refresh fetched meanwhile: checked now that the keys are here.
         if cacheFirst && !fromServer { await adoptRefreshed(id, session) }
         if cacheFirst && !fromServer && !offline {
@@ -1444,7 +1486,7 @@ public final class VaultRepository {
     /// is, and the next sync with the server decides (with the usual warnings). Rows of an
     /// answer that wasn't checked are never shown or filled from.
     private func adoptRefreshed(_ id: String, _ session: Session) async {
-        guard store.hasRefreshed(id), sessions[id] === session, activeId == id, let shown = vault, let base = copyOf(id) else { return }
+        guard store.hasRefreshed(id), sessions[id] === session, activeId == id, let shown = served, let base = copyOf(id) else { return }
         // Judged against the device memory as it is stored now, read before the side file is (the
         // other process may have written since this one opened the copy: what it learnt must
         // count, or an answer from before its write could replace the newer copy it stored).
@@ -1475,7 +1517,7 @@ public final class VaultRepository {
             }
         }
         store.deleteRefreshed(id)
-        if !adopted, sessions[id] === session, activeId == id { vault?.refreshedRejected = true }
+        if !adopted, sessions[id] === session, activeId == id { served?.refreshedRejected = true }
     }
 
     /// The stored copy is the one this process holds: the same answer (revision, cursor) with the
@@ -1690,7 +1732,7 @@ public final class VaultRepository {
         let sharing = try await sharingInputs(id, session, &fresh, network: !stored)
         let served = fresh
         guard sessions[id] === session, activeId == id else { return nil }
-        let previous: OpenedVault? = copy?.account == id ? vault.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
+        let previous: OpenedVault? = copy?.account == id ? self.served.map { OpenedVault(data: $0, keys: vaultKeys, headers: vaultHeaders, names: invitationNames) } : nil
         let invitations = isApp
         let fullRows = !trashSummary
         let revs = memory.revs?.revs
@@ -1807,14 +1849,15 @@ public final class VaultRepository {
         }
         guard sessions[id] === session, activeId == id else { return }
         known = (id, after)
-        let before = vault.map { Self.keyShape($0.vaults) }
+        let before = served.map { Self.keyShape($0.vaults) }
         vaultKeys = opened.keys
         vaultHeaders = opened.headers
         invitationNames = opened.names
         copy = (id, snapshot)
         var v = opened.data
         v.offline = offline
-        vault = v
+        if queuesOffline { loadOfflineChanges(id, session) }
+        served = v
         refreshIdentities()
         if let out = opened.sharing { await finishSharing(id, session, out, network: mode == .synced || mode == .localChange) }
         // What this device showed as usable: the "earlier copy" of later unlocks (rule 6).
@@ -2067,7 +2110,7 @@ public final class VaultRepository {
             } catch let e as ApiError where TwoStepGate.isRequired(status: e.status, code: e.code) {
                 // The server answered: two-step setup comes first (the app shows that screen).
             } catch {
-                if sessions[id] === session, activeId == id { vault?.offline = true }
+                if sessions[id] === session, activeId == id { served?.offline = true }
             }
         }
     }
@@ -2078,7 +2121,7 @@ public final class VaultRepository {
         do {
             try await syncLocked()
         } catch {
-            vault?.offline = true
+            served?.offline = true
         }
     }
 
@@ -2094,7 +2137,7 @@ public final class VaultRepository {
     /// attempt's answer, with the same version and another manifest). The vault row then takes
     /// that manifest with the change. A vault with a manifest and none sent, any other link, or
     /// an answer that says the vault's number didn't move: sync (and check).
-    private func afterWrite(_ vaultId: String, _ answer: JSON, _ change: LocalChange?, sent: ManifestEntry? = nil) async {
+    func afterWrite(_ vaultId: String, _ answer: JSON, _ change: LocalChange?, sent: ManifestEntry? = nil) async {
         let id = activeId
         guard let change, let c = copy, c.account == id, let session = sessions[id] else { return await syncAfterWrite() }
         let row = c.snapshot.vaults.first { $0.id == vaultId }
@@ -2536,11 +2579,11 @@ public final class VaultRepository {
 
     // MARK: Items
 
-    private var now: Int64 { Int64(Date().timeIntervalSince1970) }
+    var now: Int64 { Int64(Date().timeIntervalSince1970) }
 
-    private func requireVault() throws -> VaultData {
-        guard let v = vault else { throw UserError("Your vault is locked.") }
-        if v.offline { throw UserError(serverProblem ?? "You're offline. Changes can be saved once PassAuth reaches your server.") }
+    func requireVault() throws -> VaultData {
+        guard let v = served else { throw UserError("Your vault is locked.") }
+        if v.offline { throw UserError(serverProblem ?? OfflineText.needsConnection) }
         // Part S: nothing is written to a server whose known config has no signed sharing.
         if requiresSignedSharing, ServerSupport.refused(features: store.get().file.accounts[activeId]?.features) {
             throw UserError(ServerSupport.updateServer)
@@ -2574,10 +2617,22 @@ public final class VaultRepository {
     /// through: that item, once synced, is updated with this content instead.
     @discardableResult
     public func createItem(_ item: Item, vaultId: String?, id: String? = nil) async throws -> String {
-        try await lock.run { try await createLocked(item, vaultId: vaultId, id: id) }
+        let made: (id: String, queued: Bool) = try await lock.run {
+            lastWriteQueued = false
+            lastAttempt = nil
+            if knownOffline { return (try await queueCreate(item, vaultId: vaultId, id: id), true) }
+            do {
+                return (try await createLocked(item, vaultId: vaultId, id: id), false)
+            } catch where queuesOffline && OfflineQueue.waits(error) && served != nil {
+                served?.offline = true
+                return (try await queueCreate(item, vaultId: vaultId, id: id ?? lastAttempt?.itemId), true)
+            }
+        }
+        lastWriteQueued = made.queued
+        return made.id
     }
 
-    private func createLocked(_ item: Item, vaultId: String?, id requested: String?) async throws -> String {
+    func createLocked(_ item: Item, vaultId: String?, id requested: String?) async throws -> String {
         var v = try await vaultForWrite().vault
         let id: String
         if let requested { id = requested } else { id = try await core { try newId() } }
@@ -2595,6 +2650,7 @@ public final class VaultRepository {
             let enc = try await core { try key.encryptItem(itemJson: json, id: id, vaultId: targetId) }
             // The vault's next manifest: with the new row (nil: the vault has none).
             let sent = try await nextManifest(targetId, removed: [], added: [SyncItem(id: id, vaultId: targetId, itemKey: nil, data: enc.data)])
+            lastAttempt = OfflineAttempt(itemId: id, vaultId: targetId, sent: OfflineSent(key: enc.key, data: enc.data, keyEpoch: target.keyEpoch))
             do {
                 let answer = try await api.call(activeId, "/items", body: Self.body(enc, keyEpoch: target.keyEpoch, manifests: [sent]))
                 written = (answer, enc, targetId, sent)
@@ -2612,7 +2668,7 @@ public final class VaultRepository {
                 v = try requireVault()
             } catch let e as ApiError where e.status == 409 && Self.itemExists(e) {
                 try await syncLocked()
-                guard let landed = vault?.get(id), landed.vaultId == targetId, landed.deletedAt == nil else { throw e }
+                guard let landed = served?.get(id), landed.vaultId == targetId, landed.deletedAt == nil else { throw e }
                 var mine = next
                 mine.createdAt = landed.item.createdAt
                 try await updateLocked(landed, mine, targetVaultId: nil)
@@ -2643,10 +2699,29 @@ public final class VaultRepository {
     /// the item's new revision, once, but only when the item's content is still the one the
     /// change was made to (else it is the usual conflict).
     public func updateItem(_ entry: Entry, _ item: Item, targetVaultId: String? = nil) async throws {
-        try await lock.run { try await updateLocked(entry, item, targetVaultId: targetVaultId) }
+        let queued: Bool = try await lock.run {
+            lastWriteQueued = false
+            lastAttempt = nil
+            let moving = targetVaultId != nil && targetVaultId != entry.vaultId
+            if queuesOffline, !moving, entry.pending != nil || knownOffline {
+                try await queueEdit(entry, item)
+                return true
+            }
+            if moving, entry.pending != nil { throw UserError(OfflineText.pendingFirst) }
+            do {
+                try await updateLocked(entry, item, targetVaultId: targetVaultId)
+                return false
+            } catch where queuesOffline && !moving && OfflineQueue.waits(error) && served != nil {
+                served?.offline = true
+                try await queueEdit(entry, item)
+                return true
+            }
+        }
+        lastWriteQueued = queued
+        if queued { syncForOfflineChanges() }
     }
 
-    private func updateLocked(_ base: Entry, _ item: Item, targetVaultId: String?) async throws {
+    func updateLocked(_ base: Entry, _ item: Item, targetVaultId: String?) async throws {
         let ready = try await vaultForWrite()
         var v = ready.vault
         var next = item
@@ -2692,6 +2767,7 @@ public final class VaultRepository {
                 manifests = [try await nextManifest(entry.vaultId, removed: before, added: []),
                              try await nextManifest(targetId, removed: [], added: [after])]
             }
+            if same { lastAttempt = OfflineAttempt(itemId: entryId, vaultId: targetId, sent: OfflineSent(key: enc.key, data: enc.data, keyEpoch: target.keyEpoch)) }
             do {
                 let answer = try await api.call(activeId, "/items/\(entry.id)",
                                                 body: Self.body(enc, keyEpoch: target.keyEpoch, revision: entry.revision, manifests: manifests), method: "PUT")
@@ -2738,26 +2814,54 @@ public final class VaultRepository {
     }
 
     public func trashItem(_ entry: Entry) async throws {
-        try await lock.run { try await changeState(entry, .trash) }
+        let queued: Bool = try await lock.run {
+            lastWriteQueued = false
+            if queuesOffline, entry.pending != nil || knownOffline {
+                try queueTrash(entry)
+                return true
+            }
+            do {
+                try await changeState(entry, .trash)
+                return false
+            } catch where queuesOffline && OfflineQueue.waits(error) && served != nil {
+                served?.offline = true
+                try queueTrash(entry)
+                return true
+            }
+        }
+        lastWriteQueued = queued
+        if queued { syncForOfflineChanges() }
     }
 
+    /// Restore from the trash. An item this device moved to the trash while offline (not sent
+    /// yet) is restored by dropping that change.
     public func restoreItem(_ entry: Entry) async throws {
-        try await lock.run { try await changeState(entry, .restore) }
+        try await lock.run {
+            if queuesOffline, let p = entry.pending, p.kind == .trash {
+                try removeOfflineChange(activeId, p.changeId)
+                return
+            }
+            if entry.pending != nil { throw UserError(OfflineText.pendingFirst) }
+            try await changeState(entry, .restore)
+        }
     }
 
     /// Delete an item in the trash for good.
     public func purgeItem(_ entry: Entry) async throws {
-        try await lock.run { try await changeState(entry, .purge) }
+        try await lock.run {
+            if entry.pending != nil { throw UserError(OfflineText.pendingFirst) }
+            try await changeState(entry, .purge)
+        }
     }
 
-    private enum StateChange { case trash, restore, purge }
+    enum StateChange { case trash, restore, purge }
 
     /// Trash, restore or delete for good. In a vault with a manifest the request carries the
     /// item's revision and the vault's next manifest (in the query: these requests have no
     /// body). When something else changed meanwhile (`manifest_conflict`, `manifest_required`,
     /// or this item: `revision_conflict`) the vault is synced and checked and the change sent
     /// again, three times at most, unless the item is gone or already where it should be.
-    private func changeState(_ entry: Entry, _ kind: StateChange) async throws {
+    func changeState(_ entry: Entry, _ kind: StateChange) async throws {
         let ready = try await vaultForWrite()
         var v = ready.vault
         if !v.canWrite(entry) { throw UserError("You can only view items in this vault.") }
@@ -2820,14 +2924,14 @@ public final class VaultRepository {
     // MARK: Vault manifests
 
     /// The rows of `ids` in vault `vid` as the copy holds them (what its manifest was checked with).
-    private func copyRows(_ ids: [String], in vid: String) -> [SyncItem] {
+    func copyRows(_ ids: [String], in vid: String) -> [SyncItem] {
         guard let c = copy, c.account == activeId else { return [] }
         let wanted = Set(ids)
         return c.snapshot.items.filter { $0.vaultId == vid && wanted.contains($0.id) }
     }
 
     /// The vault has a manifest in the copy shown now.
-    private func hasManifest(_ vid: String) -> Bool {
+    func hasManifest(_ vid: String) -> Bool {
         guard let c = copy, c.account == activeId else { return false }
         return (c.snapshot.vaults.first { $0.id == vid }?.manifestVersion ?? 0) > 0
     }
@@ -2839,7 +2943,7 @@ public final class VaultRepository {
     /// manifest: nothing is sent.
     func nextManifest(_ vid: String, removed: [SyncItem], added: [SyncItem]) async throws -> ManifestEntry? {
         guard let c = copy, c.account == activeId, let row = c.snapshot.vaults.first(where: { $0.id == vid }) else { return nil }
-        let status = vault?.vaults.first { $0.id == vid }?.manifest ?? .none
+        let status = served?.vaults.first { $0.id == vid }?.manifest ?? .none
         if status.unresolved { throw UserError(ManifestText.held) }
         // Not checked against the server's answer (the sync a write waits for didn't settle it).
         if status.pending { throw UserError(ManifestText.unchecked) }
@@ -2875,7 +2979,7 @@ public final class VaultRepository {
     /// clocks within a day of each other. One request per vault and vault number, of at most
     /// 250 items (fewer when the server's limit is lower); the rest waits for the next sync.
     private func maintainManifests(_ id: String, _ session: Session) async {
-        guard isApp, !preferCache, !maintaining, sessions[id] === session, activeId == id, let v = vault, !v.offline,
+        guard isApp, !preferCache, !maintaining, sessions[id] === session, activeId == id, let v = served, !v.offline,
               let first = copyOf(id) else { return }
         let features = store.get().file.accounts[id]?.features ?? []
         guard features.contains(vaultManifestFeature) else { return }
@@ -3467,6 +3571,7 @@ public final class VaultRepository {
             pendingMaster = nil
             Keychain.deleteBiometric(id)
             store.deleteCache(id)
+            store.deleteOfflineChanges(id)
             forgetAvatar(id)
             let email = a.email.lowercased()
             let sameEmailElsewhere = s.file.accounts.contains { $0.key != id && $0.value.email.lowercased() == email }
@@ -3564,7 +3669,7 @@ public final class VaultRepository {
     /// Save a new passkey (AutoFill) in the login the user chose (`PasskeyLogic.saveTargets`),
     /// or a new login. Syncs first, so the vault isn't the offline copy and revisions are current.
     public func storePasskey(_ p: Passkey, target: String) async throws {
-        try await sync()
+        try await syncBeforeSave()
         guard let v = vault else { throw UserError("Your vault is locked.") }
         switch PasskeyLogic.storePlan(v, p, target: target) {
         case .attach(let e, let item): try await updateItem(e, item)
@@ -3600,7 +3705,7 @@ public final class VaultRepository {
     /// - `newItemId`: the id a new login gets, kept by the sheet across its retries (see `createItem`).
     public func saveLogin(page: String, username: String, password: String, target: String? = nil, isDefault: Bool = false, newItemId: String? = nil) async throws -> SaveOutcome {
         guard !password.isEmpty else { throw UserError("There is no password to save.") }
-        try await sync()
+        try await syncBeforeSave()
         guard let v = vault else { throw UserError("Your vault is locked.") }
         let match = store.get().settings.defaultMatch
         let fresh = SaveLogic.plan(page: page, username: username, password: password, vault: v, defaultMatch: match)
@@ -3644,7 +3749,7 @@ public final class VaultRepository {
     /// is thrown and nothing is written (the sheet asks again).
     public func addSite(_ id: String, page: String, sameAccount: (username: String, password: String)? = nil) async throws -> AddSite.Outcome {
         guard AddSite.origin(page) != nil else { throw UserError("Only a website's address can be added to a login.") }
-        try await sync()
+        try await syncBeforeSave()
         guard let v = vault else { throw UserError("Your vault is locked.") }
         guard let e = v.entries.first(where: { $0.id == id }), e.item.login != nil else {
             if sameAccount != nil { throw SaveChoiceChanged() }

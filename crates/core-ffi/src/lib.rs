@@ -317,6 +317,17 @@ impl Account {
         Ok(self.0.open_avatar(&sealed)?)
     }
 
+    /// Seal this device's offline change list (JSON, ≤ 8 MiB) with the account's key.
+    pub fn seal_offline_changes(&self, json: String) -> R<String> {
+        Ok(self.0.seal_offline_changes(&json)?)
+    }
+
+    /// The JSON from what `seal_offline_changes` made. `DecryptFailed` for another
+    /// account's list or a changed one.
+    pub fn open_offline_changes(&self, sealed: String) -> R<String> {
+        Ok(self.0.open_offline_changes(&sealed)?)
+    }
+
     /// Emergency access, the contact's side: open the `sealed_key` that account
     /// `grantor_id` (the access's `grantor.id`) sealed to this account for access
     /// `grant_id`. `DecryptFailed` if it isn't for this account, that grantor or that

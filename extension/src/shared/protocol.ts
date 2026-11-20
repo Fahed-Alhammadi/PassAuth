@@ -14,6 +14,7 @@ import type { PageSafeText } from "./page-text";
 import type { CreateRequest, GetRequest, PasskeyRuntimeReply } from "./passkey-types";
 import type {
   AfterUnlock,
+  ConflictView,
   DeviceSignIn,
   DeviceSignInStart,
   EditorInfo,
@@ -26,6 +27,7 @@ import type {
   ItemSummary,
   KeySignInStatus,
   LoginResult,
+  OfflineChangeList,
   PasskeyRequestInfo,
   PinUnlockResult,
   PolicyNotices,
@@ -159,6 +161,14 @@ export interface PopupApi {
   /** `typedEmail`: the email typed on this device; a Secret Key that came along is kept only for it. */
   "deviceSignIn:finish": Rpc<{ account: string; signIn: DeviceSignIn; typedEmail?: string }, void>;
   "deviceSignIn:discard": Rpc<{ account: string; accessToken: string }, void>;
+  /** Offline changes of the active account (the "Waiting to sync" page). */
+  "offline:list": Rpc<None, OfflineChangeList>;
+  /** "Discard this change": the item's offline change is removed (nothing of it reaches the server). */
+  "offline:discard": Rpc<{ itemId: string }, void>;
+  /** The decision sheet for the item's change in conflict ("Changed on another device"). */
+  "offline:conflict": Rpc<{ itemId: string }, ConflictView>;
+  /** The user's choice on that sheet; the change is then sent (or removed). */
+  "offline:resolve": Rpc<{ itemId: string; choice: ConflictView["choices"][number]["id"] }, void>;
   /** The item's files the server no longer has (`GET /items/{id}/attachments`); null when it can't say. */
   "files:missing": Rpc<{ id: string }, string[] | null>;
   /** Downloading one of the item's files: its address and a current access token (`renew` after a 401). The popup decrypts it. */

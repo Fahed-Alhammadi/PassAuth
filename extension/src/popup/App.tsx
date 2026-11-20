@@ -2,6 +2,7 @@ import { LogoMark } from "@web/components/Logo";
 import { ConfirmDialog, ErrorText, Icon, PasswordInput, SheetActions } from "@web/components/ui";
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { codeOf, LOCKED, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
+import { lostText } from "../shared/offline-text";
 import { callPopup, setFailureHandler } from "../shared/protocol";
 import type { PopupState, TwoFactorChallenge } from "../shared/types";
 import { openCentered, POPUP_WINDOW } from "../shared/windows";
@@ -11,6 +12,7 @@ import { DeviceSignIn, deviceSignInEmail, deviceSignInUrl } from "./device-sign-
 import { EditPage } from "./editor";
 import { GeneratorPage } from "./generator";
 import { HistoryPage, ItemPage } from "./item";
+import { ChangesPage, ConflictPage } from "./offline";
 import { SettingsPage } from "./settings";
 import { Choices, Tile } from "./sheet";
 import { OtherAccounts } from "./shell";
@@ -131,6 +133,11 @@ export function SignOutDialog({ state, onClose, onDone }: { state: PopupState; o
         onDone();
       }}
     >
+      {!!state.offlineChanges && (
+        <p className="alert alert-warn" role="alert">
+          {lostText(state.offlineChanges)}
+        </p>
+      )}
       <p className="card-text">PassAuth removes this account's vault from this browser. To sign in again you need {list}.</p>
     </ConfirmDialog>
   );
@@ -149,7 +156,7 @@ function AuthHead({ title, sub }: { title: string; sub?: string }) {
 
 // ------------------------------------------------------------------ setup
 
-function Setup({ onDone, initial = "" }: { onDone: () => void; initial?: string }) {
+function Setup({ onDone, initial = "", lost }: { onDone: () => void; initial?: string; lost?: number | undefined }) {
   const [url, setUrl] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,6 +189,11 @@ function Setup({ onDone, initial = "" }: { onDone: () => void; initial?: string 
           required
         />
       </label>
+      {!!lost && (
+        <p className="alert alert-warn" role="alert">
+          {lostText(lost)}
+        </p>
+      )}
       <ErrorText error={error} />
       <SheetActions>
         <button type="submit" className="btn btn-primary btn-block" disabled={busy || !url}>
@@ -330,7 +342,8 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
       setChangingServer(false);
       onDone();
     };
-    return <Setup initial={state.server} onDone={changed} />;
+    // Offline changes of this account that weren't sent are deleted with the change: said before Connect.
+    return <Setup initial={state.server} onDone={changed} lost={state.offlineChanges} />;
   }
   if (challenge && waitingKey) {
     return (
@@ -717,6 +730,8 @@ function Screens({ state, onChange, start, startNote }: { state: PopupState; onC
       {route.tab === "vault" && route.page === "edit" && <EditPage key={visit} id={route.id} draft={visit === 0 ? start.draft : undefined} ctx={ctx} />}
       {route.tab === "vault" && route.page === "new" && <EditPage key={visit} kind={route.kind} prefill={route.prefill} draft={visit === 0 ? start.draft : undefined} ctx={ctx} />}
       {route.tab === "vault" && route.page === "addSite" && <AddSitePage key={visit} url={route.url} ctx={ctx} />}
+      {route.tab === "vault" && route.page === "changes" && <ChangesPage key={visit} ctx={ctx} />}
+      {route.tab === "vault" && route.page === "conflict" && <ConflictPage key={visit} id={route.id} ctx={ctx} />}
       {route.tab === "generator" && <GeneratorPage key={visit} ctx={ctx} />}
       {route.tab === "settings" && <SettingsPage key={visit} ctx={ctx} section={route.section} />}
       <div className="pop-note" role="status" aria-live="polite" aria-atomic="true">

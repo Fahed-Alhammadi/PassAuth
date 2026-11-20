@@ -42,3 +42,10 @@ export const AVATAR_PREFIX = "avatar:";
  * `OpenedAvatar`), rebuilt from the sealed copy at unlock. Removed with the account's session keys.
  */
 export const AVATAR_OPEN_PREFIX = "avatarOpen:";
+
+/**
+ * chrome.storage.local: an account's offline changes waiting to sync (`offlineChanges:<account>`, background/vault.ts
+ * section "offline changes"): `{ sealed, count }`, the list sealed with the account key (core `sealOfflineChanges`) and
+ * how many changes it holds (shown before Log out while locked). Removed with the account, at Log out and Change server.
+ */
+export const OFFLINE_CHANGES_PREFIX = "offlineChanges:";

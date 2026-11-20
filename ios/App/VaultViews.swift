@@ -131,6 +131,7 @@ private struct VaultList: View {
                     }
                 }
             }
+            OfflineStatusSection()
             ManifestWarnings()
             UnopenableItems(trashed: filter.scope == .trash)
             if let r = v?.rollback {
@@ -286,7 +287,7 @@ private struct VaultList: View {
             Button("Move to trash", role: .destructive) {
                 model.run {
                     try await model.repo.trashItem(s.entry)
-                    model.notify("Moved to trash.")
+                    model.notify(model.repo.lastWriteQueued ? OfflineText.trashedWaiting : "Moved to trash.")
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -352,6 +353,7 @@ struct ItemRow: View {
                 if !summary.subtitle.isEmpty {
                     Text(summary.subtitle).font(.subheadline).foregroundStyle(Color.paMuted).lineLimit(lines)
                 }
+                if let mark = summary.entry.pending { OfflineMarker(mark: mark) }
             }
         }
         .padding(.vertical, 2)
@@ -449,7 +451,7 @@ struct AccountMenu: View {
             Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
+            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1, pending: model.repo.offlineCount()))
         }
     }
 }

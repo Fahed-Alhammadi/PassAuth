@@ -97,6 +97,10 @@ public struct ConflictError: Error, LocalizedError, Sendable {
 
 public let secretKeyRequiredMessage = "secret_key_required"
 
+/// A request got no answer from the server (no network, DNS, refused or reset connection, TLS,
+/// timeout): the offline change list (`OfflineQueue.waits`) keeps a save for later on this text.
+public let cantReachServerMessage = "Can't reach your PassAuth server. Check the server address and your connection."
+
 /// 403 `quota_exceeded`: the save would take the vault's owner past the server's item or storage
 /// limit (only growth is refused; editing, trashing and deleting always work).
 public let quotaExceededMessage = "You've reached this server's storage limit. Delete items or ask the server's admin."

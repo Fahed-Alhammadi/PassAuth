@@ -120,7 +120,7 @@ public final class ApiClient {
             case .refreshed:
                 (data, res) = try await send()
             case .unavailable:
-                throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+                throw UserError(cantReachServerMessage)
             case .rejected:
                 store.update { $0.secrets.tokens[accountId] = nil }
                 onSessionLost?(accountId)
@@ -175,7 +175,7 @@ public final class ApiClient {
             } catch let e as URLError where e.code == .cancelled {
                 throw CancellationError()
             } catch {
-                throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+                throw UserError(cantReachServerMessage)
             }
         }
         var (value, res) = try await send()
@@ -184,7 +184,7 @@ public final class ApiClient {
             case .refreshed:
                 (value, res) = try await send()
             case .unavailable:
-                throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+                throw UserError(cantReachServerMessage)
             case .rejected:
                 store.update { $0.secrets.tokens[accountId] = nil }
                 onSessionLost?(accountId)
@@ -295,7 +295,7 @@ public final class ApiClient {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            throw UserError("Can't reach your PassAuth server. Check the server address and your connection.")
+            throw UserError(cantReachServerMessage)
         }
     }
 

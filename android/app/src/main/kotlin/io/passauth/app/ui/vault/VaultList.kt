@@ -22,7 +22,9 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.GroupAdd
 import androidx.compose.material.icons.outlined.Policy
@@ -97,11 +99,13 @@ data class ItemSummary(
     val subtitle: String,
     val host: String,
     val url: String,
+    /** The item's offline change, shown as a marker ([io.passauth.app.data.OfflineChanges.marker]). */
+    val change: io.passauth.app.data.OfflineChange? = null,
 ) {
     val item get() = entry.item
 
     companion object {
-        fun of(e: Entry): ItemSummary {
+        fun of(e: Entry, change: io.passauth.app.data.OfflineChange? = null): ItemSummary {
             val i = e.item
             val host = i.siteHost
             val subtitle = i.login?.username?.takeIf { it.isNotEmpty() }
@@ -110,7 +114,7 @@ data class ItemSummary(
                 ?: i.notes.lineSequence().firstOrNull().orEmpty().take(50)
             val url = i.login?.urls?.firstOrNull { it.match != io.passauth.app.data.UrlMatch.Regex && Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(it.url) }?.url
                 ?: if (host.isNotEmpty()) "https://$host" else ""
-            return ItemSummary(e, i.name.ifEmpty { "Untitled" }, subtitle, host, url)
+            return ItemSummary(e, i.name.ifEmpty { "Untitled" }, subtitle, host, url, change)
         }
     }
 }
@@ -146,7 +150,7 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
         },
     ) { padding ->
         val v = vault
-        val all = remember(v) { v?.entries.orEmpty().map(ItemSummary::of) }
+        val all = remember(v) { v?.entries.orEmpty().map { ItemSummary.of(it, v?.change(it.id)) } }
         val folders = remember(v) { v?.folders.orEmpty() }
         PullToRefreshBox(
             isRefreshing = refreshing,
@@ -215,6 +219,24 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                     item {
                         if (problem != null) Alert("$problem Showing the copy of your vault saved on this device.", AlertKind.Error, modifier = Modifier.padding(top = 8.dp))
                         else Alert("You're offline. Showing the copy of your vault saved on this device.", modifier = Modifier.padding(top = 8.dp))
+                    }
+                }
+                // Offline changes: how many wait, or wait for the user's decision (which opens the first such item).
+                v?.changes?.let { io.passauth.app.data.OfflineChanges.status(it) }?.let { text ->
+                    val decide = v.changes.changes.firstOrNull { it.state == io.passauth.app.data.ChangeState.Conflict }
+                    item(key = "offline-changes") {
+                        Surface(
+                            color = if (decide != null) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainer,
+                            contentColor = if (decide != null) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(io.passauth.app.ui.theme.Radius.control),
+                            modifier = Modifier.padding(top = 8.dp).fillMaxWidth(),
+                        ) {
+                            Row(Modifier.padding(start = Space.m, end = Space.xs).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.CloudUpload, null, Modifier.size(18.dp))
+                                Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).padding(start = Space.s))
+                                if (decide != null) TextButton(onClick = { ctx.go(Route.ItemView(decide.itemId)) }) { Text("Review") }
+                            }
+                        }
                     }
                 }
                 // Vaults whose items aren't what the vault's record of changes says (vault manifests): shown, not changed.
@@ -424,6 +446,7 @@ private fun ItemRow(ctx: UiCtx, s: ItemSummary, first: Boolean, last: Boolean) {
             if (s.subtitle.isNotEmpty()) {
                 Text(s.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            s.change?.let { ChangeMarker(it) }
         }
         // Quick actions stay on the row, quiet: the row itself is the primary action.
         if (s.url.isNotEmpty() && roomy) {
@@ -635,5 +658,19 @@ private fun NoticeCard(icon: androidx.compose.ui.graphics.vector.ImageVector, li
 private fun QuietIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, tint: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
     IconButton(onClick = onClick, modifier = Modifier.size(width = 44.dp, height = 48.dp)) {
         Icon(icon, description, Modifier.size(20.dp), tint = tint)
+    }
+}
+
+/** The small marker of an item with an offline change: waiting (quiet), not sent or changed elsewhere (error colour). */
+@Composable
+fun ChangeMarker(change: io.passauth.app.data.OfflineChange, modifier: Modifier = Modifier) {
+    val waiting = change.state == io.passauth.app.data.ChangeState.Waiting
+    val color = if (waiting) PassAuthTheme.colors.muted else MaterialTheme.colorScheme.error
+    Row(modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(if (waiting) Icons.Outlined.CloudUpload else Icons.Outlined.ErrorOutline, null, Modifier.size(14.dp), tint = color)
+        Text(
+            io.passauth.app.data.OfflineChanges.marker(change), style = MaterialTheme.typography.bodySmall, color = color,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 4.dp),
+        )
     }
 }

@@ -163,6 +163,16 @@ export class FakeAccount {
     if (!sealed.startsWith("sealed:")) throw new Error("decrypt_failed");
     return Uint8Array.from(atob(sealed.slice(7)), (c) => c.charCodeAt(0));
   }
+  /** Like the core's offline change sealing: `offline:<json>` for this fake account; anything else doesn't open (`decrypt_failed`). */
+  sealOfflineChanges(json: string) {
+    if (typeof json !== "string") throw new Error("expected a string");
+    return `offline:${control.userId}:${json}`;
+  }
+  openOfflineChanges(sealed: string) {
+    const prefix = `offline:${control.userId}:`;
+    if (typeof sealed !== "string" || !sealed.startsWith(prefix)) throw new Error("decrypt_failed");
+    return sealed.slice(prefix.length);
+  }
   /** The account's own identity: what the background reads as "me" (the account id the core authenticated). */
   legacyIdentity() {
     return { user_id: control.userId, public_key: "fake-public-key", signing_key: null, identity_signature: null, x25519_signature: null };

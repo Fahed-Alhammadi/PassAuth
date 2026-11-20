@@ -16,6 +16,8 @@ final class AppModel {
     @ObservationIgnored private(set) var lockManager: LockManager!
     @ObservationIgnored private(set) var liveSync: LiveSync!
     @ObservationIgnored private(set) var backgroundRefresh: BackgroundRefresh!
+    /// The OS's view of the network (offline changes: saves wait, sending resumes when it's back).
+    @ObservationIgnored private(set) var network: NetworkWatch!
     let permissions: PermissionCenter
     /// Sign-in request notifications (permission, APNs token, registration with the servers).
     let push = PushCenter.shared
@@ -94,6 +96,7 @@ final class AppModel {
         health = HealthSession(repo: repo)
         #endif
         backgroundRefresh = BackgroundRefresh(repo: repo)
+        network = NetworkWatch(repo: repo)
         BackgroundRefresh.current = backgroundRefresh
         // Attachment files left by an earlier run (a download being shared, an upload's encrypted copy).
         AttachmentTransfer.cleanUp()

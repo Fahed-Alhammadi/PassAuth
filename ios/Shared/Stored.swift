@@ -161,6 +161,9 @@ public struct AccountData: Codable, Equatable, Sendable {
     /// The version (`/sync` `user.avatar_seq`) of the profile picture cached on this device
     /// (`AvatarCache`, the app only); nil when none was ever fetched, 0 = the account has none.
     public var avatarSeq: Int64?
+    /// How many offline changes wait on this device (the list itself is sealed with the account
+    /// key): the warnings before Log out and Change server read it while the account is locked.
+    public var offlineChanges: Int?
 
     public init(server: String = "", email: String = "") {
         self.server = server

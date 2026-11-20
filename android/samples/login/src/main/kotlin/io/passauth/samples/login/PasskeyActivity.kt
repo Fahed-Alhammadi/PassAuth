@@ -38,6 +38,8 @@ class PasskeyActivity : Activity() {
     private lateinit var rp: EditText
     private var publicKey: ByteArray? = null
     private var lastChallenge = ""
+    private lateinit var saveUser: EditText
+    private lateinit var savePassword: EditText
 
     private fun b64(b: ByteArray) = Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     private fun unb64(s: String) = Base64.decode(s, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
@@ -57,6 +59,11 @@ class PasskeyActivity : Activity() {
         col.addView(Button(this).apply { text = "Create passkey"; setOnClickListener { create() } })
         col.addView(Button(this).apply { text = "Sign in with passkey"; setOnClickListener { signIn() } })
         col.addView(Button(this).apply { text = "Get password"; setOnClickListener { password() } })
+        saveUser = EditText(this).apply { hint = "User name to save"; setText("cm-user@passauth.test") }
+        savePassword = EditText(this).apply { hint = "Password to save"; setText("Saved-Through-CM-1") }
+        col.addView(saveUser)
+        col.addView(savePassword)
+        col.addView(Button(this).apply { text = "Save password"; setOnClickListener { savePassword() } })
         col.addView(log)
         setContentView(ScrollView(this).apply { addView(col) })
     }
@@ -112,6 +119,19 @@ class PasskeyActivity : Activity() {
             say("clientDataJSON type=${cdj.getString("type")} origin=${cdj.getString("origin")} challengeOk=${cdj.getString("challenge") == lastChallenge} rpIdHashOk=$rpHashOk signatureValid=$verified")
         } catch (e: Exception) {
             say("GET FAILED ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /** `createCredential(CreatePasswordRequest)`: saving a password through Credential Manager. */
+    private fun savePassword() = scope.launch {
+        try {
+            CredentialManager.create(this@PasskeyActivity).createCredential(
+                this@PasskeyActivity,
+                androidx.credentials.CreatePasswordRequest(saveUser.text.toString(), savePassword.text.toString()),
+            )
+            say("SAVE PASSWORD OK user=${saveUser.text}")
+        } catch (e: Exception) {
+            say("SAVE PASSWORD FAILED ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

@@ -99,6 +99,8 @@ export const popupHandlers = {
       const others = vault.otherItems();
       const outdated = await vault.serverNeedsUpdate();
       const problem = url && tabId !== undefined ? await fillProblem(tabId, url) : undefined;
+      const offline = vault.offlineSummary();
+      const offlineNotice = vault.offlineNotice();
       return {
         suggested: suggested.map(vault.summarize),
         all: vault.allEntries().map(vault.summarize),
@@ -111,6 +113,8 @@ export const popupHandlers = {
         ...(others.length ? { others } : {}),
         ...(outdated ? { serverProblem: SERVER_UPDATE_TEXT } : {}),
         ...(problem ? { fillProblem: problem } : {}),
+        ...(offline ? { offline } : {}),
+        ...(offlineNotice ? { offlineNotice } : {}),
       };
     },
   },
@@ -130,6 +134,7 @@ export const popupHandlers = {
         ...(Object.keys(errors).length ? { regexErrors: errors } : {}),
         ...(vault.rolledBack(e.id) ? { olderVersion: ROLLBACK_ITEM_TEXT } : {}),
         ...(vault.manifestWarned(e.vaultId) ? { vaultWarning: vault.manifestWarning(e.vaultId) ?? undefined } : {}),
+        ...(vault.offlineMark(e.id) ? { offline: vault.offlineMark(e.id) } : {}),
       };
     },
   },
@@ -255,6 +260,10 @@ export const popupHandlers = {
     run: ({ account, signIn, typedEmail }) => vault.finishDeviceSignIn(account, signIn, typeof typedEmail === "string" ? typedEmail : undefined),
   },
   "deviceSignIn:discard": { from: POPUP, run: ({ account, accessToken }) => discardDeviceSession(account, String(accessToken)) },
+  "offline:list": { from: POPUP, unlock: true, run: () => vault.offlineList() },
+  "offline:discard": { from: POPUP, unlock: true, activity: "restart", run: ({ itemId }) => vault.discardOfflineChange(String(itemId)) },
+  "offline:conflict": { from: POPUP, unlock: true, run: ({ itemId }) => vault.offlineConflict(String(itemId)) },
+  "offline:resolve": { from: POPUP, unlock: true, activity: "restart", run: ({ itemId, choice }) => vault.resolveOfflineConflict(String(itemId), choice) },
   "files:missing": { from: POPUP, unlock: true, run: ({ id }) => missingFiles(String(id)) },
   // Downloading a file is the user at work in PassAuth.
   "files:access": { from: POPUP, unlock: true, activity: "restart", run: ({ itemId, attachmentId, renew }) => fileAccess(String(itemId), String(attachmentId), renew === true) },

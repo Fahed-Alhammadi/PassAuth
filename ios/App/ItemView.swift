@@ -61,6 +61,9 @@ struct ItemView: View {
                 .padding(.vertical, 4)
                 .paRow()
             }
+            if let mark = entry.pending {
+                OfflineItemSection(entry: entry, mark: mark)
+            }
             if entry.rolledBack {
                 Section {
                     Notice(text: ItemRollback.itemWarning, kind: .error)
@@ -170,10 +173,12 @@ struct ItemView: View {
                             run { try await model.repo.restoreItem(entry); model.notify("Item restored.") }
                         } label: { Label("Restore", systemImage: "arrow.uturn.backward") }
                             .disabled(busy).paRow()
-                        Button(role: .destructive) { confirmPurge = true } label: { Label("Delete forever", systemImage: "trash.slash") }
-                            .disabled(busy).paRow()
+                        if entry.pending == nil {
+                            Button(role: .destructive) { confirmPurge = true } label: { Label("Delete forever", systemImage: "trash.slash") }
+                                .disabled(busy).paRow()
+                        }
                     } else {
-                        if !model.repo.moveTargets(entry).isEmpty {
+                        if !model.repo.moveTargets(entry).isEmpty && entry.pending == nil {
                             Button { moving = true } label: { Label("Move to another vault", systemImage: "folder.badge.gearshape") }
                                 .disabled(busy).paRow()
                                 .accessibilityIdentifier("moveItem")
@@ -208,7 +213,7 @@ struct ItemView: View {
             Button("Move to trash", role: .destructive) {
                 run {
                     try await model.repo.trashItem(entry)
-                    model.notify("Moved to trash. You can restore it from the trash.")
+                    model.notify(model.repo.lastWriteQueued ? OfflineText.trashedWaiting : "Moved to trash. You can restore it from the trash.")
                     dismiss()
                 }
             }
@@ -481,7 +486,7 @@ func roleLabel(_ v: VaultInfo) -> String {
 }
 
 /// Icon and title close together (the item header's folder and vault).
-private struct TightLabel: LabelStyle {
+struct TightLabel: LabelStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 4) {
             configuration.icon

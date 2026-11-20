@@ -1,11 +1,9 @@
-New in 0.14.0
-• Sign-in request notifications: when you sign in on a new device with "Sign in with another device", your iPhone now gets a notification. Tap it, unlock PassAuth and approve the request as before (matching words and a 6-digit code). Notifications never show your email or server.
-• Turn them on from the card in your vault, or in Settings → Account security → Sign-in request notifications.
-
-Needs a PassAuth server 0.17.0 or later (with push notifications switched on in the admin page, the default).
+New in 0.15.0
+• Work offline: when your server can't be reached, you can still add items, edit them and move them to the trash. Changes show "Waiting to sync" and are sent by themselves when the connection comes back. Logins saved from AutoFill while offline wait too.
+• If an item was changed on another device in the meantime, PassAuth asks you what to keep: Keep mine, Keep the other, or Keep both.
+• Each item with a waiting change has "Discard this change". Logging out warns you first if changes haven't been sent.
 
 Please test:
-1. Tap "Turn on" on the vault card and allow notifications.
-2. Lock PassAuth and close it. On a computer, open the web vault, choose "Sign in with another device" and type your email.
-3. Check a "Sign-in request" notification arrives within a few seconds.
-4. Tap it: PassAuth opens, asks you to unlock, then shows the request. Approve it and finish signing in on the computer.
+1. Turn on Airplane Mode. Add a login, edit another one and move a third to the trash. Check each shows "Waiting to sync".
+2. Turn Airplane Mode off and open PassAuth. Check the changes reach the web vault.
+3. Edit the same login offline on the iPhone and online in the web vault, then reconnect. Try each choice in the "Changed on another device" sheet.

@@ -591,6 +591,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
   const [syncing, setSyncing] = useState(false);
   const [synced, setSynced] = useState(false);
   const [lastSync, setLastSync] = useState(state.lastSync);
+  const [offlineText, setOfflineText] = useState(state.offlineText);
   const [neverSave, setNeverSave] = useState(state.neverSave);
 
   const update = (patch: Partial<Settings>) => {
@@ -611,8 +612,9 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       await callPopup("sync");
       const s = await callPopup("state");
       setLastSync(s.lastSync);
+      setOfflineText(s.offlineText);
       setSynced(true);
-      notify("Sync complete. Your vault is up to date.");
+      notify(s.offlineText ? `Sync complete. ${s.offlineText}.` : "Sync complete. Your vault is up to date.");
     } catch (e) {
       notify(`Sync failed: ${msg(e)}`);
     } finally {
@@ -794,8 +796,13 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
           <ActionRow
             icon="sync"
             title={syncing ? "Syncing…" : "Sync vault now"}
-            sub={<span aria-live="polite">Last sync: {formatTime(lastSync)}</span>}
-            done={synced && !syncing ? "Up to date" : undefined}
+            sub={
+              <span aria-live="polite">
+                Last sync: {formatTime(lastSync)}
+                {offlineText ? ` · ${offlineText}` : ""}
+              </span>
+            }
+            done={synced && !syncing && !offlineText ? "Up to date" : undefined}
             onClick={sync}
           />
           <ActionRow icon="upload" title="Import items" sub="Opens the web vault" onClick={() => chrome.tabs.create({ url: `${state.server}/import` })} />

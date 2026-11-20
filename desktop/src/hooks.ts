@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "@web/components/ui";
 import { forgetSecrets, type DesktopHooks } from "@web/lib/platform";
-import { EMAIL_KEY, getState, logout, rememberKey, secretKeyKey } from "@web/lib/vault";
+import { EMAIL_KEY, deleteOfflineChanges, getState, logout, rememberKey, secretKeyKey } from "@web/lib/vault";
 import { secretStore } from "@web/lib/platform";
 import { isTrustMemoryKey } from "@web/lib/signing";
 import { confirmChangeServer, requestChangeServer } from "./Root";
@@ -14,6 +14,7 @@ import { checkForUpdates, installUpdate } from "./updater";
 import { appHook } from "./app";
 import { clearAutofillHandoff } from "./handoff";
 import { saveBytes } from "./transfers";
+import { offlineChanges } from "./offline";
 
 const isMac = navigator.platform.startsWith("Mac");
 
@@ -22,6 +23,8 @@ export async function changeServer() {
   if (getState().status !== "logged-out" && !(await confirmChangeServer())) return;
   clearPersistedKeys();
   await clearAutofillHandoff();
+  // The dialog warned about changes that haven't been sent: they belong to this server and go with it.
+  await deleteOfflineChanges();
   await logout();
   // The keychain entries are per server (`<host>|pa.*`): remove the old server's, or they'd pile up forever.
   const email = secretStore.get(EMAIL_KEY);
@@ -71,5 +74,6 @@ export async function hooks(): Promise<DesktopHooks> {
     secrets,
     vaultTimeout: vaultTimeoutHook,
     app: await appHook(),
+    offlineChanges,
   };
 }

@@ -13,7 +13,7 @@
  *   core.ts         the Rust core (WASM), loaded once; site.ts its site logic (matching, the save rule, passkey targets)
  */
 import { DEBUG_KEY, logged, setDebug } from "../shared/log";
-import { setSessionLostHandler, setTwoStepHandler } from "./api";
+import { setReachHandler, setSessionLostHandler, setTwoStepHandler } from "./api";
 import { initBadge, pageStateChanged, refreshBadge } from "./badge";
 import { onCommand } from "./commands";
 import { forgetFillProblem } from "./fill-problems";
@@ -59,6 +59,8 @@ setSessionLostHandler((id) => void vault.clearUnlocked(id).catch(logged("Droppin
 setKeySignInFinisher((token, credential, remember) => vault.verifyTwoFactorPasskey(token, credential, remember));
 // The server requires two-step login first (403 two_step_required): the popup says so.
 setTwoStepHandler(noteTwoStepRequired);
+// Offline changes: whether each request reached the server (saves wait while it doesn't; sent when it answers again).
+setReachHandler(vault.noteReach);
 
 // Debug logging follows the `debugLog` key (shared/log.ts).
 void chrome.storage.local.get(DEBUG_KEY).then((r) => setDebug(r[DEBUG_KEY] === true), logged("Reading the debug setting"));
@@ -88,7 +90,11 @@ chrome.runtime.onStartup.addListener(() => void onBrowserStart().catch(logged("T
 chrome.alarms.onAlarm.addListener(onAlarm);
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === LIVE_ALARM) void onLiveAlarm().catch(logged("The live-sync check"));
+  // Offline changes waiting to sync: try again (a sync first, while unlocked).
+  if (vault.isOfflineAlarm(alarm.name)) void vault.connectionBack().catch(logged("Sending changes waiting to sync"));
 });
+// Back online: the same.
+(globalThis as { addEventListener?: (type: string, fn: () => void) => void }).addEventListener?.("online", () => void vault.connectionBack().catch(logged("Sending changes waiting to sync")));
 chrome.idle.onStateChanged.addListener((state) => void onIdleState(state).catch(logged("The vault timeout on system lock")));
 chrome.commands.onCommand.addListener(onCommand);
 chrome.contextMenus.onClicked.addListener(onMenuClicked);

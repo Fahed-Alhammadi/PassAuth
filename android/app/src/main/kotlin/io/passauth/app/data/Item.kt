@@ -305,4 +305,13 @@ object ItemCodec {
         val o = AppJson.encodeToJsonElement(Item.serializer(), item) as JsonObject
         return JsonObject(o + item.extra.filterKeys { it !in o }).toString()
     }
+
+    /** [encode] as a JSON object (an offline change keeps the item this way). */
+    fun encodeJson(item: Item): JsonObject {
+        val o = AppJson.encodeToJsonElement(Item.serializer(), item) as JsonObject
+        return if (item.extra.isEmpty()) o else JsonObject(o + item.extra.filterKeys { it !in o })
+    }
+
+    /** [decode] of a JSON object. */
+    fun decodeJson(o: JsonObject): Item = decode(o.toString())
 }

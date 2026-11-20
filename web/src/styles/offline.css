@@ -1,0 +1,32 @@
+/* Offline changes (desktop): item markers and the "Changed on another device" sheet. Tokens only (light + dark). */
+
+/* Row marker: one quiet line under the item's subtitle. */
+.offline-mark {
+  display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%;
+  font-size: var(--text-caption); line-height: 1.4; color: var(--ink-3);
+}
+.offline-mark svg { flex: none; }
+.offline-mark-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offline-held { color: var(--warn); }
+.offline-conflict { color: var(--danger); font-weight: 500; }
+
+.offline-status-line { display: block; }
+
+/* Both versions side by side; rows that differ are marked. */
+.offline-compare {
+  display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius-m);
+  background: var(--surface); overflow: hidden; font-size: var(--text-caption);
+}
+.offline-compare-row {
+  display: grid; grid-template-columns: 88px minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-2);
+  padding: var(--space-2) var(--space-3); align-items: start;
+}
+.offline-compare-row + .offline-compare-row { border-top: 1px solid var(--line); }
+.offline-compare-row > span { min-width: 0; overflow-wrap: anywhere; white-space: pre-line; color: var(--ink); }
+.offline-compare-head > span { font-weight: 600; color: var(--ink-2); }
+.offline-compare-label { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--ink-3) !important; }
+.offline-compare-row.differs { background: var(--warn-soft); }
+.offline-compare-row.differs > span:not(.offline-compare-label) { font-weight: 500; }
+.offline-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.offline-compare > .btn { align-self: flex-start; margin: var(--space-1) var(--space-2); }
+.offline-compare .muted { color: var(--ink-3); }

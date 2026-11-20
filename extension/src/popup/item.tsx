@@ -14,6 +14,7 @@ import { LargeType, PasswordChars } from "./chars";
 import { activeTab, type CopyRequest, type Ctx, formatDate, hostOf, msg, splitCode } from "./ctx";
 import { Files } from "./files";
 import { identityRows } from "./identity";
+import { OfflineBox } from "./offline";
 import { Page, PopOut, Ring } from "./shell";
 import { GLYPH } from "./vault";
 
@@ -259,6 +260,7 @@ export function ItemPage({ id, ctx }: { id: string; ctx: Ctx }) {
                 <Icon name="shield" size={14} /> {data.vaultWarning}
               </p>
             )}
+            {data.offline && <OfflineBox itemId={id} name={i.name} mark={data.offline} ctx={ctx} onDiscarded={back} />}
             {/* L6: a deleted signer's vault keeps its fingerprint line (the label alone shows no fingerprint). */}
             {data.signer && <SignerLine signer={data.signer} />}
             {canFill && (

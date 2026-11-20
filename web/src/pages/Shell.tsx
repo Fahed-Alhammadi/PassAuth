@@ -4,6 +4,7 @@ import { SignInRequestSheet } from "../components/DeviceSignIn";
 import { SigningNotices } from "../components/SignedSharing";
 import { StartNewListButton, UseServerListButton } from "../components/EmergencyRoster";
 import { Wordmark } from "../components/Logo";
+import { OfflineStatus, signOut } from "../components/OfflineChanges";
 import { ConfirmDialog, Icon, toast, type IconName } from "../components/ui";
 import { SERVER_UPDATE_NEEDED, api, friendlyError, hasFeature, usePolicies, usePublicConfig } from "../lib/api";
 import { keepDraftFor } from "../lib/drafts";
@@ -24,7 +25,7 @@ import {
 } from "../lib/manifest";
 import { exportAllowed, policyNotices, violationsKey } from "../lib/policies";
 import { ROSTER_ROLLED_BACK, ROSTER_UNREADABLE } from "../lib/emergency-client";
-import { acceptServerCopy, dismissWarnings, lock, logout, resetDeviceRecord, useVault } from "../lib/vault";
+import { acceptServerCopy, dismissWarnings, lock, resetDeviceRecord, useVault } from "../lib/vault";
 import { isTrashed, kindOf, type ItemKind } from "../lib/types";
 
 const KINDS: [ItemKind, string, IconName][] = [
@@ -138,7 +139,7 @@ export function Shell() {
             <Icon name="lock" /> Lock
             {lockShortcut && <kbd className="nav-kbd">{lockShortcut}</kbd>}
           </button>
-          <button type="button" onClick={logout}>
+          <button type="button" onClick={() => void signOut()}>
             <Icon name="logout" /> Sign out
           </button>
         </nav>
@@ -183,7 +184,7 @@ export function FilterSelect({ filter }: { filter: string }) {
           else if (v === "#sends") nav("/sends");
           else if (v === "#import") nav("/import");
           else if (v === "#export") nav("/export");
-          else if (v === "#signout") logout();
+          else if (v === "#signout") void signOut();
           else nav(filterPath(v));
         }}
       >
@@ -390,6 +391,7 @@ export function Notices() {
 
   return (
     <>
+      <OfflineStatus />
       {serverOutdated && (
         <div className="alert alert-warn small notice" role="alert" data-server-outdated>
           <div className="grow">

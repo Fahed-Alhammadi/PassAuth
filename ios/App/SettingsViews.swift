@@ -329,7 +329,7 @@ private struct AccountPage: View {
             Button("Log out", role: .destructive) { model.run { await model.logOut() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1))
+            Text(LogoutCopy.message(email: s.email, others: s.accounts.count > 1, pending: model.repo.offlineCount()))
         }
         Section {
             NavigationLink {
@@ -646,7 +646,7 @@ private struct VaultOptionsPage: View {
             }
             .disabled(syncing)
         } footer: {
-            Text("Last sync: \(lastSyncText(model.state.lastSync))")
+            Text("Last sync: \(lastSyncText(model.state.lastSync))" + (model.repo.offlineUnreadable ? ". " + OfflineText.cantOpen : OfflineText.status(model.repo.offlineChanges).map { ". " + $0 + "." } ?? ""))
         }
         .paRow()
         Section {
@@ -844,6 +844,9 @@ private struct DeleteAccountPage: View {
                     Text("This permanently deletes \(s.email) from your PassAuth server, with every vault you own and every item in them. People you shared those vaults with lose access too. Vaults others shared with you are not deleted.")
                         .foregroundStyle(Color.paInk)
                     Notice(text: "This can't be undone. Export your vault first if you want to keep a copy.", kind: .error)
+                    if let lost = OfflineText.lost(model.repo.offlineCount()) {
+                        Notice(text: lost, kind: .error).accessibilityIdentifier("delete.offlineChanges")
+                    }
                 }
                 .promptPlainRow()
             }

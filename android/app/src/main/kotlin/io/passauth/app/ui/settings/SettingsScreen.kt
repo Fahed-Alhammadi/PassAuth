@@ -909,6 +909,7 @@ private fun DeleteAccountDialog(ctx: UiCtx, close: () -> Unit) {
                 "People you shared those vaults with lose access too. Vaults others shared with you are not deleted.",
         )
         Alert("This can't be undone. Export your vault first if you want to keep a copy.", AlertKind.Error)
+        io.passauth.app.data.OfflineChanges.lostWarning(ctx.state.pendingChanges)?.let { io.passauth.app.ui.components.WarningNote(it) }
         // Verification sits right above the actions.
         Column(verticalArrangement = Arrangement.spacedBy(Space.m)) {
             io.passauth.app.ui.components.PasswordField(password, { password = it; error = null }, "Master password", onImeAction = ::submit)

@@ -435,6 +435,58 @@ public final class SecureStore {
         updateMemoryFile(trashSeenURL(id), aad: "trashed:\(id)") { _ in try? JSONEncoder().encode(seen) }
     }
 
+    // MARK: Offline changes (waiting to sync)
+    //
+    // The list is sealed with the account key by the core (`seal_offline_changes`), so only the
+    // unlocked account can read or change it; the file wraps that text like the other files.
+    // The app and its AutoFill extension both change it, each read-change-write under the
+    // memory lock (AutoFill adds, the app sends).
+
+    private func offlineURL(_ id: String) -> URL { memoryFile(id, "offline") }
+
+    public enum OfflineRead: Sendable, Equatable {
+        case missing
+        case unreadable
+        case sealed(String)
+    }
+
+    public func readOfflineChanges(_ id: String) -> OfflineRead {
+        switch readMemoryFile(offlineURL(id), aad: "offline:\(id)") {
+        case .missing: .missing
+        case .unreadable: .unreadable
+        case .plain(let d): .sealed(String(decoding: d, as: UTF8.self))
+        }
+    }
+
+    /// Read, change and write the sealed list under the cross-process lock: `change` gets the
+    /// stored sealed text (nil: none) and returns the new one (nil: delete the file). Throws
+    /// (and changes nothing) when the file or the lock can't be had now, or `change` throws.
+    public func updateOfflineChanges(_ id: String, _ change: (String?) throws -> String?) throws {
+        guard let lock = FileLock.acquireSync(memoryLockURL) else { throw UserError(OfflineText.unreadable) }
+        defer { lock.release() }
+        let url = offlineURL(id)
+        let stored: String?
+        switch readOfflineChanges(id) {
+        case .missing: stored = nil
+        case .unreadable: throw UserError(OfflineText.unreadable)
+        case .sealed(let s): stored = s
+        }
+        guard let next = try change(stored) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        guard next != stored else { return }
+        guard let blob = seal(Data(next.utf8), aad: "offline:\(id)") else { throw UserError(OfflineText.unreadable) }
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true, attributes: SharedConfig.directoryAttributes)
+        write(blob, to: url)
+    }
+
+    /// Log out, Change server, removal, account deletion: the list goes (after the warning).
+    public func deleteOfflineChanges(_ id: String) {
+        try? FileManager.default.removeItem(at: offlineURL(id))
+        updateAccount(id) { $0.offlineChanges = nil }
+    }
+
     // MARK: Encryption
 
     private func storeKey() -> SymmetricKey? {

@@ -92,6 +92,8 @@ data class AppState(
     val avatarAvailable: Boolean = false,
     /** The active account's server sends sign-in request notifications (`/api/config` feature `push`), as last asked; null: not asked yet. */
     val pushOffered: Boolean? = null,
+    /** Offline changes of the active account that haven't been sent ([OfflineChanges]). */
+    val pendingChanges: Int = 0,
 )
 
 /** A decrypted item of the active account. */
@@ -235,7 +237,12 @@ data class VaultData(
     val newer: List<NewerItem> = emptyList(),
     /** This phone's record of the account's vaults can't be read, again and again ([Manifests.MEMORY_UNREADABLE], "Reset on this device"). */
     val memoryUnreadable: Boolean = false,
+    /** Offline changes waiting on this phone ([OfflineChanges]); [entries] already show them. */
+    val changes: OfflineList = OfflineList(),
 ) {
+    /** The waiting change of item [id], if any (its marker, "Discard this change", the conflict sheet). */
+    fun change(id: String): OfflineChange? = changes.of(id)
+
     /** Vaults whose items don't match the vault's manifest ([Manifests.WARNING]): shown, never written to. */
     val unresolved: List<VaultInfo> get() = vaults.filter { it.manifest == ManifestState.Unresolved }
 
@@ -400,7 +407,26 @@ class VaultRepository(
 
     /** Public syncs: one in flight, one waiting ([SyncQueue]). */
     private val syncQueue = SyncQueue(scope)
-    private val _vault = MutableStateFlow<VaultData?>(null)
+    /**
+     * The active account's vault as checked from the server's answers (and this phone's own sent
+     * writes): what writes and the sender work from. [vault] is it with the offline changes on top.
+     */
+    private inner class CheckedVault {
+        var value: VaultData? = null
+            set(v) {
+                field = v
+                publish()
+            }
+    }
+
+    private val _vault = CheckedVault()
+    private val _shown = MutableStateFlow<VaultData?>(null)
+
+    /** The active account's offline changes, opened at unlock (account id, list); null while locked or not read yet. */
+    private var offlineList: Pair<String, OfflineList>? = null
+
+    /** The account whose offline list couldn't be read: offline writes are refused (nothing is written over it). */
+    private var offlineUnreadable: String? = null
     private var pendingMaster: MasterKeys? = null
     private var pendingRemember = ""
 
@@ -418,7 +444,7 @@ class VaultRepository(
     val deviceCode: StateFlow<DeviceCodeRequest?> = _deviceCode.asStateFlow()
 
     /** The active account's decrypted vault; null while locked. */
-    override val vault: StateFlow<VaultData?> = _vault.asStateFlow()
+    override val vault: StateFlow<VaultData?> = _shown.asStateFlow()
 
     /** Accounts whose server answered 403 `two_step_required` (no two-step method while one is required); memory only. */
     private val gated = MutableStateFlow<Set<String>>(emptySet())
@@ -498,6 +524,7 @@ class VaultRepository(
             avatar = pics[s.activeId],
             avatarAvailable = a?.features?.contains(AvatarRules.FEATURE) == true,
             pushOffered = a?.features?.let { io.passauth.app.push.PushRules.offered(it) },
+            pendingChanges = a?.pendingChanges ?: 0,
         )
     }
 
@@ -1158,6 +1185,9 @@ class VaultRepository(
         unopenableRows = emptyMap()
         newerRows = emptyMap()
         copy = null
+        // Lock keeps the list on the device; it is opened again at the next unlock.
+        offlineList = null
+        offlineUnreadable = null
         _vault.value = null
         _sharing.value = SharingStatus()
         keysSignature = null
@@ -1474,6 +1504,8 @@ class VaultRepository(
             return unreached(e.cause as? Exception ?: e)
         }
         if (upkeep) manifestUpkeep(id, session, shown.serverTime, shown.trashDays)
+        // The checks of this sync passed: what waits on this phone is sent.
+        if (sessions[id] === session) afterCheckedSync(id)
     }
 
     /** The copy a locked background refresh left beside the checked one didn't pass with the keys ([Manifests.adoptable]): it is dropped. */
@@ -1793,6 +1825,9 @@ class VaultRepository(
         manifestNoRecord = noRecord
         unopenableRows = opened.unopenable.associateBy { it.id }
         newerRows = opened.newer.associateBy { it.id }
+        // The account's offline changes, opened once per unlock, go on top of what is shown.
+        loadOffline(id, session)
+        if (sessions[id] !== session) return
         // "No record" accepted and still none: said quietly until a manifest exists again (rule T3).
         val unwatched = manifestMemory?.takeIf { it.first == id }?.second.orEmpty().filterValues { it.notChecked && it.mark == null }.keys
         _vault.value = opened.data.copy(
@@ -2748,9 +2783,13 @@ class VaultRepository(
     private fun requireVault() = _vault.value ?: throw UserException("Your vault is locked.")
 
     private suspend fun requireOnline(v: VaultData) {
-        // Part S: nothing is written to a server whose known config doesn't list signed sharing.
+        requireSupported()
+        if (v.offline) throw UserException(OfflineChanges.NEEDS_CONNECTION)
+    }
+
+    /** Part S: nothing is written to a server whose known config doesn't list signed sharing. */
+    private suspend fun requireSupported() {
         store.get().active?.features?.let { if (!ServerSupport.supported(it)) throw ServerTooOldException() }
-        if (v.offline) throw UserException("You're offline. Changes can be saved once PassAuth reaches your server.")
     }
 
     /**
@@ -2761,37 +2800,72 @@ class VaultRepository(
      */
     suspend fun createItem(item: Item, vaultId: String?, id: String? = null): String = mutex.withLock { createLocked(item, vaultId, id) }
 
-    private suspend fun createLocked(item: Item, vaultId: String?, requested: String?): String {
-        requireOnline(requireVault())
+    /**
+     * [queued]: the sender of offline changes sends this waiting create (its `sent` is saved before
+     * each request; an id the server already holds with other content is an error the sender
+     * handles). Otherwise a create made while offline, or one that gets no answer, waits in the list.
+     */
+    private suspend fun createLocked(item: Item, vaultId: String?, requested: String?, queued: OfflineChange? = null): String {
         val t = now()
         val id = requested ?: core { newId() }
         val stamped = item.copy(createdAt = t, updatedAt = t)
+        if (queued == null) {
+            requireSupported()
+            val v = requireVault()
+            if (knownOffline(v) || pendingChange(id) != null) {
+                val target = vaultId?.let { want -> v.vaults.firstOrNull { it.id == want } } ?: writableVault(v)
+                if (target.role == Role.Read) throw UserException("You can't add items to ${target.name}.")
+                queue(OfflineChange(core { newId() }, ChangeKind.Create, target.id, id, null, ItemCodec.encodeJson(stamped), null, System.currentTimeMillis()))
+                return id
+            }
+        }
         val json = ItemCodec.encode(stamped)
         var targetId = ""
         var sent: EncryptedItem? = null
         var manifest: ManifestEntry? = null
         var answer: JsonElement? = null
-        val created = ItemWrites.create(
-            send = {
-                val v = requireVault()
-                val target = vaultId?.let { want -> v.vaults.firstOrNull { it.id == want } } ?: writableVault(v)
-                val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
-                targetId = target.id
-                val enc = core { key.encryptItem(json, id, target.id) }
-                // A vault with a manifest: the write carries its next one, counting the new item.
-                val m = manifestEntry(target.id, emptyList(), listOf(SyncItem(id, target.id, enc.key, enc.data)))
-                answer = api.call(activeId(), "/items", body = ItemWrites.body(enc, target.keyEpoch, manifests = listOfNotNull(m)))
-                sent = enc
-                manifest = m
-            },
-            resync = { syncLocked() },
-            updateEarlierAttempt = {
-                syncLocked()
-                val landed = _vault.value?.get(id)?.takeIf { it.vaultId == targetId }
-                if (landed != null) updateLocked(landed, stamped.copy(createdAt = landed.item.createdAt), landed.vaultId)
-                landed != null
-            },
-        )
+        // The body of the last attempt that may have reached the server (kept with a change that waits).
+        var attempt: SentBody? = queued?.sent
+        val earlier = queued?.sent?.data
+        val created = try {
+            ItemWrites.create(
+                send = {
+                    val v = requireVault()
+                    val target = vaultId?.let { want -> v.vaults.firstOrNull { it.id == want } } ?: writableVault(v)
+                    val key = vaultKeys[target.id] ?: throw UserException("Vault not found.")
+                    targetId = target.id
+                    val enc = core { key.encryptItem(json, id, target.id) }
+                    // A vault with a manifest: the write carries its next one, counting the new item.
+                    val m = manifestEntry(target.id, emptyList(), listOf(SyncItem(id, target.id, enc.key, enc.data)))
+                    val body = SentBody(enc.key, enc.data, target.keyEpoch)
+                    if (queued != null) recordSent(id, body)
+                    attempt = body
+                    answer = api.call(activeId(), "/items", body = ItemWrites.body(enc, target.keyEpoch, manifests = listOfNotNull(m)))
+                    sent = enc
+                    manifest = m
+                },
+                resync = { syncLocked() },
+                updateEarlierAttempt = {
+                    syncLocked()
+                    if (queued != null) {
+                        // A waiting create: done when the stored row is what one of its attempts sent.
+                        val row = copy?.second?.items?.firstOrNull { it.id == id }
+                        row?.data != null && (row.data == earlier || row.data == attempt?.data)
+                    } else {
+                        val landed = _vault.value?.get(id)?.takeIf { it.vaultId == targetId }
+                        if (landed != null) updateLocked(landed, stamped.copy(createdAt = landed.item.createdAt), landed.vaultId)
+                        landed != null
+                    }
+                },
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (queued != null || !OfflineChanges.shouldWait(e)) throw e
+            markUnreached()
+            queue(OfflineChange(core { newId() }, ChangeKind.Create, targetId.ifEmpty { vaultId ?: writableVault(requireVault()).id }, id, null, ItemCodec.encodeJson(stamped), attempt, System.currentTimeMillis()))
+            return id
+        }
         if (created == ItemWrites.Created.New) {
             val enc = sent
             val change = if (enc == null) null else ItemWrites.revision(answer)?.let { rev -> LocalChange.Put(SyncItem(id, targetId, enc.key, enc.data, rev, null, t, t)) }
@@ -2806,8 +2880,8 @@ class VaultRepository(
      * [ConflictException] when the item changed on the server since [entry] was read. Key epoch
      * and the retry after a key change: see [ItemWrites].
      */
-    suspend fun updateItem(entry: Entry, item: Item, targetVaultId: String = entry.vaultId) {
-        mutex.withLock { updateLocked(entry, item, targetVaultId) }
+    suspend fun updateItem(entry: Entry, item: Item, targetVaultId: String = entry.vaultId, queueable: Boolean = true) {
+        mutex.withLock { updateLocked(entry, item, targetVaultId, queueable = queueable) }
     }
 
     /**
@@ -2820,21 +2894,44 @@ class VaultRepository(
         updateItem(entry, entry.item.copy(login = login.copy(urls = login.urls + LoginUrl(url, UrlMatch.Default))))
     }
 
-    private suspend fun updateLocked(base: Entry, item: Item, targetVaultId: String) {
-        requireOnline(requireVault())
+    /**
+     * [queued]: the sender of offline changes sends a waiting edit ([base] is the server's row it was
+     * decided on). Otherwise ([queueable]) an edit made while offline, of an item that already has a
+     * waiting change, or one that gets no answer waits in the list. Moves and file changes
+     * ([queueable] false) need a connection.
+     */
+    private suspend fun updateLocked(start: Entry, item: Item, targetVaultId: String, queued: Boolean = false, queueable: Boolean = true) {
         val t = now()
         var next = item.copy(updatedAt = t)
-        val old = base.item.login?.password
+        val old = start.item.login?.password
         val newPassword = next.login?.password
-        if (next.login != null && !old.isNullOrEmpty() && old != newPassword && next.passwordHistory == base.item.passwordHistory) {
+        if (next.login != null && !old.isNullOrEmpty() && old != newPassword && next.passwordHistory == start.item.passwordHistory) {
             next = next.copy(passwordHistory = (listOf(PasswordChange(old, t)) + next.passwordHistory).take(20))
+        }
+        var base = start
+        if (!queued) {
+            requireSupported()
+            val v = requireVault()
+            val pending = pendingChange(start.id)
+            val move = targetVaultId != start.vaultId
+            if (move || !queueable) {
+                if (pending != null) throw UserException(OfflineChanges.HAS_WAITING_CHANGE)
+                if (knownOffline(v)) throw UserException(OfflineChanges.NEEDS_CONNECTION)
+            } else if (pending != null || knownOffline(v)) {
+                if (!v.canWrite(start)) throw UserException("You can only view items in this vault.")
+                queue(OfflineChange(core { newId() }, ChangeKind.Edit, start.vaultId, start.id, start.revision.takeIf { it >= 0 }, ItemCodec.encodeJson(next), null, System.currentTimeMillis()))
+                return
+            }
+            // An entry shown from a change that was sent meanwhile: the item as the server has it now.
+            if (start.revision < 0) base = v.get(start.id) ?: throw UserException(ItemWrites.DELETED_ELSEWHERE)
         }
         val json = ItemCodec.encode(next)
         var sent: EncryptedItem? = null
         var moved = false
         var manifest: ManifestEntry? = null
         var answer: JsonElement? = null
-        ItemWrites.update(
+        var attempt: SentBody? = null
+        try { ItemWrites.update(
             base,
             send = { entry ->
                 val v = requireVault()
@@ -2848,6 +2945,8 @@ class VaultRepository(
                 // takes it out of one vault's manifest and puts it (re-encrypted) into the other's.
                 val before = rowForWrite(entry.id, entry.vaultId)
                 val after = SyncItem(entry.id, target.id, enc.key, enc.data, deletedAt = before?.deletedAt)
+                attempt = SentBody(enc.key, enc.data, target.keyEpoch)
+                if (queued) recordSent(entry.id, attempt!!)
                 val manifests = if (target.id == entry.vaultId) {
                     listOfNotNull(manifestEntry(target.id, listOfNotNull(before), listOf(after)))
                 } else {
@@ -2862,7 +2961,14 @@ class VaultRepository(
                 syncLocked()
                 _vault.value?.get(base.id)
             },
-        )
+        ) } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (queued || !queueable || targetVaultId != base.vaultId || !OfflineChanges.shouldWait(e)) throw e
+            markUnreached()
+            queue(OfflineChange(core { newId() }, ChangeKind.Edit, base.vaultId, base.id, base.revision, ItemCodec.encodeJson(next), attempt, System.currentTimeMillis()))
+            return
+        }
         // A move also changed the vault it left (its number isn't in the answer): sync.
         val enc = sent
         val change = if (moved || enc == null) null else ItemWrites.revision(answer)?.let { rev -> LocalChange.Put(SyncItem(base.id, targetVaultId, enc.key, enc.data, rev, updatedAt = t)) }
@@ -2879,6 +2985,28 @@ class VaultRepository(
 
     suspend fun trashItem(entry: Entry) {
         mutex.withLock {
+            requireSupported()
+            val v = requireVault()
+            if (pendingChange(entry.id) != null || knownOffline(v)) {
+                if (!v.canWrite(entry)) throw UserException("You can only view items in this vault.")
+                queue(OfflineChange(core { newId() }, ChangeKind.Trash, entry.vaultId, entry.id, entry.revision.takeIf { it >= 0 }, null, null, System.currentTimeMillis()))
+                return@withLock
+            }
+            try {
+                trashLocked(entry)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!OfflineChanges.shouldWait(e)) throw e
+                markUnreached()
+                queue(OfflineChange(core { newId() }, ChangeKind.Trash, entry.vaultId, entry.id, entry.revision, null, null, System.currentTimeMillis()))
+            }
+        }
+    }
+
+    /** Move [entry] to the trash on the server (an online trash, or the sender's). */
+    private suspend fun trashLocked(entry: Entry) {
+        run {
             var current: Entry? = entry
             var answer: JsonElement? = null
             var manifest: ManifestEntry? = null
@@ -2904,9 +3032,342 @@ class VaultRepository(
                     current = _vault.value?.get(entry.id)
                 },
             )
-            val done = current ?: return@withLock
+            val done = current ?: return
             val change = ItemWrites.revision(answer)?.let { LocalChange.Trash(done.id, at, it, TRASH_SUMMARY, hash) }
             afterWrite(done.vaultId, answer, change, manifest)
+        }
+    }
+
+    // ------------------------------------------------------- offline changes
+
+    /** Whether the OS reports a usable network ([PassAuthApp] sets it; true while unknown). */
+    var networkAvailable: () -> Boolean = { true }
+
+    /** The app knows it is offline: the OS says so, or the last request couldn't reach the server. */
+    private fun knownOffline(v: VaultData) = v.offline || !networkAvailable()
+
+    /** A request got no answer: the copy shown is marked offline (the status line says so). */
+    private fun markUnreached() {
+        _vault.value = _vault.value?.let { if (it.offline) it else it.copy(offline = true) }
+    }
+
+    /** The checked vault with the offline changes on top, published as [vault]. */
+    private fun publish() {
+        val b = _vault.value
+        val list = offlineList?.takeIf { it.first == copy?.first }?.second
+        _shown.value = when {
+            b == null -> null
+            list == null || list.changes.isEmpty() -> if (b.changes.changes.isEmpty()) b else b.copy(changes = OfflineList())
+            else -> b.copy(
+                entries = OfflineChanges.overlay(b.entries, list, { it.id }, { c, item, e -> Entry(c.itemId, item, e?.vaultId ?: c.vaultId, e?.revision ?: -1, e?.enc ?: EncryptedItem(c.itemId, c.vaultId, "", "")) }) { o ->
+                    runCatching { ItemCodec.decodeJson(o) }.getOrNull()
+                },
+                changes = list,
+            )
+        }
+    }
+
+    private fun pendingChange(itemId: String): OfflineChange? = offlineList?.takeIf { it.first == copy?.first }?.second?.of(itemId)
+
+    /** Account [id]'s list opened with its key (once per unlock); an unreadable one is never written over. */
+    private suspend fun loadOffline(id: String, session: Session) {
+        if (offlineList?.first == id) return
+        val read = withContext(Dispatchers.IO) { store.offlineChanges(id).read() }
+        val list = when (read) {
+            SealedFile.Read.Missing -> OfflineList()
+            SealedFile.Read.Unreadable -> null
+            is SealedFile.Read.Text -> try {
+                core { AppJson.decodeFromString(OfflineList.serializer(), session.account.openOfflineChanges(read.text)) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+        }
+        if (sessions[id] !== session) return
+        if (list == null) {
+            offlineUnreadable = id
+            offlineList = null
+            return
+        }
+        if (offlineUnreadable == id) offlineUnreadable = null
+        offlineList = id to list
+        if (store.get().accounts[id]?.pendingChanges != list.changes.size) store.updateAccount(id) { it.copy(pendingChanges = list.changes.size) }
+    }
+
+    private suspend fun offlineOf(id: String): OfflineList {
+        if (offlineUnreadable == id) throw UserException(OfflineChanges.UNREADABLE)
+        offlineList?.takeIf { it.first == id }?.let { return it.second }
+        val session = sessions[id] ?: throw UserException("Your vault is locked.")
+        loadOffline(id, session)
+        return offlineList?.takeIf { it.first == id }?.second ?: throw UserException(OfflineChanges.UNREADABLE)
+    }
+
+    /** Seal and store account [id]'s [list] (the count goes to the account record for the warnings), then show it. */
+    private suspend fun saveOffline(id: String, list: OfflineList) {
+        val session = sessions[id] ?: throw UserException("Your vault is locked.")
+        if (offlineUnreadable == id) throw UserException(OfflineChanges.UNREADABLE)
+        val json = AppJson.encodeToString(OfflineList.serializer(), list)
+        val sealed = core { session.account.sealOfflineChanges(json) }
+        val written = withContext(Dispatchers.IO) { store.offlineChanges(id).write { sealed } }
+        if (!written) throw UserException(OfflineChanges.UNREADABLE)
+        offlineList = id to list
+        store.updateAccount(id) { it.copy(pendingChanges = list.changes.size) }
+        publish()
+    }
+
+    /** A change saved to the list of the active account (merged with one the item already has). */
+    private suspend fun queue(next: OfflineChange) {
+        val id = activeId()
+        saveOffline(id, OfflineChanges.add(offlineOf(id), next))
+    }
+
+    /** The sender saves the body of an attempt before it is sent. */
+    private suspend fun recordSent(itemId: String, body: SentBody) {
+        val id = activeId()
+        val list = offlineOf(id)
+        val c = list.of(itemId) ?: return
+        saveOffline(id, OfflineChanges.put(list, c.copy(sent = body)))
+    }
+
+    /** "Discard this change": the item's change is removed from the list (nothing is sent). */
+    suspend fun discardChange(itemId: String) = mutex.withLock {
+        val id = activeId()
+        val list = offlineOf(id)
+        if (list.of(itemId) != null) saveOffline(id, OfflineChanges.remove(list, itemId))
+    }
+
+    /** What the conflict sheet shows: this phone's version, the server's (null: deleted there) and the change. */
+    data class ConflictView(val change: OfflineChange, val mine: Item?, val theirs: Item?)
+
+    fun conflictView(itemId: String): ConflictView? {
+        val c = pendingChange(itemId)?.takeIf { it.state == ChangeState.Conflict } ?: return null
+        val theirs = _vault.value?.get(itemId)?.item
+        val mine = c.item?.let { runCatching { ItemCodec.decodeJson(it) }.getOrNull() } ?: theirs
+        return ConflictView(c, mine, theirs)
+    }
+
+    enum class ConflictChoice {
+        /** Keep mine / Move to trash anyway: sent over the server's current version. */
+        Mine,
+
+        /** Keep the other / Discard mine: the change is removed. */
+        Other,
+
+        /** Keep both / Save mine as a new item: this phone's version as a new item in the same vault. */
+        Both,
+    }
+
+    /** The user's decision on a conflict; the sender then runs. */
+    suspend fun resolveConflict(itemId: String, choice: ConflictChoice) {
+        mutex.withLock {
+            val id = activeId()
+            val list = offlineOf(id)
+            val c = list.of(itemId) ?: return@withLock
+            val row = serverRow(itemId)
+            val next = when (choice) {
+                ConflictChoice.Other -> OfflineChanges.remove(list, itemId)
+                ConflictChoice.Mine -> {
+                    if (row == null || (c.kind == ChangeKind.Edit && row.trashed)) throw UserException(ItemWrites.DELETED_ELSEWHERE)
+                    OfflineChanges.put(list, OfflineChanges.over(c, row.revision))
+                }
+                ConflictChoice.Both -> {
+                    if (c.kind == ChangeKind.Trash || c.item == null) throw UserException("Nothing to save.")
+                    val deleted = row == null || row.trashed
+                    val copyOf = OfflineChanges.asNew(c, core { newId() }, core { newId() }) { o ->
+                        if (deleted) o else JsonObject(o + ("name" to JsonPrimitive(((o["name"] as? JsonPrimitive)?.contentOrNull.orEmpty()) + OfflineChanges.COPY_SUFFIX)))
+                    }
+                    OfflineList(list.version, list.changes.map { if (it.itemId == itemId) copyOf else it })
+                }
+            }
+            saveOffline(id, next)
+        }
+        requestSend()
+    }
+
+    /** The server's row of [itemId] as the checked copy holds it (null: the server has no such item). */
+    private fun serverRow(itemId: String): ServerRow? =
+        copy?.second?.items?.firstOrNull { it.id == itemId }?.let { ServerRow(it.revision, it.data, it.deletedAt != null, it.vaultId) }
+
+    private val sendLock = Any()
+
+    /** A sender runs (set before it starts: the scope's dispatcher may run it at once, inside [requestSend]). */
+    private var sending = false
+    private var sendAgain = false
+
+    /** Send the waiting changes (one sender at a time; a request while one runs makes it go round once more). */
+    private fun requestSend() {
+        synchronized(sendLock) {
+            if (sending) {
+                sendAgain = true
+                return
+            }
+            sending = true
+        }
+        scope.launch {
+            while (true) {
+                synchronized(sendLock) { sendAgain = false }
+                try {
+                    sendWaiting()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    synchronized(sendLock) { sending = false }
+                    throw e
+                } catch (_: Exception) {
+                    // Tried again after the next sync.
+                }
+                val again = synchronized(sendLock) {
+                    if (!sendAgain) sending = false
+                    sendAgain
+                }
+                if (!again) return@launch
+            }
+        }
+    }
+
+    /** The connection came back (the OS says so): a sync, which sends what waits. */
+    fun connectionBack() {
+        scope.launch {
+            val v = _vault.value ?: return@launch
+            if (!v.offline && pendingCount() == 0) return@launch
+            runCatching { sync() }
+        }
+    }
+
+    private fun pendingCount() = offlineList?.takeIf { it.first == copy?.first }?.second?.changes?.size ?: 0
+
+    /** After a sync whose checks passed: send what waits. */
+    private fun afterCheckedSync(id: String) {
+        if (offlineList?.first == id && offlineList?.second?.changes?.any { it.state != ChangeState.Conflict } == true) requestSend()
+    }
+
+    /** Oldest first, one at a time under the lock; stops at the first request without an answer. */
+    private suspend fun sendWaiting() {
+        val id = activeId()
+        val session = sessions[id] ?: return
+        val items = offlineList?.takeIf { it.first == id }?.second?.changes?.map { it.itemId } ?: return
+        for (itemId in items) {
+            val stop = mutex.withLock {
+                if (sessions[id] !== session || activeId() != id || _vault.value == null) true else sendOne(id, itemId)
+            }
+            if (stop) return
+        }
+    }
+
+    private fun sendWords(e: Throwable): String = when (e) {
+        is ApiException -> ServerErrors.text(e)
+        is UserException -> e.message.orEmpty()
+        else -> "Something went wrong."
+    }
+
+    /** One change: decided against the server's row and sent, held or marked. True: stop (no answer). */
+    private suspend fun sendOne(id: String, first: String): Boolean {
+        // The same gate as online writes: nothing is sent to a server that doesn't support signed sharing.
+        try {
+            requireSupported()
+        } catch (_: ServerTooOldException) {
+            return true
+        }
+        var itemId = first
+        var attempt = 0
+        var renamed = false
+        while (true) {
+            val list = offlineOf(id)
+            val c = list.of(itemId) ?: return false
+            if (c.state == ChangeState.Conflict) return false
+            val v = _vault.value ?: return true
+            if (v.offline) return true
+            suspend fun mark(state: ChangeState, reason: String?) {
+                if (c.state != state || c.reason != reason) saveOffline(id, OfflineChanges.put(offlineOf(id), c.copy(state = state, reason = reason)))
+            }
+            val row = serverRow(c.itemId)
+            // The request goes to the vault the item is in now (another device may have moved it).
+            val vaultNow = row?.vaultId ?: c.vaultId
+            OfflineChanges.holdReason(v.vaults.firstOrNull { it.id == vaultNow })?.let {
+                mark(ChangeState.Held, it)
+                return false
+            }
+            suspend fun rename() {
+                renamed = true
+                val fresh = core { newId() }
+                saveOffline(id, OfflineChanges.put(OfflineChanges.remove(offlineOf(id), c.itemId), c.copy(itemId = fresh, sent = null)))
+                itemId = fresh
+            }
+            attempt++
+            try {
+                // An attempt that landed: does the change still hold exactly that item (nothing merged since)?
+                val mine = c.item?.let { runCatching { ItemCodec.decodeJson(it) }.getOrNull() }
+                val sentMatches = if (row != null && c.sent != null && row.data == c.sent.data && mine != null) {
+                    v.get(c.itemId)?.item?.let { OfflineChanges.sameContent(mine, it) } ?: true
+                } else {
+                    true
+                }
+                when (val d = OfflineChanges.decide(c, row, sentMatches)) {
+                    SendDecision.Done -> {
+                        saveOffline(id, OfflineChanges.remove(offlineOf(id), c.itemId))
+                        return false
+                    }
+                    is SendDecision.Conflict -> {
+                        mark(ChangeState.Conflict, if (d.deleted) OfflineChanges.DELETED else null)
+                        return false
+                    }
+                    SendDecision.NewId -> {
+                        if (renamed) {
+                            mark(ChangeState.Held, OfflineChanges.CHANGED_ELSEWHERE)
+                            return false
+                        }
+                        rename()
+                        continue
+                    }
+                    SendDecision.EditOver -> {
+                        val e = v.get(c.itemId) ?: throw UserException(OfflineChanges.CANT_OPEN)
+                        updateLocked(e, mine ?: throw UserException(OfflineChanges.UNREADABLE_CHANGE), e.vaultId, queued = true)
+                        saveOffline(id, OfflineChanges.remove(offlineOf(id), c.itemId))
+                        return false
+                    }
+                    SendDecision.Send -> {
+                        val item = mine
+                        when (c.kind) {
+                            ChangeKind.Create -> createLocked(item ?: throw UserException(OfflineChanges.UNREADABLE_CHANGE), c.vaultId, c.itemId, queued = c)
+                            ChangeKind.Edit -> {
+                                val e = v.get(c.itemId) ?: throw UserException(OfflineChanges.CANT_OPEN)
+                                updateLocked(e, item ?: throw UserException(OfflineChanges.UNREADABLE_CHANGE), e.vaultId, queued = true)
+                            }
+                            ChangeKind.Trash -> v.get(c.itemId)?.let { trashLocked(it) }
+                        }
+                        saveOffline(id, OfflineChanges.remove(offlineOf(id), c.itemId))
+                        return false
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (c.kind == ChangeKind.Create && ItemWrites.itemExists(e) && !renamed) {
+                    rename()
+                    continue
+                }
+                when (val f = OfflineChanges.afterFailure(e, attempt, ::sendWords)) {
+                    SendFailure.Stop -> {
+                        markUnreached()
+                        return true
+                    }
+                    SendFailure.Again -> try {
+                        syncLocked()
+                    } catch (e2: kotlinx.coroutines.CancellationException) {
+                        throw e2
+                    } catch (_: Exception) {
+                        markUnreached()
+                        return true
+                    }
+                    is SendFailure.Held -> {
+                        mark(ChangeState.Held, f.reason)
+                        return false
+                    }
+                    SendFailure.Conflict -> {
+                        mark(ChangeState.Conflict, null)
+                        return false
+                    }
+                }
+            }
         }
     }
 
@@ -2918,6 +3379,9 @@ class VaultRepository(
         if (itemRevs?.first == id) itemRevs = null
         if (manifestMemory?.first == id) manifestMemory = null
         if (trashSeen?.first == id) trashSeen = null
+        if (offlineList?.first == id) offlineList = null
+        if (offlineUnreadable == id) offlineUnreadable = null
+        scope.launch { store.updateAccount(id) { it.copy(pendingChanges = 0) } }
         _avatars.update { it - id }
     }
 
@@ -3832,13 +4296,13 @@ class VaultRepository(
      */
     fun loginsFor(pageUrl: String): List<Entry> {
         val fallback = state.value.settings.defaultMatch
-        val v = _vault.value ?: return emptyList()
+        val v = _shown.value ?: return emptyList()
         return v.entries.filter { e -> e.item.login?.let { UrlMatcher.matchesAny(pageUrl, it, fallback, allowRegex = v.isPersonal(e)) } == true }
     }
 
     /** Passkeys saved for a relying party. */
     fun passkeysFor(rpId: String): List<Pair<Entry, Passkey>> =
-        _vault.value?.entries.orEmpty().flatMap { e ->
+        _shown.value?.entries.orEmpty().flatMap { e ->
             e.item.login?.passkeys.orEmpty().filter { it.rpId.equals(rpId, ignoreCase = true) }.map { e to it }
         }
 

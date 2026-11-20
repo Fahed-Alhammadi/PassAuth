@@ -104,12 +104,16 @@ class SecureStore(private val context: Context, scope: CoroutineScope) {
     /** When this phone first saw each trashed item of account [id] in the trash ([TrashSeen]), with the offline copy. */
     fun trashSeen(id: String): SealedFile = memory(id, "trashseen")
 
+    /** Account [id]'s offline changes ([OfflineChanges]): the list as the core sealed it with the account key, sealed again with the store key. */
+    fun offlineChanges(id: String): SealedFile = memory(id, "offline")
+
     /** Deletes account [id]'s offline copy (with its item edit counters, manifest memory and trash times) and its profile picture (log out, account removed). */
     fun deleteCache(id: String) {
         copies.delete(id)
         revs(id).delete()
         manifests(id).delete()
         trashSeen(id).delete()
+        offlineChanges(id).delete()
         avatars.delete(id)
     }
 

@@ -7,7 +7,8 @@ import { getDesktop } from "./lib/platform";
 import { SIGN_IN_PATH, signedOutState } from "./lib/routes";
 import { webLockMinutes } from "./lib/policies";
 import { server } from "./lib/server";
-import { boot, holdsKeys, lock, logout, useVault } from "./lib/vault";
+import { boot, holdsKeys, lock, useVault } from "./lib/vault";
+import { SignOutPrompt, signOut } from "./components/OfflineChanges";
 import { AdminPage } from "./pages/Admin";
 import { ExportPage } from "./pages/Export";
 import { ImportPage } from "./pages/Import";
@@ -109,7 +110,7 @@ function Unreachable() {
         <div className="auth-panel stack">
           <SheetActions
             quiet={
-              <button type="button" className="btn btn-text" onClick={logout}>
+              <button type="button" className="btn btn-text" onClick={() => void signOut()}>
                 Sign out
               </button>
             }
@@ -206,6 +207,7 @@ export function App() {
     <>
       <RouterProvider router={router} />
       <ToastHost />
+      <SignOutPrompt />
     </>
   );
 }

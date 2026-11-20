@@ -2,6 +2,7 @@ import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode 
 import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { ItemAttachments, NewItemFiles } from "../components/Attachments";
 import { ItemEditor } from "../components/ItemEditor";
+import { ChangeMarker, ItemChangeBar, savedText } from "../components/OfflineChanges";
 import { TrustBadge } from "../components/SignedSharing";
 import { ConfirmDialog, CopyButton, ErrorText, Icon, Modal, SheetActions, SiteIcon, TotpView, toast, type IconName } from "../components/ui";
 import { errorMessage, friendlyError, hasFeature, usePublicConfig } from "../lib/api";
@@ -200,6 +201,7 @@ export function VaultPage() {
                 <span className="grow">
                   <span className="title">{e.item.name || "Untitled"}</span>
                   <span className="sub">{subtitle(e.item)}</span>
+                  <ChangeMarker itemId={e.id} />
                 </span>
                 {e.item.favorite && (
                   <span className="fav" title="Favorite">
@@ -376,12 +378,12 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
 
   if (editing) return <Editor entry={entry} kind={kindOf(i)} onDone={() => setEditing(false)} />;
 
-  const run = async (fn: () => Promise<void>, msg: string, then?: () => void) => {
+  const run = async (fn: () => Promise<void>, msg: string | (() => string), then?: () => void) => {
     setBusy(true);
     setError(null);
     try {
       await fn();
-      toast(msg);
+      toast(typeof msg === "string" ? msg : msg());
       then?.();
     } catch (e) {
       setError(errorMessage(e));
@@ -428,11 +430,11 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
                   aria-label="Favorite"
                   title={i.favorite ? "Remove from favorites" : "Add to favorites"}
                   disabled={busy}
-                  onClick={() => run(() => updateItem(entry, { ...i, favorite: !i.favorite }), i.favorite ? "Removed from favorites" : "Added to favorites")}
+                  onClick={() => run(() => updateItem(entry, { ...i, favorite: !i.favorite }), () => savedText(entry.id, i.favorite ? "Removed from favorites" : "Added to favorites"))}
                 >
                   <Icon name="star" />
                 </button>
-                <button type="button" className="btn btn-icon btn-quiet-danger" aria-label="Move to trash" title="Move to trash" disabled={busy} onClick={() => run(() => trashItem(entry.id), "Moved to trash", onClose)}>
+                <button type="button" className="btn btn-icon btn-quiet-danger" aria-label="Move to trash" title="Move to trash" disabled={busy} onClick={() => run(() => trashItem(entry.id), () => savedText(entry.id, "Moved to trash"), onClose)}>
                   <Icon name="trash" />
                 </button>
                 <button type="button" className="btn" onClick={() => setEditing(true)}>
@@ -453,6 +455,7 @@ function Detail({ entry, onClose }: { entry: VaultEntry; onClose: () => void }) 
           {ROLLBACK_ITEM}
         </div>
       )}
+      <ItemChangeBar entry={entry} />
       <ErrorText error={error} />
 
       <ItemFields item={i} afterLogin={i.login && <PasswordNotes entry={entry} onChange={canWrite ? () => setEditing(true) : undefined} />} />
@@ -834,13 +837,15 @@ function Editor({ entry, kind, prefill, onDone }: { entry?: VaultEntry; kind: It
           if (base) {
             // The editor doesn't change the file list: keep the one the item has (files may come and go meanwhile).
             await updateItem(base, withAttachmentsOf(item, base.item), vaultId);
-            toast("Changes saved");
+            toast(savedText(base.id, "Changes saved"));
             onDone(base.id);
           } else {
             const id = await createItem(vaultId, withAttachmentsOf(item, null), newId);
-            // The item exists now: its files upload in the background, shown on the item.
-            if (files.length) attachFiles(id, files);
-            toast(files.length ? "Item saved. Attaching files…" : "Item saved");
+            const waits = savedText(id, "") !== "";
+            // The item exists now: its files upload in the background, shown on the item. An item that waits to be sent
+            // can't have files yet (they need a connection).
+            if (files.length && !waits) attachFiles(id, files);
+            toast(waits ? (files.length ? "Saved on this device without its files. Add them again once you're online." : savedText(id, "")) : files.length ? "Item saved. Attaching files…" : "Item saved");
             onDone(id);
           }
         }}

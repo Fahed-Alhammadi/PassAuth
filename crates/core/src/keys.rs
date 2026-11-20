@@ -41,6 +41,9 @@ const EMERGENCY_ROSTER: &str = "emergency-roster";
 const AVATAR_AAD: &str = "passauth/avatar/v1/";
 /// Largest profile picture the apps seal: they send a small square JPEG (≈256 px).
 pub const MAX_AVATAR_BYTES: usize = 256 * 1024;
+const OFFLINE_CHANGES_AAD: &str = "passauth/offline-changes/v1/";
+/// Largest offline change list [`AccountKeys::seal_offline_changes`] seals (its JSON).
+pub const MAX_OFFLINE_CHANGES_BYTES: usize = 8 * 1024 * 1024;
 
 /// `passauth/<kind>/v2/<id>/<id>…`: every id non-empty and without '/', so two
 /// lists of ids never give the same bytes.
@@ -511,6 +514,28 @@ impl UnlockedAccount {
             return Err(Error::Malformed("profile picture size"));
         }
         Ok(image)
+    }
+
+    /// Offline changes: seal this device's list of changes waiting to be sent (the
+    /// apps' own JSON, at most [`MAX_OFFLINE_CHANGES_BYTES`]) with the Account Key
+    /// (base64url), so the list is kept on the device only in sealed form and can't be
+    /// swapped for another account's.
+    pub fn seal_offline_changes(&self, json: &str) -> Result<String> {
+        if json.len() > MAX_OFFLINE_CHANGES_BYTES {
+            return Err(Error::Malformed("offline changes size"));
+        }
+        let aad = format!("{OFFLINE_CHANGES_AAD}{}", self.account_id);
+        Ok(b64(&self
+            .account_key
+            .encrypt(json.as_bytes(), aad.as_bytes())?))
+    }
+
+    /// The JSON from what [`seal_offline_changes`](Self::seal_offline_changes) made:
+    /// this account's, unchanged, or an error.
+    pub fn open_offline_changes(&self, sealed: &str) -> Result<String> {
+        let aad = format!("{OFFLINE_CHANGES_AAD}{}", self.account_id);
+        let json = self.account_key.decrypt(&unb64(sealed)?, aad.as_bytes())?;
+        String::from_utf8(json).map_err(|_| Error::Malformed("offline changes are not UTF-8"))
     }
 }
 
@@ -1116,6 +1141,29 @@ mod tests {
         // Not interchangeable with the roster (same key, other AAD).
         let roster = alice.seal_emergency_roster("{}").unwrap();
         assert!(alice.open_avatar(&roster).is_err());
+    }
+
+    #[test]
+    fn offline_changes_open_only_for_their_account() {
+        let alice = new(false).unlocked;
+        let json = r#"{"version":1,"changes":[]}"#;
+        let sealed = alice.seal_offline_changes(json).unwrap();
+        assert_eq!(alice.open_offline_changes(&sealed).unwrap(), json);
+        let bob = new(false).unlocked;
+        assert!(matches!(
+            bob.open_offline_changes(&sealed),
+            Err(Error::Decrypt)
+        ));
+        assert!(
+            alice
+                .seal_offline_changes(&"x".repeat(MAX_OFFLINE_CHANGES_BYTES + 1))
+                .is_err()
+        );
+        // Not interchangeable with the roster or the picture (same key, other AAD).
+        let roster = alice.seal_emergency_roster(json).unwrap();
+        assert!(alice.open_offline_changes(&roster).is_err());
+        assert!(alice.open_emergency_roster(&sealed).is_err());
+        assert!(alice.open_avatar(&sealed).is_err());
     }
 
     #[test]

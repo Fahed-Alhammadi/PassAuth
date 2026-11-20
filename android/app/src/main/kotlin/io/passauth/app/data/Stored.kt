@@ -115,6 +115,8 @@ data class AccountData(
     val policies: Policies? = null,
     /** The server's `limits.max_import_items` asked with [features] (how many items one batch request may name); null until then. */
     val maxImportItems: Int? = null,
+    /** How many offline changes wait on this device (the list itself is sealed with the account key); shown before they'd be lost. */
+    val pendingChanges: Int = 0,
     /**
      * Before [Stored.rosters]: the roster memory kept in the record (so a log out or another account
      * on the record lost or inherited it). Only read to move it there once ([Stored.migrated]).
@@ -263,7 +265,7 @@ data class Stored(
     /** Record [id] signed out but kept (the last account: the sign-in screen remembers server and email). [rosters] stay. */
     fun signedOutRecord(id: String): Stored {
         val a = accounts[id] ?: return this
-        return copy(accounts = accounts + (id to a.copy(tokens = null, biometric = null, bundle = null, lastSync = 0)))
+        return copy(accounts = accounts + (id to a.copy(tokens = null, biometric = null, bundle = null, lastSync = 0, pendingChanges = 0)))
     }
 
     companion object {

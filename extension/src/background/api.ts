@@ -186,6 +186,15 @@ export async function renewAccess(accountId: string): Promise<void> {
   throw signedOutError();
 }
 
+/**
+ * Told after every API request whether the account's server answered (`reached`) or not (no network, DNS, refused,
+ * TLS, timeout, or 502/503/504): offline changes (vault.ts) wait while it doesn't and are sent when it answers again.
+ */
+let reachHook: (accountId: string, reached: boolean) => void = () => {};
+export function setReachHandler(fn: (accountId: string, reached: boolean) => void) {
+  reachHook = fn;
+}
+
 type Options = {
   method?: string;
   body?: unknown;
@@ -218,12 +227,17 @@ export async function api<T = unknown>(path: string, opts: Options = {}): Promis
     });
   };
   const reach = async () => {
+    let res: Response;
     try {
-      return await send();
+      res = await send();
     } catch (e) {
       if (e instanceof AppError) throw e;
+      reachHook(accountId, false);
       throw unreachable();
     }
+    // 502/503/504: a proxy answered, the server didn't (offline changes wait for these too).
+    reachHook(accountId, res.status < 502 || res.status > 504);
+    return res;
   };
   let res = await reach();
   if (res.status === 401 && auth) {

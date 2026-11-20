@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Offline changes: sent when the connection comes back (ConnectivityManager callback). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Keeps other apps' overlay windows off PassAuth's consent sheets (save, passkeys, unlock over another app). -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />

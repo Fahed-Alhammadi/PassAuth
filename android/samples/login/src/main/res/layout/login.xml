@@ -61,5 +61,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Passkey tests" />
+
+    <Button
+        android:id="@+id/identifier_first"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Two-step sign-in" />
     </LinearLayout>
 </LinearLayout>

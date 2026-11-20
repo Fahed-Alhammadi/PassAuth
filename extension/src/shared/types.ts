@@ -57,6 +57,10 @@ export interface PopupState {
   rememberedDevice: boolean;
   settings: Settings;
   lastSync: number;
+  /** Offline changes of the active account that haven't been sent (readable while locked): Log out and Change server warn first. */
+  offlineChanges?: number;
+  /** The sync status line for them, while unlocked ("2 changes waiting to sync · 1 change needs your decision"). */
+  offlineText?: string;
   neverSave: string[];
   /** Sites (base domains) where PassAuth hides its inline menu and fill entries. */
   hiddenSites: string[];
@@ -121,6 +125,36 @@ export interface ItemSummary {
   /** Logins: every saved website address, for search. */
   websites?: string[];
   tags?: string[];
+  /** The item has an offline change (background/offline-rules.ts): its marker. */
+  offline?: OfflineMark;
+}
+
+/** An item's offline change as its marker shows it: "Waiting to sync", "Not sent: <reason>", "Changed on another device". */
+export interface OfflineMark {
+  state: "waiting" | "held" | "conflict";
+  kind: "create" | "edit" | "trash";
+  text: string;
+}
+
+/** Every offline change of the active account (the "Waiting to sync" page), oldest first, with the status line. */
+export interface OfflineChangeList {
+  changes: (OfflineMark & { itemId: string; name: string; vaultName: string })[];
+  text: string | null;
+}
+
+/** The decision sheet "Changed on another device" for one change: both versions field by field, and the choices. */
+export interface ConflictView {
+  itemId: string;
+  kind: "edit" | "deleted" | "trash";
+  name: string;
+  vaultName: string;
+  host: string;
+  /** `mine`/`theirs` per field ("" when that side has none); `secret`: hidden until shown. */
+  fields: { label: string; mine: string; theirs: string; secret: boolean; differs: boolean }[];
+  /** Whether there is a version of this device's to show (not for a trash). */
+  hasMine: boolean;
+  hasTheirs: boolean;
+  choices: { id: "mine" | "other" | "both" | "new" | "discard" | "trash"; title: string; sub: string }[];
 }
 
 /**
@@ -169,6 +203,10 @@ export interface ItemList {
   memory?: { text: string; action: string; body: string };
   /** The server is one this version refuses ("Update your PassAuth server to keep using this app."): the list is the offline copy. */
   serverProblem?: string;
+  /** Offline changes: the status line ("N changes waiting to sync", "N changes need your decision") and how many need a decision. */
+  offline?: { text: string; decide: number };
+  /** The changes waiting on this device couldn't be opened: dropped (dismissible by `key`) or kept unread (`key` null). */
+  offlineNotice?: { text: string; key: string | null };
 }
 
 /**
@@ -339,6 +377,8 @@ export interface ItemData {
   olderVersion?: string;
   /** The item's vault doesn't match its manifest (background/manifests.ts): the warning and what to do. Nothing in it can be changed meanwhile. */
   vaultWarning?: string;
+  /** The item has an offline change: its marker ("Discard this change"; "Decide" for a conflict). */
+  offline?: OfflineMark;
 }
 
 /** A verification code as the background made it; `expires`: when it changes (ms, see totp.ts). */

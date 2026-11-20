@@ -1,3 +1,4 @@
-• Sign-in request notifications: when you use "Sign in with another device" on a new device, your phone now gets a notification. Tap it, unlock PassAuth and approve the request as before. Notifications never show your email or server.
-• Turn them on from the card in your vault, or in Settings → Account security.
-• Needs PassAuth server 0.18.0 or newer and Google Play services.
+• Work offline: add, edit and trash items without a connection. Changes show "Waiting to sync" and are sent when you are back online.
+• Changed on another device meanwhile? PassAuth asks: Keep mine, Keep the other or Keep both.
+• Autofill now saves user name and password together when a site asks for them on two screens.
+• Apps that save passwords through Android's password manager can now save to PassAuth.

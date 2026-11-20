@@ -52,6 +52,7 @@ import {
   createVault,
   declineConsent,
   declineInvitation,
+  deleteOfflineChanges,
   deleteVault,
   fingerprint,
   forgetDevice,
@@ -82,6 +83,7 @@ import {
   type ReviewView,
   type Vault,
 } from "../lib/vault";
+import { LostChangesWarning, signOut } from "../components/OfflineChanges";
 import { ActivityTab, VaultActivity } from "./Activity";
 import { EmergencyTab } from "./Emergency";
 import "../styles/settings.css";
@@ -286,7 +288,7 @@ export function SettingsPage() {
               </div>
             );
           })}
-          <button type="button" className="btn btn-ghost rail-signout" onClick={logout}>
+          <button type="button" className="btn btn-ghost rail-signout" onClick={() => void signOut()}>
             <Icon name="logout" /> Sign out
           </button>
         </nav>
@@ -419,6 +421,8 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
   async function deleteAccount(password: string) {
     const token = await reauth(password);
     await api("/account", { method: "DELETE", headers: { "x-reauth-token": token } });
+    // The account is gone: changes waiting on this device for it can never be sent.
+    await deleteOfflineChanges();
     await logout();
   }
 
@@ -493,6 +497,7 @@ function AccountTab({ account, reload }: { account: AccountInfo; reload: () => P
           onClose={() => setDeleting(false)}
         >
           <p className="card-text">This permanently deletes the account, every vault you own and every item in them. You can't undo this.</p>
+          <LostChangesWarning />
         </ConfirmPassword>
       )}
     </>

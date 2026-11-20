@@ -3,7 +3,8 @@ import { LogoMark } from "../components/Logo";
 import { RecoveryCodesModal } from "../components/TwoStep";
 import { ErrorText, Icon, SheetActions } from "../components/ui";
 import { api, friendlyError } from "../lib/api";
-import { continueAfterTwoStep, logout, useVault } from "../lib/vault";
+import { continueAfterTwoStep, useVault } from "../lib/vault";
+import { signOut as warnedSignOut } from "../components/OfflineChanges";
 import { AddPasskeyModal, EmailCard, PasskeysCard, TotpCard, type AccountInfo } from "./Settings";
 
 /**
@@ -54,7 +55,7 @@ export function TwoStepRequiredPage() {
   }
 
   const signOut = (
-    <button type="button" className="btn btn-text" onClick={logout} disabled={busy}>
+    <button type="button" className="btn btn-text" onClick={() => void warnedSignOut()} disabled={busy}>
       Sign out
     </button>
   );

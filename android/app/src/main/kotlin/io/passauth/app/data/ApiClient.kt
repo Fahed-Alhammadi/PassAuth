@@ -235,7 +235,7 @@ class ApiClient(private val store: SecureStore) {
                     throw ApiException(401, "unauthorized", "Your session ended. Sign in again.")
                 }
                 // Network error, 5xx or 429: keep the tokens, the next request retries.
-                RefreshResult.Unavailable -> throw UserException(UNREACHABLE)
+                RefreshResult.Unavailable -> throw UnreachableException()
             }
         }
         return res
@@ -306,7 +306,7 @@ class ApiClient(private val store: SecureStore) {
     } catch (e: IOException) {
         // A failure while sending a body that the app made (an upload) keeps its own reason.
         (e.cause as? BodyFailure)?.let { throw it.cause ?: it }
-        throw UserException(UNREACHABLE)
+        throw UnreachableException()
     }
 
     private suspend fun parse(res: Response): JsonElement = withContext(Dispatchers.IO) {

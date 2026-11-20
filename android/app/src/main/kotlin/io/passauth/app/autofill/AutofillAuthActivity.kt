@@ -6,6 +6,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
 import android.os.Bundle
+import androidx.credentials.CreatePasswordRequest
+import androidx.credentials.CreatePasswordResponse
+import androidx.credentials.exceptions.CreateCredentialCancellationException
+import androidx.credentials.exceptions.CreateCredentialUnknownException
+import androidx.credentials.provider.PendingIntentHandler
 import android.service.autofill.FillResponse
 import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
@@ -27,6 +32,10 @@ import kotlinx.coroutines.launch
  * - [MODE_SAVE]: a save prompt was accepted while locked; unlock, then save. When the vault
  *   already has a login for the site or app, a sheet says what will happen ("Update login?"
  *   or "Save login?") and lets the user change where it is saved.
+ * - [MODE_CREDENTIAL_SAVE]: an app asked Credential Manager to save a password and the user
+ *   chose PassAuth (a `CreateEntry` of [io.passauth.app.credentials.PassAuthCredentialService]);
+ *   unlock, then the same save rule and sheet as an autofill save, answered with a
+ *   `CreatePasswordResponse`.
  * - [MODE_NEVER]: "Never" on the save prompt; add the site or app to the never-save list.
  * - [MODE_OPEN]: "Open PassAuth".
  * - [MODE_ADD_SITE]: "Add this site to a login…" (nothing matched); pick a login, confirm,
@@ -54,6 +63,7 @@ class AutofillAuthActivity : ServiceActivity() {
             MODE_UNLOCK -> withVault("Unlock to fill", "Your vault is locked. Unlock it to fill your login.") { vault, _ -> fillResponse(vault) }
             MODE_DATASET -> withVault("Unlock to fill", "Your vault is locked. Unlock it to fill your login.") { vault, _ -> dataset(vault) }
             MODE_ADD_SITE -> withVault("Unlock to fill", "Your vault is locked. Unlock it to choose the login to fill here.") { vault, _ -> addSite(vault) }
+            MODE_CREDENTIAL_SAVE -> withVault("Unlock to save", "Your vault is locked. Unlock it to save this password in PassAuth.") { vault, _ -> credentialSave(vault) }
             MODE_SAVE -> {
                 // From here on this sheet decides; the save is no longer applied by itself at the next unlock.
                 intent.getStringExtra(EXTRA_KEY)?.let(AutofillEngine::claimPendingSave)
@@ -205,14 +215,45 @@ class AutofillAuthActivity : ServiceActivity() {
             toast("PassAuth couldn't save this login. Sign in again to save it.")
             return cancel()
         }
-        // An app: also the logins of websites that vouch for it (asset links).
-        val p = pending.copy(target = engine.linked(pending.target, vault))
         // A typed login is only ever saved in the account that was active when the user chose to save.
-        if (p.accountId != graph.repo.state.value.activeId) {
+        if (pending.accountId != graph.repo.state.value.activeId) {
             toast("PassAuth didn't save this login: another account is active now. Sign in again to save it.")
             return cancel()
         }
-        if (!engine.offerSave(p.target)) return saved(null)
+        if (!engine.offerSave(pending.target)) return saved(null)
+        saveFlow(vault, pending)
+    }
+
+    private val credentialMode get() = intent.getStringExtra(EXTRA_MODE) == MODE_CREDENTIAL_SAVE
+
+    /**
+     * Credential Manager `createCredential(CreatePasswordRequest)`: the caller is the place (a
+     * browser on the privileged allowlist by its web origin, any other app by its package), the
+     * request's id and password the typed login. The user picked PassAuth in Android's sheet, so
+     * "Ask to save" and the never-save list don't hold it back.
+     */
+    private suspend fun credentialSave(vault: VaultData) {
+        val request = PendingIntentHandler.retrieveProviderCreateCredentialRequest(intent) ?: return cancel()
+        val call = request.callingRequest as? CreatePasswordRequest ?: return cancel()
+        val found = io.passauth.app.credentials.PassAuthCredentialService.passwordTarget(this, request.callingAppInfo)
+            ?: return failCredential("PassAuth can't save passwords for this app.")
+        if (call.password.isEmpty()) return failCredential("There's no password to save.")
+        val label = (found as? FillTarget.App)?.let { engine.appLabel(it.packageName) }
+        saveFlow(vault, AutofillEngine.Companion.PendingSave(found, call.id.trim(), call.password, label, System.currentTimeMillis(), graph.repo.state.value.activeId))
+    }
+
+    private fun failCredential(text: String) {
+        val r = Intent()
+        PendingIntentHandler.setCreateCredentialException(r, CreateCredentialUnknownException(text))
+        toast(text)
+        setResult(RESULT_OK, r)
+        finish()
+    }
+
+    /** The save rule for [pending]: saved at once when there's nothing to choose, else the sheet. */
+    private suspend fun saveFlow(vault: VaultData, pending: AutofillEngine.Companion.PendingSave) {
+        // An app: also the logins of websites that vouch for it (asset links).
+        val p = pending.copy(target = engine.linked(pending.target, vault))
         val candidates = engine.saveCandidates(vault, p.target)
         val plan = SaveRule.plan(candidates, p.username, p.password)
         val addTo = engine.sameAccountElsewhere(vault, p.target, p.username, p.password)
@@ -220,8 +261,11 @@ class AutofillAuthActivity : ServiceActivity() {
         if (addTo.isEmpty() && (SaveRule.targets(candidates, p.username, p.password).isEmpty() || plan == SaveRule.Plan.Nothing)) {
             return try {
                 saved(engine.applySave(vault, p.target, p.username, p.password, p.appLabel, plan) ?: "This login is already saved in PassAuth.")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
-                saved("Couldn't save to PassAuth: ${io.passauth.app.ui.errorMessage(e)}")
+                val text = "Couldn't save to PassAuth: ${io.passauth.app.ui.errorMessage(e)}"
+                if (credentialMode) failCredential(text) else saved(text)
             }
         }
         askSave(p, candidates, plan, addTo, null)
@@ -265,7 +309,8 @@ class AutofillAuthActivity : ServiceActivity() {
             error = notice,
             // A login in a shared vault is only ever chosen here, by the user, with this warning.
             warning = { c -> adding(c)?.let { AddSite.warning(it, place, addWord) } ?: SaveRule.sharedWarning(target(c)) },
-            quiet = listOf(
+            // An app that asked to save through Credential Manager is answered "saved" or "cancelled"; "Never" is autofill's.
+            quiet = if (credentialMode) emptyList() else listOf(
                 ServiceActivity.Quiet("Never for this $here") {
                     engine.addNeverSave(AutofillMatcher.neverSaveKey(p.target))
                     saved("PassAuth won't offer to save logins here. You can change this in Settings → Autofill.")
@@ -301,7 +346,21 @@ class AutofillAuthActivity : ServiceActivity() {
 
     private fun saved(notice: String?) {
         notice?.let(::toast)
-        setResult(RESULT_OK)
+        if (credentialMode) {
+            val r = Intent()
+            PendingIntentHandler.setCreateCredentialResponse(r, CreatePasswordResponse())
+            setResult(RESULT_OK, r)
+        } else {
+            setResult(RESULT_OK)
+        }
+        finish()
+    }
+
+    override fun cancel() {
+        if (!credentialMode) return super.cancel()
+        val r = Intent()
+        PendingIntentHandler.setCreateCredentialException(r, CreateCredentialCancellationException("The user didn't save the password."))
+        setResult(RESULT_OK, r)
         finish()
     }
 
@@ -321,6 +380,7 @@ class AutofillAuthActivity : ServiceActivity() {
         const val MODE_NEVER = "never"
         const val MODE_OPEN = "open"
         const val MODE_ADD_SITE = "add-site"
+        const val MODE_CREDENTIAL_SAVE = "credential-save"
 
         /** "Save in" choice meaning a new login (never an item id: those are UUIDs). */
         private const val SAVE_NEW = "new"
@@ -341,6 +401,12 @@ class AutofillAuthActivity : ServiceActivity() {
             val mutable = mode == MODE_UNLOCK || mode == MODE_DATASET || mode == MODE_ADD_SITE
             val flags = PendingIntent.FLAG_CANCEL_CURRENT or if (mutable) PendingIntent.FLAG_MUTABLE else PendingIntent.FLAG_IMMUTABLE
             return PendingIntent.getActivity(context, requestCodes.getAndIncrement(), intent, flags).intentSender
+        }
+
+        /** The `CreateEntry` of a Credential Manager password save: mutable (the framework adds the request), explicit. */
+        fun credentialSave(context: Context): PendingIntent {
+            val intent = Intent(context, AutofillAuthActivity::class.java).putExtra(EXTRA_MODE, MODE_CREDENTIAL_SAVE)
+            return PendingIntent.getActivity(context, requestCodes.getAndIncrement(), intent, PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         }
 
         /**

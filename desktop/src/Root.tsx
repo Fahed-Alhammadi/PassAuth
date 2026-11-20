@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { emit } from "@tauri-apps/api/event";
 import { App } from "@web/App";
 import { LogoMark } from "@web/components/Logo";
+import { LostChangesWarning } from "@web/components/OfflineChanges";
 import { Modal, SheetActions } from "@web/components/ui";
 import { SESSION_KEY } from "@web/lib/api";
 import { loadSecrets, secretStore } from "@web/lib/platform";
@@ -158,6 +159,7 @@ function ChangeServerDialog() {
   return (
     <Modal title="Change server?" subtitle={savedServer() ? new URL(savedServer()!).host : undefined} icon="globe" onClose={() => askChangeServer?.(false)}>
       <p className="card-text">You'll be signed out. Your vault stays on the server; sign in again to open it.</p>
+      <LostChangesWarning />
       <SheetActions
         quiet={
           <button type="button" className="btn btn-text" onClick={() => askChangeServer?.(false)} data-autofocus="">

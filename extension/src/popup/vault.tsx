@@ -13,6 +13,7 @@ import type { ItemList, ItemSummary, OtherItem } from "../shared/types";
 import { AddSiteConfirm } from "./add-site";
 import { activeTab, type Ctx, hostOf, msg } from "./ctx";
 import { Notices } from "./notices";
+import { OfflineBadge } from "./offline";
 import { searchItems } from "./search";
 import { Account, Menu, MenuItem, Page, PopOut } from "./shell";
 import { type ListFilter, NO_FILTER } from "./view-state";
@@ -538,7 +539,7 @@ function ItemRow({ row, ctx, tabStop, onFocusRow, onFill }: { row: Row; ctx: Ctx
               </span>
             )}
           </span>
-          {i.subtitle && <span className="sub">{i.subtitle}</span>}
+          {i.offline ? <OfflineBadge mark={i.offline} className="sub" /> : i.subtitle && <span className="sub">{i.subtitle}</span>}
         </span>
       </button>
       {row.canFill ? (

@@ -3324,6 +3324,10 @@ final class ManifestContractTests: XCTestCase {
         try v.add("Shop")
         w.liveSync = true
         let repo = try await repo(w)
+        // The rule for apps without an offline change list (the macOS AutoFill extension): the
+        // editor sends the same create again (the iOS app keeps it in the list instead,
+        // OfflineQueueRepoTests).
+        repo.queuesOffline = false
         // The first attempt is stored, its answer lost.
         w.loseAnswers = 1
         let id = try newId()

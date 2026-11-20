@@ -59,12 +59,20 @@ class PassAuthAutofillService : AutofillService() {
         if (state.status == Status.Setup || state.status == Status.LoggedOut) return null
         val ids = (form.fillIds + listOfNotNull(form.otp?.id)).distinct()
         val offerSave = engine.offerSave(found)
-        // With the vault open, Android's save dialog can say whether a saved login gets updated.
-        fun saveInfo(vault: io.passauth.app.data.VaultData?, target: FillTarget) = if (!offerSave) null else AutofillResponses.saveInfo(
+        // Identifier-first: this screen follows a user-name screen of the same place (Android gave its state back).
+        val place = AutofillMatcher.neverSaveKey(found)
+        val afterUsername = IdentifierFirst.continues(request.clientState?.getString(IdentifierFirst.STATE_KEY), place)
+        val usernameStep = offerSave && IdentifierFirst.isUsernameStep(form)
+        // With the vault open, Android's save dialog can say whether a saved login gets updated (not when
+        // the user name was typed on an earlier screen: the line is chosen by this screen's fields).
+        fun saveInfo(vault: io.passauth.app.data.VaultData?, target: FillTarget) = if (!offerSave) null else if (usernameStep) AutofillResponses.usernameStepSaveInfo(form) else AutofillResponses.saveInfo(
             this, form,
             AutofillAuthActivity.sender(this, AutofillAuthActivity.MODE_NEVER, key = AutofillMatcher.neverSaveKey(target)),
-            vault?.let { engine.saveHint(it, target) },
+            vault?.takeIf { !afterUsername || form.username != null }?.let { engine.saveHint(it, target) },
+            afterUsernameStep = afterUsername,
         )
+        // The place carried to the next screen (a user-name screen), or on to the save request (its password screen).
+        val carry = if (usernameStep || afterUsername) android.os.Bundle().apply { putString(IdentifierFirst.STATE_KEY, place) } else null
         val ui = AutofillResponses(this, request.inlineSuggestionsRequest)
         // Whatever is left of the time budget; if the vault isn't ready by then, offer the unlock entry
         // (its activity returns the logins straight away when the vault turns out to be unlocked).
@@ -81,20 +89,29 @@ class PassAuthAutofillService : AutofillService() {
             val datasets = AutofillAuthActivity.buildDatasets(this, ui, engine, vault, target, form, state.settings, AddSite.allowed(target, parsed.webDomain))
             // Only "Open PassAuth" and nothing to save: stay out of the way.
             if (datasets.size <= 1 && save == null && form.password == null) return null
-            b.addAll(datasets)
+            // A user-name screen with no login to fill: only kept for the save that follows, nothing shown.
+            if (!(datasets.size <= 1 && usernameStep)) b.addAll(datasets)
         }
         save?.let(b::setSaveInfo)
+        carry?.let(b::setClientState)
         return b.build()
     }
 
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
-        val structure = request.fillContexts.lastOrNull()?.structure ?: return callback.onSuccess()
-        val parsed = StructureParser.parse(structure)
+        val screens = request.fillContexts.mapNotNull { it.structure?.let(StructureParser::parse) }
+        val parsed = screens.lastOrNull() ?: return callback.onSuccess()
+        val carried = request.clientState?.getString(IdentifierFirst.STATE_KEY)
         graph.scope.launch {
             try {
                 val found = engine.target(parsed)
-                val creds = engine.submitted(parsed.form)
-                if (found == null || creds == null || !engine.offerSave(found)) return@launch callback.onSuccess()
+                val typed = engine.submitted(parsed.form)
+                if (found == null || typed == null || !engine.offerSave(found)) return@launch callback.onSuccess()
+                // Identifier-first: the user name typed on an earlier screen of the same place.
+                val place = AutofillMatcher.neverSaveKey(found)
+                val earlier = if (typed.first.isNotBlank() || !IdentifierFirst.continues(carried, place)) emptyList() else screens.dropLast(1).map { st ->
+                    IdentifierFirst.Step(engine.target(st)?.let(AutofillMatcher::neverSaveKey), st.form.username?.value, st.form.passwords.isNotEmpty())
+                }
+                val creds = IdentifierFirst.username(typed.first, earlier, place, carried) to typed.second
                 val label = (found as? FillTarget.App)?.let { engine.appLabel(it.packageName) ?: parsed.windowTitle }
                 val vault = graph.awaitVault()
                 // An app: also the logins of websites that vouch for it (asset links).

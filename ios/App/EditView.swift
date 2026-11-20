@@ -348,11 +348,11 @@ struct EditView: View {
                     // The editor never changes the file list: the item as last synced keeps its files
                     // (an overwrite too), as in the web vault.
                     try await model.repo.updateItem(base, AttachmentList.withAttachments(of: base.item, clean))
-                    model.notify("Changes saved.")
+                    model.notify(model.repo.lastWriteQueued ? OfflineText.savedWaiting : "Changes saved.")
                     onSaved(entry.id)
                 } else {
                     let id = try await model.repo.createItem(AttachmentList.set(clean, []), vaultId: vaultId, id: newItemId)
-                    model.notify("Item saved.")
+                    model.notify(model.repo.lastWriteQueued ? OfflineText.savedWaiting : "Item saved.")
                     onSaved(id)
                 }
                 dismiss()

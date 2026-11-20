@@ -400,6 +400,27 @@ impl Account {
         self.0.open_avatar(&string(sealed)?).map_err(js_err)
     }
 
+    /// Seal this device's offline change list (JSON, ≤ 8 MiB) with the account's key.
+    #[wasm_bindgen(js_name = sealOfflineChanges)]
+    pub fn seal_offline_changes(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] json: JsValue,
+    ) -> R<String> {
+        self.0.seal_offline_changes(&string(json)?).map_err(js_err)
+    }
+
+    /// The JSON from what `sealOfflineChanges` made. Throws `decrypt_failed` for
+    /// another account's list or a changed one.
+    #[wasm_bindgen(js_name = openOfflineChanges)]
+    pub fn open_offline_changes(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "string")] sealed: JsValue,
+    ) -> R<String> {
+        self.0
+            .open_offline_changes(&string(sealed)?)
+            .map_err(js_err)
+    }
+
     /// Emergency access, the contact's side: open the `sealed_key` that account
     /// `grantorId` (the access's `grantor.id`) sealed to this account for access
     /// `grantId`. Throws `decrypt_failed` if it isn't for this account, that grantor

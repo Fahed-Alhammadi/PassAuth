@@ -30,6 +30,9 @@ class LoginActivity : Activity() {
         findViewById<android.view.View>(R.id.passkeys).setOnClickListener {
             startActivity(Intent(this, PasskeyActivity::class.java))
         }
+        findViewById<android.view.View>(R.id.identifier_first).setOnClickListener {
+            startActivity(Intent(this, IdentifierFirstActivity::class.java))
+        }
     }
 }
 

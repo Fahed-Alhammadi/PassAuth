@@ -128,16 +128,29 @@ class AutofillResponses(private val context: Context, private val inline: Inline
          * site to the never-save list. With a [hint], Android's save dialog also says what
          * PassAuth will do with what was typed: update a saved login, or save a new one.
          */
-        fun saveInfo(context: Context, form: LoginForm<AutofillId>, never: IntentSender?, hint: SaveRule.Hint? = null): SaveInfo? {
+        fun saveInfo(context: Context, form: LoginForm<AutofillId>, never: IntentSender?, hint: SaveRule.Hint? = null, afterUsernameStep: Boolean = false): SaveInfo? {
             val pw = form.password ?: return null
             var type = SaveInfo.SAVE_DATA_TYPE_PASSWORD
-            if (form.username != null) type = type or SaveInfo.SAVE_DATA_TYPE_USERNAME
+            if (form.username != null || afterUsernameStep) type = type or SaveInfo.SAVE_DATA_TYPE_USERNAME
             return SaveInfo.Builder(type, form.passwords.map { it.id }.toTypedArray())
                 .apply { form.username?.let { setOptionalIds(arrayOf(it.id)) } }
                 // Many apps don't finish the activity after signing in; save when the form disappears.
                 .setFlags(SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE)
                 .apply { if (never != null) setNegativeAction(SaveInfo.NEGATIVE_BUTTON_STYLE_NEVER, never) }
                 .apply { if (hint != null) runCatching { saveDescription(context, form.username?.id, hint) }.getOrNull()?.let(::setCustomDescription) }
+                .build()
+        }
+
+        /**
+         * A user-name screen of an identifier-first flow ([IdentifierFirst]): no save dialog now
+         * (`FLAG_DELAY_SAVE`), but Android keeps the screen and hands it to the save of the
+         * password screen that follows.
+         */
+        fun usernameStepSaveInfo(form: LoginForm<AutofillId>): SaveInfo? {
+            if (!IdentifierFirst.isUsernameStep(form)) return null
+            val user = form.username ?: return null
+            return SaveInfo.Builder(SaveInfo.SAVE_DATA_TYPE_USERNAME, arrayOf(user.id))
+                .setFlags(SaveInfo.FLAG_DELAY_SAVE)
                 .build()
         }
 

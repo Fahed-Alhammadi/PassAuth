@@ -121,26 +121,37 @@ test("a second key change during the retry is not retried again", async () => {
   expect(server.requests.filter((r) => r.method === "POST" && r.path === "/items")).toHaveLength(2);
 });
 
-test("a create that timed out but reached the server isn't saved twice when tried again with the same id", async () => {
+test("a create that timed out but reached the server waits as an offline change and isn't saved twice", async () => {
   await signedIn();
   const id = crypto.randomUUID();
   server.dropReply.add("POST /items");
-  await expectReject(vault.createItem(login("Example"), undefined, id), (e) => e instanceof Error);
+  // No answer: the save works for the user and waits (offline changes), shown with its marker.
+  expect(await vault.createItem(login("Example"), undefined, id)).toBe(id);
   expect(server.items).toHaveLength(1);
+  expect(vault.getEntry(id)?.item.name).toBe("Example");
+  // The next sync that checks out sends it: the server already has exactly what was sent, so nothing is stored again.
+  await vault.sync();
+  await vault.sendOfflineChanges();
+  expect(server.items).toHaveLength(1);
+  expect(vault.offlineSummary()).toBeNull();
   // Trying again (the save prompt or the editor keeps the id): the copy that arrived is used.
   expect(await vault.createItem(login("Example"), undefined, id)).toBe(id);
   expect(server.items).toHaveLength(1);
   expect(vault.getEntry(id)?.item.name).toBe("Example");
 });
 
-test("retrying with the same id after the item was changed: the earlier copy is brought up to date", async () => {
+test("retrying with the same id after the item was changed: the waiting create takes the new item and brings the server's copy up to date", async () => {
   await signedIn(["key_epoch"]); // a server without error codes: says "item id already exists"
   const id = crypto.randomUUID();
   server.dropReply.add("POST /items");
-  await expectReject(vault.createItem(login("Example", "first"), undefined, id), () => true);
+  await vault.createItem(login("Example", "first"), undefined, id);
   await vault.createItem(login("Example", "second"), undefined, id);
+  await vault.sync();
+  await vault.sendOfflineChanges();
   expect(server.items).toHaveLength(1);
   expect(vault.getEntry(id)?.item.login?.password).toBe("second");
+  expect(JSON.parse(server.items[0]!.data).login.password).toBe("second");
+  expect(vault.offlineSummary()).toBeNull();
 });
 
 test("ids from the popup must be UUIDs", async () => {

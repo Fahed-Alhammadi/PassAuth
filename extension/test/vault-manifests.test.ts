@@ -963,7 +963,9 @@ test("REVIEW PoC (R2): a /sync row that carries served_sha256 with other data is
   await storage.syncCache.set("a1", kept);
   await reopen(false);
   expect(vault.getEntry("i1")?.item.notes).toBe("an older version");
-  await expectReject(vault.createItem(login("New")), (e) => e.message === UNREACHABLE_TEXT);
+  // Unreachable: a save waits in the offline changes (nothing is sent); dropped here.
+  await vault.discardOfflineChange(await vault.createItem(login("New")));
+  expect(vault.offlineSummary()).toBeNull();
   await reopen();
   await vault.sync();
   expect(vault.getEntry("i1")?.item.notes, "the whole vault was fetched").toBe("");
@@ -1094,8 +1096,18 @@ test("REVIEW (the chain): when the log can't be fetched the answer isn't used: t
   // Writes into the vault wait for a sync that gets through; nothing is sent meanwhile (not built on the old state).
   const writes = () => server.requests.filter((r) => r.method !== "GET").length;
   const entry = vault.getEntry("i1")!;
+  server.handlers[`GET /vaults/${V}/manifest-log`] = failing;
   for (const write of [() => vault.createItem(login("New")), () => vault.updateItem(entry, { ...entry.item, notes: "x" }), () => vault.trashItem(entry)]) await expect(write()).rejects.toThrow();
   expect(writes()).toBe(0);
+  // A server that doesn't answer (503): the saves wait in the offline changes instead; still nothing is sent.
+  server.handlers[`GET /vaults/${V}/manifest-log`] = () => ({ status: 503, body: "<html>" });
+  const created = await vault.createItem(login("New"));
+  await vault.updateItem(entry, { ...entry.item, notes: "x" });
+  await vault.trashItem(vault.getEntry("i1")!);
+  expect(vault.offlineSummary()?.text).toBe("2 changes waiting to sync");
+  expect(writes()).toBe(0);
+  await vault.discardOfflineChange(created);
+  await vault.discardOfflineChange("i1");
   // The network down altogether is the same thing.
   vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) =>
     String(input).includes("manifest-log") ? Promise.reject(new TypeError("Failed to fetch")) : server.fetch(input, init),
@@ -1472,7 +1484,8 @@ test("REVIEW (no warning from bookkeeping): a copy that is behind what this brow
   const asked = logRequests().length;
   await reopen(false);
   expect(warned()).toStrictEqual([]);
-  await expectReject(vault.createItem(login("New")), (e) => e.message === UNREACHABLE_TEXT);
+  // Unreachable: a save waits in the offline changes (nothing is sent); dropped here.
+  await vault.discardOfflineChange(await vault.createItem(login("New")));
   await reopen();
   await vault.sync();
   expect(warned()).toStrictEqual([]);

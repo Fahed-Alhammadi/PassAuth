@@ -6,7 +6,7 @@
  * and is used once (without a draft).
  */
 import type { Item, ItemKind } from "@web/lib/types";
-import { POPUP_ROUTE_KEY, POPUP_VIEW_KEY, VIEW_KEEP_MS } from "../shared/storage-keys";
+import { OFFLINE_CHANGES_PREFIX, POPUP_ROUTE_KEY, POPUP_VIEW_KEY, VIEW_KEEP_MS } from "../shared/storage-keys";
 import type { PopupRouteRequest } from "../shared/types";
 import type { Route } from "./ctx";
 
@@ -54,7 +54,9 @@ export interface Start {
  * while the popup is open, and removes it when PassAuth locks.
  */
 export function vaultChanged(changes: Record<string, unknown>, area: string, accountId: string): boolean {
-  return area === "session" && !!accountId && `index:${accountId}` in changes;
+  if (!accountId) return false;
+  // The match index (any change to the items), or the account's offline changes (their markers and states).
+  return (area === "session" && `index:${accountId}` in changes) || (area === "local" && `${OFFLINE_CHANGES_PREFIX}${accountId}` in changes);
 }
 
 /** Which editor a route opens ("edit:<id>", "new:<kind>"), or null for other pages. */
@@ -88,6 +90,8 @@ function validRoute(r: unknown): Route | null {
   if (x.page === "list") return LIST;
   if ((x.page === "item" || x.page === "edit" || x.page === "history") && str(x.id)) return { tab: "vault", page: x.page, id: x.id };
   if (x.page === "new" && KINDS.has(x.kind as ItemKind)) return { tab: "vault", page: "new", kind: x.kind as ItemKind };
+  if (x.page === "changes") return { tab: "vault", page: "changes" };
+  if (x.page === "conflict" && str(x.id)) return { tab: "vault", page: "conflict", id: x.id };
   if (x.page === "addSite" && typeof x.url === "string" && /^https?:\/\//i.test(x.url) && x.url.length < 2048) return { tab: "vault", page: "addSite", url: x.url };
   return null;
 }
