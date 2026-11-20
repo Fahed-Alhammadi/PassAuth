@@ -10,7 +10,7 @@
 # Base images are pinned by digest (Dependabot keeps them current).
 
 # ------------------------------------------------- core crypto → WebAssembly
-FROM --platform=$BUILDPLATFORM rust:1.99-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS wasm
+FROM --platform=$BUILDPLATFORM rust:1.100-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS wasm
 RUN rustup target add wasm32-unknown-unknown
 WORKDIR /src
 COPY Cargo.lock ./
@@ -42,7 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends brotli && rm -r
       -exec gzip -9 -k {} + -exec brotli -q 11 -k {} +
 
 # ------------------------------------------------------------------- server
-FROM --platform=$BUILDPLATFORM rust:1.99-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS builder
+FROM --platform=$BUILDPLATFORM rust:1.100-slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS builder
 ARG TARGETARCH
 ARG BUILDARCH
 RUN set -eux; \
