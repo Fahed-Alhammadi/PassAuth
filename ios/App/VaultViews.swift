@@ -110,13 +110,14 @@ private struct VaultList: View {
         let source = filter.scope == .trash ? (v?.trash ?? []) : (v?.entries ?? [])
         let all = source.map(ItemSummary.init)
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let found = all.filter { s in
-            (q.isEmpty || s.name.lowercased().contains(q) || s.subtitle.lowercased().contains(q) || s.host.contains(q))
-                && (filter.kind == nil || s.item.kind == filter.kind)
+        let filtered = all.filter { s in
+            (filter.kind == nil || s.item.kind == filter.kind)
                 && (filter.folder == nil || (s.item.folder ?? "") == filter.folder)
                 && (filter.vaultId == nil || s.entry.vaultId == filter.vaultId)
                 && (filter.scope != .favorites || s.item.favorite)
         }
+        // Every word in the name, user name, any website, tags or folder; name/website prefixes first.
+        let found = ItemSearch.search(filtered, q, item: \.item, extra: { [$0.subtitle] })
         List {
             if v?.offline == true {
                 Section {

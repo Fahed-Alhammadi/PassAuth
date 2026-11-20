@@ -1,0 +1,93 @@
+/* ------------------------------------------------ password health: duplicate logins */
+
+/* Section rows: site icon, what the group is, then Combine and Keep separate. */
+.dup-list { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); overflow: hidden; }
+.dup-row { position: relative; display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); }
+.dup-row + .dup-row::before { content: ""; position: absolute; top: 0; right: 0; left: 64px; border-top: 1px solid var(--line); }
+.dup-row > .avatar { flex: none; align-self: flex-start; }
+.dup-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dup-row-site { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-row-user, .dup-row-names { font-size: var(--text-caption); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-row-user { color: var(--ink-2); }
+.dup-row-names { color: var(--ink-3); }
+.dup-row-actions { flex: none; display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); }
+.dup-row-actions .btn { white-space: nowrap; }
+
+/* Value chips: what combining gains; the amber one marks a choice to make. */
+.dup-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-1); }
+.dup-chip { display: inline-block; padding: 1px var(--space-2); border-radius: 999px; font-size: var(--text-caption); font-weight: 500; line-height: 1.5; background: var(--accent-soft); color: var(--accent-ink, var(--accent)); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-chip-attn { background: var(--warn-soft); color: var(--warn); }
+
+.dup-kept { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); }
+.dup-kept > .dup-list { align-self: stretch; }
+
+@media (max-width: 560px) {
+  .dup-row { flex-wrap: wrap; }
+  .dup-row-actions { flex: 1 0 100%; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; }
+  .dup-row-actions .btn-primary { flex: 1 1 auto; }
+}
+
+/* Toast with one action (e.g. "Open combined login"). */
+.toast-with-action { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-4); }
+.toast-action { border: 0; padding: 4px 0; background: none; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.toast-action:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+
+/* ----------------------------------------------------------------- preview */
+dialog.modal:has(.dup-preview) { max-width: 520px; }
+@media (max-width: 640px) {
+  dialog.modal:has(.dup-preview) { width: 100%; max-width: none; height: 100%; max-height: none; margin: 0; border-radius: 0; }
+}
+
+/* Source markers: a letter per login, in distinct token colours. */
+.dup-marker {
+  flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.dup-m0 { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.dup-m1 { background: var(--ok-soft); color: var(--ok); box-shadow: inset 0 0 0 1px var(--ok); }
+.dup-m2 { background: var(--warn-soft); color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
+.dup-m3 { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--ink-3); }
+.dup-markers { flex: none; display: inline-flex; gap: 3px; }
+
+.dup-sources { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.dup-source { flex: 1 1 180px; min-width: 0; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--surface); }
+.dup-source-text { min-width: 0; display: flex; flex-direction: column; }
+.dup-source-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dup-source-url { font-size: var(--text-caption); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.dup-result { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4); border-radius: var(--radius-m); background: var(--surface-2); }
+.dup-result-title { font-size: var(--text-body); font-weight: 600; }
+.dup-field { margin: 0; padding: 0; border: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.dup-label { padding: 0; font-size: var(--text-caption); font-weight: 500; color: var(--ink-2); }
+.dup-result .choices { background: var(--surface); }
+.dup-result .choice-title { overflow-wrap: anywhere; }
+.dup-values { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-1); }
+.dup-value { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.dup-value-text { flex: 1; min-width: 0; margin: 0; display: flex; flex-direction: column; overflow-wrap: anywhere; }
+.dup-value-sub { font-size: var(--text-caption); color: var(--ink-3); }
+.dup-hint { margin: 0; font-size: var(--text-caption); color: var(--ink-3); }
+.dup-hint-attn { color: var(--warn); }
+
+.dup-code { display: inline-flex; align-items: center; gap: var(--space-2); margin-top: 2px; }
+.dup-code-digits { font-family: var(--mono); font-variant-ligatures: none; font-variant-numeric: tabular-nums; font-size: var(--text-body); letter-spacing: 0.04em; color: var(--ink); }
+
+.dup-notes-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.dup-notes summary { cursor: pointer; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.dup-notes summary::-webkit-details-marker { display: none; }
+.dup-notes summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius-s); }
+.dup-notes-peek { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.dup-notes-more { font-size: var(--text-caption); font-weight: 500; color: var(--accent); }
+.dup-notes[open] .dup-notes-peek { display: none; }
+.dup-notes[open] .dup-notes-more::after { content: ""; }
+
+.dup-footer { margin: 0; color: var(--ink-2); }
+
+/* The one moment of motion: the result rows rise in, their markers settle. */
+@keyframes dup-rise { from { opacity: 0; transform: translateY(4px); } }
+@keyframes dup-settle { from { opacity: 0; transform: scale(0.6); } }
+.dup-result > .dup-field { animation: dup-rise 140ms var(--ease-out) both; animation-delay: calc(min(var(--i, 0), 6) * 12ms); }
+.dup-result .dup-marker { animation: dup-settle 120ms var(--ease-out) both; animation-delay: calc(min(var(--i, 0), 6) * 12ms + 40ms); }
+@media (prefers-reduced-motion: reduce) {
+  .dup-result > .dup-field, .dup-result .dup-marker { animation: none; }
+}
+.dup-from { justify-content: flex-start; gap: var(--space-2); color: var(--ink); }

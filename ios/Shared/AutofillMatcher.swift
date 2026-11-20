@@ -76,15 +76,8 @@ public enum AutofillMatcher {
         return out
     }
 
-    /// Search over all logins (name, username, websites).
+    /// Search over all logins: the apps' one item search (`ItemSearch`), every website included.
     public static func search(_ query: String, _ entries: [Entry]) -> [Entry] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let logins = entries.filter { $0.item.login != nil }
-        guard !q.isEmpty else { return logins }
-        return logins.filter { e in
-            e.item.name.lowercased().contains(q)
-                || (e.item.login?.username.lowercased().contains(q) ?? false)
-                || (e.item.login?.urls.contains { $0.url.lowercased().contains(q) } ?? false)
-        }
+        ItemSearch.search(entries.filter { $0.item.login != nil }, query)
     }
 }

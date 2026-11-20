@@ -370,12 +370,13 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                 if (v == null) return@LazyColumn
                 if (filter.active) {
                     val q = filter.query.trim().lowercase()
-                    val found = all.filter { s ->
-                        (q.isEmpty() || s.name.lowercase().contains(q) || s.subtitle.lowercase().contains(q) || s.host.contains(q)) &&
-                            (filter.kind == null || s.item.kind == filter.kind) &&
+                    val filtered = all.filter { s ->
+                        (filter.kind == null || s.item.kind == filter.kind) &&
                             (filter.folder == null || (s.item.folder ?: "") == filter.folder) &&
                             (!filter.favorites || s.item.favorite)
                     }
+                    // Every word in the name, user name, any website, tags or folder; name/website prefixes first.
+                    val found = io.passauth.app.data.ItemSearch.search(filtered, q, extra = { listOf(it.subtitle) }) { it.item }
                     section(ctx, if (q.isNotEmpty()) "Search results" else "Filtered items", found) {
                         Column(Modifier.fillMaxWidth().padding(vertical = Space.xl), horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("No items match.", style = MaterialTheme.typography.bodyLarge)

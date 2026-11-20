@@ -755,11 +755,7 @@ private fun EmergencyVaultScreen(ctx: UiCtx, g: Grant, back: () -> Unit) {
                     io.passauth.app.ui.components.CheckRow("Show items in the trash ($trashed)", showTrash, { showTrash = it })
                 }
                 val q = query.trim().lowercase()
-                val list = v.items.filter { e ->
-                    (showTrash || e.deletedAt == null) &&
-                        (q.isEmpty() || e.item.name.lowercase().contains(q) || e.item.login?.username?.lowercase()?.contains(q) == true ||
-                            e.item.login?.urls?.any { it.url.lowercase().contains(q) } == true)
-                }
+                val list = io.passauth.app.data.ItemSearch.search(v.items.filter { showTrash || it.deletedAt == null }, q) { it.item }
                 if (v.items.isEmpty()) Muted("These vaults are empty.") else if (list.isEmpty()) Muted("Nothing matches.")
                 CardSection(null) {
                     list.forEachIndexed { n, e ->

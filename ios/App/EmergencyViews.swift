@@ -763,7 +763,7 @@ private struct GrantorVaultPage: View {
             if let o = opened {
                 let q = query.trimmingCharacters(in: .whitespaces).lowercased()
                 ForEach(o.vaults, id: \.id) { v in
-                    let items = o.items.filter { $0.vaultId == v.id && $0.deletedAt == nil && (q.isEmpty || $0.item.name.lowercased().contains(q)) }
+                    let items = ItemSearch.search(o.items.filter { $0.vaultId == v.id && $0.deletedAt == nil }, q, item: \.item)
                     Section(v.name) {
                         if items.isEmpty { Text(q.isEmpty ? "No items." : "No matching items.").foregroundStyle(Color.paMuted) }
                         ForEach(items) { e in

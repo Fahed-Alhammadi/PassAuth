@@ -1,4 +1,2 @@
-• Work offline: add, edit and trash items without a connection. Changes show "Waiting to sync" and are sent when you are back online.
-• Changed on another device meanwhile? PassAuth asks: Keep mine, Keep the other or Keep both.
-• Autofill now saves user name and password together when a site asks for them on two screens.
-• Apps that save passwords through Android's password manager can now save to PassAuth.
+• Search finds items by any of their websites, not only the name or the first website. It also looks at user names, tags, folders and card details.
+• The same search works in the autofill login picker and emergency access.

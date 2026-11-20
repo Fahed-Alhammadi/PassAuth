@@ -103,7 +103,8 @@ abstract class ServiceActivity : SecureActivity() {
     private var onUnlocked: (suspend (VaultData) -> Unit)? = null
 
     /** A row of a confirmation's choice list. [symbol] replaces the first letter of [title] on the tile. */
-    data class Choice(val id: String, val title: String, val detail: String, val symbol: Symbol? = null)
+    /** [item]: the vault item it stands for, searched like the vault list ([io.passauth.app.data.ItemSearch]). */
+    data class Choice(val id: String, val title: String, val detail: String, val symbol: Symbol? = null, val item: io.passauth.app.data.Item? = null)
 
     enum class Symbol { New, Person }
 
@@ -223,7 +224,7 @@ abstract class ServiceActivity : SecureActivity() {
         val globe = !graph.repo.state.collectAsStateWithLifecycle().value.showSiteIcons
         var query by remember(s) { mutableStateOf("") }
         val q = query.trim().lowercase()
-        val found = if (q.isEmpty()) s.choices else s.choices.filter { it.title.lowercase().contains(q) || it.detail.lowercase().contains(q) }
+        val found = io.passauth.app.data.ItemSearch.search(s.choices, q, extra = { listOf(it.title, it.detail) }) { it.item }
         val shown = found.take(PICK_LIMIT)
         PromptSheet(
             onClose = ::cancel,

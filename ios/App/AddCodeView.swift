@@ -39,9 +39,7 @@ struct AddCodeSheet: View {
         return v.entries
             .filter { $0.deletedAt == nil && $0.item.login != nil && v.canWrite($0) }
             .map(ItemSummary.init)
-            .filter { s in
-                q.isEmpty || s.name.lowercased().contains(q) || s.subtitle.lowercased().contains(q) || s.host.lowercased().contains(q)
-            }
+            .filter { ItemSearch.matches($0.item, q, extra: [$0.subtitle]) }
             .sorted { a, b in
                 let ra = related(a), rb = related(b)
                 if ra != rb { return ra }

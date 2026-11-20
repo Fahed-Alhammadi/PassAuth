@@ -158,7 +158,7 @@ class AutofillAuthActivity : ServiceActivity() {
             },
             choices = targets.map { t ->
                 val detail = listOf(t.username.ifEmpty { "No user name" }, t.site, if (t.personal) "" else t.vault.ifEmpty { "Shared vault" })
-                ServiceActivity.Choice(t.id, t.name.ifEmpty { t.site.ifEmpty { "Untitled" } }, detail.filter { it.isNotEmpty() }.joinToString(" · "))
+                ServiceActivity.Choice(t.id, t.name.ifEmpty { t.site.ifEmpty { "Untitled" } }, detail.filter { it.isNotEmpty() }.joinToString(" · "), item = vault.get(t.id)?.item)
             },
             action = "Continue",
             error = notice,

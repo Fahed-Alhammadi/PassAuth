@@ -70,26 +70,48 @@ export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
 
 // ------------------------------------------------------------------ toast
 
-let showToast: (msg: string) => void = () => {};
-export function toast(msg: string) {
-  showToast(msg);
+/** An optional button in a toast (e.g. "Open combined login"); the toast then stays a little longer. */
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
+
+let showToast: (msg: string, action?: ToastAction) => void = () => {};
+export function toast(msg: string, action?: ToastAction) {
+  showToast(msg, action);
 }
 
 /** The live region stays mounted so screen readers announce each message; only its text changes. */
 export function ToastHost() {
-  const [msg, setMsg] = useState<string | null>(null);
+  const [shown, setShown] = useState<{ msg: string; action?: ToastAction } | null>(null);
   useEffect(() => {
     let t: number | undefined;
-    showToast = (m) => {
-      setMsg(m);
+    showToast = (msg, action) => {
+      setShown({ msg, action });
       clearTimeout(t);
-      t = window.setTimeout(() => setMsg(null), Math.max(4000, m.length * 60));
+      t = window.setTimeout(() => setShown(null), Math.max(action ? 8000 : 4000, msg.length * 60));
     };
     return () => clearTimeout(t);
   }, []);
   return (
     <div className="toast-region" role="status" aria-live="polite">
-      {msg && <div className="toast">{msg}</div>}
+      {shown && (
+        <div className={shown.action ? "toast toast-with-action" : "toast"}>
+          {shown.msg}
+          {shown.action && (
+            <button
+              type="button"
+              className="toast-action"
+              onClick={() => {
+                shown.action?.run();
+                setShown(null);
+              }}
+            >
+              {shown.action.label}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
