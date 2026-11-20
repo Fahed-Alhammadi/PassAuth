@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "io.passauth.samples.login"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "io.passauth.samples.login"

@@ -41,7 +41,7 @@ val googleServices = providers.fileContents(layout.projectDirectory.file("google
 
 android {
     namespace = "io.passauth.app"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "io.passauth.app"
