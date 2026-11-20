@@ -6,6 +6,12 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.18.0 (2026-11-20)
+
+- Android sign-in request notifications (FCM) through the push relay (26d6306)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.17.0...server-0.18.0)
+
 ## 0.17.0 (2026-11-20)
 
 - Sign-in request push notifications (iOS first) via a push relay (d7f41de)
