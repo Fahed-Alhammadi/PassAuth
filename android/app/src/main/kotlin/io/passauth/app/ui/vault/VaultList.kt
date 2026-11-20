@@ -327,6 +327,8 @@ fun VaultListScreen(ctx: UiCtx, filter: ListFilter, setFilter: (ListFilter) -> U
                         }
                     }
                 }
+                // Sign-in request notifications, offered once (servers with `push`, phones where they can work).
+                item(key = "notice:push") { io.passauth.app.push.PushOfferCard(ctx) }
                 // What the account still has to change for the server's policies.
                 val violations = violationsByAccount[ctx.state.activeId].orEmpty()
                 val policyKey = "pol:${ctx.state.activeId}:" + PolicyRules.violationsKey(violations)

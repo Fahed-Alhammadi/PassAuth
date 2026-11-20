@@ -1,5 +1,3 @@
-• Autofill works in more places: apps get your website logins when the website vouches for the app, and Samsung Internet, Edge, Firefox and other browsers can ask PassAuth.
-• No match? "Choose a login…" fills one once or remembers it for that app.
-• Chrome: turn on Settings → Autofill services → Autofill using another service.
-• Screens that only ask for a verification code can be filled.
-• Permissions moved out of Settings; change them in Android settings.
+• Sign-in request notifications: when you use "Sign in with another device" on a new device, your phone now gets a notification. Tap it, unlock PassAuth and approve the request as before. Notifications never show your email or server.
+• Turn them on from the card in your vault, or in Settings → Account security.
+• Needs PassAuth server 0.18.0 or newer and Google Play services.

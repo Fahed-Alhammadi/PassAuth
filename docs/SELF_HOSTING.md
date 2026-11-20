@@ -148,20 +148,20 @@ Your `SIGNUPS_*`, `SMTP_*`, `ICON_SERVICE` and `LOG_LEVEL` values are still read
 
 ## Push notifications
 
-When someone starts signing in to an account on a new device and asks to approve it from a signed-in one, the account's iPhones get a notification ("Sign-in request"), even while PassAuth is closed. Tapping it opens the app, which shows the request after it is unlocked. This is on by default.
+When someone starts signing in to an account on a new device and asks to approve it from a signed-in one, the account's iPhones and Android phones get a notification ("Sign-in request"), even while PassAuth is closed. Tapping it opens the app, which shows the request after it is unlocked. This is on by default.
 
-Apple delivers notifications only to apps signed with the app publisher's key, so your server can't send them to Apple itself. It asks the **push relay** instead, a small service run by the PassAuth publisher on Cloudflare (`https://passauth-push.uaealhammadi.com`). For each signed-in iPhone the server sends the relay:
+Apple and Google deliver notifications only for the app publisher's own keys, so your server can't send them itself. It asks the **push relay** instead, a small service run by the PassAuth publisher on Cloudflare (`https://passauth-push.uaealhammadi.com`). For each signed-in phone the server sends the relay:
 
-- the phone's push token (a random identifier Apple gives the app, not tied to the account),
-- whether it is a test build or an App Store build,
+- the phone's push token (a random identifier Apple or Google gives the app, not tied to the account),
+- iPhone or Android, and for an iPhone whether it is a test build or an App Store build,
 - that it is a sign-in request.
 
-The relay never gets the account, its email, the request or anything in a vault. Like any website it sees where the request comes from (your server's IP address) and when. It sends Apple a fixed text, the same for everyone, and keeps nothing. The approval works exactly as without notifications: the phone fetches the request from your server over its own signed-in connection, and the person still compares the words and approves it in the app.
+The relay never gets the account, its email, the request or anything in a vault. Like any website it sees where the request comes from (your server's IP address) and when. It sends Apple a fixed text, the same for everyone; Android phones get only a wake-up with no text through Google and show that same text themselves. The relay keeps nothing. The approval works exactly as without notifications: the phone fetches the request from your server over its own signed-in connection, and the person still compares the words and approves it in the app.
 
 On the admin page, under **Features**:
 
 - **Push notifications for sign-in requests**: turn it off and the server stops sending them, forgets every phone's push token, and the apps stop registering. Requests still appear in the apps while they are open.
-- **Push relay address**: point the server at another relay, e.g. one you run yourself from the PassAuth source (`relay/`; it needs the publisher's Apple key to reach the App Store app, so this is mostly for people who build the iOS app themselves). It must be an `https://` address.
+- **Push relay address**: point the server at another relay, e.g. one you run yourself from the PassAuth source (`relay/`; it needs the publisher's Apple key and Firebase account to reach the store apps, so this is mostly for people who build the apps themselves). It must be an `https://` address.
 
 You can also set the starting values in `.env` (optional): `PASSAUTH_PUSH=off`, `PASSAUTH_PUSH_RELAY_URL=https://push.example.com`. What you save on the admin page wins.
 

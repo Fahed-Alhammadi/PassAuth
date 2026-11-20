@@ -33,6 +33,12 @@ val testAssetLinksBase = providers.gradleProperty("passauth.testAssetLinksBase")
 // e.g. a Chromium snapshot build on the emulator. Never applies to release builds.
 val testPrivilegedApp = providers.gradleProperty("passauth.testPrivilegedApp").orNull.orEmpty()
 
+// Sign-in request notifications (FCM): android/app/google-services.json when it exists (gitignored;
+// a copy is in Keys/, CI writes it from the GOOGLE_SERVICES_JSON secret). Each variant gets the client
+// whose package name is its applicationId as BuildConfig fields (see buildSrc/FirebaseClientConfig.kt);
+// without the file they're empty and the app doesn't offer notifications. No google-services plugin.
+val googleServices = providers.fileContents(layout.projectDirectory.file("google-services.json")).asText
+
 android {
     namespace = "io.passauth.app"
     compileSdk = 36
@@ -104,6 +110,17 @@ android {
 // :app:testReleaseUnitTest, so enable them for every build type.
 androidComponents {
     beforeVariants { v -> v.hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true }
+    onVariants { v ->
+        val firebase = v.applicationId.map { id -> googleServices.orNull?.let { FirebaseClientConfig.parse(it, id) } ?: FirebaseClientConfig("", "", "", "") }
+        fun field(name: String, value: (FirebaseClientConfig) -> String) = v.buildConfigFields?.put(
+            name,
+            firebase.map { com.android.build.api.variant.BuildConfigField("String", FirebaseClientConfig.literal(value(it)), null) },
+        )
+        field("FIREBASE_APP_ID") { it.appId }
+        field("FIREBASE_API_KEY") { it.apiKey }
+        field("FIREBASE_PROJECT_ID") { it.projectId }
+        field("FIREBASE_SENDER_ID") { it.senderId }
+    }
 }
 
 kotlin {
@@ -125,6 +142,9 @@ dependencies {
     implementation(libs.androidx.autofill)
     implementation(libs.androidx.work)
     implementation(libs.androidx.browser)
+    // Sign-in request notifications only (no analytics): Firebase is set up by hand (PushCenter).
+    implementation(libs.firebase.messaging)
+    implementation(libs.play.services.base)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

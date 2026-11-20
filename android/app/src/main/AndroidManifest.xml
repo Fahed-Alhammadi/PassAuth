@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
@@ -8,6 +9,10 @@
     <!-- Only to scan authenticator QR codes, requested when the user taps "Scan QR code". -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <!-- Sign-in request notifications, asked for when the user turns them on (vault card, Settings, first launch). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- No advertising id: Firebase is used for messaging only (no analytics). -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" tools:node="remove" />
 
     <!-- Browsers must be visible to check their signing certificates against the privileged allowlist (autofill).
          Apps with a launcher icon must be visible for their names: a login saved from an app is named after
@@ -143,5 +148,26 @@
                 android:name="android.credentials.provider"
                 android:resource="@xml/credential_provider" />
         </service>
+
+        <!-- Sign-in request notifications (FCM, data-only messages from the PassAuth push relay).
+             Firebase is initialised by hand from BuildConfig (PushCenter), so its init provider goes,
+             and nothing is collected: no automatic token, no analytics, no data collection. -->
+        <service
+            android:name=".push.PassAuthMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+        <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="firebase_analytics_collection_enabled" android:value="false" />
+        <meta-data android:name="firebase_analytics_collection_deactivated" android:value="true" />
+        <meta-data android:name="google_analytics_adid_collection_enabled" android:value="false" />
+        <meta-data android:name="firebase_data_collection_default_enabled" android:value="false" />
+        <meta-data android:name="delivery_metrics_exported_to_big_query_enabled" android:value="false" />
     </application>
 </manifest>

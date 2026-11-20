@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.AutoFixHigh
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Fingerprint
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -37,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -129,19 +131,23 @@ private fun PermissionList(ctx: UiCtx) {
     val autofillOn = remember(resumes) { SystemServices.autofillEnabled(context) }
     val providerOn = remember(resumes) { SystemServices.providerEnabled(context) }
     val biometricCode = remember(resumes) { BiometricManager.from(context).canAuthenticate(BIOMETRIC_STRONG) }
-    val rows = listOf(
+    // Sign-in request notifications: listed only where they can work (Firebase in this build, Google Play services).
+    val pushAvailable by ctx.graph.push.available.collectAsState()
+    val notifications = io.passauth.app.push.rememberNotificationPermission(ctx)
+    val rows = listOfNotNull(
         Feature.Camera to camera,
         Feature.Autofill to PermissionModel.service(autofillOn),
         Feature.Passkeys to PermissionModel.service(providerOn),
         Feature.Biometrics to PermissionModel.biometrics(biometricCode, chosen = ctx.state.onboarding.offerBiometric),
+        if (pushAvailable) Feature.Notifications to notifications.access else null,
     )
     rows.forEachIndexed { n, (feature, access) ->
         // Inset to the text column (past the icon), like every list in the app.
         if (n > 0) HorizontalDivider(Modifier.padding(start = 24.dp + Space.m), color = PassAuthTheme.colors.line)
         PermissionRow(feature, access) { action ->
             when (action) {
-                Action.Request -> requestCamera.launch(Manifest.permission.CAMERA)
-                Action.OpenAppSettings -> openAppSettings(context)
+                Action.Request -> if (feature == Feature.Notifications) notifications.request() else requestCamera.launch(Manifest.permission.CAMERA)
+                Action.OpenAppSettings -> if (feature == Feature.Notifications) io.passauth.app.push.openNotificationSettings(context) else openAppSettings(context)
                 Action.OpenSystemScreen -> if (feature == Feature.Autofill) {
                     if (!SystemServices.openAutofillSettings(context)) ctx.notify("Open Android settings → Passwords, passkeys & accounts to choose PassAuth.")
                 } else {
@@ -164,6 +170,7 @@ private fun icon(feature: Feature): ImageVector = when (feature) {
     Feature.Autofill -> Icons.Outlined.AutoFixHigh
     Feature.Passkeys -> Icons.Outlined.Key
     Feature.Biometrics -> Icons.Outlined.Fingerprint
+    Feature.Notifications -> Icons.Outlined.NotificationsActive
 }
 
 @Composable

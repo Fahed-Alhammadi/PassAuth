@@ -23,6 +23,11 @@ zxing = "3.5.4"
 work = "2.10.5"
 # Auth Tab (1.9+) for two-step sign-in on the server's key page; 1.10.0 still builds against compileSdk 36.
 browser = "1.10.0"
+# Sign-in request notifications (FCM). firebase-messaging alone (no BoM, no analytics): 26.0.2 is the
+# newest release; its AARs and androidx dependencies still build against compileSdk 36.
+firebaseMessaging = "26.0.2"
+# GoogleApiAvailability (phones without Google Play services hide the offer); the version messaging 26.0.2 uses.
+playServicesBase = "18.9.0"
 junit = "4.13.2"
 
 [libraries]
@@ -53,6 +58,8 @@ camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref =
 camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax" }
 # QR decoding (Apache-2.0, pure Java; no Google Play services).
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebaseMessaging" }
+play-services-base = { module = "com.google.android.gms:play-services-base", version.ref = "playServicesBase" }
 junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]

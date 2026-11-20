@@ -562,6 +562,7 @@ private fun ColumnScope.Security(ctx: UiCtx) {
             "Set up a fingerprint or face unlock in Android settings to use this."
         },
     )
+    io.passauth.app.push.PushSettingsRow(ctx)
     OutlinedButton(onClick = { ctx.launch { ctx.repo.lock() } }) {
         Icon(Icons.Outlined.Lock, null, Modifier.size(18.dp))
         Spacer(Modifier.size(8.dp))

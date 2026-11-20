@@ -21,6 +21,11 @@ fn device_token(n: u8) -> String {
     format!("{n:02X}").repeat(32)
 }
 
+/// An FCM registration token as Android reports it (mixed case, kept as given).
+fn fcm_token(n: u8) -> String {
+    format!("dGVzdA{n:02}:APA91b{}", "Ab_c-9".repeat(25))
+}
+
 fn registration(token: &str) -> Value {
     json!({ "platform": "apns", "token": token, "environment": "sandbox" })
 }
@@ -164,7 +169,11 @@ async fn push_tokens_are_checked_kept_per_session_and_forgotten() {
     let s1 = session_of(&app, &t1).await;
 
     for bad in [
-        json!({ "platform": "fcm", "token": device_token(1), "environment": "sandbox" }),
+        json!({ "platform": "gcm", "token": device_token(1), "environment": "production" }),
+        json!({ "platform": "fcm", "token": fcm_token(1), "environment": "sandbox" }),
+        json!({ "platform": "fcm", "token": "short:token", "environment": "production" }),
+        json!({ "platform": "fcm", "token": format!("{}!", fcm_token(1)), "environment": "production" }),
+        json!({ "platform": "fcm", "token": "a".repeat(513), "environment": "production" }),
         json!({ "platform": "apns", "token": "abc", "environment": "sandbox" }),
         json!({ "platform": "apns", "token": "zz".repeat(32), "environment": "sandbox" }),
         json!({ "platform": "apns", "token": "ab".repeat(101), "environment": "sandbox" }),
@@ -331,15 +340,31 @@ async fn a_sign_in_request_wakes_the_accounts_phones_through_the_relay() {
     let t1 = token(&app, email, "pw-push-b-1").await;
     let (s, _) = put_push(&app, &t1, registration(&device_token(9))).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
+    // An Android phone signed in to the same account.
+    let t2 = token(&app, email, "pw-push-b-1").await;
+    let android = json!({ "platform": "fcm", "token": fcm_token(7), "environment": "production" });
+    let (s, v) = put_push(&app, &t2, android).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
 
     // No account behind the email: nobody is woken.
     ask(&app, "nobody-push@example.com").await;
     // The account's request: one notification per token.
     ask(&app, email).await;
-    relay.wait_for(1).await;
+    relay.wait_for(2).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let received = relay.received.lock().unwrap().clone();
-    assert_eq!(received.len(), 1, "{received:?}");
+    let mut received = relay.received.lock().unwrap().clone();
+    assert_eq!(received.len(), 2, "{received:?}");
+    received.sort_by_key(|(_, _, b)| b["platform"].as_str().unwrap_or_default().to_owned());
+    assert_eq!(
+        received[1].2,
+        json!({
+            "platform": "fcm",
+            "token": fcm_token(7),
+            "environment": "production",
+            "kind": "auth_request",
+        }),
+        "Android tokens keep their case"
+    );
     let (path, agent, body) = &received[0];
     assert_eq!(path, "/v1/notify");
     assert_eq!(
@@ -356,8 +381,8 @@ async fn a_sign_in_request_wakes_the_accounts_phones_through_the_relay() {
         }),
         "the token, its environment and the kind: nothing about the account or the request"
     );
-    // The relay said it was sent: the token stays.
-    assert_eq!(kept(&state).await.len(), 1);
+    // The relay said it was sent: the tokens stay.
+    assert_eq!(kept(&state).await.len(), 2);
 }
 
 #[tokio::test]

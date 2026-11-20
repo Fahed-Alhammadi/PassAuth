@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar icon of sign-in request notifications: the shield with the P cut out (white, Android tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="128"
+    android:viewportHeight="144">
+    <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd" android:pathData="M64,5 L111,27 Q117,30 117,39 V82 Q117,114 64,139 Q11,114 11,82 V39 Q11,30 17,27 Z M42,30 H70 C95,30 103,45 103,62 C103,82 89,96 66,96 H55 V121 L38,112 V30 Z M55,48 V78 H67 C79,78 84,72 84,63 C84,54 79,48 67,48 Z" />
+</vector>

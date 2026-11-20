@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -171,7 +172,9 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
     LaunchedEffect(state.status, state.twoStepRequired) { if (state.status != Status.Unlocked || state.twoStepRequired) route = Route.Vault }
     // Sign-in requests from new devices: asked for whenever the vault is open here (and by live sync).
     val vaultOpen = state.status == Status.Unlocked && !state.twoStepRequired
-    LaunchedEffect(state.activeId, vaultOpen) {
+    // A sign-in request notification arrived or was tapped: ask again (once the vault is open).
+    val pushed by graph.push.signInRequests.collectAsState()
+    LaunchedEffect(state.activeId, vaultOpen, pushed) {
         if (!vaultOpen) return@LaunchedEffect graph.inbox.clear()
         try {
             graph.inbox.refresh()

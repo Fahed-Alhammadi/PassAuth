@@ -90,6 +90,8 @@ data class AppState(
     val avatar: ImageBitmap? = null,
     /** The active account's server keeps profile pictures (`/api/config` feature [AvatarRules.FEATURE]). */
     val avatarAvailable: Boolean = false,
+    /** The active account's server sends sign-in request notifications (`/api/config` feature `push`), as last asked; null: not asked yet. */
+    val pushOffered: Boolean? = null,
 )
 
 /** A decrypted item of the active account. */
@@ -495,6 +497,7 @@ class VaultRepository(
             showSiteIcons = SiteIcons.shown(s.settings.showIcons, a?.api, a?.features),
             avatar = pics[s.activeId],
             avatarAvailable = a?.features?.contains(AvatarRules.FEATURE) == true,
+            pushOffered = a?.features?.let { io.passauth.app.push.PushRules.offered(it) },
         )
     }
 
@@ -1173,8 +1176,28 @@ class VaultRepository(
         unloadVault()
     }
 
+    /**
+     * Runs before accounts are signed out (every log out path), while their sessions still work:
+     * their servers forget this phone's notification token ([io.passauth.app.push.PushCenter]).
+     * Best effort and short; set once by the app graph.
+     */
+    var beforeSignOut: suspend (accountIds: List<String>) -> Unit = {}
+
+    /** Accounts signed in on this device (locked or not: notification registration needs the session only). */
+    suspend fun signedInAccountIds(): List<String> =
+        store.get().accounts.filter { (_, a) -> isListed(a) && a.tokens != null }.keys.toList()
+
+    /** One sign-in request notification request (`PUT`/`DELETE /account/push`) on account [id]'s session. */
+    suspend fun pushCall(id: String, method: String, body: JsonElement?) {
+        io.passauth.app.push.PushClient(securityTransport(id)).send(method, body)
+    }
+
+    /** Account [id]'s server's `/api/config` features, asked now (the admin can turn push off at any time); what was kept when unreachable. */
+    suspend fun featuresNow(id: String): List<String>? = refreshConfig(id)?.features ?: store.get().accounts[id]?.features
+
     /** Vault timeout with the "log out" action: sign every account out (they stay listed). */
     suspend fun logoutAll() {
+        runCatching { beforeSignOut(signedInAccountIds()) }
         lockAll()
         val s = store.get()
         for ((id, a) in s.accounts) {
@@ -1188,7 +1211,12 @@ class VaultRepository(
     }
 
     /** Log out of the active account and remove it from this device; the next one becomes active. */
-    suspend fun logout() = mutex.withLock {
+    suspend fun logout() {
+        runCatching { beforeSignOut(listOf(activeId())) }
+        mutex.withLock { logoutLocked() }
+    }
+
+    private suspend fun logoutLocked() {
         val s = store.get()
         s.active?.let { api.logoutRemote(it.server, it.tokens) }
         signOutLocally(s.activeId)

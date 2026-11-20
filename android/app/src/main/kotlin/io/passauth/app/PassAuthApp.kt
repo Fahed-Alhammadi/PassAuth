@@ -47,6 +47,9 @@ class AppGraph(app: Application) {
     val inbox = AuthRequestInbox(repo)
     val live = LiveSync(repo, store, api.http, inbox)
 
+    /** Sign-in request notifications (FCM; available only in builds with a Firebase config and with Google Play services). */
+    val push = io.passauth.app.push.PushCenter(app, repo, scope)
+
     /**
      * Password health of the unlocked vault (Settings → Password health, notes on item pages). The
      * breach check has its own client: never the PassAuth server's headers, tokens or cookies.
@@ -101,6 +104,8 @@ class PassAuthApp : Application() {
     override fun onCreate() {
         super.onCreate()
         graph = AppGraph(this)
+        graph.push.start()
+        ProcessLifecycleOwner.get().lifecycle.addObserver(graph.push)
         ProcessLifecycleOwner.get().lifecycle.addObserver(graph.lock)
         // Decrypted attachment copies handed out a while ago go when the app leaves the screen.
         ProcessLifecycleOwner.get().lifecycle.addObserver(graph.files)

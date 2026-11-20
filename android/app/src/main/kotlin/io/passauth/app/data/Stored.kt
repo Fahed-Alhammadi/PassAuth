@@ -65,6 +65,11 @@ data class Settings(
      * [vaultTimeout]; Settings says so until the user picks a timeout again.
      */
     val vaultTimeoutLowered: Boolean = false,
+    /**
+     * Sign-in request notifications are wanted (Settings → Account security). They also need
+     * Android's notifications permission; on by default, so allowing it turns them on.
+     */
+    val signInNotifications: Boolean = true,
 )
 
 const val BACKGROUND_SYNC_DEFAULT = 120
@@ -137,6 +142,10 @@ data class Onboarding(
     val permissionsShown: Boolean = false,
     val cameraAsked: Boolean = false,
     val offerBiometric: Boolean = false,
+    /** Android was asked for the notifications permission (tells "not asked" from "denied for good"). */
+    val notificationsAsked: Boolean = false,
+    /** The vault card offering sign-in request notifications was dismissed (device-wide, kept). */
+    val pushOfferDismissed: Boolean = false,
 )
 
 /** Everything the app keeps on disk; the whole file is encrypted with a Keystore key. */

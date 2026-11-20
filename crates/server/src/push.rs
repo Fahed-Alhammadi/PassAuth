@@ -10,8 +10,8 @@
 //! its own after the request is stored: the answer to the new device never waits
 //! for it, and takes the same time with or without an account behind the email.
 //!
-//! The relay holds the platform's signing key (APNs) and shows a fixed notice ("Sign-in
-//! request"); it gets the device token, the APNs environment and the kind
+//! The relay holds the platforms' signing keys (APNs for iPhone, FCM for Android) and
+//! a fixed notice ("Sign-in request"); it gets the platform, the device token, the APNs environment and the kind
 //! (`auth_request`), never the request, the account, its email or this server's address. The phone opens the
 //! app, which lists the request over the usual authenticated API; the approval works
 //! as before. A token the relay reports gone (410) is deleted. Rows go away with
@@ -53,6 +53,8 @@ pub const RELAY_SETTING: &str = "push_relay_url";
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Device tokens: hex, this many characters (APNs tokens are 32 bytes today).
 const TOKEN_HEX: std::ops::RangeInclusive<usize> = 64..=200;
+/// FCM registration tokens (about 150 to 200 characters today).
+const TOKEN_FCM: std::ops::RangeInclusive<usize> = 100..=512;
 /// Tokens notified per request (the most recently registered first).
 const MAX_TOKENS: i64 = 20;
 /// Longest relay address accepted.
@@ -158,7 +160,8 @@ pub struct Registration {
 }
 
 /// `PUT /account/push` `{platform: "apns", token, environment: "production" |
-/// "sandbox"}` → 204. Keeps this session's token (one per session; replaces the one
+/// "sandbox"}` (iPhone) or `{platform: "fcm", token, environment: "production"}`
+/// (Android) → 204. Keeps this session's token (one per session; replaces the one
 /// it had) and takes the token away from any other session that had it (the phone
 /// signed in again, or to another account). 409 `push_disabled` while the admin
 /// switch is off.
@@ -174,20 +177,41 @@ pub async fn register(
             "push notifications are turned off on this server",
         ));
     }
-    if b.platform != "apns" {
-        return Err(ApiError::bad("platform must be \"apns\""));
-    }
-    if !TOKEN_HEX.contains(&b.token.len()) || !b.token.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err(ApiError::bad(
-            "token must be the device token in hex (64 to 200 characters)",
-        ));
-    }
-    if !matches!(b.environment.as_str(), "production" | "sandbox") {
-        return Err(ApiError::bad(
-            "environment must be \"production\" or \"sandbox\"",
-        ));
-    }
-    let token = b.token.to_ascii_lowercase();
+    let token = match b.platform.as_str() {
+        "apns" => {
+            if !TOKEN_HEX.contains(&b.token.len())
+                || !b.token.bytes().all(|c| c.is_ascii_hexdigit())
+            {
+                return Err(ApiError::bad(
+                    "token must be the device token in hex (64 to 200 characters)",
+                ));
+            }
+            if !matches!(b.environment.as_str(), "production" | "sandbox") {
+                return Err(ApiError::bad(
+                    "environment must be \"production\" or \"sandbox\"",
+                ));
+            }
+            b.token.to_ascii_lowercase()
+        }
+        "fcm" => {
+            // FCM registration tokens are case-sensitive: kept as given.
+            if !TOKEN_FCM.contains(&b.token.len())
+                || !b
+                    .token
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b':'))
+            {
+                return Err(ApiError::bad(
+                    "token must be the FCM registration token (100 to 512 characters)",
+                ));
+            }
+            if b.environment != "production" {
+                return Err(ApiError::bad("environment must be \"production\""));
+            }
+            b.token.clone()
+        }
+        _ => return Err(ApiError::bad("platform must be \"apns\" or \"fcm\"")),
+    };
     let t = now();
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM push_tokens WHERE token = $1 AND session_id <> $2")
@@ -270,10 +294,10 @@ pub fn notify_auth_request(state: &AppState, user_id: &str) {
 }
 
 async fn send_all(state: &AppState, user_id: &str) -> anyhow::Result<()> {
-    let tokens: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT p.session_id, p.token, p.environment FROM push_tokens p
+    let tokens: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT p.session_id, p.platform, p.token, p.environment FROM push_tokens p
          JOIN sessions s ON s.id = p.session_id
-         WHERE p.user_id = $1 AND p.platform = 'apns' AND s.refresh_expires > $2
+         WHERE p.user_id = $1 AND p.platform IN ('apns', 'fcm') AND s.refresh_expires > $2
          ORDER BY p.updated_at DESC LIMIT $3",
     )
     .bind(user_id)
@@ -285,21 +309,23 @@ async fn send_all(state: &AppState, user_id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let relay = state.push.relay_url();
-    let sends = tokens.into_iter().map(|(session, token, environment)| {
-        let relay = relay.clone();
-        async move {
-            let body = json!({
-                "platform": "apns",
-                "token": token,
-                "environment": environment,
-                "kind": "auth_request",
-            });
-            let outcome = tokio::time::timeout(TIMEOUT, post(state, &relay, body.to_string()))
-                .await
-                .unwrap_or(Err(SendError::Timeout));
-            (session, token, outcome)
-        }
-    });
+    let sends = tokens
+        .into_iter()
+        .map(|(session, platform, token, environment)| {
+            let relay = relay.clone();
+            async move {
+                let body = json!({
+                    "platform": platform,
+                    "token": token,
+                    "environment": environment,
+                    "kind": "auth_request",
+                });
+                let outcome = tokio::time::timeout(TIMEOUT, post(state, &relay, body.to_string()))
+                    .await
+                    .unwrap_or(Err(SendError::Timeout));
+                (session, token, outcome)
+            }
+        });
     for (session, token, outcome) in futures_util::future::join_all(sends).await {
         match outcome {
             Ok(status) if status.is_success() => {

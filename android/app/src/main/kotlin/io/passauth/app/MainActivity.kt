@@ -43,6 +43,10 @@ class MainActivity : SecureActivity() {
         if (intent?.component?.className?.endsWith(".AutofillSettings") == true || intent?.getBooleanExtra(EXTRA_AUTOFILL_SETTINGS, false) == true) {
             requestedRoute.value = Route.Settings("autofill")
         }
+        // A sign-in request notification was tapped: ask for the open requests (after unlock when locked).
+        if (intent?.getBooleanExtra(io.passauth.app.push.PushNotice.EXTRA_SIGN_IN_REQUEST, false) == true) {
+            graph.push.tapped()
+        }
     }
 
     override fun onResume() {

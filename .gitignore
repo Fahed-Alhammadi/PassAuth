@@ -68,6 +68,8 @@ android/core/src/main/kotlin/io/passauth/core/
 android/.gradle/
 android/**/build/
 android/local.properties
+# Firebase config (sign-in request notifications): copy of Keys/google-services.json; CI writes it from GOOGLE_SERVICES_JSON
+android/app/google-services.json
 android/.kotlin/
 *.jks
 *.keystore

@@ -6,13 +6,13 @@ import androidx.biometric.BiometricManager
  * What the app may ask for, and how each one's state is shown. Pure logic (unit-tested).
  *
  * Only what PassAuth really uses (Play rejects unused permissions): the camera (QR codes),
- * the autofill service, the Credential Manager provider and fingerprint / face unlock.
- * No notifications, location or contacts. Android 17's local network permission
+ * the autofill service, the Credential Manager provider, fingerprint / face unlock and
+ * notifications (sign-in requests; listed only where they can work). No location or contacts. Android 17's local network permission
  * (ACCESS_LOCAL_NETWORK, for self-hosted servers on a home network) is enforced only for
  * apps targeting SDK 37+; with targetSdk 36 the INTERNET permission still grants it, so
  * it isn't listed. Add it here when targetSdk moves to 37.
  */
-enum class Feature { Camera, Autofill, Passkeys, Biometrics }
+enum class Feature { Camera, Autofill, Passkeys, Biometrics, Notifications }
 
 enum class Access {
     /** Granted / turned on. */
@@ -66,7 +66,7 @@ object PermissionModel {
         Access.Blocked -> Action.OpenAppSettings
         Access.NotSetUp -> Action.Enroll
         Access.Off, Access.NotAsked -> when (feature) {
-            Feature.Camera -> Action.Request
+            Feature.Camera, Feature.Notifications -> Action.Request
             Feature.Autofill, Feature.Passkeys -> Action.OpenSystemScreen
             // First launch: nobody is signed in yet, so remember the choice.
             Feature.Biometrics -> Action.Choose
@@ -76,16 +76,19 @@ object PermissionModel {
     fun actionLabel(feature: Feature, access: Access): String? = when (access) {
         Access.Blocked -> "Open settings"
         Access.NotSetUp -> "Set up"
-        Access.Off, Access.NotAsked -> if (feature == Feature.Camera) "Allow" else "Turn on"
+        Access.Off, Access.NotAsked -> if (feature.runtime) "Allow" else "Turn on"
         else -> null
     }
 
     /** Label next to the checkmark once done. */
-    fun doneLabel(feature: Feature): String = if (feature == Feature.Camera) "Allowed" else "On"
+    fun doneLabel(feature: Feature): String = if (feature.runtime) "Allowed" else "On"
+
+    /** A runtime permission (Allow / Allowed) rather than a service or choice (Turn on / On). */
+    private val Feature.runtime: Boolean get() = this == Feature.Camera || this == Feature.Notifications
 
     fun status(feature: Feature, access: Access): String = when (access) {
-        Access.On -> if (feature == Feature.Camera) "Allowed" else "On"
-        Access.Off -> if (feature == Feature.Camera) "Not allowed" else "Off"
+        Access.On -> if (feature.runtime) "Allowed" else "On"
+        Access.Off -> if (feature.runtime) "Not allowed" else "Off"
         Access.NotAsked -> "Not asked"
         Access.Blocked -> "Not allowed. Change it in Android settings."
         Access.Chosen -> "Turns on after you sign in"
@@ -98,6 +101,7 @@ object PermissionModel {
         Feature.Autofill -> "Autofill service"
         Feature.Passkeys -> "Passkeys and passwords"
         Feature.Biometrics -> "Fingerprint or face unlock"
+        Feature.Notifications -> "Notifications"
     }
 
     fun reason(feature: Feature) = when (feature) {
@@ -105,5 +109,6 @@ object PermissionModel {
         Feature.Autofill -> "Fill and save logins in apps and browsers."
         Feature.Passkeys -> "Sign in with passkeys and saved passwords through Android."
         Feature.Biometrics -> "Unlock your vault without typing your master password."
+        Feature.Notifications -> "Sign-in requests: get notified when you sign in on another device, and approve it here."
     }
 }
