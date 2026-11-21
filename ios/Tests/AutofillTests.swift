@@ -201,10 +201,10 @@ final class AutofillTests: XCTestCase {
         ]
         let r = IdentityMapper.records(entries, defaultMatch: .domain)
         let passwords = r.filter { $0.kind == .password }
-        XCTAssertEqual(passwords.map(\.service), ["example.com", "https://shop.test/account", "https://shop.test", "example.org", "https://pa.example.org"],
-                       "deduplicated, regex/never/app/non-web left out; the server's own address is written like any site")
-        XCTAssertEqual(passwords.map(\.serviceType), [.domain, .url, .url, .domain, .url])
-        XCTAssertEqual(passwords.map(\.recordId), ["1", "2", "2", "4", "4"])
+        XCTAssertEqual(passwords.map(\.service), ["example.com", "example.org"],
+                       "deduplicated; Host/Exact (the system would offer them on the whole domain), regex/never/app/non-web left out; the server's own address is written like any site")
+        XCTAssertEqual(passwords.map(\.serviceType), [.domain, .domain])
+        XCTAssertEqual(passwords.map(\.recordId), ["1", "4"])
         XCTAssertEqual(passwords.first?.user, "alice")
         XCTAssertEqual(r.filter { $0.kind == .oneTimeCode }.map(\.service), ["example.com"])
         let passkeys = r.filter { $0.kind == .passkey }
@@ -228,9 +228,9 @@ final class AutofillTests: XCTestCase {
     }
 
     /// Several logins under one base domain with the same user name would collapse into one
-    /// suggestion in the system's list, which can fill the wrong password: they're written by
-    /// their full host instead, so each is offered on its own site.
-    func testSameUserUnderOneBaseDomainIsWrittenByHost() {
+    /// suggestion in the system's list, and the system offers any login of the domain on every
+    /// subdomain: they're left out, so the system shows "PassAuth…", whose list picks by the page.
+    func testSameUserUnderOneBaseDomainIsLeftOut() {
         let e = [
             entry("1", name: "Cloudy", user: "fahed", password: "a", urls: [("https://cloudy.example.com/login", .domain)], totp: "JBSWY3DPEHPK3PXP"),
             entry("2", name: "Radarr", user: "Fahed", password: "b", urls: [("https://radarr.example.com", .domain)]),
@@ -238,11 +238,10 @@ final class AutofillTests: XCTestCase {
             entry("4", name: "Mail", user: "fahed", password: "d", urls: [("https://mail.other.test", .domain)]),
         ]
         let pw = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .password }
-        XCTAssertEqual(pw.map(\.service), ["https://cloudy.example.com", "https://radarr.example.com", "example.com", "other.test"])
-        XCTAssertEqual(pw.map(\.serviceType), [.url, .url, .domain, .domain])
-        // The code of a login that moved goes with it.
-        let codes = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .oneTimeCode }
-        XCTAssertEqual(codes.map(\.service), ["https://cloudy.example.com"])
+        XCTAssertEqual(pw.map(\.service), ["example.com", "other.test"])
+        XCTAssertEqual(pw.map(\.recordId), ["3", "4"])
+        // The code of a login left out goes with it.
+        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .oneTimeCode }.isEmpty)
         // One login with the same user name on two websites of one base domain stays as it is.
         let one = [entry("1", name: "A", user: "fahed", password: "a", urls: [("https://a.example.com", .domain), ("https://b.example.com", .domain)])]
         XCTAssertEqual(IdentityMapper.records(one, defaultMatch: .domain).map(\.service), ["example.com"])
@@ -251,8 +250,10 @@ final class AutofillTests: XCTestCase {
     func testDefaultMatchChangesIdentities() {
         let e = [entry("1", name: "Example", user: "alice", urls: [("https://www.example.com/login", .default)])]
         XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .domain).map(\.service), ["example.com"])
-        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .host).map(\.service), ["https://www.example.com"])
-        XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .exact).map(\.service), ["https://www.example.com/login"])
+        // Host, Exact, Starts with: the system can't hold them to one site, so they aren't registered ("PassAuth…").
+        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .host).isEmpty)
+        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .exact).isEmpty)
+        XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .startsWith).isEmpty)
         XCTAssertTrue(IdentityMapper.records(e, defaultMatch: .never).isEmpty)
     }
 
