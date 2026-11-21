@@ -21,6 +21,7 @@
  * - knownFeatures: per server address, the feature list of the last `/api/config` this browser read.
  */
 import type { Bundle, SyncResponse } from "@web/lib/types";
+import { isSafari } from "../shared/browser";
 import { log, logged } from "../shared/log";
 import { AVATAR_OPEN_PREFIX, AVATAR_PREFIX, OFFLINE_CHANGES_PREFIX } from "../shared/storage-keys";
 import type { Settings } from "../shared/types";
@@ -76,7 +77,8 @@ export const ACCOUNT_FIELDS = ["server", "email", "name", "tokens", "lastSync", 
 export const defaultSettings: Settings = {
   vaultTimeout: 15,
   timeoutAction: "lock",
-  inlineMenu: "focus",
+  // Safari also shows macOS's AutoFill sheet on focus: there the menu opens from the field's PassAuth icon.
+  inlineMenu: isSafari() ? "click" : "focus",
   autoCopyTotp: true,
   clearClipboard: 30,
   showIcons: true,
