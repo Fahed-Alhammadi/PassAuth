@@ -72,6 +72,15 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .hero-copy > p { color: var(--on-navy-2); font-size: var(--t-lg); line-height: 1.55; max-width: 36ch; margin: 0 0 36px; }
 .hero .fine { font-size: var(--t-sm); margin: 20px 0 0; color: var(--on-navy-2); }
 .cta { display: flex; flex-wrap: wrap; gap: 12px; }
+/* Google's "Get it on Google Play" badge (assets/google-play-badge.png, 646×250 with its own clear space: the negative
+   margin trims that space so the badge lines up with the buttons). */
+.play-badge { display: inline-block; border-radius: 10px; line-height: 0; }
+.play-badge img { width: 216px; margin: -13.6px; max-width: none; }
+.play-badge.small img { width: 180px; margin: -11.3px; }
+.play-badge:focus-visible { outline-offset: 4px; }
+.store { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-top: 28px; }
+.store span { color: var(--on-navy-2); font-size: var(--t-sm); }
+.app .play-badge { margin-top: 14px; }
 .btn { display: inline-flex; align-items: center; padding: 13px 22px; border-radius: var(--r-md); font-weight: 600; text-decoration: none; border: 1px solid transparent; line-height: 1.2; }
 .btn-primary { background: var(--blue-fill); color: #fff; }
 .btn-primary:hover { background: #0650c4; }

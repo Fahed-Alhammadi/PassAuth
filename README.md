@@ -8,9 +8,12 @@
   <a href="CHANGELOG.md"><img src="https://img.shields.io/github/v/tag/Fahed-Alhammadi/PassAuth?filter=server-*&label=server&color=0866ED" alt="Latest server version"></a>
   <a href="https://github.com/Fahed-Alhammadi/PassAuth/releases/latest"><img src="https://img.shields.io/github/v/release/Fahed-Alhammadi/PassAuth?label=desktop&color=0866ED" alt="Latest desktop app release"></a>
   <a href="https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan"><img src="https://img.shields.io/chrome-web-store/v/pnofinkalfnjjgofaikljeikjaoogaan?label=Chrome%20Web%20Store&color=0866ED" alt="Chrome Web Store"></a>
-  <a href="https://play.google.com/store/apps/details?id=io.passauth.app"><img src="https://img.shields.io/badge/Google%20Play-get%20it-0866ED" alt="Google Play"></a>
   <a href="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/core.yml"><img src="https://github.com/Fahed-Alhammadi/PassAuth/actions/workflows/core.yml/badge.svg?branch=main" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-082052" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <a href="https://play.google.com/store/apps/details?id=io.passauth.app&hl=en"><img src="website/assets/google-play-badge.png" alt="Get it on Google Play" height="80"></a>
 </p>
 
 <p align="center">
@@ -46,12 +49,12 @@
 | Web vault | Manage items, share vaults, import, two-step login, admin page | Built into every server |
 | Browser extension | Menu under login fields and autofill, codes copied for you, saves new logins, passkeys, offline copy, up to five accounts, badge with the logins for the open site | [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) (Chrome, Edge, Brave and other Chromium browsers) |
 | Desktop | Your vault on macOS, Windows and Linux; lives in the menu bar or tray, syncs in the background, updates itself; on macOS: AutoFill for Safari and apps, and the PassAuth extension in Safari | [Downloads](#desktop-app) below |
-| Android | Autofill in apps and browsers, passkey provider, verification codes (scan or paste), password history, live and background sync | [Google Play](https://play.google.com/store/apps/details?id=io.passauth.app) |
+| Android | Autofill in apps and browsers, passkey provider, verification codes (scan or paste), password history, live and background sync | <a href="https://play.google.com/store/apps/details?id=io.passauth.app&hl=en"><img src="website/assets/google-play-badge.png" alt="Get it on Google Play" height="54"></a> |
 | iPhone and iPad | AutoFill for passwords, codes and passkeys; saves new logins and suggests strong passwords; password history, live and background sync | Beta: [join the test on TestFlight](https://testflight.apple.com/join/MGBhGbhp) |
 
 Browsers: the extension runs in Chrome, Edge, Brave and other Chromium browsers, and in Firefox (submitted to Firefox Add-ons). On a Mac, the desktop app also brings it to Safari. On iPhone and iPad, the PassAuth app fills logins in Safari through AutoFill.
 
-The Android app is on [Google Play](https://play.google.com/store/apps/details?id=io.passauth.app). The iPhone and iPad app isn't in the App Store yet: to try it before the official release, join the beta on TestFlight from the link above; you'll get updates automatically. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
+The Android app is on [Google Play](https://play.google.com/store/apps/details?id=io.passauth.app&hl=en). The iPhone and iPad app isn't in the App Store yet: to try it before the official release, join the beta on TestFlight from the link above; you'll get updates automatically. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
 
 ### Desktop app
 
@@ -144,5 +147,7 @@ Third-party components keep their own licenses:
 - Site matching uses the [Public Suffix List](https://publicsuffix.org/) maintained by Mozilla and contributors, licensed under the [Mozilla Public License 2.0](https://mozilla.org/MPL/2.0/) (kept unchanged in `crates/core/src/site/public_suffix_list.dat`).
 - The web vault, extension and website use the [IBM Plex](https://github.com/IBM/plex) fonts, licensed under the [SIL Open Font License 1.1](https://openfontlicense.org).
 - Rust and JavaScript dependencies are under their own licenses (mostly MIT or Apache-2.0); see `Cargo.lock` and the `pnpm-lock.yaml` files.
+
+Google Play and the Google Play logo are trademarks of Google LLC.
 
 © 2026 Fahed Alhammadi. All rights reserved.
