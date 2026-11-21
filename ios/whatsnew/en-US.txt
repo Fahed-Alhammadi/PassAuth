@@ -1,7 +1,7 @@
-New in 0.15.1
-• Search finds items by any of their websites: searching "samsung.com" now finds a login even when its name is different, and every website of an item counts, not only the first. Search also looks at user names, tags, folders and card and identity details. Every word you type must match.
-• The same search is used in AutoFill's list, "Add verification code" and emergency access.
+New in 0.15.2
+• AutoFill no longer mixes up logins that share a user name on one domain. If you have, for example, two "fahed" logins on cloud.example.com and media.example.com, each is now suggested on its own site, so the keyboard's suggestion can't fill the other login's password.
+• Buttons that remove something (Log out, Move to trash, Delete forever, Discard) now show their icon in red too.
 
 Please test:
-1. Open a login that has two or more websites. Search the vault for the second website: the login should appear.
-2. Search for part of a user name or a tag.
+1. Save two logins with the same user name on two sites of one domain (for example a.yourdomain.com and b.yourdomain.com), both with the website match "Base domain". On each site's sign-in page, the suggestion above the keyboard should show that site's login, and filling should use its password.
+2. Check the red icons on Log out (Settings → Account), Move to trash and Delete forever (a login in the trash), and Discard (editing a login).
