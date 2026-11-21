@@ -44,6 +44,13 @@ test("extensionPage: Firefox's moz-extension pages; a moz-extension page of anot
   expect(extensionPage({ id: EXTENSION_ID, url: "moz-extension://ffffffff-2222-4c3b-9d1e-2f6a7b8c9d00/popup.html" }, EXTENSION_ID, own)).toBe(null);
 });
 
+test("extensionPage: Safari's safari-web-extension pages (its popup); another extension's page is not PassAuth", () => {
+  const own = ["safari-web-extension://8C1D7E2A-3B4F-4D5E-9A6B-7C8D9E0F1A2B"];
+  expect(extensionPage({ id: EXTENSION_ID, url: `${own[0]}/popup.html` }, EXTENSION_ID, own)).toBe("/popup.html");
+  expect(extensionPage({ id: EXTENSION_ID, url: `${own[0]}/inline-menu.html` }, EXTENSION_ID, own)).toBe("/inline-menu.html");
+  expect(extensionPage({ id: EXTENSION_ID, url: "safari-web-extension://FFFFFFFF-0000-4D5E-9A6B-7C8D9E0F1A2B/popup.html" }, EXTENSION_ID, own)).toBe(null);
+});
+
 test("frameMayFill: the login's websites must match the claiming frame, by its real origin", () => {
   const urls: LoginUrl[] = [{ url: "https://login.example.com", match: "host" }];
   const frame = (origin: string, url = `${origin}/form`) => ({ origin, url });
