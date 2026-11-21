@@ -2,7 +2,7 @@
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true, "root": ".." },
-  "files": { "includes": ["**", "!src/wasm", "!dist", "!dist-firefox", "!node_modules", "!pnpm-lock.yaml"] },
+  "files": { "includes": ["**", "!src/wasm", "!dist", "!dist-firefox", "!dist-safari", "!node_modules", "!pnpm-lock.yaml"] },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 200 },
   "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always", "trailingCommas": "all", "arrowParentheses": "always" } },
   "linter": {

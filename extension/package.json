@@ -9,6 +9,7 @@
     "wasm": "../scripts/build-wasm.sh extension/src/wasm",
     "build": "tsc -b && node build.mjs",
     "build:firefox": "tsc -b && node build.mjs --firefox",
+    "build:safari": "tsc -b && node build.mjs --safari",
     "typecheck": "tsc -b",
     "lint": "biome check .",
     "format": "biome check --write .",

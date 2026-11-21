@@ -3,14 +3,20 @@
 // shim (webauthn.js, page world), and the main content script at document_idle (content.js).
 // `node build.mjs --firefox` builds the Firefox version into dist-firefox/ instead: the same code with the manifest
 // from firefox-manifest.mjs and no offscreen page (Firefox's background has a DOM).
+// `node build.mjs --safari` builds the Safari version (inside the iOS app) into dist-safari/: the manifest from
+// safari-manifest.mjs with the iOS app's version (ios/VERSION), no offscreen page and no passkey scripts.
 
 import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import react from "@vitejs/plugin-react";
 import { build } from "vite";
 import { firefoxManifest } from "./firefox-manifest.mjs";
+import { safariManifest } from "./safari-manifest.mjs";
 
 const firefox = process.argv.includes("--firefox");
-const OUT = firefox ? "dist-firefox" : "dist";
+const safari = process.argv.includes("--safari");
+const OUT = firefox ? "dist-firefox" : safari ? "dist-safari" : "dist";
+// Firefox's and Safari's backgrounds are event pages with a DOM: no offscreen clipboard page.
+const offscreen = !firefox && !safari;
 
 // dedupe: shared web components must use this package's single React copy.
 const base = {
@@ -34,7 +40,7 @@ await build({
         popup: "popup.html",
         "inline-menu": "inline-menu.html",
         "save-prompt": "save-prompt.html",
-        ...(firefox ? {} : { offscreen: "offscreen.html" }),
+        ...(offscreen ? { offscreen: "offscreen.html" } : {}),
         background: "src/background/main.ts",
       },
       output: { entryFileNames: "[name].js", chunkFileNames: "chunks/[name]-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" },
@@ -42,11 +48,12 @@ await build({
   },
 });
 
-for (const [entry, name] of [
+const contentScripts = [
   ["src/content/bridge.ts", "bridge"],
   ["src/content/index.ts", "content"],
   ["src/page/webauthn.ts", "webauthn"],
-]) {
+].filter(([, name]) => !safari || name === "content");
+for (const [entry, name] of contentScripts) {
   await build({
     ...base,
     build: {
@@ -59,5 +66,8 @@ for (const [entry, name] of [
 }
 
 cpSync("public", OUT, { recursive: true });
-if (firefox) writeFileSync(`${OUT}/manifest.json`, `${JSON.stringify(firefoxManifest(JSON.parse(readFileSync("public/manifest.json", "utf8"))), null, 2)}\n`);
-console.log(`built ${firefox ? "Firefox " : ""}extension in ${OUT}/`);
+const chromeManifest = () => JSON.parse(readFileSync("public/manifest.json", "utf8"));
+const writeManifest = (m) => writeFileSync(`${OUT}/manifest.json`, `${JSON.stringify(m, null, 2)}\n`);
+if (firefox) writeManifest(firefoxManifest(chromeManifest()));
+if (safari) writeManifest(safariManifest(chromeManifest(), readFileSync("../ios/VERSION", "utf8").trim()));
+console.log(`built ${firefox ? "Firefox " : safari ? "Safari " : ""}extension in ${OUT}/`);

@@ -37,6 +37,7 @@ target/
 node_modules/
 dist/
 dist-firefox/
+dist-safari/
 build/
 .vite/
 coverage/
