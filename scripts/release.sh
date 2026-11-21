@@ -5,10 +5,11 @@
 #   scripts/release.sh extension X.Y.Z   extension/package.json + manifest.json        -> extension-X.Y.Z (Chrome Web Store)
 #   scripts/release.sh ios       X.Y.Z   ios/VERSION                                    -> ios-X.Y.Z       (TestFlight)
 #   scripts/release.sh android   X.Y.Z   android/VERSION                                -> android-X.Y.Z   (Play internal testing)
+#   scripts/release.sh safari    X.Y.Z   safari/VERSION                                 -> safari-X.Y.Z    (PassAuth for Safari: TestFlight, iOS + macOS)
 #   scripts/release.sh desktop   X.Y.Z   desktop/package.json + src-tauri/Cargo.toml (+ Cargo.lock) -> vX.Y.Z (GitHub release with the installers, marked Latest; the app updates from it)
 #
-# ios/android also need updated "What's new" notes, committed before running this:
-# ios/whatsnew/en-US.txt (TestFlight "What to Test", ≤4000 chars) and
+# ios/android/safari also need updated "What's new" notes, committed before running this:
+# ios/whatsnew/en-US.txt and safari/whatsnew/en-US.txt (TestFlight "What to Test", ≤4000 chars) and
 # android/whatsnew/whatsnew-en-US (Play release notes, ≤500 chars).
 #
 # Then: git push origin main, wait for CI, git push origin <tag>.
@@ -17,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 part=${1:-} version=${2:-}
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 server|extension|ios|android|desktop X.Y.Z" >&2; exit 1; }
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: $0 server|extension|ios|android|safari|desktop X.Y.Z" >&2; exit 1; }
 
 json_version() { node -p "require('./$1').version"; }
 # Replace only the top-level "version" value, keeping the file's formatting.
@@ -33,13 +34,13 @@ case "$part" in
   extension)
     current=$(json_version extension/package.json)
     files=(extension/package.json extension/public/manifest.json) ;;
-  ios | android)
+  ios | android | safari)
     current=$(tr -d '[:space:]' < "$part/VERSION")
     files=("$part/VERSION") ;;
   desktop)
     current=$(json_version desktop/package.json)
     files=(desktop/package.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock) ;;
-  *) echo "usage: $0 server|extension|ios|android|desktop X.Y.Z" >&2; exit 1 ;;
+  *) echo "usage: $0 server|extension|ios|android|safari|desktop X.Y.Z" >&2; exit 1 ;;
 esac
 
 if [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" ] || [ "$current" = "$version" ]; then
@@ -54,6 +55,7 @@ git rev-parse -q --verify "refs/tags/$tag" >/dev/null && { echo "tag $tag alread
 # committed, non-empty, within the store limit, and changed since the previous release.
 case "$part" in
   ios) notes=ios/whatsnew/en-US.txt max=4000 ;;
+  safari) notes=safari/whatsnew/en-US.txt max=4000 ;;
   android) notes=android/whatsnew/whatsnew-en-US max=500 ;;
   *) notes="" ;;
 esac
@@ -83,7 +85,7 @@ case "$part" in
   extension)
     set_json_version extension/package.json "$version"
     set_json_version extension/public/manifest.json "$version" ;;
-  ios | android)
+  ios | android | safari)
     echo "$version" > "$part/VERSION" ;;
   desktop)
     set_json_version desktop/package.json "$version"

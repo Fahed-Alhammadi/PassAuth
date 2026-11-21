@@ -92,6 +92,10 @@ jobs:
       - name: Firefox extension (build + web-ext lint)
         run: pnpm build:firefox && npm exec --yes -- web-ext@10.8.0 lint --source-dir dist-firefox
         working-directory: extension
+      # The app around it (safari/) is built by safari.yml.
+      - name: Safari extension (build)
+        run: pnpm build:safari
+        working-directory: extension
 
   store-check:
     if: github.event_name == 'workflow_dispatch'
