@@ -96,3 +96,5 @@ xcuserdata/
 /desktop/macos/Core/
 /desktop/macos/Version.xcconfig
 /desktop/macos/build/
+/safari/PassAuthSafari.xcodeproj/
+/safari/Version.xcconfig

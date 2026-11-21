@@ -1,12 +1,12 @@
-// The Safari manifest (the extension inside the PassAuth iOS app), made from the Chrome one (public/manifest.json) so
-// they always list the same fill scripts and permissions. Safari on iOS runs the background as a non-persistent event
+// The Safari manifest (the extension in the "PassAuth for Safari" app, iPhone/iPad/Mac), made from the Chrome one (public/manifest.json) so
+// they always list the same fill scripts and permissions. Safari runs the background as a non-persistent event
 // page (background.scripts, with a DOM: background/clipboard.ts writes the clipboard itself), and iOS stops it at any
 // time. Left out: the passkey bridge and page shim (the iOS AutoFill extension handles passkeys in Safari; two
 // providers would mean two prompts), the offscreen page, the right-click menu, shortcuts and the optional `privacy`
-// permission (Safari on iOS has none of them), and Chrome-only keys. The version is the iOS app's (ios/VERSION): the
-// extension ships inside the app.
+// permission (Safari on iOS has none of them), and Chrome-only keys. The version is the Safari app's (safari/VERSION):
+// the extension ships inside that app.
 
-/** Safari 17 = iOS 17, the iOS app's deployment target (ios/project.yml). */
+/** Safari 17 (iOS 17, macOS 14), the Safari app's deployment targets (safari/project.yml). */
 export const MIN_SAFARI = "17.0";
 
 const DROP_KEYS = ["minimum_chrome_version", "externally_connectable", "commands", "optional_permissions"];

@@ -10,5 +10,6 @@ if [ ! -f "$src/manifest.json" ]; then
 fi
 dest="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
 mkdir -p "$dest"
-# On iOS the resources folder is the bundle root (flat bundle): copy over, never delete.
+# The resources folder is the bundle root on iOS (flat bundle) and Contents/Resources on macOS:
+# copy over, never delete.
 cp -R "$src/." "$dest/"

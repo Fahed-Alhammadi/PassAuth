@@ -10,7 +10,7 @@ import { browserName, isFirefox, isSafari } from "../src/shared/browser";
 const chrome = JSON.parse(readFileSync(new URL("../public/manifest.json", import.meta.url), "utf8"));
 const safari = safariManifest(chrome, "0.16.0");
 
-test("Safari: non-persistent event-page background, minimum version, the iOS app's version", () => {
+test("Safari: non-persistent event-page background, minimum version, the Safari app's version", () => {
   expect(safari.background).toEqual({ scripts: ["background.js"], type: "module", persistent: false });
   expect(MIN_SAFARI).toBe("17.0");
   expect(safari.browser_specific_settings).toEqual({ safari: { strict_min_version: "17.0" } });

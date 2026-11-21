@@ -27,9 +27,5 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).SafariWebExtensionHandler</string>
 	</dict>
-	<key>PAAppGroup</key>
-	<string>group.io.passauth.app</string>
-	<key>PAKeychainGroup</key>
-	<string>$(AppIdentifierPrefix)io.passauth.shared</string>
 </dict>
 </plist>
