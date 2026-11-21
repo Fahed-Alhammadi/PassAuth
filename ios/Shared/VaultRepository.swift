@@ -1230,7 +1230,7 @@ public final class VaultRepository {
         let before = store.get().settings
         store.update { transform(&$0.file.settings) }
         let after = store.get().settings
-        if before.defaultMatch != after.defaultMatch && vault != nil { refreshIdentities() }
+        if (before.defaultMatch != after.defaultMatch || before.suggestAllLogins != after.suggestAllLogins) && vault != nil { refreshIdentities() }
         guard before.vaultTimeout != after.vaultTimeout else { return }
         await lock.run {
             if after.vaultTimeout == .never {
@@ -2174,7 +2174,7 @@ public final class VaultRepository {
         let s = store.get()
         identities.seed(s.file.identityFingerprint)
         guard let v = vault, sessions[s.activeId] != nil else { return identities.clear() }
-        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch))
+        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch, suggestAll: s.settings.suggestAllLogins))
     }
 
     /// Decrypt a copy, reusing what `previous` already opened: a vault key whose header

@@ -426,10 +426,12 @@ struct MacList: View {
         var revision: Int64?
         var entries: Int
         var match: UrlMatch
+        var suggestAll: Bool
     }
 
     private var inputs: Inputs {
-        Inputs(revision: model.repo.vault?.revision, entries: model.repo.vault?.entries.count ?? -1, match: model.state.settings.defaultMatch)
+        Inputs(revision: model.repo.vault?.revision, entries: model.repo.vault?.entries.count ?? -1, match: model.state.settings.defaultMatch,
+               suggestAll: model.state.settings.suggestAllLogins)
     }
 
     private static let log = Logger(subsystem: "io.passauth.autofill", category: "list")
@@ -871,6 +873,14 @@ struct MacSettings: View {
                 Text("Filling")
             } footer: {
                 Text("\(matchHelp(state.settings.defaultMatch)) Applies to websites set to \"Default\" in an item. Also set in the PassAuth app: Settings → This app. The most recent change applies.")
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Suggest every login in Safari's AutoFill list", isOn: Binding(get: { state.settings.suggestAllLogins }, set: { v in
+                    Task { await model.repo.updateSettings { $0.suggestAllLogins = v } }
+                }))
+            } footer: {
+                Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under \"PassAuth…\" in the list, with the login for the page first.")
                     .foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(Color.paDanger) }

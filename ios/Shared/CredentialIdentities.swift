@@ -37,7 +37,9 @@ public struct IdentityRecord: Equatable, Hashable, Sendable {
 /// schemes. A login for the PassAuth server's own address is written like any other, so Safari
 /// suggests it on the web vault's sign-in page.
 public enum IdentityMapper {
-    public static func records(_ entries: [Entry], defaultMatch: UrlMatch) -> [IdentityRecord] {
+    /// `suggestAll` (the "Suggest every login above the keyboard" setting): Host/Exact/Starts with websites are
+    /// registered by their address and same-name logins by their full host, instead of left out.
+    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, suggestAll: Bool = false) -> [IdentityRecord] {
         var out: [IdentityRecord] = []
         var seen = Set<IdentityRecord>()
         func add(_ r: IdentityRecord) { if seen.insert(r).inserted { out.append(r) } }
@@ -52,7 +54,11 @@ public enum IdentityMapper {
                 // name there, whatever its type: Host/Exact/Starts with websites, and logins that share a user
                 // name under one base domain, aren't registered. The system then shows "PassAuth…", whose list
                 // picks by the page (AutofillMatcher).
-                if type == .url || crowded.contains(DomainUser(domain: svc, user: user.lowercased())) { return nil }
+                if type == .url { return suggestAll ? (svc, type) : nil }
+                if crowded.contains(DomainUser(domain: svc, user: user.lowercased())) {
+                    guard suggestAll, let p = UrlMatcher.parse(u.url) else { return nil }
+                    return (p.origin, .url)
+                }
                 return (svc, type)
             }
             let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
