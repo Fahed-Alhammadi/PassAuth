@@ -118,9 +118,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Plain cargo-audit, not rustsec/audit-check: that action posts a check run named "Security audit", and when
-      # core.yml audits the same commit the two collide ("Not Found - update-a-check-run") whenever there are
-      # warnings. Fails on vulnerabilities only; ignores come from .cargo/audit.toml (run from the repo root).
+      # Plain cargo-audit, not rustsec/audit-check: that action's own "Security audit" check run failed with
+      # "Not Found - update-a-check-run" whenever there were warnings (core.yml does the same). Fails on
+      # vulnerabilities only; ignores come from .cargo/audit.toml (run from the repo root).
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-audit
