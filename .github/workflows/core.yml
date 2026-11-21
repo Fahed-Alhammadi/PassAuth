@@ -74,11 +74,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      checks: write
-      # Scheduled runs open an issue for each new advisory.
+      # The weekly run opens an issue when it finds an advisory.
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      # Plain cargo-audit, not rustsec/audit-check: that action posts its own "Security audit" check run, which
+      # failed with "Not Found - update-a-check-run" whenever there were warnings (same fix as desktop.yml).
+      # Fails on vulnerabilities only; ignores come from .cargo/audit.toml.
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+      - run: cargo audit
+      # One open issue at a time: a later weekly failure with the issue still open adds nothing.
+      - name: Open an issue for the advisory
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Security audit: vulnerable Rust dependency"
+          open="$(gh issue list --state open --search "\"$title\" in:title" --json number --jq 'length')"
+          if [ "$open" != "0" ]; then echo "An audit issue is already open"; exit 0; fi
+          gh issue create --title "$title" --body "The weekly \`cargo audit\` of Cargo.lock found a vulnerability: $RUN_URL"
