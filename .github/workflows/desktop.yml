@@ -37,6 +37,7 @@ on:
       - "ios/Shared/**"
       - "ios/AutoFill/**"
       - "ios/UI/**"
+      - "extension/**"
       - ".github/workflows/desktop.yml"
   pull_request:
     paths:
@@ -52,6 +53,7 @@ on:
       - "ios/Shared/**"
       - "ios/AutoFill/**"
       - "ios/UI/**"
+      - "extension/**"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
@@ -127,7 +129,7 @@ jobs:
       - run: cargo audit --file desktop/src-tauri/Cargo.lock
 
   autofill:
-    name: macOS AutoFill extension
+    name: macOS extensions
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch')
     runs-on: macos-latest
     permissions:
@@ -140,16 +142,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Install XcodeGen
-        run: brew install xcodegen
-      - name: Unit tests
+      - name: Install XcodeGen and the wasm-bindgen CLI (version from Cargo.lock)
+        run: |
+          brew install xcodegen
+          v="$(grep -A3 'name = "wasm-bindgen"' Cargo.lock | grep -m1 version | cut -d'"' -f2)"
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 10.34.9
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: AutoFill unit tests
         run: |
           scripts/build-macos-core.sh
           cd desktop/macos && xcodegen generate
           xcodebuild -project PassAuthAutoFill.xcodeproj -scheme PassAuthAutoFill -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO test -quiet
+      # The Safari extension: the browser extension's Safari build inside a macOS app extension.
+      - name: Safari extension (build)
+        run: |
+          scripts/build-wasm.sh web/src/wasm extension/src/wasm
+          (cd web && pnpm install --frozen-lockfile)
+          (cd extension && pnpm install --frozen-lockfile && pnpm build:safari)
+          cd desktop/macos
+          xcodebuild -project PassAuthAutoFill.xcodeproj -scheme PassAuthSafari -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO build -quiet
 
   build:
     name: ${{ matrix.os }}
@@ -242,7 +262,7 @@ jobs:
           node-version: 26
 
       - name: Build the core for the browser
-        run: scripts/build-wasm.sh web/src/wasm
+        run: scripts/build-wasm.sh web/src/wasm extension/src/wasm
       # The desktop app imports web/src, whose imports resolve from web/node_modules.
       - run: pnpm install --frozen-lockfile
         working-directory: web
@@ -292,13 +312,14 @@ jobs:
             echo "APPLE_API_KEY_PATH=$key"
           } >> "$GITHUB_ENV"
 
-      # macOS AutoFill extension (desktop/macos): built, signed with its own entitlements and the
-      # Developer ID provisioning profile, then copied into PassAuth.app/Contents/PlugIns by Tauri
+      # macOS extensions (desktop/macos): AutoFill and Safari, each built, signed with its own entitlements
+      # and Developer ID provisioning profile, then copied into PassAuth.app/Contents/PlugIns by Tauri
       # (bundle.macOS.files, CI-only config). Tauri signs the outer app without --deep, so the
       # extension keeps its signature. macOS lists a credential provider only when its containing
       # app carries the AutoFill entitlement too, so the app is signed with
       # entitlements/macos-host.plist and its own Developer ID profile (Contents/embedded.provisionprofile,
-      # secret MACOS_DESKTOP_PROVISIONING_PROFILE). Skipped (no extension) while a secret is missing.
+      # secret MACOS_DESKTOP_PROVISIONING_PROFILE). Skipped (no extension) while a secret is missing. The Safari
+      # extension (secret MACOS_SAFARI_PROVISIONING_PROFILE) is left out while its profile is missing.
       - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         if: runner.os == 'macOS'
         with:
@@ -308,22 +329,35 @@ jobs:
         env:
           PROFILE_BASE64: ${{ secrets.MACOS_AUTOFILL_PROVISIONING_PROFILE }}
           HOST_PROFILE_BASE64: ${{ secrets.MACOS_DESKTOP_PROVISIONING_PROFILE }}
+          SAFARI_PROFILE_BASE64: ${{ secrets.MACOS_SAFARI_PROVISIONING_PROFILE }}
         run: |
           if [ -z "$PROFILE_BASE64" ] || [ -z "$HOST_PROFILE_BASE64" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
             echo "::warning::MACOS_AUTOFILL_PROVISIONING_PROFILE, MACOS_DESKTOP_PROVISIONING_PROFILE or the signing certificate is missing: the macOS app is built without AutoFill"
             exit 0
           fi
           brew install xcodegen
+          (cd extension && pnpm install --frozen-lockfile && pnpm build:safari)
           profile="$RUNNER_TEMP/autofill.provisionprofile"
           printf '%s' "$PROFILE_BASE64" | base64 --decode > "$profile"
-          MACOS_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" MACOS_SIGN_KEYCHAIN="$SIGNING_KEYCHAIN" MACOS_AUTOFILL_PROFILE="$profile" desktop/macos/build.sh
+          safari_profile=""
+          if [ -n "$SAFARI_PROFILE_BASE64" ]; then
+            safari_profile="$RUNNER_TEMP/safari.provisionprofile"
+            printf '%s' "$SAFARI_PROFILE_BASE64" | base64 --decode > "$safari_profile"
+          else
+            echo "::warning::MACOS_SAFARI_PROVISIONING_PROFILE is missing: the macOS app is built without the Safari extension"
+          fi
+          MACOS_SIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" MACOS_SIGN_KEYCHAIN="$SIGNING_KEYCHAIN" MACOS_AUTOFILL_PROFILE="$profile" \
+            MACOS_SAFARI_PROFILE="$safari_profile" desktop/macos/build.sh
           appex="$GITHUB_WORKSPACE/desktop/macos/build/PassAuthAutoFill.appex"
           codesign --verify --strict --verbose=2 "$appex"
+          safari="$GITHUB_WORKSPACE/desktop/macos/build/PassAuthSafari.appex"
+          plugins="\"PlugIns/PassAuthAutoFill.appex\":\"$appex\""
+          if [ -d "$safari" ]; then plugins="$plugins,\"PlugIns/PassAuthSafari.appex\":\"$safari\""; fi
           host_profile="$RUNNER_TEMP/desktop.provisionprofile"
           printf '%s' "$HOST_PROFILE_BASE64" | base64 --decode > "$host_profile"
           entitlements="$GITHUB_WORKSPACE/desktop/src-tauri/entitlements/macos-host.plist"
-          printf '{"bundle":{"macOS":{"entitlements":"%s","files":{"PlugIns/PassAuthAutoFill.appex":"%s","embedded.provisionprofile":"%s"}}}}' \
-            "$entitlements" "$appex" "$host_profile" > "$RUNNER_TEMP/autofill.json"
+          printf '{"bundle":{"macOS":{"entitlements":"%s","files":{%s,"embedded.provisionprofile":"%s"}}}}' \
+            "$entitlements" "$plugins" "$host_profile" > "$RUNNER_TEMP/autofill.json"
           echo "AUTOFILL_ARGS=--config $RUNNER_TEMP/autofill.json" >> "$GITHUB_ENV"
       # Tag push: builds, then creates the release (or adds to it: the three systems share one)
       # and uploads the bundles, their updater signatures and latest.json (not for pre-releases).
@@ -357,6 +391,12 @@ jobs:
           # The containing app: AutoFill entitlement + the profile that allows it (or macOS kills it at launch).
           codesign -d --entitlements - "$app" 2>/dev/null | grep -q autofill-credential-provider
           test -f "$app/Contents/embedded.provisionprofile"
+          # The Safari extension (when its profile was there): sandboxed, with the extension's manifest.
+          safari="$app/Contents/PlugIns/PassAuthSafari.appex"
+          if [ -d "$safari" ]; then
+            codesign -d --entitlements - "$safari" 2>/dev/null | grep -q app-sandbox
+            test -f "$safari/Contents/Resources/manifest.json"
+          fi
 
       - name: Remove the API key and keychain
         if: always() && runner.os == 'macOS'

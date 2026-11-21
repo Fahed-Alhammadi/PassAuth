@@ -1,5 +1,5 @@
 // Safari: the sign-in form starts with the server, email and Secret Key another PassAuth app on the device left for it
-// (shared/app-handoff.ts, answered by safari/Extension/Handoff.swift). Other browsers never ask.
+// (shared/app-handoff.ts, answered by desktop/macos/Safari/Handoff.swift). Other browsers never ask.
 
 import { afterEach, expect, test } from "vitest";
 import { appHandoff } from "../src/shared/app-handoff";
@@ -24,7 +24,7 @@ afterEach(() => {
 test("Safari: server, email and Secret Key from the app", async () => {
   safari({ server: "https://vault.example.com", email: "alex@example.com", secretKey: "A3-KEY" });
   expect(await appHandoff()).toEqual({ server: "https://vault.example.com", email: "alex@example.com", secretKey: "A3-KEY" });
-  expect(asked).toEqual([["io.passauth.safari", { type: "handoff" }]]);
+  expect(asked).toEqual([["io.passauth.desktop", { type: "handoff" }]]);
 });
 
 test("Safari: no hand-off, a broken answer or a failed call → nothing", async () => {

@@ -65,7 +65,7 @@ export function Welcome() {
         <Step n={1} icon="puzzle" title="Pin PassAuth to the toolbar">
           <p>
             {isSafari()
-              ? "On iPhone and iPad, PassAuth is in the page menu of Safari's address bar. On a Mac, choose Safari → Settings → Extensions, turn on PassAuth, and it appears in the toolbar."
+              ? "In Safari, choose Safari → Settings → Extensions and turn on PassAuth: it appears in the toolbar."
               : isFirefox()
                 ? "Click the puzzle piece in Firefox's toolbar, then the gear next to PassAuth and Pin to Toolbar, so it is always one click away."
                 : `Click the puzzle piece in ${browserName()}'s toolbar, then the pin next to PassAuth, so it is always one click away.`}

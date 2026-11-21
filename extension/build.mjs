@@ -3,8 +3,8 @@
 // shim (webauthn.js, page world), and the main content script at document_idle (content.js).
 // `node build.mjs --firefox` builds the Firefox version into dist-firefox/ instead: the same code with the manifest
 // from firefox-manifest.mjs and no offscreen page (Firefox's background has a DOM).
-// `node build.mjs --safari` builds the Safari version (inside the iOS app) into dist-safari/: the manifest from
-// safari-manifest.mjs with the Safari app's version (safari/VERSION), no offscreen page and no passkey scripts.
+// `node build.mjs --safari` builds the Safari version (inside the desktop app on macOS) into dist-safari/: the manifest from
+// safari-manifest.mjs, no offscreen page and no passkey scripts. Its version is the desktop app's (desktop/package.json).
 
 import { cpSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import react from "@vitejs/plugin-react";
@@ -69,5 +69,5 @@ cpSync("public", OUT, { recursive: true });
 const chromeManifest = () => JSON.parse(readFileSync("public/manifest.json", "utf8"));
 const writeManifest = (m) => writeFileSync(`${OUT}/manifest.json`, `${JSON.stringify(m, null, 2)}\n`);
 if (firefox) writeManifest(firefoxManifest(chromeManifest()));
-if (safari) writeManifest(safariManifest(chromeManifest(), readFileSync("../safari/VERSION", "utf8").trim()));
+if (safari) writeManifest(safariManifest(chromeManifest(), JSON.parse(readFileSync("../desktop/package.json", "utf8")).version));
 console.log(`built ${firefox ? "Firefox " : safari ? "Safari " : ""}extension in ${OUT}/`);
