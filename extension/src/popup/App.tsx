@@ -318,7 +318,7 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     const address = email.trim();
     if (!address) return setError("Enter your email address first.");
     if (new URLSearchParams(location.search).has("popout")) return setDevice(address);
-    const browser = await chrome.windows.getCurrent().catch(() => null);
+    const browser = await chrome.windows?.getCurrent().catch(() => null);
     await openCentered(deviceSignInUrl(address), POPUP_WINDOW, { windowId: browser?.id });
     window.close();
   }

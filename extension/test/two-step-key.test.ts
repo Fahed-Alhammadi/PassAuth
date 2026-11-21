@@ -21,8 +21,9 @@ vi.mock("../src/background/api", () => ({
   },
   serverFeatures: async () => net.features,
 }));
-const win = vi.hoisted(() => ({ opened: [] as string[], removed: [] as number[], seq: 500 }));
+const win = vi.hoisted(() => ({ opened: [] as string[], removed: [] as number[], seq: 500, none: false }));
 vi.mock("../src/shared/windows", () => ({
+  canUseWindows: () => !win.none,
   openCentered: async (url: string) => {
     win.opened.push(url);
     const id = ++win.seq;
@@ -69,6 +70,7 @@ beforeEach(() => {
   net.features = new Set(["two_step_key_page"]);
   win.opened = [];
   win.removed = [];
+  win.none = false;
   vi.spyOn(fake.chrome.windows, "remove").mockImplementation((async (id: number) => {
     win.removed.push(id);
   }) as never);
@@ -198,6 +200,31 @@ test("Cancel on the page, closing the window or its tab: cancelled", async () =>
   await onKeyWindowGone({ tabId: opened().tabId });
   expect(await wait).toEqual({ cancelled: true });
   expect(fake.session.data.has(KEY_WAIT_KEY)).toBe(false);
+});
+
+test("no windows (Safari on iPhone and iPad): the key page opens in a tab, which closes when done or counts as cancelled when closed", async () => {
+  win.none = true;
+  const removedTabs: number[] = [];
+  (fake.chrome.tabs as unknown as { remove: (id: number) => Promise<void> }).remove = async (id: number) => {
+    removedTabs.push(id);
+  };
+  const challenge = challengeBytes();
+  answer(challenge);
+  let wait = (await openKeyPage("tok", "login")).outcome;
+  const url = fake.createdTabs.at(-1) ?? "";
+  expect(url.startsWith(`${ORIGIN}/two-step/key#`)).toBe(true);
+  expect(win.opened).toEqual([]);
+  const state = new URLSearchParams(new URL(url).hash.slice(1)).get("state") ?? "";
+  await onKeyTabUpdated(999, { url: doneUrl(credential(challenge), ORIGIN, state) });
+  expect(await wait).toEqual({ credential: credential(challenge) });
+  expect(removedTabs).toEqual([999]);
+  expect(win.removed).toEqual([]);
+
+  answer(challengeBytes());
+  wait = (await openKeyPage("tok", "login")).outcome;
+  await onKeyWindowGone({ tabId: 999 });
+  expect(await wait).toEqual({ cancelled: true });
+  expect(removedTabs).toEqual([999]);
 });
 
 test("one hand-off at a time: a new one ends the open one as cancelled and closes its window", async () => {

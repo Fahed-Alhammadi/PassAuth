@@ -67,7 +67,8 @@ setReachHandler(vault.noteReach);
 void chrome.storage.local.get(DEBUG_KEY).then((r) => setDebug(r[DEBUG_KEY] === true), logged("Reading the debug setting"));
 
 initBadge();
-chrome.idle.setDetectionInterval(60);
+// Safari has no idle API, no shortcuts and no right-click menu, and on iPhone no windows API: each is optional here.
+chrome.idle?.setDetectionInterval(60);
 
 /** The toolbar icon, its count and the right-click menu follow the active tab and PassAuth's state. */
 function refreshPage() {
@@ -97,9 +98,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 // Back online: the same.
 (globalThis as { addEventListener?: (type: string, fn: () => void) => void }).addEventListener?.("online", () => void vault.connectionBack().catch(logged("Sending changes waiting to sync")));
-chrome.idle.onStateChanged.addListener((state) => void onIdleState(state).catch(logged("The vault timeout on system lock")));
-chrome.commands.onCommand.addListener(onCommand);
-chrome.contextMenus.onClicked.addListener(onMenuClicked);
+chrome.idle?.onStateChanged.addListener((state) => void onIdleState(state).catch(logged("The vault timeout on system lock")));
+chrome.commands?.onCommand.addListener(onCommand);
+chrome.contextMenus?.onClicked.addListener(onMenuClicked);
 
 chrome.tabs.onActivated.addListener(refreshPage);
 chrome.tabs.onUpdated.addListener((_id, change) => {
@@ -113,8 +114,8 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 });
 // The security key window reached the server's done page, or was closed (two-step-key.ts).
 chrome.tabs.onUpdated.addListener((tabId, change) => void onKeyTabUpdated(tabId, change).catch(logged("Reading the security key result")));
-chrome.windows.onRemoved.addListener((windowId) => void onKeyWindowGone({ windowId }).catch(logged("A closed security key window")));
-chrome.windows.onFocusChanged.addListener(refreshPage);
+chrome.windows?.onRemoved.addListener((windowId) => void onKeyWindowGone({ windowId }).catch(logged("A closed security key window")));
+chrome.windows?.onFocusChanged.addListener(refreshPage);
 chrome.tabs.onRemoved.addListener((tabId) => {
   void forgetSaves(tabId).catch(logged("Forgetting a closed tab's save"));
   void forgetMenus(tabId).catch(logged("Forgetting a closed tab's menu"));

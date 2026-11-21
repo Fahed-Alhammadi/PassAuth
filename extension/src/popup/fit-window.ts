@@ -27,10 +27,10 @@ export function fitWindow(content: () => Size): Promise<void> {
 
 async function fitOnce(content: () => Size): Promise<void> {
   // Page zoom scales the page's own pixels against the window's (unknown: assume none).
-  const zoom = await chrome.tabs.getZoom().catch(() => 1);
+  const zoom = await (chrome.tabs.getZoom?.() ?? Promise.resolve(1)).catch(() => 1);
   // A resize reaches the page a moment after the window: check again until both agree (a few rounds at most).
   for (let round = 0; round < 3; round++) {
-    const win = await chrome.windows.getCurrent().catch(() => null);
+    const win = await chrome.windows?.getCurrent().catch(() => null);
     const current = usableBounds(win);
     // Only PassAuth's own windows; never the browser window a toolbar popup belongs to.
     if (!win?.id || win.type !== "popup" || win.state !== "normal" || !current) return;

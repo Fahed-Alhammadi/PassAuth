@@ -66,7 +66,7 @@ export const seconds = (s: number) => (s < 60 ? `${s} seconds` : `${s / 60} minu
 export async function activeTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.url?.startsWith("http") || !new URLSearchParams(location.search).has("popout")) return tab;
-  const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  const win = await chrome.windows?.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
   if (!win?.id) return tab;
   const [other] = await chrome.tabs.query({ active: true, windowId: win.id });
   return other ?? tab;

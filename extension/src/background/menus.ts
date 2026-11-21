@@ -287,6 +287,8 @@ export function applyMenu(): Promise<void> {
 }
 
 async function rebuild() {
+  // Safari has no right-click menu.
+  if (!chrome.contextMenus) return;
   try {
     await initCore();
     const s = await snapshot();
@@ -331,7 +333,7 @@ export function noteContextField(sender: chrome.runtime.MessageSender, password:
   if (contextFields.get(tabId) === value) return;
   contextFields.set(tabId, value);
   // Not in the menu right now (locked, hidden site, the setting off): an error to ignore.
-  if (sender.tab?.active) chrome.contextMenus.update(STRONG_ID, { visible: value }, () => void chrome.runtime.lastError);
+  if (sender.tab?.active && chrome.contextMenus) chrome.contextMenus.update(STRONG_ID, { visible: value }, () => void chrome.runtime.lastError);
 }
 
 /** A tab closed. */

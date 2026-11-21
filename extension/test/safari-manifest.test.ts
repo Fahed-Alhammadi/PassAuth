@@ -54,3 +54,8 @@ test("isSafari / browserName tell Safari apart by its extension URL scheme", () 
   }
   expect(isSafari()).toBe(false);
 });
+
+test("browserFeatures: Chrome offers shortcuts, the right-click menu and the default password manager setting", async () => {
+  const { browserFeatures } = await import("../src/shared/browser");
+  expect(browserFeatures()).toEqual({ shortcuts: true, rightClickMenu: true, defaultPasswordManager: true });
+});
