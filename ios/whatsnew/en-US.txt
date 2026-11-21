@@ -1,7 +1,7 @@
-New in 0.15.2
-• AutoFill no longer mixes up logins that share a user name on one domain. If you have, for example, two "fahed" logins on cloud.example.com and media.example.com, each is now suggested on its own site, so the keyboard's suggestion can't fill the other login's password.
-• Buttons that remove something (Log out, Move to trash, Delete forever, Discard) now show their icon in red too.
+New in 0.15.3
+• AutoFill picks the right login on sites that share a domain. Logins set to match by Host, Exact or Starts with, and logins that share a user name on one domain (for example "fahed" on cloud.example.com and media.example.com), no longer appear in the suggestion above the keyboard, where the system could offer the wrong one. Tap PassAuth there instead: its list shows the login for the page you're on first.
+• Logins set to Base domain still appear above the keyboard as before.
 
 Please test:
-1. Save two logins with the same user name on two sites of one domain (for example a.yourdomain.com and b.yourdomain.com), both with the website match "Base domain". On each site's sign-in page, the suggestion above the keyboard should show that site's login, and filling should use its password.
-2. Check the red icons on Log out (Settings → Account), Move to trash and Delete forever (a login in the trash), and Discard (editing a login).
+1. Have two logins on two sites of one domain (for example a.yourdomain.com and b.yourdomain.com), with the same user name or set to Host. On each sign-in page, open PassAuth from the suggestion bar: the right login should be at the top, and filling should use its password.
+2. A login set to Base domain should still appear directly in the suggestion bar.

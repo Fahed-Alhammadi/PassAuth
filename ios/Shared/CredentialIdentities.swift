@@ -27,9 +27,11 @@ public struct IdentityRecord: Equatable, Hashable, Sendable {
 /// A website becomes an identity by its effective match (the item's, or the default-match
 /// setting for "Default"): "base domain" → a `.domain` identity of the base domain (iOS also
 /// offers it on subdomains, like the matcher); "host" → a `.URL` identity of the origin;
-/// "exact" / "starts with" → a `.URL` identity of the address. Logins that share a user name
-/// under one base domain are written by their full host (`crowdedDomains`), so the system's
-/// list shows each on its own site instead of one row for both. iOS matches these itself and
+/// "exact" / "starts with" → a `.URL` identity of the address (`service`). Only `.domain` ones are
+/// registered: the system offers every identity on the whole base domain and shows one row per user
+/// name there (seen on macOS: a host-only Cloudy login offered first on radarr.… and portainer.…), so
+/// Host/Exact/Starts with websites and logins sharing a user name under one base domain
+/// (`crowdedDomains`) are left out; "PassAuth…" then lists the right login for the page. iOS matches these itself and
 /// doesn't tell PassAuth the page when a suggestion is picked, so websites PassAuth can't
 /// express this way are left out: regular expressions, "never", app websites and non-web
 /// schemes. A login for the PassAuth server's own address is written like any other, so Safari
@@ -46,10 +48,11 @@ public enum IdentityMapper {
             let user = l.username.isEmpty ? e.item.name : l.username
             let services: [(String, IdentityRecord.Service)] = l.urls.compactMap { u in
                 guard let (svc, type) = service(u, defaultMatch: defaultMatch) else { return nil }
-                // Another login with this user name on the same base domain: by full host.
-                if type == .domain, crowded.contains(DomainUser(domain: svc, user: user.lowercased())), let p = UrlMatcher.parse(u.url) {
-                    return (p.origin, .url)
-                }
+                // The system offers an identity on every subdomain of its base domain and lists one row per user
+                // name there, whatever its type: Host/Exact/Starts with websites, and logins that share a user
+                // name under one base domain, aren't registered. The system then shows "PassAuth…", whose list
+                // picks by the page (AutofillMatcher).
+                if type == .url || crowded.contains(DomainUser(domain: svc, user: user.lowercased())) { return nil }
                 return (svc, type)
             }
             let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
