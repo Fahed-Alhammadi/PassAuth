@@ -247,6 +247,29 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(IdentityMapper.records(one, defaultMatch: .domain).map(\.service), ["example.com"])
     }
 
+    /// "Suggest every login above the keyboard" (off by default): Host/Exact/Starts with websites are
+    /// registered by their address, and same-name logins under one base domain by their full host, so
+    /// each still has its own row (the system may still offer it on other sites of the domain).
+    func testSuggestEveryLoginRegistersThemAgain() {
+        let e = [
+            entry("1", name: "Cloudy", user: "fahed", password: "a", urls: [("https://cloudy.example.com/login", .domain)]),
+            entry("2", name: "Radarr", user: "fahed", password: "b", urls: [("https://radarr.example.com", .domain)]),
+            entry("3", name: "Shop", user: "bob", password: "c", urls: [("https://shop.test/account", .exact), ("https://pay.test", .host)]),
+            entry("4", name: "Gitea", user: "admin", password: "d", urls: [("https://gitea.example.com", .domain)]),
+        ]
+        let on = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true).filter { $0.kind == .password }
+        XCTAssertEqual(on.map(\.service), ["https://cloudy.example.com", "https://radarr.example.com", "https://shop.test/account", "https://pay.test", "example.com"])
+        XCTAssertEqual(on.map(\.serviceType), [.url, .url, .url, .url, .domain])
+        let off = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .password }
+        XCTAssertEqual(off.map(\.service), ["example.com"])
+    }
+
+    func testSuggestEveryLoginIsOffForExistingSettings() throws {
+        let s = try JSONDecoder().decode(Settings.self, from: Data(#"{"defaultMatch":"host"}"#.utf8))
+        XCTAssertFalse(s.suggestAllLogins)
+        XCTAssertFalse(Settings().suggestAllLogins)
+    }
+
     func testDefaultMatchChangesIdentities() {
         let e = [entry("1", name: "Example", user: "alice", urls: [("https://www.example.com/login", .default)])]
         XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .domain).map(\.service), ["example.com"])

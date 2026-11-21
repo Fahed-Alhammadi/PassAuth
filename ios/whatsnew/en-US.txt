@@ -1,7 +1,6 @@
-New in 0.15.3
-• AutoFill picks the right login on sites that share a domain. Logins set to match by Host, Exact or Starts with, and logins that share a user name on one domain (for example "fahed" on cloud.example.com and media.example.com), no longer appear in the suggestion above the keyboard, where the system could offer the wrong one. Tap PassAuth there instead: its list shows the login for the page you're on first.
-• Logins set to Base domain still appear above the keyboard as before.
+New in 0.15.4
+• New switch in Settings → AutoFill: "Suggest every login above the keyboard". Since 0.15.3, logins set to match by Host, Exact or Starts with (and logins that share a user name on one domain) are reached through PassAuth in the suggestions, so iOS can't offer the wrong one. If you prefer them directly above the keyboard again, turn this on. iOS may then suggest a login from another site of the same domain: check the site name before you tap it.
 
 Please test:
-1. Have two logins on two sites of one domain (for example a.yourdomain.com and b.yourdomain.com), with the same user name or set to Host. On each sign-in page, open PassAuth from the suggestion bar: the right login should be at the top, and filling should use its password.
-2. A login set to Base domain should still appear directly in the suggestion bar.
+1. With the switch off (the default), a login set to Host appears under PassAuth in the suggestions, not as its own suggestion.
+2. Turn it on, then open that login's sign-in page again: it should appear directly above the keyboard.
