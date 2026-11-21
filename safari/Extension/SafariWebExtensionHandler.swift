@@ -17,6 +17,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     static func answer(_ message: [String: Any]?) -> [String: Any] {
         switch message?["type"] as? String {
         case "ping": return ["ok": true]
+        case "handoff": return Handoff.reply(Handoff.read())
         default: return ["error": "unknown"]
         }
     }

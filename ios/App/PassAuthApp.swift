@@ -118,6 +118,12 @@ struct RootView: View {
         .onChange(of: model.push.signInRequests) { _, _ in
             if state.status == .unlocked && !state.twoStepRequired { Task { await model.authRequests.refresh() } }
         }
+        // "PassAuth for Safari": server, email and Secret Key of the unlocked account, so its
+        // sign-in needs only the master password; signed out: cleared (locked: kept as it was).
+        .onChange(of: "\(state.activeId)|\(state.status)|\(state.server)|\(state.email)", initial: true) { _, _ in
+            if state.status == .unlocked { SafariHandoff.store(model.repo.safariHandoff) }
+            else if state.status == .setup || state.status == .loggedOut { SafariHandoff.store(nil) }
+        }
         .onChange(of: state.settings.theme) { _, t in applyTheme(t) }
         .onChange(of: state.settings.vaultTimeout) { _, _ in model.lockManager.settingsChanged() }
     }

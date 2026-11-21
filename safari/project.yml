@@ -76,6 +76,8 @@ targets:
         CFBundleDisplayName: PassAuth
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # The Keychain group holding the hand-off (Extension/Handoff.swift).
+        PAKeychainGroup: $(AppIdentifierPrefix)$(PA_HANDOFF_GROUP)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.Safari.web-extension
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
@@ -83,10 +85,15 @@ targets:
       path: Extension/SafariExtension.entitlements
       properties:
         com.apple.security.app-sandbox: true
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)$(PA_HANDOFF_GROUP)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.passauth.safari.extension
         PRODUCT_NAME: SafariExtension
+        # iPhone/iPad: the PassAuth app's shared group; Mac: the desktop app's AutoFill group.
+        PA_HANDOFF_GROUP: io.passauth.shared
+        "PA_HANDOFF_GROUP[sdk=macosx*]": io.passauth.desktop.autofill
         TARGETED_DEVICE_FAMILY: "1,2"
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES

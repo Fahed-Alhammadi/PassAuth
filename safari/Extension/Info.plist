@@ -27,5 +27,7 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).SafariWebExtensionHandler</string>
 	</dict>
+	<key>PAKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)$(PA_HANDOFF_GROUP)</string>
 </dict>
 </plist>

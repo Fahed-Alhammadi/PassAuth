@@ -620,6 +620,13 @@ public final class VaultRepository {
         return sessionIds.contains(id) ? .unlocked : .locked
     }
 
+    /// The hand-off for "PassAuth for Safari": the active account while unlocked, else nil.
+    public var safariHandoff: SafariHandoff? {
+        let st = state
+        let sk = store.stored.secrets.secretKeys[st.email.lowercased()]
+        return SafariHandoff.make(status: st.status, server: st.server, email: st.email, secretKey: sk)
+    }
+
     public var state: AppState {
         let s = store.stored
         var st = AppState()
