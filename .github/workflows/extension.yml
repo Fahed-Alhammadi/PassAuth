@@ -1,15 +1,18 @@
-# Web vault + Chrome extension.
+# Web vault + Chrome and Firefox extension.
 # - Push to main / pull request: builds and tests the web vault, checks that the shared golden
 #   vectors (testdata/vectors.json) are the answers of the core being built (the extension's site
 #   logic is the core's), then lints (Biome), tests (incl. its wrappers against the vectors) and
-#   builds the extension against the browser build of the core.
-# - Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the Chrome
-#   extension and submit it to the Chrome Web Store. There is no GitHub release: the zip
-#   (passauth-extension-1.2.3.zip) is kept as a download on the workflow run for 90 days. The version comes from extension/package.json and
+#   builds the extension against the browser build of the core, for Chrome and for Firefox (checked by
+#   Mozilla's web-ext lint).
+# - Push a tag like extension-1.2.3 (scripts/release.sh extension 1.2.3) to build the extension and
+#   submit it to the Chrome Web Store and to addons.mozilla.org (Firefox, with its source archive,
+#   scripts/firefox-source.sh). There is no GitHub release: the zips (passauth-extension-1.2.3.zip,
+#   passauth-extension-firefox-1.2.3.zip + -source) are kept as downloads on the workflow run for 90 days. The version comes from extension/package.json and
 #   extension/public/manifest.json, which must both match the tag (the Web Store needs a higher
 #   manifest version for every upload).
-# - Run it by hand (Actions → Extension → Run workflow) to only check the Web Store
-#   connection: it signs in and prints the store status; nothing is built or uploaded.
+# - Run it by hand (Actions → Extension → Run workflow) to only check the store connections:
+#   it signs in to the Chrome Web Store and addons.mozilla.org and prints their status; nothing
+#   is built or uploaded.
 name: Extension
 
 on:
@@ -85,6 +88,10 @@ jobs:
       - name: Extension (lint, unit tests, type check + build)
         run: pnpm install --frozen-lockfile && pnpm lint && pnpm test && pnpm build
         working-directory: extension
+      # Fails on lint errors only (its warnings are known: fixed innerHTML markup, the Chrome-only offscreen path).
+      - name: Firefox extension (build + web-ext lint)
+        run: pnpm build:firefox && npm exec --yes -- web-ext@10.8.0 lint --source-dir dist-firefox
+        working-directory: extension
 
   store-check:
     if: github.event_name == 'workflow_dispatch'
@@ -99,6 +106,14 @@ jobs:
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
           CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
         run: scripts/cws-publish.sh --check
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Check the addons.mozilla.org connection
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: node scripts/amo-check.mjs
 
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
@@ -140,6 +155,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm package
           mv passauth-extension.zip "../passauth-extension-${GITHUB_REF_NAME#extension-}.zip"
+      # Same code, Firefox manifest (extension/firefox-manifest.mjs); the source archive is what AMO's
+      # reviewers rebuild from (byte-identical output: scripts/build-wasm.sh maps machine paths away).
+      - name: Build Firefox extension + source archive
+        run: |
+          v="${GITHUB_REF_NAME#extension-}"
+          (cd extension && pnpm package:firefox && mv passauth-extension-firefox.zip "../passauth-extension-firefox-$v.zip")
+          scripts/firefox-source.sh "passauth-extension-firefox-$v-source.zip" "$GITHUB_REF_NAME"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: passauth-extension-${{ github.ref_name }}
@@ -158,3 +180,18 @@ jobs:
           v="${GITHUB_REF_NAME#extension-}"
           if [[ "$v" == *-* ]]; then echo "Pre-release $v: not sent to the Web Store"; exit 0; fi
           scripts/cws-publish.sh "passauth-extension-$v.zip"
+      # Off until repo variable AMO_UPLOAD_ENABLED=true (plus secrets AMO_JWT_ISSUER, AMO_JWT_SECRET).
+      # The first upload creates the listing from extension/amo-metadata.json. --approval-timeout 0:
+      # return once AMO has validated the upload (review can take days); the listing updates after approval.
+      - name: Submit to addons.mozilla.org
+        if: vars.AMO_UPLOAD_ENABLED == 'true'
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        working-directory: extension
+        run: |
+          v="${GITHUB_REF_NAME#extension-}"
+          if [[ "$v" == *-* ]]; then echo "Pre-release $v: not sent to addons.mozilla.org"; exit 0; fi
+          npm exec --yes -- web-ext@10.8.0 sign --source-dir dist-firefox --channel listed \
+            --amo-metadata amo-metadata.json --upload-source-code "../passauth-extension-firefox-$v-source.zip" \
+            --approval-timeout 0 --artifacts-dir "$RUNNER_TEMP/web-ext"

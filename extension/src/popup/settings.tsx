@@ -4,6 +4,7 @@ import { LogoMark } from "@web/components/Logo";
 import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "@web/components/ui";
 import { minutesLabel, timeoutOptions } from "@web/lib/policies";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { browserName, isFirefox } from "../shared/browser";
 import { callPopup } from "../shared/protocol";
 import type { PopupState, SecurityKey, SecurityKeys, Settings, SharingIdentity, VaultTimeout } from "../shared/types";
 import { avatarJpeg, bytesToBase64 } from "./avatar-image";
@@ -19,7 +20,18 @@ const COMMANDS: [name: string, label: string, help?: string][] = [
   ["lock", "Lock PassAuth"],
 ];
 
-/** The shortcuts as Chrome has them now (the user can change them on chrome://extensions/shortcuts). */
+/**
+ * The browser's page for changing extension shortcuts. Chrome: chrome://extensions/shortcuts. Firefox doesn't let an
+ * extension open about:addons, but has commands.openShortcutSettings() (Firefox 137).
+ */
+const firefoxShortcuts = () => (chrome.commands as { openShortcutSettings?: () => Promise<void> }).openShortcutSettings;
+const canChangeShortcuts = () => !isFirefox() || !!firefoxShortcuts();
+async function openShortcutSettings() {
+  if (!isFirefox()) return void (await chrome.tabs.create({ url: "chrome://extensions/shortcuts" }));
+  await firefoxShortcuts()?.call(chrome.commands);
+}
+
+/** The shortcuts as the browser has them now (the user can change them in the browser's shortcut settings). */
 export function Shortcuts() {
   const [commands, setCommands] = useState<chrome.commands.Command[] | null>(null);
   useEffect(() => {
@@ -46,9 +58,13 @@ export function Shortcuts() {
           })}
         </ul>
       )}
-      <button type="button" className="link" style={{ alignSelf: "flex-start" }} onClick={() => void chrome.tabs.create({ url: "chrome://extensions/shortcuts" })}>
-        Change shortcuts
-      </button>
+      {canChangeShortcuts() ? (
+        <button type="button" className="link" style={{ alignSelf: "flex-start" }} onClick={() => void openShortcutSettings()}>
+          Change shortcuts
+        </button>
+      ) : (
+        <p className="small muted">To change them: Firefox menu → Add-ons and themes → gear button → Manage Extension Shortcuts.</p>
+      )}
     </section>
   );
 }
@@ -209,8 +225,8 @@ function HiddenSites({ initial, notify }: { initial: string[]; notify: (t: strin
 type Control = chrome.types.LevelOfControl | "no-permission" | "unknown";
 
 /**
- * "Default password manager": turn off Chrome's own password saving and
- * address/card autofill (chrome.privacy, an optional permission) so its
+ * "Default password manager": turn off the browser's own password saving and
+ * address/card autofill (chrome.privacy, an optional permission; Firefox: passwords only) so its
  * prompts don't compete with PassAuth's. Turning it off hands control back.
  */
 export function DefaultManager({ notify }: { notify: (t: string) => void }) {
@@ -222,17 +238,19 @@ export function DefaultManager({ notify }: { notify: (t: string) => void }) {
   };
   // biome-ignore lint/correctness/useExhaustiveDependencies: read once when the page opens (read is recreated on every render)
   useEffect(() => void read(), []);
-  const services = () => [chrome.privacy.services.passwordSavingEnabled, chrome.privacy.services.autofillAddressEnabled, chrome.privacy.services.autofillCreditCardEnabled];
+  // Firefox has only the password setting (its address and card autofill can't be turned off by an extension).
+  const services = () => [chrome.privacy.services.passwordSavingEnabled, chrome.privacy.services.autofillAddressEnabled, chrome.privacy.services.autofillCreditCardEnabled].filter(Boolean);
+  const name = browserName();
 
   async function toggle(on: boolean) {
     try {
       if (on) {
-        if (!(await chrome.permissions.request({ permissions: ["privacy"] }))) return notify("PassAuth needs the privacy permission to turn off Chrome's password manager.");
+        if (!(await chrome.permissions.request({ permissions: ["privacy"] }))) return notify(`PassAuth needs the privacy permission to turn off ${name}'s password manager.`);
         for (const s of services()) await s.set({ value: false });
         notify("PassAuth is now your default password manager.");
       } else {
         for (const s of services()) await s.clear({});
-        notify("Chrome's password manager and autofill are back on.");
+        notify(isFirefox() ? "Firefox's password manager is back on." : `${name}'s password manager and autofill are back on.`);
       }
     } catch (e) {
       notify(msg(e));
@@ -245,14 +263,18 @@ export function DefaultManager({ notify }: { notify: (t: string) => void }) {
     <>
       <Toggle
         label="Make PassAuth your default password manager"
-        help="Turns off Chrome's built-in password saving and address and card autofill, so only PassAuth offers to save and fill."
+        help={
+          isFirefox()
+            ? "Turns off Firefox's built-in password saving, so only PassAuth offers to save logins."
+            : `Turns off ${name}'s built-in password saving and address and card autofill, so only PassAuth offers to save and fill.`
+        }
         checked={on}
         onChange={toggle}
       />
       {control === "controlled_by_other_extensions" && (
-        <p className="small muted">Another extension (for example another password manager) controls this Chrome setting. Remove or turn off that extension first.</p>
+        <p className="small muted">Another extension (for example another password manager) controls this {name} setting. Remove or turn off that extension first.</p>
       )}
-      {control === "not_controllable" && <p className="small muted">This setting is managed by your organization's Chrome policy.</p>}
+      {control === "not_controllable" && <p className="small muted">This setting is managed by your organization's {name} policy.</p>}
     </>
   );
 }

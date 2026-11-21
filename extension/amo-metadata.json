@@ -1,0 +1,10 @@
+{
+  "summary": { "en-US": "Fill passwords, one-time codes and passkeys from your self-hosted PassAuth vault. End-to-end encrypted: your server never sees your passwords." },
+  "categories": ["privacy-security"],
+  "homepage": { "en-US": "https://fahed-alhammadi.github.io/PassAuth/" },
+  "support_url": { "en-US": "https://fahed-alhammadi.github.io/PassAuth/support.html" },
+  "version": {
+    "license": "MIT",
+    "approval_notes": "PassAuth is an open-source password manager (https://github.com/Fahed-Alhammadi/PassAuth). The add-on talks only to the PassAuth server the user enters at sign-in (self-hosted; nothing goes to the developer). Vault items are encrypted in the browser (XChaCha20-Poly1305, Argon2id), so the server stores ciphertext only; the account email and encrypted vault are the declared data (authenticationInfo, personallyIdentifyingInfo).\n\nBuild from the attached source: see README.md and BUILD_INFO.txt at its top folder (Rust core compiled to WebAssembly with wasm-bindgen, TypeScript bundled with Vite, then `pnpm package:firefox`). The output zip is reproducible.\n\nNotes for review: innerHTML is only set to fixed markup bundled with the add-on (SVG icons, its own CSS); page and vault text is always set with textContent. The offscreen-document code is the Chrome path and never runs in Firefox (Firefox's background page writes the clipboard itself). The page-world script (webauthn.js, world MAIN) forwards passkey requests to the add-on.\n\nTo test: run a server with Docker as described in docs/SELF_HOSTING.md of the repository (image ghcr.io/fahed-alhammadi/passauth), create an account in its web vault, then sign in to the add-on with the server's address. A test account on our demo server is available on request."
+  }
+}

@@ -44,7 +44,8 @@ export function shadowOf(el: Element): ShadowRoot | null {
   if (el.shadowRoot) return el.shadowRoot;
   if (!el.localName.includes("-")) return null;
   try {
-    return chrome.dom?.openOrClosedShadowRoot?.(el as HTMLElement) ?? null;
+    // Chrome: chrome.dom; Firefox: the content script's view of the element has openOrClosedShadowRoot.
+    return chrome.dom?.openOrClosedShadowRoot?.(el as HTMLElement) ?? (el as { openOrClosedShadowRoot?: ShadowRoot | null }).openOrClosedShadowRoot ?? null;
   } catch {
     return null;
   }

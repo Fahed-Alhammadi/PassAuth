@@ -6,6 +6,7 @@
 import { LogoMark } from "@web/components/Logo";
 import { Icon, type IconName } from "@web/components/ui";
 import { type ReactNode, useEffect, useState } from "react";
+import { browserName, isFirefox } from "../shared/browser";
 import { DefaultManager, Shortcuts } from "./settings";
 
 function Step({ n, icon, title, children }: { n: number; icon: IconName; title: string; children: ReactNode }) {
@@ -58,7 +59,11 @@ export function Welcome() {
       </header>
       <ol className="welcome-steps">
         <Step n={1} icon="puzzle" title="Pin PassAuth to the toolbar">
-          <p>Click the puzzle piece in Chrome's toolbar, then the pin next to PassAuth, so it is always one click away.</p>
+          <p>
+            {isFirefox()
+              ? "Click the puzzle piece in Firefox's toolbar, then the gear next to PassAuth and Pin to Toolbar, so it is always one click away."
+              : `Click the puzzle piece in ${browserName()}'s toolbar, then the pin next to PassAuth, so it is always one click away.`}
+          </p>
         </Step>
         <Step n={2} icon="globe" title="Connect to your server">
           <p>Open PassAuth, enter your PassAuth server's address and sign in with your email, master password and, if you use one, your Secret Key.</p>

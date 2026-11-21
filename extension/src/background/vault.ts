@@ -18,6 +18,7 @@ import { approval, type SignInRequest, secretKeyToKeep } from "@web/lib/device-l
 import { WEAK_BITS } from "@web/lib/health";
 import type { Bundle, EncryptedItem, Item, LoginFinishResponse, PreloginResponse, Role, SyncItemRow, SyncResponse, SyncVaultRow } from "@web/lib/types";
 import { isSyncResponse, kindOf, siteHost } from "@web/lib/types";
+import { browserName } from "../shared/browser";
 import { AppError, codeOf, EXPIRED, FAILED, lockedError, messageOf, NOT_FOUND, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
 import { log, logged, loggedAs } from "../shared/log";
 import { POPUP_VIEW_KEY } from "../shared/storage-keys";
@@ -526,7 +527,7 @@ export async function setServer(url: string) {
 
 /** How this browser names itself to the server at sign-in (also for a sign-in approved from another device). */
 export async function deviceInfo() {
-  return { id: await local.deviceId(), name: `PassAuth extension (${navigator.userAgent.includes("Edg/") ? "Edge" : "Chrome"})`, kind: "extension" };
+  return { id: await local.deviceId(), name: `PassAuth extension (${browserName()})`, kind: "extension" };
 }
 
 const secretKeyMissing = () => new AppError(SECRET_KEY_REQUIRED, "This account uses a Secret Key. Enter it from your Emergency Kit.");

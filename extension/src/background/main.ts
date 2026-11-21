@@ -15,6 +15,7 @@
 import { DEBUG_KEY, logged, setDebug } from "../shared/log";
 import { setReachHandler, setSessionLostHandler, setTwoStepHandler } from "./api";
 import { initBadge, pageStateChanged, refreshBadge } from "./badge";
+import { onClipboardAlarm } from "./clipboard";
 import { onCommand } from "./commands";
 import { forgetFillProblem } from "./fill-problems";
 import { forgetTab as forgetMenus } from "./inline-menu";
@@ -88,6 +89,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 chrome.runtime.onStartup.addListener(() => void onBrowserStart().catch(logged("The vault timeout at browser start")));
 chrome.alarms.onAlarm.addListener(onAlarm);
+chrome.alarms.onAlarm.addListener(onClipboardAlarm);
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === LIVE_ALARM) void onLiveAlarm().catch(logged("The live-sync check"));
   // Offline changes waiting to sync: try again (a sync first, while unlocked).

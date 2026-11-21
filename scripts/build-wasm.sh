@@ -12,6 +12,12 @@ if [ "$want" != "$have" ]; then
   exit 1
 fi
 
+# Machine paths (this checkout, the cargo registry) end up in panic locations inside the .wasm: map them to fixed
+# names, so the same source gives the same bytes on any computer (addons.mozilla.org rebuilds the add-on from its
+# source and compares). These flags replace .cargo/config.toml's target rustflags, so its getrandom flag is repeated.
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f' '--cfg' 'getrandom_backend="wasm_js"' "--remap-path-prefix=$cargo_home=/cargo" "--remap-path-prefix=$PWD=/src")"
+export CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}"
 cargo build --release --locked -p passauth-core-wasm --target wasm32-unknown-unknown
 for out in "$@"; do
   mkdir -p "$out"
