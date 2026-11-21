@@ -1,6 +1,7 @@
 import { LogoMark } from "@web/components/Logo";
 import { ConfirmDialog, ErrorText, Icon, PasswordInput, SheetActions } from "@web/components/ui";
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { appHandoff, sameServer } from "../shared/app-handoff";
 import { codeOf, LOCKED, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
 import { lostText } from "../shared/offline-text";
 import { callPopup, setFailureHandler } from "../shared/protocol";
@@ -160,6 +161,10 @@ function Setup({ onDone, initial = "", lost }: { onDone: () => void; initial?: s
   const [url, setUrl] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Safari: the server the PassAuth app on this device uses (shared/app-handoff.ts).
+  useEffect(() => {
+    void appHandoff().then((h) => h && setUrl((u) => u || h.server));
+  }, []);
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -255,6 +260,20 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     );
   }
 
+  // Safari: email and Secret Key from the PassAuth app on this device, for the same server (shared/app-handoff.ts).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, when the sign-in screen opens
+  useEffect(() => {
+    void appHandoff().then((h) => {
+      if (!h || !sameServer(h.server, state.server)) return;
+      setEmail((e) => e || h.email);
+      if (h.secretKey) {
+        const key = h.secretKey;
+        setSecretKey((k) => k || key);
+        setNeedKey(true);
+      }
+    });
+  }, []);
+
   // A security-key sign-in started before this popup closed (the key window took the focus): waiting, or how it ended.
   // biome-ignore lint/correctness/useExhaustiveDependencies: once, when the sign-in screen opens
   useEffect(() => {
@@ -318,7 +337,7 @@ function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) =
     const address = email.trim();
     if (!address) return setError("Enter your email address first.");
     if (new URLSearchParams(location.search).has("popout")) return setDevice(address);
-    const browser = await chrome.windows.getCurrent().catch(() => null);
+    const browser = await chrome.windows?.getCurrent().catch(() => null);
     await openCentered(deviceSignInUrl(address), POPUP_WINDOW, { windowId: browser?.id });
     window.close();
   }

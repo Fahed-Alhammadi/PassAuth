@@ -43,11 +43,19 @@ async function anchor(from: { windowId?: number; tabId?: number }): Promise<Boun
   return own ?? usableBounds(await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null));
 }
 
+/** Whether the browser can open windows (Safari on iPhone and iPad can't: tabs only). */
+export const canUseWindows = (): boolean => typeof chrome.windows?.create === "function";
+
 /**
  * Open a PassAuth window whose page area is `content`, centred over the
  * browser window of `from` (so it also lands on that window's display).
  */
 export async function openCentered(url: string, content: Size, from: { windowId?: number; tabId?: number } = {}): Promise<chrome.windows.Window | undefined> {
+  // Safari on iPhone and iPad has no windows: a tab instead (no window to hand back).
+  if (!canUseWindows()) {
+    await chrome.tabs.create({ url, active: true });
+    return undefined;
+  }
   const size = outerSize(content, await frame());
   const over = await anchor(from);
   const base = { url, type: "popup" as const, focused: true, ...size };

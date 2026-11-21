@@ -159,7 +159,7 @@ export const isPopOut = () => new URLSearchParams(location.search).has("popout")
 /** Open PassAuth in its own window, where the popup was (its view is restored), and close this popup. */
 export async function openPopOut() {
   // Over the browser window this popup belongs to, not in a corner of the screen.
-  const browser = await chrome.windows.getCurrent().catch(() => null);
+  const browser = await chrome.windows?.getCurrent().catch(() => null);
   await openCentered(chrome.runtime.getURL("popup.html?popout=1"), POPUP_WINDOW, { windowId: browser?.id });
   window.close();
 }

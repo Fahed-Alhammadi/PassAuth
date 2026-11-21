@@ -7,6 +7,7 @@ import "./popup.css";
 
 import { Component, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { fluidPopup, isSafari } from "../shared/browser";
 import { POPUP_WINDOW } from "../shared/windows";
 import { App } from "./App";
 import { fitWindow } from "./fit-window";
@@ -33,6 +34,7 @@ if (!welcome) keepAlive();
 const passkey = location.hash.match(/^#passkey=(.+)$/)?.[1];
 const popout = new URLSearchParams(location.search).has("popout");
 if (popout) document.documentElement.classList.add("popout");
+if (fluidPopup(isSafari(), matchMedia("(pointer: coarse)").matches)) document.documentElement.classList.add("fluid");
 if (welcome) document.documentElement.classList.add("welcome-page");
 // The confirmation window is exactly as tall as its sheet (Passkey.tsx sizes it).
 if (passkey) document.documentElement.classList.add("sheet-window");

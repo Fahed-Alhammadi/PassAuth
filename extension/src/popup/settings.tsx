@@ -4,7 +4,7 @@ import { LogoMark } from "@web/components/Logo";
 import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "@web/components/ui";
 import { minutesLabel, timeoutOptions } from "@web/lib/policies";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { browserName, isFirefox } from "../shared/browser";
+import { browserFeatures, browserName, isFirefox } from "../shared/browser";
 import { callPopup } from "../shared/protocol";
 import type { PopupState, SecurityKey, SecurityKeys, Settings, SharingIdentity, VaultTimeout } from "../shared/types";
 import { avatarJpeg, bytesToBase64 } from "./avatar-image";
@@ -35,7 +35,7 @@ async function openShortcutSettings() {
 export function Shortcuts() {
   const [commands, setCommands] = useState<chrome.commands.Command[] | null>(null);
   useEffect(() => {
-    chrome.commands.getAll().then(setCommands, () => setCommands([]));
+    (chrome.commands?.getAll() ?? Promise.resolve([])).then(setCommands, () => setCommands([]));
   }, []);
   return (
     <section className="stack-s" aria-labelledby="keys-title">
@@ -718,7 +718,7 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
       icon: "wand",
       body: (
         <>
-          <DefaultManager notify={notify} />
+          {browserFeatures().defaultPasswordManager && <DefaultManager notify={notify} />}
           <label className="field">
             <span>Show inline autofill menu</span>
             <select className="select" value={settings.inlineMenu} onChange={(e) => update({ inlineMenu: e.target.value as Settings["inlineMenu"] })}>
@@ -744,20 +744,26 @@ export function SettingsPage({ ctx, section }: { ctx: Ctx; section?: string }) {
             checked={settings.inlineOnSignup}
             onChange={(v) => update({ inlineOnSignup: v })}
           />
-          <Toggle
-            label="Show PassAuth in the right-click menu"
-            help="Fill, copy a user name, password or code, or a strong password, from the page's right-click menu."
-            checked={settings.contextMenu}
-            onChange={(v) => update({ contextMenu: v })}
-          />
+          {browserFeatures().rightClickMenu && (
+            <Toggle
+              label="Show PassAuth in the right-click menu"
+              help="Fill, copy a user name, password or code, or a strong password, from the page's right-click menu."
+              checked={settings.contextMenu}
+              onChange={(v) => update({ contextMenu: v })}
+            />
+          )}
           <Toggle
             label="Copy verification code automatically"
             help="After filling a login that has an authenticator key, the current code is copied so you can paste it."
             checked={settings.autoCopyTotp}
             onChange={(v) => update({ autoCopyTotp: v })}
           />
-          <hr />
-          <Shortcuts />
+          {browserFeatures().shortcuts && (
+            <>
+              <hr />
+              <Shortcuts />
+            </>
+          )}
           <label className="field">
             <span>Clear clipboard</span>
             <select className="select" value={settings.clearClipboard} onChange={(e) => update({ clearClipboard: +e.target.value })}>

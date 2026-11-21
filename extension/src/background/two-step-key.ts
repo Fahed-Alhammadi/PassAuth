@@ -18,7 +18,7 @@ import { b64urlToBytes, KEY_DONE_PATH, KEY_PAGE_FEATURE, KEY_PAGE_MISMATCH, keyP
 import { AppError, EXPIRED, FAILED, messageOf } from "../shared/errors";
 import { logged } from "../shared/log";
 import type { KeySignInStatus, TwoFactorChallenge } from "../shared/types";
-import { openCentered } from "../shared/windows";
+import { canUseWindows, openCentered } from "../shared/windows";
 import { api, serverFeatures } from "./api";
 import { local } from "./storage";
 
@@ -38,10 +38,14 @@ const TIMED_OUT_TEXT = "Your security key wasn't used in time. Try again.";
 const NO_WINDOW_TEXT = "PassAuth couldn't open a window for your security key. Try again.";
 
 /** The open key window, as kept in session storage. */
+/** `Waiting.windowId` of a key page opened as a tab. */
+const NO_WINDOW = -1;
+
 interface Waiting {
   /** Random id of this hand-off. */
   id: string;
   tabId: number;
+  /** The key window; NO_WINDOW when the key page is a tab (Safari on iPhone and iPad has no windows). */
   windowId: number;
   /** The done page's address (`<key page origin>/two-step/key/done`), without a fragment. */
   done: string;
@@ -104,10 +108,31 @@ async function settle(w: Waiting, outcome: KeyOutcome, closeWindow = true): Prom
   }
   const stored = await storedWaiting();
   if (stored?.id === w.id) await chrome.storage.session.remove(KEY_WAIT_KEY).catch(logged("Forgetting the security key window"));
-  if (closeWindow) await chrome.windows.remove(w.windowId).catch(() => {});
+  if (closeWindow) {
+    if (w.windowId === NO_WINDOW) await chrome.tabs.remove(w.tabId).catch(() => {});
+    else await chrome.windows.remove(w.windowId).catch(() => {});
+  }
   if (mine) mine.resolve(outcome);
   else if (w.purpose === "login") orphaned();
   return !!mine;
+}
+
+/** The key page in its own window: its window and tab. */
+async function openKeyWindow(url: string): Promise<{ windowId: number; tabId: number }> {
+  const win = await openCentered(url, KEY_WINDOW).catch(() => undefined);
+  const tabId = win?.tabs?.[0]?.id ?? (win?.id !== undefined ? (await chrome.tabs.query({ windowId: win.id }).catch(() => []))[0]?.id : undefined);
+  if (win?.id === undefined || tabId === undefined) {
+    if (win?.id !== undefined) await chrome.windows.remove(win.id).catch(() => {});
+    throw new AppError(FAILED, NO_WINDOW_TEXT);
+  }
+  return { windowId: win.id, tabId };
+}
+
+/** The key page as a tab (no windows: Safari on iPhone and iPad). */
+async function openKeyTab(url: string): Promise<{ windowId: number; tabId: number }> {
+  const tab = await chrome.tabs.create({ url, active: true }).catch(() => undefined);
+  if (tab?.id === undefined) throw new AppError(FAILED, NO_WINDOW_TEXT);
+  return { windowId: NO_WINDOW, tabId: tab.id };
 }
 
 /**
@@ -129,13 +154,8 @@ export async function openKeyPage(token: string, purpose: "login" | "device", ac
   const challenge = publicKeyOf(options)?.challenge;
   if (!page || !url || typeof challenge !== "string") throw new AppError(FAILED, KEY_PAGE_MISMATCH);
   await cancelKeyPage();
-  const win = await openCentered(url, KEY_WINDOW).catch(() => undefined);
-  const tabId = win?.tabs?.[0]?.id ?? (win?.id !== undefined ? (await chrome.tabs.query({ windowId: win.id }).catch(() => []))[0]?.id : undefined);
-  if (win?.id === undefined || tabId === undefined) {
-    if (win?.id !== undefined) await chrome.windows.remove(win.id).catch(() => {});
-    throw new AppError(FAILED, NO_WINDOW_TEXT);
-  }
-  const w: Waiting = { id: crypto.randomUUID(), tabId, windowId: win.id, done: new URL(KEY_DONE_PATH, url).href, challenge, state: page.state, purpose };
+  const opened = canUseWindows() ? await openKeyWindow(url) : await openKeyTab(url);
+  const w: Waiting = { id: crypto.randomUUID(), ...opened, done: new URL(KEY_DONE_PATH, url).href, challenge, state: page.state, purpose };
   await chrome.storage.session.set({ [KEY_WAIT_KEY]: w });
   // Wrapped: an async function would otherwise wait for the outcome itself.
   const outcome = new Promise<KeyOutcome>((resolve) => {

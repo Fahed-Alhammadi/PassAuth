@@ -1,0 +1,11 @@
+First test version of PassAuth for Safari.
+
+PassAuth now works in Safari on iPhone, iPad and Mac:
+- Fill logins from your PassAuth vault, with the menu inside login fields.
+- Save new logins and update changed passwords when you sign in.
+- Add a website to a login you already have.
+- If the PassAuth app on the same device is unlocked, your server, email and Secret Key are filled in for you: just type your master password.
+
+To turn it on: open the PassAuth for Safari app and follow the steps. Passkeys and AutoFill in other apps keep coming from the PassAuth app.
+
+Please tell us what doesn't work, especially on websites where the menu doesn't appear or a login isn't saved.

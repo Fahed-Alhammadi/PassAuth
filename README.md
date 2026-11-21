@@ -47,8 +47,9 @@
 | Desktop | Your vault on macOS, Windows and Linux; lives in the menu bar or tray, syncs in the background, updates itself; AutoFill for Safari and apps on macOS | [Downloads](#desktop-app) below |
 | Android | Autofill in apps and browsers, passkey provider, verification codes (scan or paste), password history, live and background sync | Beta: [join the group](https://groups.google.com/g/passauth-app), then [join the test on Google Play](https://play.google.com/apps/testing/io.passauth.app) |
 | iPhone and iPad | AutoFill for passwords, codes and passkeys; saves new logins and suggests strong passwords; password history, live and background sync | Beta: [join the test on TestFlight](https://testflight.apple.com/join/MGBhGbhp) |
+| PassAuth for Safari | The browser extension in Safari on iPhone, iPad and Mac: menu under login fields, saves new logins, adds a site to a login; your server and email come from the PassAuth app on the same device | Coming soon (App Store) |
 
-Browsers: the extension runs in Chrome, Edge, Brave and other Chromium browsers. Safari is covered by the macOS AutoFill extension that comes with the desktop app. Firefox isn't supported.
+Browsers: the extension runs in Chrome, Edge, Brave and other Chromium browsers, and in Firefox (submitted to Firefox Add-ons). Safari gets its own app, PassAuth for Safari (coming soon); until then the AutoFill extensions of the desktop app (macOS) and the iPhone app fill logins in Safari.
 
 The mobile apps aren't in the stores yet. To try them before the official release, join the beta from the links above; you'll get updates automatically. On Android, first join the [passauth-app Google Group](https://groups.google.com/g/passauth-app) with the Google account you use on your phone, then open the Google Play link. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
 

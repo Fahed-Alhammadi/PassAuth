@@ -8,6 +8,7 @@
 import { Icon, type IconName, SiteIcon } from "@web/components/ui";
 import { type ItemKind, KIND_LABEL } from "@web/lib/types";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { needsSiteAccess, SITE_ACCESS_TEXT } from "../shared/browser";
 import { callPopup } from "../shared/protocol";
 import type { ItemList, ItemSummary, OtherItem } from "../shared/types";
 import { AddSiteConfirm } from "./add-site";
@@ -67,6 +68,7 @@ export function VaultList({
   const [host, setHost] = useState("");
   const [pageUrl, setPageUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [siteAccess, setSiteAccess] = useState(false);
   const [showFilter, setShowFilter] = useState(!!(filter.kind || filter.folder !== null || filter.favorite || filter.vault !== null));
   const [favOpen, setFavOpen] = useState<boolean | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
@@ -86,6 +88,7 @@ export function VaultList({
     activeTab()
       .then((tab) => {
         const url = tab?.url?.startsWith("http") ? tab.url : undefined;
+        if (alive) setSiteAccess(needsSiteAccess(tab));
         if (alive && url) {
           setHost(hostOf(url));
           setPageUrl(url);
@@ -377,6 +380,11 @@ export function VaultList({
       {error && (
         <div className="alert alert-error" role="alert">
           {error}
+        </div>
+      )}
+      {siteAccess && (
+        <div className="alert alert-info" role="status">
+          {SITE_ACCESS_TEXT}
         </div>
       )}
       <Notices ctx={ctx} data={data} tabId={tabId} />
