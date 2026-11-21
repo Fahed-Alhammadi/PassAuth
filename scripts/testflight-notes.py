@@ -3,9 +3,7 @@
 
     scripts/testflight-notes.py <marketing version> <build number> <notes file>
 
-Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH (App Store Connect API key, .p8); optional BUNDLE_ID
-(default io.passauth.app; io.passauth.safari for PassAuth for Safari) and PLATFORM (IOS or MAC_OS: which
-platform's build, for an app on both).
+Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH (App Store Connect API key, .p8).
 Waits up to 40 minutes for App Store Connect to list the build after the upload.
 Needs PyJWT with the crypto extra (pip install "pyjwt[crypto]").
 """
@@ -20,8 +18,7 @@ import urllib.request
 import jwt
 
 API = "https://api.appstoreconnect.apple.com/v1"
-BUNDLE_ID = os.environ.get("BUNDLE_ID") or "io.passauth.app"
-PLATFORM = os.environ.get("PLATFORM") or ""
+BUNDLE_ID = "io.passauth.app"
 LOCALE = "en-US"
 
 
@@ -65,10 +62,7 @@ def main() -> None:
         sys.exit(f"no app with bundle id {BUNDLE_ID}")
     app_id = apps[0]["id"]
 
-    filters = {"filter[app]": app_id, "filter[version]": build, "filter[preReleaseVersion.version]": version}
-    if PLATFORM:
-        filters["filter[preReleaseVersion.platform]"] = PLATFORM
-    q = urllib.parse.urlencode(filters)
+    q = urllib.parse.urlencode({"filter[app]": app_id, "filter[version]": build, "filter[preReleaseVersion.version]": version})
     build_id = None
     for _ in range(80):  # 80 × 30 s = 40 min
         found = call("GET", f"/builds?{q}")["data"]

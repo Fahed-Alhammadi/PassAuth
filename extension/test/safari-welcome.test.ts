@@ -26,10 +26,3 @@ test("Safari: the welcome page renders without shortcut and default-manager step
   expect(root.textContent).not.toContain("Fill with the keyboard");
   expect(root.textContent).not.toContain("default password manager");
 });
-
-test("Safari: the popup fills the sheet's width on a touch screen, keeps 380 px elsewhere", async () => {
-  const { fluidPopup } = await import("../src/shared/browser");
-  expect(fluidPopup(true, true)).toBe(true);
-  expect(fluidPopup(true, false)).toBe(false);
-  expect(fluidPopup(false, true)).toBe(false);
-});

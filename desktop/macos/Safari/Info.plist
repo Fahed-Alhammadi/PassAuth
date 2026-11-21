@@ -20,6 +20,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>
@@ -27,7 +29,9 @@
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).SafariWebExtensionHandler</string>
 	</dict>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Fahed Alhammadi</string>
 	<key>PAKeychainGroup</key>
-	<string>$(AppIdentifierPrefix)$(PA_HANDOFF_GROUP)</string>
+	<string>$(DEVELOPMENT_TEAM).io.passauth.desktop.autofill</string>
 </dict>
 </plist>

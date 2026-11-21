@@ -1,16 +1,11 @@
 import Foundation
 import Security
 
-/// Server, email and Secret Key another PassAuth app on this device left for this extension's
-/// sign-in (JSON in a Keychain item; never tokens or keys). iPhone/iPad: the PassAuth app
-/// (`io.passauth.safari.handoff` in the shared group, ios/Shared/SafariHandoff.swift). Mac: the
-/// desktop app's item for its AutoFill extension (`io.passauth.desktop.handoff`, desktop/src-tauri).
+/// Server, email and Secret Key the desktop app left for this extension's sign-in: the hand-off item it
+/// writes for its AutoFill extension (`io.passauth.desktop.handoff` in the AutoFill extension's Keychain
+/// group, `autofill_handoff` in desktop/src-tauri). JSON; never tokens or keys.
 enum Handoff {
-    #if os(macOS)
     static let service = "io.passauth.desktop.handoff"
-    #else
-    static let service = "io.passauth.safari.handoff"
-    #endif
 
     /// The Keychain group in Info.plist (`PAKeychainGroup`, with the team prefix).
     static var group: String? {

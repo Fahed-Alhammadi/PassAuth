@@ -1,5 +1,5 @@
 /**
- * Which browser PassAuth runs in. The same code runs in Chrome (and Edge), Firefox and Safari (the "PassAuth for Safari" app);
+ * Which browser PassAuth runs in. The same code runs in Chrome (and Edge), Firefox and Safari on a Mac (inside the desktop app);
  * build.mjs gives each its own manifest. Firefox and Safari are told apart by their extension URL schemes
  * (moz-extension:, safari-web-extension:), which a page can't fake.
  */
@@ -7,7 +7,7 @@
 /** True in Firefox (pages, background and content scripts alike). */
 export const isFirefox = (): boolean => chrome.runtime.getURL("").startsWith("moz-extension:");
 
-/** True in Safari (the "PassAuth for Safari" app, iPhone/iPad/Mac). */
+/** True in Safari (the extension inside the desktop app on macOS). */
 export const isSafari = (): boolean => chrome.runtime.getURL("").startsWith("safari-web-extension:");
 
 /** The browser's name for user-facing text. */
@@ -22,13 +22,7 @@ export const browserFeatures = () => ({
 
 /** The site-access text the popup shows in Safari (needsSiteAccess). */
 export const SITE_ACCESS_TEXT =
-  "To fill on this website, allow PassAuth on it: in Safari, open the page menu in the address bar (on a Mac, click PassAuth in the toolbar) and choose to allow PassAuth on this website.";
+  "To fill on this website, allow PassAuth on it: click PassAuth in Safari's toolbar and choose to allow it on this website, or set it in Safari → Settings → Websites → PassAuth.";
 
 /** Safari hides a tab's address until the user allows PassAuth on that website: the popup asks for it. */
 export const needsSiteAccess = (tab: { id?: number; url?: string } | undefined): boolean => isSafari() && !!tab && !tab.url;
-
-/**
- * Whether the popup fills its sheet's width instead of Chrome's 380 px column: Safari on a touch screen (iPhone, iPad),
- * where the popup is a sheet as wide as the screen (an iPhone SE is 375 pt).
- */
-export const fluidPopup = (safari: boolean, touch: boolean): boolean => safari && touch;

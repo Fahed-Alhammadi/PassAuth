@@ -122,6 +122,45 @@ targets:
         SKIP_INSTALL: YES
         CODE_SIGN_ENTITLEMENTS: AutoFill/AutoFill-adhoc.entitlements
 
+  # Safari web extension: the browser extension's Safari build (extension/dist-safari, `pnpm build:safari`,
+  # copied in by scripts/copy-safari-extension.sh) and its native handler (Safari/): the sign-in hand-off
+  # reads the desktop's AutoFill hand-off item. Embedded at PassAuth.app/Contents/PlugIns/PassAuthSafari.appex;
+  # build.sh signs it.
+  PassAuthSafari:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Safari
+        excludes:
+          - "*.entitlements"
+    postCompileScripts:
+      - name: Copy the Safari build of the extension
+        script: scripts/copy-safari-extension.sh
+        basedOnDependencyAnalysis: false
+    info:
+      path: Safari/Info.plist
+      properties:
+        CFBundleDisplayName: PassAuth
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: © Fahed Alhammadi
+        # The AutoFill extension's Keychain group, where the desktop app leaves the hand-off.
+        PAKeychainGroup: $(DEVELOPMENT_TEAM).io.passauth.desktop.autofill
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.passauth.desktop.safari
+        PRODUCT_NAME: PassAuthSafari
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        CODE_SIGN_ENTITLEMENTS: Safari/Safari-adhoc.entitlements
+        PA_EXTENSION_DIST: $(SRCROOT)/../../extension/dist-safari
+        # The build phase reads extension/dist-safari outside the project's declared inputs.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
   # Logic tests (no host): the macOS-only policy plus the shared data-layer tests from ios/Tests
   # that don't need the iOS app, run against the macOS build of ios/Shared.
   PassAuthAutoFillTests:
@@ -197,5 +236,11 @@ schemes:
       gatherCoverageData: false
       targets:
         - PassAuthAutoFillTests
+    archive:
+      config: Release
+  PassAuthSafari:
+    build:
+      targets:
+        PassAuthSafari: all
     archive:
       config: Release

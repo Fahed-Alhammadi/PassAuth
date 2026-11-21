@@ -44,12 +44,11 @@
 |---|---|---|
 | Web vault | Manage items, share vaults, import, two-step login, admin page | Built into every server |
 | Browser extension | Menu under login fields and autofill, codes copied for you, saves new logins, passkeys, offline copy, up to five accounts, badge with the logins for the open site | [Chrome Web Store](https://chromewebstore.google.com/detail/passauth/pnofinkalfnjjgofaikljeikjaoogaan) (Chrome, Edge, Brave and other Chromium browsers) |
-| Desktop | Your vault on macOS, Windows and Linux; lives in the menu bar or tray, syncs in the background, updates itself; AutoFill for Safari and apps on macOS | [Downloads](#desktop-app) below |
+| Desktop | Your vault on macOS, Windows and Linux; lives in the menu bar or tray, syncs in the background, updates itself; on macOS: AutoFill for Safari and apps, and the PassAuth extension in Safari | [Downloads](#desktop-app) below |
 | Android | Autofill in apps and browsers, passkey provider, verification codes (scan or paste), password history, live and background sync | Beta: [join the group](https://groups.google.com/g/passauth-app), then [join the test on Google Play](https://play.google.com/apps/testing/io.passauth.app) |
 | iPhone and iPad | AutoFill for passwords, codes and passkeys; saves new logins and suggests strong passwords; password history, live and background sync | Beta: [join the test on TestFlight](https://testflight.apple.com/join/MGBhGbhp) |
-| PassAuth for Safari | The browser extension in Safari on iPhone, iPad and Mac: menu under login fields, saves new logins, adds a site to a login; your server and email come from the PassAuth app on the same device | Coming soon (App Store) |
 
-Browsers: the extension runs in Chrome, Edge, Brave and other Chromium browsers, and in Firefox (submitted to Firefox Add-ons). Safari gets its own app, PassAuth for Safari (coming soon); until then the AutoFill extensions of the desktop app (macOS) and the iPhone app fill logins in Safari.
+Browsers: the extension runs in Chrome, Edge, Brave and other Chromium browsers, and in Firefox (submitted to Firefox Add-ons). On a Mac, the desktop app also brings it to Safari. On iPhone and iPad, the PassAuth app fills logins in Safari through AutoFill.
 
 The mobile apps aren't in the stores yet. To try them before the official release, join the beta from the links above; you'll get updates automatically. On Android, first join the [passauth-app Google Group](https://groups.google.com/g/passauth-app) with the Google account you use on your phone, then open the Google Play link. Feedback is welcome in [GitHub Issues](https://github.com/Fahed-Alhammadi/PassAuth/issues).
 
@@ -63,6 +62,8 @@ The desktop app is the web vault in its own window. It remembers your server's a
 - Checks for updates once a day and asks before installing.
 
 **AutoFill on macOS.** The app includes an AutoFill extension for Safari and apps (macOS 14 or later): turn on PassAuth in System Settings → General → AutoFill & Passwords. It fills passwords, passkeys and one-time codes, and unlocks with your master password or Touch ID for the time you choose. It reuses the desktop app's server address, email and Secret Key, so you only type the master password once. Its settings include "Default URI match detection" (base domain, host, starts with, exact, regular expression or never). It doesn't clear the clipboard on macOS.
+
+**Safari extension on macOS.** The app also brings the PassAuth browser extension to Safari: open Safari → Settings → Extensions and turn on PassAuth. It adds the menu under login fields, saves new logins and adds a site to a login you already have. Your server, email and Secret Key come from the desktop app, so you only type the master password. Passkeys stay with AutoFill.
 
 - macOS (Apple silicon and Intel): [PassAuth-macOS.dmg](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-macOS.dmg)
 - Windows (64-bit): [PassAuth-Windows-x64-setup.exe](https://github.com/Fahed-Alhammadi/PassAuth/releases/latest/download/PassAuth-Windows-x64-setup.exe)

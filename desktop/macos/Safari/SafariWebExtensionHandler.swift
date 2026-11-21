@@ -2,7 +2,8 @@ import Foundation
 import SafariServices
 
 /// The native side of the Safari extension (the same extension code as Chrome and Firefox, built by
-/// `pnpm build:safari` and copied into this bundle by a build phase in project.yml). The extension's
+/// `pnpm build:safari` and copied into this bundle by scripts/copy-safari-extension.sh), embedded in the
+/// desktop app at PassAuth.app/Contents/PlugIns/PassAuthSafari.appex (desktop/macos/build.sh). The extension's
 /// `browser.runtime.sendNativeMessage` calls arrive here as `{ type: String, ... }`; the reply is a dictionary.
 final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     func beginRequest(with context: NSExtensionContext) {
