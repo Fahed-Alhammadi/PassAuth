@@ -60,11 +60,20 @@ export interface DesktopAppSettings {
   keepDock: boolean;
   /** Minutes between background checks of the server's revision while unlocked; 0 = off. */
   backgroundSyncMinutes: number;
+  /**
+   * macOS: the AutoFill extension's "Default URI match detection" (`domain`, `host`, …), shared with it through the
+   * Keychain; the last change on either side counts. Absent on other platforms.
+   */
+  autofillDefaultMatch?: string;
 }
 export interface DesktopAppHook {
   platform: "macos" | "windows" | "linux";
   /** Background-sync intervals in minutes (0 = off), in display order, with their labels. */
   syncOptions: [number, string][];
+  /** macOS: the AutoFill default match options, in display order, with their labels; absent elsewhere. */
+  autofillMatchOptions?: [string, string][];
+  /** Re-read what can change outside the app (the AutoFill extension's setting). */
+  refresh?(): Promise<void>;
   get(): DesktopAppSettings;
   /** Applies what it can and reports failures itself (toast). */
   set(patch: Partial<DesktopAppSettings>): Promise<void>;

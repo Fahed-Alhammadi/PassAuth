@@ -165,6 +165,10 @@ final class AutofillModel {
 
     func start() async {
         repo.store.load()
+        #if os(macOS)
+        // A newer "Default URI match detection" picked in the desktop app's Settings.
+        await DesktopSettings.adopt(repo)
+        #endif
         // Generating needs only the generator settings, not the vault.
         if case .generate = request {
             regenerate()

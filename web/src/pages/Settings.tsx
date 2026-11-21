@@ -678,6 +678,10 @@ function VaultTimeoutCard({ hook }: { hook: VaultTimeoutHook }) {
 /** Desktop app only: login item, Dock icon (macOS) and background sync. */
 function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
   const s = useSyncExternalStore(hook.subscribe, hook.get);
+  // The AutoFill extension may have changed its setting since the app started.
+  useEffect(() => {
+    void hook.refresh?.();
+  }, [hook]);
   return (
     <section className="card" aria-labelledby="app-title">
       <h2 id="app-title">This app</h2>
@@ -713,6 +717,26 @@ function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
         Changes reach this app as they happen while it's connected. On this schedule, and after the computer wakes, it also checks the server and reconnects,
         so the vault stays current if the connection dropped. Runs only while the vault is unlocked.
       </Setting>
+      {hook.autofillMatchOptions && s.autofillDefaultMatch !== undefined && (
+        <>
+          <h3>AutoFill on this Mac</h3>
+          <Setting
+            as="label"
+            title="Default URI match detection"
+            control={
+              <select className="select" value={s.autofillDefaultMatch} onChange={(e) => void hook.set({ autofillDefaultMatch: e.target.value })}>
+                {hook.autofillMatchOptions.map(([v, label]) => (
+                  <option key={v} value={v}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            }
+          >
+            Used by AutoFill in Safari and apps for websites set to Default in a login.
+          </Setting>
+        </>
+      )}
     </section>
   );
 }

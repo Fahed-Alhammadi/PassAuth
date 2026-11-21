@@ -145,6 +145,32 @@ public enum Keychain {
         guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
         return out as? Data
     }
+
+    /// AutoFill settings shared with the desktop app (`DesktopSettings`; `autofill_settings_*` in
+    /// desktop/src-tauri): `{"defaultMatch":…,"changedAt":<unix ms>}`, written by both sides.
+    static let desktopSettingsService = "io.passauth.desktop.autofill-settings"
+    public static func readDesktopSettings() -> Data? {
+        var q = base(desktopSettingsService, "settings")
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
+        return out as? Data
+    }
+
+    @discardableResult
+    public static func writeDesktopSettings(_ data: Data) -> Bool {
+        let q = base(desktopSettingsService, "settings")
+        var status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var add = q
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            add[kSecAttrLabel as String] = "PassAuth AutoFill"
+            status = SecItemAdd(add as CFDictionary, nil)
+        }
+        return status == errSecSuccess
+    }
     #endif
 
     /// Remove every item of this app (fresh install: Keychain items outlive the app).

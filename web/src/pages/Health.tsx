@@ -14,6 +14,7 @@ import { useSiteIconsShown } from "../lib/site-icons";
 import { siteHost, type VaultEntry } from "../lib/types";
 import { useVault, type Vault } from "../lib/vault";
 import { DuplicatesSection } from "./Duplicates";
+import { MatchingSection } from "./Matching";
 import { filterPath } from "./Shell";
 import "../styles/tools.css";
 
@@ -114,6 +115,8 @@ export function HealthPage() {
         <ExposedSection check={check} availability={availability} exposed={exposed} unchecked={unchecked} total={logins.length} />
 
         <DuplicatesSection />
+
+        <MatchingSection />
 
         <section className="card" aria-labelledby="health-reused">
           <div className="card-head">

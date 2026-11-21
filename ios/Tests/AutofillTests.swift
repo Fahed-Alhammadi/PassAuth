@@ -227,6 +227,27 @@ final class AutofillTests: XCTestCase {
         }
     }
 
+    /// Several logins under one base domain with the same user name would collapse into one
+    /// suggestion in the system's list, which can fill the wrong password: they're written by
+    /// their full host instead, so each is offered on its own site.
+    func testSameUserUnderOneBaseDomainIsWrittenByHost() {
+        let e = [
+            entry("1", name: "Cloudy", user: "fahed", password: "a", urls: [("https://cloudy.example.com/login", .domain)], totp: "JBSWY3DPEHPK3PXP"),
+            entry("2", name: "Radarr", user: "Fahed", password: "b", urls: [("https://radarr.example.com", .domain)]),
+            entry("3", name: "Gitea", user: "admin", password: "c", urls: [("https://gitea.example.com", .domain)]),
+            entry("4", name: "Mail", user: "fahed", password: "d", urls: [("https://mail.other.test", .domain)]),
+        ]
+        let pw = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .password }
+        XCTAssertEqual(pw.map(\.service), ["https://cloudy.example.com", "https://radarr.example.com", "example.com", "other.test"])
+        XCTAssertEqual(pw.map(\.serviceType), [.url, .url, .domain, .domain])
+        // The code of a login that moved goes with it.
+        let codes = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .oneTimeCode }
+        XCTAssertEqual(codes.map(\.service), ["https://cloudy.example.com"])
+        // One login with the same user name on two websites of one base domain stays as it is.
+        let one = [entry("1", name: "A", user: "fahed", password: "a", urls: [("https://a.example.com", .domain), ("https://b.example.com", .domain)])]
+        XCTAssertEqual(IdentityMapper.records(one, defaultMatch: .domain).map(\.service), ["example.com"])
+    }
+
     func testDefaultMatchChangesIdentities() {
         let e = [entry("1", name: "Example", user: "alice", urls: [("https://www.example.com/login", .default)])]
         XCTAssertEqual(IdentityMapper.records(e, defaultMatch: .domain).map(\.service), ["example.com"])

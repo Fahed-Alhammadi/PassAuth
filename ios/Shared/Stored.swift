@@ -48,6 +48,9 @@ public struct Settings: Codable, Equatable, Sendable {
     public var showIcons = true
     /// Resolves a website's "default" match; never `.default` itself.
     public var defaultMatch: UrlMatch = .domain
+    /// macOS AutoFill: when `defaultMatch` was last changed (unix ms; 0 = never), against the
+    /// desktop app's shared setting (`DesktopSettings`): the newer change wins.
+    public var defaultMatchChangedAt: Int64 = 0
     public var theme: ThemeMode = .system
     /// Offer to save new logins and update changed passwords (AutoFill).
     public var askToSave = true
@@ -76,6 +79,7 @@ public struct Settings: Codable, Equatable, Sendable {
         showIcons = c.lenient(.showIcons, d.showIcons)
         defaultMatch = c.lenient(.defaultMatch, d.defaultMatch)
         if defaultMatch == .default { defaultMatch = .domain }
+        defaultMatchChangedAt = c.lenient(.defaultMatchChangedAt, d.defaultMatchChangedAt)
         theme = c.lenient(.theme, d.theme)
         askToSave = c.lenient(.askToSave, d.askToSave)
         neverSave = c.lenient(.neverSave, d.neverSave)
