@@ -41,6 +41,9 @@ export function sameSiteAsTab(sender: SenderInfo): boolean {
   return !!top && !!frame && /^https?:$/.test(top.protocol) && baseDomain(top.hostname) === baseDomain(frame.hostname);
 }
 
+/** The URL schemes of extension pages: Chrome (and Edge), Firefox, Safari. */
+const EXTENSION_SCHEMES = new Set(["chrome-extension:", "moz-extension:", "safari-web-extension:"]);
+
 /**
  * Which of PassAuth's own pages sent a message (its path, e.g. "/popup.html"),
  * or null for anything else (content scripts run in web pages and have web
@@ -55,7 +58,7 @@ export function extensionPage(sender: SenderInfo, runtimeId: string, ownOrigins:
   } catch {
     return null;
   }
-  if ((u.protocol !== "chrome-extension:" && u.protocol !== "moz-extension:") || !ownOrigins.includes(extensionOrigin(u.href))) return null;
+  if (!EXTENSION_SCHEMES.has(u.protocol) || !ownOrigins.includes(extensionOrigin(u.href))) return null;
   return u.pathname;
 }
 
