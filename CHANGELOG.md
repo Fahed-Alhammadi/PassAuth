@@ -6,6 +6,13 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.19.2 (2026-11-21)
+
+- AutoFill matching: same-name logins by host, bulk Default, desktop setting (#40) (b6aac22)
+- Extension: Firefox build and addons.mozilla.org submission (#34) (fce93d8)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.19.1...server-0.19.2)
+
 ## 0.19.1 (2026-11-20)
 
 - Image: Bump rust (#19) (dbbfec1)
