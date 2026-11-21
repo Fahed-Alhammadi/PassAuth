@@ -63,7 +63,10 @@ export const againHint = (e: Event): string => ({ key: "Press Enter again", touc
  * In PassAuth's framed pages: a click counts only once
  * - the frame has been fully visible — not covered, transparent, filtered or
  *   transformed, in any parent frame (IntersectionObserver v2) — for `ms`;
- *   where the browser can't tell (no IntersectionObserver v2), never;
+ *   where the browser can't tell (no IntersectionObserver v2: Safari, Firefox), shown fully on the screen for
+ *   `ms` — the content script's tamper check (every 250 ms, every animation frame while scrolling or after a
+ *   touch) then also closes the frame when something of the page takes hit-testing over it (`covered` in
+ *   `tampered`); a layer with `pointer-events: none`, opaque or not, can't be seen there;
  * - and, for a mouse click, the pointer has been inside the frame for `ms`
  *   since it came in or the frame last moved or changed size (`moved`, sent
  *   by the content script that placed it, or seen here: a pointer event at the
@@ -86,7 +89,6 @@ export const againHint = (e: Event): string => ({ key: "Press Enter again", touc
 export function clickGate(target: Element, ms = 500) {
   const now = () => performance.now();
   let visibleSince = 0;
-  let supported = true;
   let pointerSince = 0;
   /** Keyboard activation is accepted (see above). */
   let keys = false;
@@ -102,25 +104,30 @@ export function clickGate(target: Element, ms = 500) {
       (entries) => {
         for (const e of entries as VisibleEntry[]) {
           if (e.isVisible === undefined) {
-            supported = false;
-            return;
+            // No visibility check in this browser: shown, fully on the screen, is what counts here (see above).
+            const shown = e.isIntersecting && e.intersectionRatio >= 0.99;
+            visibleSince = shown ? visibleSince || now() : 0;
+            if (!shown) firstTap = null;
+            continue;
           }
           visibleSince = e.isVisible ? visibleSince || now() : 0;
           if (!e.isVisible) firstTap = null;
         }
       },
-      { trackVisibility: true, delay: 100 } as IntersectionObserverInit,
+      { trackVisibility: true, delay: 100, threshold: [0, 0.99, 1] } as IntersectionObserverInit,
     );
     io.observe(target);
   } catch {
-    supported = false;
+    // No IntersectionObserver at all in a browser without the visibility check: shown from now on. Where the browser
+    // has the check (Chrome), a failure to start it means "can't tell": never.
+    if (!hasVisibilityCheck()) visibleSince = now();
   }
   const restart = () => {
     if (pointerSince) pointerSince = now();
     // A tap before the frame moved (or was resized) confirms nothing after it.
     firstTap = null;
   };
-  const visibleLongEnough = () => supported && visibleSince > 0 && now() - visibleSince >= ms;
+  const visibleLongEnough = () => visibleSince > 0 && now() - visibleSince >= ms;
   const rested = () => pointerSince > 0 && now() - pointerSince >= ms;
   /**
    * The pointer stayed at the same place on the screen but not in this frame: the frame moved under a resting
@@ -174,7 +181,7 @@ export function clickGate(target: Element, ms = 500) {
           return true;
         }
         // Not yet: this tap asks for a confirm tap (only while the frame can be seen).
-        firstTap = supported && visibleSince > 0 ? tap : null;
+        firstTap = visibleSince > 0 ? tap : null;
         return false;
       }
       if (kind === "key" && !keys) return false;
@@ -246,7 +253,29 @@ function hidesFrame(s: CSSStyleDeclaration, host: boolean): boolean {
  * or containing block on an ancestor moved it — counts. The host's own styles
  * are pinned (`HOST_CSS`), so these checks are a second line.
  */
-export function tampered(host: HTMLElement, frame?: Element | null, expected?: Placement | readonly Placement[] | null): boolean {
+/** Whether this browser reports whether an element is really visible (IntersectionObserver v2: Chrome and Edge). */
+export const hasVisibilityCheck = (): boolean => typeof IntersectionObserverEntry !== "undefined" && "isVisible" in IntersectionObserverEntry.prototype;
+
+/**
+ * Whether something of the page lies over PassAuth's host: the top element at the centre of its box and a few pixels
+ * inside each corner must be the host itself (a closed shadow root answers with its host). Used where the browser has
+ * no visibility check (`hasVisibilityCheck`). A see-through layer with `pointer-events: none` isn't found this way;
+ * that remains where only Chrome's check can tell. Pure apart from `hit`.
+ */
+export function covered(host: Element, r: DOMRect, hit: (x: number, y: number) => Element | null): boolean {
+  if (r.width < 6 || r.height < 6) return false;
+  const inset = 3;
+  const points: [number, number][] = [
+    [r.left + r.width / 2, r.top + r.height / 2],
+    [r.left + inset, r.top + inset],
+    [r.right - inset, r.top + inset],
+    [r.left + inset, r.bottom - inset],
+    [r.right - inset, r.bottom - inset],
+  ];
+  return points.some(([x, y]) => x >= 0 && y >= 0 && x < innerWidth && y < innerHeight && hit(x, y) !== host);
+}
+
+export function tampered(host: HTMLElement, frame?: Element | null, expected?: Placement | readonly Placement[] | null, opts: { cover?: boolean } = {}): boolean {
   if (!host.isConnected) return true;
   // PassAuth adds its hosts to <body> (or <html>); a page that moved one into its own (transparent) container is hiding it.
   const parent = host.parentElement;
@@ -261,6 +290,11 @@ export function tampered(host: HTMLElement, frame?: Element | null, expected?: P
     if (!el) continue;
     const p = getComputedStyle(el);
     if (parseFloat(p.opacity) < 1 || p.visibility === "hidden" || hidesFrame(p, false)) return true;
+  }
+  // No visibility check in this browser: the page must not lay anything over the host (not for the in-field icon,
+  // which takes no click through the gate: a dialog in the top layer would hide it for nothing).
+  if (opts.cover !== false && !hasVisibilityCheck() && typeof document.elementFromPoint === "function" && covered(host, host.getBoundingClientRect(), (x, y) => document.elementFromPoint(x, y))) {
+    return true;
   }
   if (frame && expected) {
     const r = frame.getBoundingClientRect();

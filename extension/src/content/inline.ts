@@ -161,7 +161,7 @@ function place() {
   if (!field.isConnected || !field.getClientRects().length) return hideAll();
   // The page restyled or moved our UI: close the list rather than let it be clicked blind.
   if (menu && tampered(menu.el, menu.frame, menu.at)) closeInlineMenu();
-  if (icon && tampered(icon.el, icon.el, icon.at)) return hideAll();
+  if (icon && tampered(icon.el, icon.el, icon.at, { cover: false })) return hideAll();
   const r = field.getBoundingClientRect();
   if (icon) {
     icon.spot ??= iconSpot(field, isOurs);
