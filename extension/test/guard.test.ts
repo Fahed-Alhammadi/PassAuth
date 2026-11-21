@@ -5,7 +5,7 @@
 // row filled by the next click, before the content script's 250 ms tamper check closed the menu).
 
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { againHint, CONFIRM_MAX_MS, clickGate, confirmsTap, HOST_CSS, placeHost, tampered } from "../src/content/guard";
+import { againHint, CONFIRM_MAX_MS, clickGate, confirmsTap, covered, HOST_CSS, placeHost, tampered } from "../src/content/guard";
 
 /** IntersectionObserver v2 that reports the target fully visible at once; `seen(false)` hides it (covered by the page). */
 let seen: (visible: boolean) => void = () => {};
@@ -371,4 +371,98 @@ test("H-1: the host's styles are all pinned (all: initial !important), outline a
     ["300px", "important"],
     ["220px", "important"],
   ]);
+});
+
+// Safari and Firefox have no IntersectionObserver v2 (no `isVisible`): the frame counts as visible from when it was
+// shown, and the content script checks every animation frame that nothing of the page lies over it (`covered`).
+describe("browsers without the visibility check (Safari, Firefox)", () => {
+  class PlainObserver {
+    constructor(private callback: (entries: unknown[]) => void) {}
+    observe(target: Element) {
+      this.callback([{ target, isIntersecting: true, intersectionRatio: 1 }]);
+    }
+    disconnect() {}
+  }
+  let plain: ReturnType<typeof clickGate>;
+  beforeEach(() => {
+    vi.stubGlobal("IntersectionObserver", PlainObserver);
+    plain = clickGate(document.documentElement);
+  });
+  afterEach(() => plain.stop());
+
+  test("a click counts once the frame was shown and the pointer rested inside it for 500 ms", () => {
+    pointer("pointerover", [500, 300], [20, 10]);
+    expect(plain.ok(click())).toBe(false);
+    vi.advanceTimersByTime(500);
+    expect(plain.ok(click())).toBe(true);
+  });
+
+  test("the keyboard counts after PassAuth gave the frame the focus, once it was shown for 500 ms", () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    plain.armKeys();
+    const enter = new KeyboardEvent("keydown", { key: "Enter" });
+    expect(plain.ok(enter)).toBe(false);
+    vi.advanceTimersByTime(500);
+    expect(plain.ok(enter)).toBe(true);
+  });
+
+  test("a frame only partly on the screen doesn't count as shown", () => {
+    class PartObserver {
+      constructor(private callback: (entries: unknown[]) => void) {}
+      observe(target: Element) {
+        this.callback([{ target, isIntersecting: true, intersectionRatio: 0.6 }]);
+      }
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", PartObserver);
+    const part = clickGate(document.documentElement);
+    pointer("pointerover", [500, 300], [20, 10]);
+    vi.advanceTimersByTime(1000);
+    expect(part.ok(click())).toBe(false);
+    part.stop();
+  });
+
+  test("tampered: the page laying something over the menu closes it; the in-field icon isn't checked this way", () => {
+    vi.stubGlobal("getComputedStyle", () => styles());
+    const host = document.createElement("div");
+    document.body.append(host);
+    vi.spyOn(host, "getBoundingClientRect").mockReturnValue({ left: 10, top: 10, width: 200, height: 100, right: 210, bottom: 110 } as DOMRect);
+    const other = document.createElement("div");
+    Object.defineProperty(document, "elementFromPoint", { value: () => other, configurable: true });
+    expect(tampered(host)).toBe(true);
+    expect(tampered(host, null, null, { cover: false })).toBe(false);
+    Object.defineProperty(document, "elementFromPoint", { value: () => host, configurable: true });
+    expect(tampered(host)).toBe(false);
+    host.remove();
+  });
+
+  test("covered: the frame must be the top element at its centre and near its corners", () => {
+    const host = document.createElement("div");
+    const other = document.createElement("div");
+    const rect = { left: 100, top: 50, width: 300, height: 200, right: 400, bottom: 250 } as DOMRect;
+    expect(covered(host, rect, () => host)).toBe(false);
+    expect(covered(host, rect, (x, y) => (x > 350 && y > 200 ? other : host))).toBe(true);
+    expect(covered(host, rect, () => null)).toBe(true);
+  });
+});
+
+test("Chrome (visibility check present): if its observer can't start, a click never counts (as before)", () => {
+  class Broken {
+    constructor() {
+      throw new Error("no");
+    }
+  }
+  vi.stubGlobal("IntersectionObserver", Broken);
+  vi.stubGlobal(
+    "IntersectionObserverEntry",
+    class {
+      isVisible = false;
+    },
+  );
+  Object.defineProperty((globalThis as { IntersectionObserverEntry: { prototype: object } }).IntersectionObserverEntry.prototype, "isVisible", { value: false });
+  const g = clickGate(document.documentElement);
+  pointer("pointerover", [500, 300], [20, 10]);
+  vi.advanceTimersByTime(1000);
+  expect(g.ok(click())).toBe(false);
+  g.stop();
 });
