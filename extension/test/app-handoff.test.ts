@@ -45,3 +45,13 @@ test("other browsers: never asks", async () => {
   };
   expect(await appHandoff()).toBeNull();
 });
+
+test("sameServer: the same server despite case, a default port or a trailing slash; another host or path is not", async () => {
+  const { sameServer } = await import("../src/shared/app-handoff");
+  expect(sameServer("https://Vault.Example.com/", "https://vault.example.com")).toBe(true);
+  expect(sameServer("https://vault.example.com:443", "https://vault.example.com")).toBe(true);
+  expect(sameServer("https://vault.example.com/pa/", "https://vault.example.com/pa")).toBe(true);
+  expect(sameServer("https://vault.example.com", "https://other.example.com")).toBe(false);
+  expect(sameServer("https://vault.example.com/a", "https://vault.example.com/b")).toBe(false);
+  expect(sameServer("not a url", "https://vault.example.com")).toBe(false);
+});

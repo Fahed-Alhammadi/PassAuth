@@ -169,13 +169,18 @@ jobs:
         env:
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        # macOS signs the archive for distribution: a development profile for a Mac would register each
+        # fresh runner as a device (the team's yearly Mac limit). iOS archives for a generic device, as ios.yml.
         run: |
+          set -o pipefail
           for platform in iOS macOS; do
+            identity=()
+            [ "$platform" = macOS ] && identity=(CODE_SIGN_IDENTITY="Apple Distribution")
             xcodebuild -project safari/PassAuthSafari.xcodeproj -scheme PassAuthSafari -configuration Release \
               -destination "generic/platform=$platform" -archivePath "$RUNNER_TEMP/PassAuthSafari-$platform.xcarchive" \
               -allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" \
               -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-              archive | tail -40
+              "${identity[@]}" archive | tail -40
           done
 
       - name: Upload to App Store Connect

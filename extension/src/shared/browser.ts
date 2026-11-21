@@ -26,3 +26,9 @@ export const SITE_ACCESS_TEXT =
 
 /** Safari hides a tab's address until the user allows PassAuth on that website: the popup asks for it. */
 export const needsSiteAccess = (tab: { id?: number; url?: string } | undefined): boolean => isSafari() && !!tab && !tab.url;
+
+/**
+ * Whether the popup fills its sheet's width instead of Chrome's 380 px column: Safari on a touch screen (iPhone, iPad),
+ * where the popup is a sheet as wide as the screen (an iPhone SE is 375 pt).
+ */
+export const fluidPopup = (safari: boolean, touch: boolean): boolean => safari && touch;

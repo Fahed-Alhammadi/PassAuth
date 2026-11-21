@@ -6,7 +6,7 @@
 import { LogoMark } from "@web/components/Logo";
 import { Icon, type IconName } from "@web/components/ui";
 import { type ReactNode, useEffect, useState } from "react";
-import { browserName, isFirefox, isSafari } from "../shared/browser";
+import { browserFeatures, browserName, isFirefox, isSafari } from "../shared/browser";
 import { DefaultManager, Shortcuts } from "./settings";
 
 function Step({ n, icon, title, children }: { n: number; icon: IconName; title: string; children: ReactNode }) {
@@ -26,7 +26,11 @@ function Step({ n, icon, title, children }: { n: number; icon: IconName; title: 
   );
 }
 
+const STEP_WORDS = ["", "One", "Two", "Three", "Four", "Five"];
+
 export function Welcome() {
+  // Safari has no shortcuts and no browser password manager setting: those steps are left out.
+  const features = browserFeatures();
   const [server, setServer] = useState("");
   const [note, setNote] = useState("");
   useEffect(() => {
@@ -55,7 +59,7 @@ export function Welcome() {
       <header className="welcome-head">
         <LogoMark size={56} />
         <h1>Welcome to PassAuth</h1>
-        <p className="muted">Five short steps and your passwords are ready to fill.</p>
+        <p className="muted">{STEP_WORDS[3 + Number(features.shortcuts) + Number(features.defaultPasswordManager)]} short steps and your passwords are ready to fill.</p>
       </header>
       <ol className="welcome-steps">
         <Step n={1} icon="puzzle" title="Pin PassAuth to the toolbar">
@@ -80,13 +84,17 @@ export function Welcome() {
             </p>
           )}
         </Step>
-        <Step n={3} icon="wand" title="Fill with the keyboard">
-          <Shortcuts />
-        </Step>
-        <Step n={4} icon="shield" title="Make PassAuth your default password manager">
-          <DefaultManager notify={setNote} />
-        </Step>
-        <Step n={5} icon="upload" title="Bring your passwords">
+        {features.shortcuts && (
+          <Step n={3} icon="wand" title="Fill with the keyboard">
+            <Shortcuts />
+          </Step>
+        )}
+        {features.defaultPasswordManager && (
+          <Step n={features.shortcuts ? 4 : 3} icon="shield" title="Make PassAuth your default password manager">
+            <DefaultManager notify={setNote} />
+          </Step>
+        )}
+        <Step n={2 + Number(features.shortcuts) + Number(features.defaultPasswordManager) + 1} icon="upload" title="Bring your passwords">
           <p>Import from another password manager in the PassAuth web vault, under Tools → Import. The file is read on your device; only encrypted items reach your server.</p>
           {server && (
             <div>

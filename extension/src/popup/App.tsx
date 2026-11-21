@@ -1,7 +1,7 @@
 import { LogoMark } from "@web/components/Logo";
 import { ConfirmDialog, ErrorText, Icon, PasswordInput, SheetActions } from "@web/components/ui";
 import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { appHandoff } from "../shared/app-handoff";
+import { appHandoff, sameServer } from "../shared/app-handoff";
 import { codeOf, LOCKED, SECRET_KEY_REQUIRED, SIGNED_OUT, TWO_STEP_REQUIRED } from "../shared/errors";
 import { lostText } from "../shared/offline-text";
 import { callPopup, setFailureHandler } from "../shared/protocol";
@@ -210,9 +210,6 @@ function Setup({ onDone, initial = "", lost }: { onDone: () => void; initial?: s
 }
 
 // ------------------------------------------------------------------ login
-
-/** Two server addresses are the same server (a trailing slash aside). */
-const sameServer = (a: string, b: string) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
 
 function Login({ state, onDone }: { state: PopupState; onDone: (note?: string) => void }) {
   const [changingServer, setChangingServer] = useState(false);

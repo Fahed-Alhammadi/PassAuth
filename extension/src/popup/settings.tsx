@@ -35,7 +35,7 @@ async function openShortcutSettings() {
 export function Shortcuts() {
   const [commands, setCommands] = useState<chrome.commands.Command[] | null>(null);
   useEffect(() => {
-    chrome.commands.getAll().then(setCommands, () => setCommands([]));
+    (chrome.commands?.getAll() ?? Promise.resolve([])).then(setCommands, () => setCommands([]));
   }, []);
   return (
     <section className="stack-s" aria-labelledby="keys-title">

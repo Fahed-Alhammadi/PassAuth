@@ -627,6 +627,13 @@ public final class VaultRepository {
         return SafariHandoff.make(status: st.status, server: st.server, email: st.email, secretKey: sk)
     }
 
+    /// Changes whenever the Safari hand-off may have to be written or cleared (SafariHandoff.changeKey).
+    public var safariHandoffKey: String {
+        let st = state
+        return SafariHandoff.changeKey(activeId: st.activeId, status: st.status, server: st.server, email: st.email,
+                                       secretKey: store.stored.secrets.secretKeys[st.email.lowercased()])
+    }
+
     public var state: AppState {
         let s = store.stored
         var st = AppState()

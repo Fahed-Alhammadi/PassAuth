@@ -27,6 +27,11 @@ test("Safari: no offscreen page, right-click menu, privacy, shortcuts or Chrome-
   for (const r of safari.web_accessible_resources) expect(r).not.toHaveProperty("use_dynamic_url");
 });
 
+test("Safari: native messaging for the sign-in hand-off from the app", () => {
+  expect(safari.permissions).toContain("nativeMessaging");
+  expect(chrome.permissions).not.toContain("nativeMessaging");
+});
+
 test("Safari: only the fill content script (no passkey bridge or page shim)", () => {
   const scripts = safari.content_scripts.flatMap((c: { js: string[] }) => c.js);
   expect(scripts).toEqual(["content.js"]);

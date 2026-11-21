@@ -25,3 +25,17 @@ export async function appHandoff(): Promise<AppHandoff | null> {
   if (typeof server !== "string" || !/^https?:\/\//.test(server) || typeof email !== "string" || !email) return null;
   return { server, email, ...(typeof secretKey === "string" && secretKey ? { secretKey } : {}) };
 }
+
+/** Two server addresses are the same server: origin (case, default port) and path, a trailing slash aside. */
+export function sameServer(a: string, b: string): boolean {
+  const norm = (x: string) => {
+    try {
+      const u = new URL(x);
+      return `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return null;
+    }
+  };
+  const na = norm(a);
+  return na !== null && na === norm(b);
+}

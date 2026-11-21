@@ -94,6 +94,10 @@ public enum Keychain {
     }
 
     public static func lookup(_ account: String) -> ReadResult {
+        lookupService(service, account)
+    }
+
+    static func lookupService(_ service: String, _ account: String) -> ReadResult {
         var q = base(service, account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -150,6 +154,11 @@ public enum Keychain {
     /// The hand-off for "PassAuth for Safari" (Shared/SafariHandoff.swift). Its own service, so a
     /// fresh install's `deleteAll` keeps it; nil data removes it.
     static let safariHandoffService = "io.passauth.safari.handoff"
+    static func readSafariHandoff() -> Data? {
+        if case let .found(data) = lookupService(safariHandoffService, "handoff") { return data }
+        return nil
+    }
+
     static func writeSafariHandoff(_ data: Data?) {
         let q = base(safariHandoffService, "handoff")
         guard let data else {
@@ -159,7 +168,7 @@ public enum Keychain {
         if SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary) == errSecItemNotFound {
             var add = q
             add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             SecItemAdd(add as CFDictionary, nil)
         }
     }

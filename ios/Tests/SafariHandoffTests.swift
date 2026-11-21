@@ -24,4 +24,25 @@ final class SafariHandoffTests: XCTestCase {
         let obj2 = try XCTUnwrap(JSONSerialization.jsonObject(with: withKey) as? [String: Any])
         XCTAssertEqual(Set(obj2.keys), ["server", "email", "secretKey"])
     }
+
+    func testClearsWhenSignedOutOrTheItemIsAnotherAccounts() {
+        let item = SafariHandoff(server: "https://vault.example.com", email: "alex@example.com", secretKey: "K")
+        // Signed out: always cleared.
+        XCTAssertTrue(SafariHandoff.shouldClear(status: .setup, server: "", email: "", stored: item))
+        XCTAssertTrue(SafariHandoff.shouldClear(status: .loggedOut, server: item.server, email: item.email, stored: item))
+        // One of several accounts logged out: the next active one is locked and isn't the item's.
+        XCTAssertTrue(SafariHandoff.shouldClear(status: .locked, server: item.server, email: "sam@example.com", stored: item))
+        XCTAssertTrue(SafariHandoff.shouldClear(status: .locked, server: "https://other.example.com", email: item.email, stored: item))
+        // The same account, locked: kept, so Safari still offers it.
+        XCTAssertFalse(SafariHandoff.shouldClear(status: .locked, server: item.server, email: "Alex@Example.com", stored: item))
+        // Nothing stored: nothing to clear.
+        XCTAssertFalse(SafariHandoff.shouldClear(status: .locked, server: item.server, email: "sam@example.com", stored: nil))
+    }
+
+    func testChangeKeyFollowsTheSecretKey() {
+        let a = SafariHandoff.changeKey(activeId: "1", status: .unlocked, server: "s", email: "e", secretKey: "K1")
+        let b = SafariHandoff.changeKey(activeId: "1", status: .unlocked, server: "s", email: "e", secretKey: "K2")
+        XCTAssertNotEqual(a, b)
+        XCTAssertFalse(a.contains("K1"))
+    }
 }

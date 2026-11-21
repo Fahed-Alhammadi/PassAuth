@@ -18,7 +18,8 @@ export function safariManifest(chrome, version) {
   for (const k of DROP_KEYS) delete m[k];
   m.version = version;
   m.background = { scripts: [chrome.background.service_worker], type: chrome.background.type, persistent: false };
-  m.permissions = m.permissions.filter((p) => !DROP_PERMISSIONS.has(p));
+  // nativeMessaging: the sign-in hand-off from the PassAuth app (src/shared/app-handoff.ts).
+  m.permissions = [...m.permissions.filter((p) => !DROP_PERMISSIONS.has(p)), "nativeMessaging"];
   m.content_scripts = m.content_scripts.filter((c) => !c.js.some((js) => PASSKEY_SCRIPTS.has(js))).map(({ match_origin_as_fallback: _, ...rest }) => rest);
   m.web_accessible_resources = m.web_accessible_resources.map(({ use_dynamic_url: _, ...rest }) => rest);
   m.browser_specific_settings = { safari: { strict_min_version: MIN_SAFARI } };
