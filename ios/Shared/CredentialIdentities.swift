@@ -27,7 +27,9 @@ public struct IdentityRecord: Equatable, Hashable, Sendable {
 /// A website becomes an identity by its effective match (the item's, or the default-match
 /// setting for "Default"): "base domain" → a `.domain` identity of the base domain (iOS also
 /// offers it on subdomains, like the matcher); "host" → a `.URL` identity of the origin;
-/// "exact" / "starts with" → a `.URL` identity of the address. iOS matches these itself and
+/// "exact" / "starts with" → a `.URL` identity of the address. Logins that share a user name
+/// under one base domain are written by their full host (`crowdedDomains`), so the system's
+/// list shows each on its own site instead of one row for both. iOS matches these itself and
 /// doesn't tell PassAuth the page when a suggestion is picked, so websites PassAuth can't
 /// express this way are left out: regular expressions, "never", app websites and non-web
 /// schemes. A login for the PassAuth server's own address is written like any other, so Safari
@@ -37,11 +39,19 @@ public enum IdentityMapper {
         var out: [IdentityRecord] = []
         var seen = Set<IdentityRecord>()
         func add(_ r: IdentityRecord) { if seen.insert(r).inserted { out.append(r) } }
+        let crowded = crowdedDomains(entries, defaultMatch: defaultMatch)
         for e in entries {
             guard let l = e.item.login else { continue }
             let rank = e.item.favorite ? 1 : 0
             let user = l.username.isEmpty ? e.item.name : l.username
-            let services = l.urls.compactMap { service($0, defaultMatch: defaultMatch) }
+            let services: [(String, IdentityRecord.Service)] = l.urls.compactMap { u in
+                guard let (svc, type) = service(u, defaultMatch: defaultMatch) else { return nil }
+                // Another login with this user name on the same base domain: by full host.
+                if type == .domain, crowded.contains(DomainUser(domain: svc, user: user.lowercased())), let p = UrlMatcher.parse(u.url) {
+                    return (p.origin, .url)
+                }
+                return (svc, type)
+            }
             let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
             for (svc, type) in services {
                 if !l.password.isEmpty || !l.username.isEmpty {
@@ -59,6 +69,27 @@ public enum IdentityMapper {
             }
         }
         return out
+    }
+
+    private struct DomainUser: Hashable {
+        var domain: String
+        var user: String
+    }
+
+    /// Base domains where two or more logins share a user name (case aside). The system lists
+    /// identities by domain and user, so these would show as one suggestion that may fill the
+    /// other login's password: they're written by their full host instead.
+    private static func crowdedDomains(_ entries: [Entry], defaultMatch: UrlMatch) -> Set<DomainUser> {
+        var owners: [DomainUser: Set<String>] = [:]
+        for e in entries {
+            guard let l = e.item.login, !l.password.isEmpty || !l.username.isEmpty else { continue }
+            let user = (l.username.isEmpty ? e.item.name : l.username).lowercased()
+            for u in l.urls {
+                guard let (svc, type) = service(u, defaultMatch: defaultMatch), type == .domain else { continue }
+                owners[DomainUser(domain: svc, user: user), default: []].insert(e.id)
+            }
+        }
+        return Set(owners.filter { $0.value.count > 1 }.keys)
     }
 
     static func service(_ u: LoginUrl, defaultMatch: UrlMatch) -> (String, IdentityRecord.Service)? {

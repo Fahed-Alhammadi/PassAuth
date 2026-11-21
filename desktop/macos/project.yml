@@ -169,6 +169,7 @@ targets:
     sources:
       - path: Tests
       - path: AutoFill/TimedUnlockPolicy.swift
+      - path: AutoFill/DesktopSettings.swift
       - path: ../../ios/Tests/UrlMatcherTests.swift
         group: Tests/Shared
       - path: ../../ios/Tests/ItemJsonTests.swift

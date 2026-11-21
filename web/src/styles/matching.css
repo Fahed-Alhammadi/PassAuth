@@ -1,0 +1,15 @@
+/* ------------------------------------------------ password health: website matching */
+/* Rows reuse the duplicate-login list (duplicates.css); these add the checkbox and the websites per login. */
+.match-row { align-items: flex-start; }
+.match-check { flex: none; margin-top: 10px; width: 18px; height: 18px; accent-color: var(--accent); }
+.match-row label.dup-row-site { cursor: pointer; }
+.match-logins { margin: var(--space-2) 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+.match-login { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.match-login-name { font-size: var(--text-caption); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.match-url { min-width: 0; display: flex; align-items: center; gap: var(--space-2); }
+.match-url-text { min-width: 0; font-size: var(--text-caption); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.match-url .dup-chip { flex: none; margin: 0; }
+.match-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 560px) {
+  .match-actions .btn { flex: 1 1 auto; }
+}

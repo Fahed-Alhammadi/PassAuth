@@ -9,6 +9,9 @@
  *   and when the window comes back after a while, the app asks the server for its revision, reconnects the
  *   live connection and syncs if anything changed (`resync`). Nothing runs while the vault is locked: there is
  *   no offline copy on desktop, so there is nothing to refresh.
+ * - AutoFill on this Mac: the AutoFill extension's "Default URI match detection", in a Keychain item both sides
+ *   write (`autofill_settings_*` commands; `desktop/macos/AutoFill/DesktopSettings.swift`); the last change counts,
+ *   and the extension takes it on its next request.
  * The sync interval is per install (localStorage `desktop.app`), never sent to the server.
  */
 import { invoke } from "@tauri-apps/api/core";
@@ -28,6 +31,15 @@ const SYNC_OPTIONS: [number, string][] = [
   [120, "Every 2 hours"],
   [360, "Every 6 hours"],
   [720, "Every 12 hours"],
+];
+/** The macOS AutoFill extension's picker (`defaultMatches` in desktop/macos/AutoFill/MacViews.swift); its default first. */
+const AUTOFILL_MATCHES: [string, string][] = [
+  ["domain", "Base domain"],
+  ["host", "Host"],
+  ["starts_with", "Starts with"],
+  ["regex", "Regular expression"],
+  ["exact", "Exact"],
+  ["never", "Never"],
 ];
 /** The timer checks once a minute; a tick this late means the computer slept. */
 const TICK_MS = 60_000;
@@ -63,19 +75,37 @@ function saveInterval(minutes: number) {
   }
 }
 
+/** The AutoFill extension's default match as last written by either side; its default when nothing was written yet. */
+async function readAutofillMatch(): Promise<string> {
+  const item = await invoke<{ defaultMatch: string } | null>("autofill_settings_get").catch(() => null);
+  const m = item?.defaultMatch;
+  return m !== undefined && AUTOFILL_MATCHES.some(([v]) => v === m) ? m : AUTOFILL_MATCHES[0][0];
+}
+
 /** Read what the OS and the shell hold (login item, Dock setting). Call once before the hooks are registered. */
 export async function appHook(): Promise<DesktopAppHook> {
-  const [startAtLogin, shell] = await Promise.all([
+  const mac = platform === "macos";
+  const [startAtLogin, shell, autofillDefaultMatch] = await Promise.all([
     isEnabled().catch(() => false),
     invoke<{ keepDock: boolean }>("shell_settings_get").catch(() => ({ keepDock: false })),
+    mac ? readAutofillMatch() : Promise.resolve(undefined),
   ]);
   // The login item stores this executable's path. Rewrite it once per launch so it follows the app when it was
   // moved (Downloads → Applications) or a new AppImage was downloaded by hand; `isEnabled` only checks existence.
   if (startAtLogin) enable().catch(() => {});
-  settings = { ...settings, startAtLogin, keepDock: shell.keepDock };
+  settings = { ...settings, startAtLogin, keepDock: shell.keepDock, autofillDefaultMatch };
   return {
     platform,
     syncOptions: SYNC_OPTIONS,
+    ...(mac && {
+      autofillMatchOptions: AUTOFILL_MATCHES,
+      async refresh() {
+        const m = await readAutofillMatch();
+        if (m === settings.autofillDefaultMatch) return;
+        settings = { ...settings, autofillDefaultMatch: m };
+        notify();
+      },
+    }),
     get: () => settings,
     subscribe(fn) {
       listeners.add(fn);
@@ -98,6 +128,18 @@ export async function appHook(): Promise<DesktopAppHook> {
           settings = { ...settings, keepDock: patch.keepDock };
         } catch {
           toast("Couldn't save the setting.");
+        }
+      }
+      if (
+        mac &&
+        patch.autofillDefaultMatch !== undefined &&
+        AUTOFILL_MATCHES.some(([v]) => v === patch.autofillDefaultMatch)
+      ) {
+        try {
+          await invoke("autofill_settings_set", { defaultMatch: patch.autofillDefaultMatch });
+          settings = { ...settings, autofillDefaultMatch: patch.autofillDefaultMatch };
+        } catch {
+          toast("Couldn't save the AutoFill setting.");
         }
       }
       if (patch.backgroundSyncMinutes !== undefined && SYNC_OPTIONS.some(([v]) => v === patch.backgroundSyncMinutes)) {

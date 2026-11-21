@@ -793,6 +793,7 @@ struct MacPasskey: View {
 // MARK: Settings (configuration screen and the gear button)
 
 /// Default URI match options, as the iOS app's Settings → AutoFill (`ios/App/SettingsViews.swift`).
+/// Same values as `DesktopSettings.matches` and the desktop app's Settings (`desktop/src/app.ts`).
 private let defaultMatches: [(UrlMatch, String)] = [
     (.domain, "Base domain"), (.host, "Host"), (.startsWith, "Starts with"), (.regex, "Regular expression"), (.exact, "Exact"), (.never, "Never"),
 ]
@@ -862,14 +863,14 @@ struct MacSettings: View {
             }
             Section {
                 Picker("Default URI match detection", selection: Binding(get: { state.settings.defaultMatch }, set: { v in
-                    Task { await model.repo.updateSettings { $0.defaultMatch = v } }
+                    Task { await DesktopSettings.set(v, model.repo) } // also shown in the desktop app's Settings
                 })) {
                     ForEach(defaultMatches, id: \.0) { Text($0.1).tag($0.0) }
                 }
             } header: {
                 Text("Filling")
             } footer: {
-                Text("\(matchHelp(state.settings.defaultMatch)) Applies to websites set to \"Default\" in an item; the same setting as in the apps and the browser extension, kept per device.")
+                Text("\(matchHelp(state.settings.defaultMatch)) Applies to websites set to \"Default\" in an item. Also set in the PassAuth app: Settings → This app. The most recent change applies.")
                     .foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(Color.paDanger) }

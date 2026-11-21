@@ -2,6 +2,7 @@
 //! requests to the user's server (text in `api_fetch`, attachment files in `transfer`), the OS keychain, a
 //! self-clearing clipboard and file saving (`files`: safe names, the downloaded-from-the-internet mark).
 
+mod autofill_settings;
 mod files;
 mod offline;
 mod transfer;
@@ -441,6 +442,21 @@ async fn autofill_handoff_clear() -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 async fn write_handoff(json: Vec<u8>) -> Result<(), String> {
+    write_group_item(HANDOFF_SERVICE, HANDOFF_ACCOUNT, json).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn write_handoff(_json: Vec<u8>) -> Result<(), String> {
+    Ok(())
+}
+
+/// macOS: write (update, else add) a generic-password item in the AutoFill extension's access group.
+#[cfg(target_os = "macos")]
+async fn write_group_item(
+    service: &'static str,
+    account: &'static str,
+    json: Vec<u8>,
+) -> Result<(), String> {
     use core_foundation::data::CFData;
     use security_framework::item::{
         ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, ItemUpdateOptions,
@@ -451,8 +467,8 @@ async fn write_handoff(json: Vec<u8>) -> Result<(), String> {
         let mut search = ItemSearchOptions::new();
         search
             .class(ItemClass::generic_password())
-            .service(HANDOFF_SERVICE)
-            .account(HANDOFF_ACCOUNT)
+            .service(service)
+            .account(account)
             .access_group(HANDOFF_GROUP)
             .ignore_legacy_keychains();
         let mut update = ItemUpdateOptions::new();
@@ -464,8 +480,8 @@ async fn write_handoff(json: Vec<u8>) -> Result<(), String> {
             class: ItemClass::generic_password(),
             data,
         });
-        add.set_service(HANDOFF_SERVICE)
-            .set_account_name(HANDOFF_ACCOUNT)
+        add.set_service(service)
+            .set_account_name(account)
             .set_access_group(HANDOFF_GROUP)
             .set_location(Location::DataProtectionKeychain)
             .set_label("PassAuth AutoFill");
@@ -474,9 +490,30 @@ async fn write_handoff(json: Vec<u8>) -> Result<(), String> {
     .await
 }
 
-#[cfg(not(target_os = "macos"))]
-async fn write_handoff(_json: Vec<u8>) -> Result<(), String> {
-    Ok(())
+/// macOS: the data of an item in the AutoFill extension's access group; None when it's missing or unreadable.
+#[cfg(target_os = "macos")]
+async fn read_group_item(
+    service: &'static str,
+    account: &'static str,
+) -> Result<Option<Vec<u8>>, String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    blocking(move || {
+        let mut search = ItemSearchOptions::new();
+        search
+            .class(ItemClass::generic_password())
+            .service(service)
+            .account(account)
+            .access_group(HANDOFF_GROUP)
+            .ignore_legacy_keychains()
+            .load_data(true);
+        Ok(search.search().ok().and_then(|found| {
+            found.into_iter().find_map(|r| match r {
+                SearchResult::Data(bytes) => Some(bytes),
+                _ => None,
+            })
+        }))
+    })
+    .await
 }
 
 /// macOS: tell the webview when the screen locks, the Mac goes to sleep or the user session is switched.
@@ -847,6 +884,8 @@ pub fn run() {
             prepare_relaunch,
             autofill_handoff,
             autofill_handoff_clear,
+            autofill_settings::autofill_settings_get,
+            autofill_settings::autofill_settings_set,
             offline::offline_changes_get,
             offline::offline_changes_set,
             transfer::upload_start,
