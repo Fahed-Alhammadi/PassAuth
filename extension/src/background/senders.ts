@@ -55,7 +55,7 @@ export function extensionPage(sender: SenderInfo, runtimeId: string, ownOrigins:
   } catch {
     return null;
   }
-  if (u.protocol !== "chrome-extension:" || !ownOrigins.includes(extensionOrigin(u.href))) return null;
+  if ((u.protocol !== "chrome-extension:" && u.protocol !== "moz-extension:") || !ownOrigins.includes(extensionOrigin(u.href))) return null;
   return u.pathname;
 }
 

@@ -8,11 +8,13 @@
   "scripts": {
     "wasm": "../scripts/build-wasm.sh extension/src/wasm",
     "build": "tsc -b && node build.mjs",
+    "build:firefox": "tsc -b && node build.mjs --firefox",
     "typecheck": "tsc -b",
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "vitest run",
-    "package": "node build.mjs && node package.mjs"
+    "package": "node build.mjs && node package.mjs",
+    "package:firefox": "node build.mjs --firefox && node package.mjs --firefox"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.3.0",

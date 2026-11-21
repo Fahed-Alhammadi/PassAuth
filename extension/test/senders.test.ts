@@ -38,6 +38,12 @@ test("extensionPage: PassAuth's own pages, also through a per-session dynamic UR
   expect(extensionPage({ id: EXTENSION_ID }, EXTENSION_ID, own)).toBe(null);
 });
 
+test("extensionPage: Firefox's moz-extension pages; a moz-extension page of another add-on is not PassAuth", () => {
+  const own = ["moz-extension://0d7c4a8e-1111-4c3b-9d1e-2f6a7b8c9d00"];
+  expect(extensionPage({ id: EXTENSION_ID, url: `${own[0]}/save-prompt.html` }, EXTENSION_ID, own)).toBe("/save-prompt.html");
+  expect(extensionPage({ id: EXTENSION_ID, url: "moz-extension://ffffffff-2222-4c3b-9d1e-2f6a7b8c9d00/popup.html" }, EXTENSION_ID, own)).toBe(null);
+});
+
 test("frameMayFill: the login's websites must match the claiming frame, by its real origin", () => {
   const urls: LoginUrl[] = [{ url: "https://login.example.com", match: "host" }];
   const frame = (origin: string, url = `${origin}/form`) => ({ origin, url });
