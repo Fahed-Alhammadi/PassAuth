@@ -74,9 +74,6 @@ data class Invitation(
 }
 
 object Invitations {
-    /** The `/api/config` feature of servers with invitations. */
-    const val FEATURE = "vault_invitations"
-
     /** The name shown for a vault whose (opened) name is empty. */
     const val UNNAMED = "Shared vault"
 
@@ -260,7 +257,7 @@ object InvitationText {
  * managers to replace the key. [sync] runs after each answer.
  */
 class InvitationActions(private val api: SecurityTransport, private val sync: suspend () -> Unit) {
-    private fun path(vaultId: String) = "/vaults/${java.net.URLEncoder.encode(vaultId, "UTF-8").replace("+", "%20")}/invitation"
+    private fun path(vaultId: String) = "/vaults/${urlPart(vaultId)}/invitation"
 
     /** Accept; an invitation that is gone (cancelled, vault deleted: 404) refreshes the list and says so. */
     suspend fun accept(vaultId: String) {

@@ -1,6 +1,5 @@
 package io.passauth.app.data
 
-import java.net.URLEncoder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -143,7 +142,7 @@ class EmergencyClient(private val env: EmergencyEnv) {
         const val SIGNED_OUT = "Sign in first."
         const val GONE = "This emergency contact is no longer on your server's list. Reload the page."
 
-        fun path(id: String, rest: String = "") = "/emergency-access/${URLEncoder.encode(id, "UTF-8").replace("+", "%20")}$rest"
+        fun path(id: String, rest: String = "") = "/emergency-access/${urlPart(id)}$rest"
 
         fun hasCode(e: Throwable, code: String) = e is ApiException && e.hasCode(code)
     }
@@ -336,7 +335,7 @@ class EmergencyClient(private val env: EmergencyEnv) {
             val v = own(id) ?: continue
             if (v.role != Role.Owner || v.kind != VaultInfo.KEY_KIND_ACCOUNT) continue
             try {
-                members[id] = readMemberIds(env.call(a, "/vaults/${URLEncoder.encode(id, "UTF-8").replace("+", "%20")}/members"))
+                members[id] = readMemberIds(env.call(a, "/vaults/${urlPart(id)}/members"))
             } catch (e: ApiException) {
                 if (e.status != 404) throw e
             }

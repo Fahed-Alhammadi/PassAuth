@@ -509,7 +509,7 @@ class AccountSecurity(
     /** Remove a two-step login security key, after re-authentication. */
     suspend fun removeSecurityKey(keyId: String, email: String, password: String, secretKey: String?) {
         val token = reauth(email, password, secretKey)
-        api.call("/account/2fa/passkey/${java.net.URLEncoder.encode(keyId, "UTF-8").replace("+", "%20")}", null, "DELETE", true, mapOf(REAUTH_HEADER to token))
+        api.call("/account/2fa/passkey/${urlPart(keyId)}", null, "DELETE", true, mapOf(REAUTH_HEADER to token))
     }
 
     /**
@@ -550,7 +550,7 @@ class AccountSecurity(
      * [ForgetResult.current]: this app's own session was one of them, so it is signed out too.
      */
     suspend fun forgetDevice(deviceId: String): ForgetResult {
-        val r = post("/account/devices/${java.net.URLEncoder.encode(deviceId, "UTF-8").replace("+", "%20")}/forget") as? JsonObject
+        val r = post("/account/devices/${urlPart(deviceId)}/forget") as? JsonObject
         return ForgetResult(
             signedOut = (r?.get("signed_out") as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0,
             current = r?.bool("current") == true,
@@ -559,7 +559,7 @@ class AccountSecurity(
 
     /** Sign out one of the account's other sessions (this app's own is "Log out"). */
     suspend fun revokeSession(sessionId: String) {
-        api.call("/account/sessions/${java.net.URLEncoder.encode(sessionId, "UTF-8").replace("+", "%20")}", null, "DELETE", true, emptyMap())
+        api.call("/account/sessions/${urlPart(sessionId)}", null, "DELETE", true, emptyMap())
     }
 
     /** Sign out every other session of the account at once; this one stays. Returns how many, when the server says. */

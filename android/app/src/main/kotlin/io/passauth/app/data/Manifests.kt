@@ -403,7 +403,7 @@ object Manifests {
 
     /** `GET /vaults/{id}/manifest-log?after=<seq>`. */
     fun logPath(vaultId: String, after: Long): String =
-        "/vaults/" + java.net.URLEncoder.encode(vaultId, "UTF-8").replace("+", "%20") + "/manifest-log?after=" + after.coerceAtLeast(0)
+        "/vaults/" + urlPart(vaultId) + "/manifest-log?after=" + after.coerceAtLeast(0)
 
     /**
      * A vault's manifest log after version [after], as the JSON array the core takes: [page] asks
@@ -606,7 +606,7 @@ object Manifests {
      * next one without the row ([entry]).
      */
     fun deletePath(row: SyncItem, entry: ManifestEntry?): String {
-        val id = java.net.URLEncoder.encode(row.id, "UTF-8").replace("+", "%20")
+        val id = urlPart(row.id)
         val query = if (entry != null) query(entry, row.revision) else row.revision?.let { "?revision=$it" }.orEmpty()
         return "/items/$id/permanent$query"
     }

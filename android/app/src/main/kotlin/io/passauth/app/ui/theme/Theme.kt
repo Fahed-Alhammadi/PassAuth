@@ -49,7 +49,6 @@ object Space {
     val m = 12.dp
     val l = 16.dp
     val xl = 24.dp
-    val xxl = 32.dp
 }
 
 /** Corner radii: 8 for controls (text boxes, tiles, notices), 12 for grouped cards, 16 for sheets and dialogs. */

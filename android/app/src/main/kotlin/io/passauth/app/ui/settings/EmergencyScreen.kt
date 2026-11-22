@@ -43,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.passauth.app.data.urlPart
 import io.passauth.app.data.Emergency
 import io.passauth.app.data.EmergencyClient
 import io.passauth.app.data.Grant
@@ -797,7 +798,7 @@ private fun EmergencyItemScreen(ctx: UiCtx, g: Grant, e: io.passauth.app.data.Gr
             Muted("In ${Emergency.personName(g.grantor)}'s vault $vaultName. View only.")
             io.passauth.app.ui.vault.ItemDetailCards(ctx, i)
             io.passauth.app.ui.vault.AttachmentsCard(ctx, e.id, i, canWrite = false, readOnly = true) { a ->
-                "${EmergencyClient.path(g.id)}/attachments/${java.net.URLEncoder.encode(a.id, "UTF-8")}"
+                "${EmergencyClient.path(g.id)}/attachments/${urlPart(a.id)}"
             }
         }
     }

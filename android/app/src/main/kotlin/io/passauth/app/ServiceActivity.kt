@@ -376,10 +376,6 @@ abstract class ServiceActivity : SecureActivity() {
         screen = Screen.Message(title, body, openApp = false)
     }
 
-    protected fun hideUi() {
-        screen = Screen.None
-    }
-
     protected fun openApp() {
         startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }

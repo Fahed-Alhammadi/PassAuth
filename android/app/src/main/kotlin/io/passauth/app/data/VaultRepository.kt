@@ -353,8 +353,8 @@ private class Session(val accountId: String, val account: Account) {
  * The app's single source of truth for accounts, unlock state and the
  * decrypted vault. Mirrors the extension's background `vault.ts`.
  *
- * Phase 2 (autofill and passkey provider) runs in the same process and reads
- * the unlocked vault through [vault], [loginsFor] and [passkeysFor].
+ * Autofill and the passkey provider run in the same process and read
+ * the unlocked vault through [vault].
  */
 class VaultRepository(
     private val store: SecureStore,
@@ -2016,7 +2016,6 @@ class VaultRepository(
 
     // ------------------------------------------------------ vault manifests
 
-    private fun urlPart(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
     /** The header of vault [vaultId] in the active account's copy. */
     private suspend fun copyVault(vaultId: String): SyncVault? = copy?.takeIf { it.first == activeId() }?.second?.vaults?.firstOrNull { it.id == vaultId }
@@ -2534,7 +2533,7 @@ class VaultRepository(
     private suspend fun sharingFor(id: String, session: Session): SharingSession {
         session.sharing?.let { return it }
         val server = store.get().accounts[id]?.server.orEmpty()
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        fun enc(s: String) = urlPart(s)
         val api = object : SharingApi {
             override suspend fun putIdentity(recordJson: String): Boolean {
                 val answer = api.call(id, "/account/identity", AppJson.parseToJsonElement(recordJson), "PUT") as? JsonObject
@@ -2746,7 +2745,7 @@ class VaultRepository(
             activeId() to sh.me
         }
         try {
-            api.call(id, "/vaults/${java.net.URLEncoder.encode(vaultId, "UTF-8")}/members/${java.net.URLEncoder.encode(me, "UTF-8")}", method = "DELETE")
+            api.call(id, "/vaults/${urlPart(vaultId)}/members/${urlPart(me)}", method = "DELETE")
         } catch (e: ApiException) {
             // Already gone, or the server won't let this account leave (it stays refused here).
             if (e.status !in setOf(400, 403, 404, 409)) throw e
@@ -3896,7 +3895,7 @@ class VaultRepository(
     /** An item's attachment flows (`files`) need these: the account and its session's requests. */
     fun uploadSteps(): UploadSteps {
         val (id, _) = unlockedAccount()
-        fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+        fun enc(s: String) = urlPart(s)
         return object : UploadSteps {
             override fun newId(): String = io.passauth.core.newId()
             override fun newKey(): String = io.passauth.core.fileNewKey()
@@ -3922,12 +3921,12 @@ class VaultRepository(
 
     /** The files the server keeps for an item (`GET /items/{id}/attachments`). */
     suspend fun storedAttachments(itemId: String): List<StoredAttachment> =
-        Attachments.readStored(api.call(activeId(), "/items/${java.net.URLEncoder.encode(itemId, "UTF-8")}/attachments"))
+        Attachments.readStored(api.call(activeId(), "/items/${urlPart(itemId)}/attachments"))
 
     /** Delete a file on the server; already gone counts as done. */
     suspend fun deleteStoredAttachment(attachmentId: String) {
         try {
-            api.call(activeId(), "/attachments/${java.net.URLEncoder.encode(attachmentId, "UTF-8")}", method = "DELETE")
+            api.call(activeId(), "/attachments/${urlPart(attachmentId)}", method = "DELETE")
         } catch (e: ApiException) {
             if (e.status != 404) throw e
         }
@@ -4032,7 +4031,7 @@ class VaultRepository(
 
     /** Whether account [userId] is the only member of vault [vaultId] (`GET /vaults/{id}/members`); throws when that can't be read. */
     private suspend fun onlyMember(id: String, vaultId: String, userId: String): Boolean {
-        val enc = java.net.URLEncoder.encode(vaultId, "UTF-8")
+        val enc = urlPart(vaultId)
         val members = (api.call(id, "/vaults/$enc/members") as? JsonObject)?.get("members") as? kotlinx.serialization.json.JsonArray
             ?: throw UserException(EmergencyClient.UNEXPECTED)
         val ids = members.map { ((it as? JsonObject)?.get("user_id") as? JsonPrimitive)?.contentOrNull ?: throw UserException(EmergencyClient.UNEXPECTED) }
@@ -4108,7 +4107,7 @@ class VaultRepository(
         if (pinned != null && (pinned.first != id || pinned.second != session.accountId)) {
             throw UserException("You switched to another account meanwhile. Switch back and try again.")
         }
-        val enc = java.net.URLEncoder.encode(vaultId, "UTF-8")
+        val enc = urlPart(vaultId)
         repeat(ROTATE_ATTEMPTS) { attempt ->
             // The state this rotation re-encrypts: verified by this sync, under this lock.
             syncLocked()
@@ -4287,24 +4286,6 @@ class VaultRepository(
         if (ids.isEmpty()) return SignedSharing.CHANGED_JUST_NOW
         return SignedSharing.membersDiffer(ids.map { known[it]?.ifEmpty { null } ?: emails[it]?.ifEmpty { null } ?: SignedSharing.someone(it) })
     }
-
-    // ---------------------------------------------- queries (autofill, phase 2)
-
-    /**
-     * Logins of the unlocked active account that match a web page (default match from settings;
-     * regular expressions only from the account's own vaults).
-     */
-    fun loginsFor(pageUrl: String): List<Entry> {
-        val fallback = state.value.settings.defaultMatch
-        val v = _shown.value ?: return emptyList()
-        return v.entries.filter { e -> e.item.login?.let { UrlMatcher.matchesAny(pageUrl, it, fallback, allowRegex = v.isPersonal(e)) } == true }
-    }
-
-    /** Passkeys saved for a relying party. */
-    fun passkeysFor(rpId: String): List<Pair<Entry, Passkey>> =
-        _shown.value?.entries.orEmpty().flatMap { e ->
-            e.item.login?.passkeys.orEmpty().filter { it.rpId.equals(rpId, ignoreCase = true) }.map { e to it }
-        }
 
     companion object {
         const val SECRET_KEY_REQUIRED = "secret_key_required"

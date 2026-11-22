@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.passauth.app.data.urlPart
 import io.passauth.app.data.Attachment
 import io.passauth.app.data.AttachmentManager
 import io.passauth.app.data.Attachments
@@ -76,7 +77,7 @@ import kotlinx.coroutines.launch
 private enum class FileAction { Open, Share, Save }
 
 /** The attachment endpoint of an item's own file. */
-fun attachmentPath(id: String) = "/attachments/${java.net.URLEncoder.encode(id, "UTF-8")}"
+fun attachmentPath(id: String) = "/attachments/${urlPart(id)}"
 
 /**
  * The files of an item (servers with `attachments`; the web vault's `Attachments.tsx`): each with

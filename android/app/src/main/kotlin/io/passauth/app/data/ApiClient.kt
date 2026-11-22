@@ -365,3 +365,6 @@ fun JsonObject.str(key: String): String = this[key]?.jsonPrimitive?.contentOrNul
 fun JsonObject.strOrNull(key: String): String? = (this[key] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
 fun JsonObject.bool(key: String): Boolean = this[key]?.jsonPrimitive?.contentOrNull == "true"
 fun JsonObject.long(key: String): Long = this[key]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0
+
+/** One path segment of a request (an id), percent-encoded; a space is `%20`, never `+`. */
+internal fun urlPart(s: String): String = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")

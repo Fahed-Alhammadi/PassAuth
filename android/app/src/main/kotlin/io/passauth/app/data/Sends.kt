@@ -1,6 +1,5 @@
 package io.passauth.app.data
 
-import java.net.URLEncoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -35,7 +34,7 @@ object Sends {
 
     /** The link to share: the server's address, the Send's id and, after `#`, its key. */
     fun link(origin: String, id: String, key: String): String =
-        "${origin.trimEnd('/')}/send/${URLEncoder.encode(id, "UTF-8").replace("+", "%20")}#$key"
+        "${origin.trimEnd('/')}/send/${urlPart(id)}#$key"
 
     /** The link with its key (everything after `#`) hidden, for showing it on screen; copying uses the whole link. */
     fun maskedLink(link: String): String {
@@ -190,9 +189,6 @@ object Sends {
         changes.disabled?.let { put("disabled", it) }
         changes.hideEmail?.let { put("hide_email", it) }
     }
-
-    /** "Active", "Turned off"… */
-    fun stateLabel(s: SendState) = s.label
 }
 
 /** A Send as its owner's list shows it (`GET /sends`); [name] and [ownerKey] are encrypted. */
@@ -313,7 +309,7 @@ class SendActions(
     private val sendV2: suspend () -> Boolean = { false },
     private val crypto: () -> SendCrypto,
 ) {
-    private fun path(id: String) = "/sends/${URLEncoder.encode(id, "UTF-8").replace("+", "%20")}"
+    private fun path(id: String) = "/sends/${urlPart(id)}"
 
     /** The Send's key (for its link and its text), from its `owner_key`. */
     fun keyOf(s: OwnedSend): String = crypto().unwrap(s.ownerKey)

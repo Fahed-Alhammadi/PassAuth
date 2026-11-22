@@ -400,7 +400,6 @@ object SignedSharing {
     const val CONSENT = "Your server added this vault to your account. Accept only if you expected it."
     const val MEMORY_MISSING = "PassAuth couldn't find your list of known keys on your server, so each shared vault needs your OK again. If you didn't expect this, tell your server's admin."
     const val NEW_DEVICE = "This phone had no earlier copy of your shared vaults, so each one shared before signing needs your OK once. Accept only the ones you expected."
-    const val CONSENT_REPLACED = "Its key was replaced by an app that doesn't sign yet. Accept only if someone in this vault just replaced its key. It stays locked until you accept it."
     const val ASK_OWNER_TO_SIGN = "Ask the vault's owner to sign this vault."
     const val CONSENT_UNSIGNED = "It isn't signed, so PassAuth keeps it locked. $ASK_OWNER_TO_SIGN"
     const val CANT_DECLINE = "Only a vault signed by someone you can name can be declined here. PassAuth keeps this one locked."
