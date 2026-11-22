@@ -194,17 +194,16 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(ApiClient.clientHeader.hasPrefix("ios/"))
     }
 
-    func testErrorCodesBeforeMessages() {
-        // API v2 code, and the message text older servers put the reason in.
+    func testErrorCodesDecide() {
+        // The answer's code decides, never a message that only looks like one.
         XCTAssertTrue(ApiError(status: 403, code: "reauth_required", message: "anything").hasCode("reauth_required"))
-        XCTAssertTrue(ApiError(status: 403, code: "forbidden", message: "reauth_required").hasCode("reauth_required"))
+        XCTAssertFalse(ApiError(status: 403, code: "forbidden", message: "reauth_required").hasCode("reauth_required"))
         XCTAssertFalse(ApiError(status: 403, code: "forbidden", message: "nope").hasCode("reauth_required"))
-        XCTAssertTrue(ApiError(status: 400, code: "bad_request", message: "Invalid code").hasCode("invalid_code", orMessage: "invalid code"))
         XCTAssertEqual(errorMessage(ApiError(status: 403, code: "email_not_verified", message: "x")), "Confirm your email address first, then sign in.")
-        XCTAssertEqual(errorMessage(ApiError(status: 403, code: "forbidden", message: "email_not_verified")), "Confirm your email address first, then sign in.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 403, code: "reauth_required", message: "reauth_required")), "Please confirm your master password again.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "invalid_code", message: "wrong")), "That code isn't right. Check it and try again.")
-        XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "bad_request", message: "invalid code")), "That code isn't right. Check it and try again.")
+        XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "invalid_code", message: "invalid code")), "That code isn't right. Check it and try again.")
+        XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "expired", message: "start setup first")), "Setup has expired. Start again.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 429, code: "rate_limited", message: "too many requests")), "Too many attempts, try again later.")
     }
 
@@ -404,10 +403,10 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(writes().filter { $0.method == "PUT" }.count, 1, "nothing sent on top of the other change")
     }
 
-    /// A create whose earlier attempt got through (409 `item_exists`, or the older servers'
-    /// "item id already exists"): the item already there is updated, not saved a second time.
+    /// A create whose earlier attempt got through (409 `item_exists`): the item already there
+    /// is updated, not saved a second time.
     func testCreateWithAnIdThatGotThroughUpdatesIt() async throws {
-        for answer in [#"{"error":"item_exists","message":"item id already exists"}"#, #"{"error":"conflict","message":"item id already exists"}"#] {
+        for answer in [#"{"error":"item_exists","message":"item id already exists"}"#] {
             // A fresh device each time (no offline copy of the previous account).
             SecureStore.wipeAll(directory: dir)
             ScriptedServer.reset()
@@ -939,14 +938,13 @@ final class ContractTests: XCTestCase {
         XCTAssertNil(repo.store.get().secrets.persistedKeys["acc"], "the keys kept for Never are gone")
         XCTAssertEqual(s.policyViolations, [.secretKey])
 
-        // Without the feature (an older server): the defaults, and nothing more is asked.
-        ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","api":2,"features":["delta_sync"]}"#)
-        let asked = ScriptedServer.recorded().filter { $0.path == "/api/account" }.count
+        // A server that sets no policies: the defaults.
+        ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","api":2,"features":["policies"],"policies":{}}"#)
+        ScriptedServer.answer("GET /api/account", 200, #"{"policy_violations":[]}"#)
         await repo.refreshPolicies()
         XCTAssertEqual(repo.state.policies, Policies())
         XCTAssertEqual(repo.state.policyViolations, [])
         XCTAssertEqual(repo.state.timeoutLimit, 0)
-        XCTAssertEqual(ScriptedServer.recorded().filter { $0.path == "/api/account" }.count, asked)
         XCTAssertEqual(repo.state.settings.vaultTimeout, .min30, "a lowered choice isn't raised again")
     }
 }

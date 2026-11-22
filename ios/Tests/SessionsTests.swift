@@ -62,10 +62,10 @@ final class SessionsTests: XCTestCase {
         XCTAssertTrue(calls.allSatisfy { $0.headers["Authorization"] == "Bearer A" })
     }
 
-    func testSignOutOthersOnlyWhereTheServerHasIt() async throws {
+    func testSignOutOthersOnlyWithTheServersSettings() async throws {
         let repo = repo()
-        // An older server: no `revoke_others` in its features, or no features at all.
-        for config in [#"{"name":"PassAuth","features":["key_epoch"]}"#, #"{"name":"PassAuth"}"#] {
+        // An answer that isn't a server's settings (no features at all).
+        for config in [#"{"name":"PassAuth"}"#] {
             ScriptedServer.answer("GET /api/account/sessions", 200, sessionsJSON)
             ScriptedServer.answer("GET /api/config", 200, config)
             let list = try await repo.accountSessions()
@@ -119,8 +119,8 @@ final class SessionsTests: XCTestCase {
 
     // MARK: Forget a device (`forget_device`)
 
-    /// Sessions carry their device; "Forget…" is offered only where the server has the feature.
-    func testDevicesCanBeForgottenWhereTheServerHasIt() async throws {
+    /// Sessions carry their device; "Forget…" is offered only while the server's settings can be read.
+    func testDevicesCanBeForgottenWithTheServersSettings() async throws {
         let repo = repo()
         ScriptedServer.answer("GET /api/account/sessions", 200, sessionsJSON)
         ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","features":["revoke_others","forget_device"]}"#)
@@ -133,10 +133,10 @@ final class SessionsTests: XCTestCase {
         XCTAssertEqual(list.sessionCount(device: "d2"), 1)
 
         ScriptedServer.answer("GET /api/account/sessions", 200, sessionsJSON)
-        ScriptedServer.answer("GET /api/config", 200, #"{"name":"PassAuth","features":["revoke_others"]}"#)
-        let older = try await repo.accountSessions()
-        XCTAssertFalse(older.canForget(older.sessions[1]))
-        // A session without its device (older server) can't be forgotten.
+        ScriptedServer.answer("GET /api/config", 502, "<html>Bad gateway</html>", headers: ["Content-Type": "text/html"])
+        let unknown = try await repo.accountSessions()
+        XCTAssertFalse(unknown.canForget(unknown.sessions[1]))
+        // A session without its device can't be forgotten.
         let noDevice = SessionList(json: try JSON.parse(#"{"current":"s1","sessions":[{"id":"s1"},{"id":"s2","device_id":"d2"}]}"#), canRevokeOthers: true, canForget: true)
         XCTAssertFalse(noDevice.canForget(noDevice.sessions[0]))
         XCTAssertTrue(noDevice.canForget(noDevice.sessions[1]))

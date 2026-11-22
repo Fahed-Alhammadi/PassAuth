@@ -3,9 +3,9 @@ import Foundation
 // Settings → Account security → Signed-in devices (the web vault's Settings → Sessions): the
 // account's sessions (`GET /api/account/sessions`), signing one out (`DELETE
 // /api/account/sessions/{id}`) and every other one at once (`POST
-// /api/account/sessions/revoke-others`, offered only when `GET /api/config` lists the
-// `revoke_others` feature), and forgetting a device (`POST
-// /api/account/devices/{device_id}/forget`, with the `forget_device` feature): every session of
+// /api/account/sessions/revoke-others`), and forgetting a device (`POST
+// /api/account/devices/{device_id}/forget`; both offered only while `GET /api/config` can be
+// read): every session of
 // that device ends and its next sign-in counts as a new device (two-step login again).
 
 /// One signed-in session of the account.
@@ -42,9 +42,9 @@ public struct SessionInfo: Equatable, Sendable, Identifiable {
 /// can sign out all the others in one request.
 public struct SessionList: Equatable, Sendable {
     public var sessions: [SessionInfo]
-    /// `features` of `/api/config` has `revoke_others`.
+    /// "Sign out other sessions" is offered (the server's `/api/config` could be read).
     public var canRevokeOthers: Bool
-    /// `features` of `/api/config` has `forget_device`.
+    /// "Forget…" is offered (the server's `/api/config` could be read).
     public var canForget: Bool
 
     public init(sessions: [SessionInfo], canRevokeOthers: Bool, canForget: Bool = false) {
@@ -195,10 +195,10 @@ extension VaultRepository {
     public func accountSessions() async throws -> SessionList {
         let id = activeId
         let j = try await api.call(id, "/account/sessions")
-        // Feature check (API v2); an older server or a failed check just hides the bulk action.
+        // The server's settings must be readable now; a failed check just hides these actions.
         let config = try? await api.call(id, "/config", auth: false)
-        let features = (config?["features"]?.array ?? []).compactMap(\.string)
-        return SessionList(json: j, canRevokeOthers: features.contains("revoke_others"), canForget: features.contains("forget_device"))
+        let known = config?["features"]?.array != nil
+        return SessionList(json: j, canRevokeOthers: known, canForget: known)
     }
 
     /// Forget one of the account's devices: every session it holds ends at once and its next

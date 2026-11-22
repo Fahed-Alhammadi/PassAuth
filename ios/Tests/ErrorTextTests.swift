@@ -33,10 +33,11 @@ final class ErrorTextTests: XCTestCase {
         // The attachment limit (403 `quota_exceeded` with its reason).
         XCTAssertEqual(errorMessage(ApiError(status: 403, code: "quota_exceeded", message: "attachment storage limit reached")),
                        "You've reached your attachment storage limit.")
-        // Older servers: a generic code with the reason (or the code) as the message.
-        XCTAssertEqual(errorMessage(ApiError(status: 403, code: "forbidden", message: "reauth_required")), reauthRequiredMessage)
-        XCTAssertEqual(errorMessage(ApiError(status: 400, code: "bad_request", message: "Invalid code")), "That code isn't right. Check it and try again.")
-        XCTAssertEqual(errorMessage(ApiError(status: 403, code: "forbidden", message: "storage limit reached")), quotaExceededMessage)
+        // The codes with their usual messages.
+        XCTAssertEqual(errorMessage(ApiError(status: 403, code: "reauth_required", message: "reauth_required")), reauthRequiredMessage)
+        XCTAssertEqual(errorMessage(ApiError(status: 400, code: "invalid_code", message: "Invalid code")), "That code isn't right. Check it and try again.")
+        XCTAssertEqual(errorMessage(ApiError(status: 403, code: "quota_exceeded", message: "storage limit reached")), quotaExceededMessage)
+        XCTAssertEqual(errorMessage(ApiError(status: 400, code: "expired", message: "start setup first")), "Setup has expired. Start again.")
         // Made by the app itself.
         XCTAssertEqual(errorMessage(ApiError(status: 200, code: "not_passauth", message: phishing)), "That address doesn't look like a PassAuth server.")
         XCTAssertEqual(errorMessage(ApiError(status: 401, code: "unauthorized", message: "Your session ended. Sign in again.")), "Your session ended. Sign in again.")

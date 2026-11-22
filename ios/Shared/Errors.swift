@@ -37,13 +37,8 @@ public struct ApiError: Error, LocalizedError, Sendable {
     /// The server (or a proxy in front of it) refused because of too many requests.
     public var isRateLimited: Bool { status == 429 || code == "rate_limited" }
 
-    /// Is this the server's `reason`? Servers since API v2 put it in `error`; older ones answer
-    /// some of them with a generic code and the reason as the message
-    /// (`{"error":"forbidden","message":"reauth_required"}`), or only with a message text
-    /// (`fallback`, compared without case).
-    public func hasCode(_ reason: String, orMessage fallback: String? = nil) -> Bool {
-        code == reason || message == reason || fallback.map { message.lowercased() == $0 } == true
-    }
+    /// Is this the server's `reason` (the answer's `error` code)?
+    public func hasCode(_ reason: String) -> Bool { code == reason }
 }
 
 /// A user-facing error from the app itself (shown as is).
@@ -163,17 +158,11 @@ let apiCodeText: [String: String] = [
     "not_passauth": "That address doesn't look like a PassAuth server.",
 ]
 
-/// Messages servers send under a generic code (`bad_request`, `forbidden`…) that the app knows,
-/// compared without case: servers from before the codes sent some reasons only this way.
+/// Messages the app knows, compared without case, where the code alone doesn't say enough: a
+/// generic code (`bad_request`), or a code shared by two reasons (`expired`, `quota_exceeded`).
 let apiMessageText: [String: String] = [
-    "invalid code": "That code isn't right. Check it and try again.",
-    "invalid two-factor code": "That code isn't right. Check it and try again.",
     "start setup first": "Setup has expired. Start again.",
-    "reauth_required": reauthRequiredMessage,
-    "email_not_verified": "Confirm your email address first, then sign in.",
-    "storage limit reached": quotaExceededMessage,
     "attachment storage limit reached": attachmentQuotaMessage,
-    "item changed on another device; sync and retry": "This was changed on another device just now, so nothing was saved. Try again.",
     "email is not configured on this server": "This server can't send email, so email codes aren't available.",
     "invalid email address": "Enter a valid email address.",
 ]
@@ -182,16 +171,15 @@ let apiMessageText: [String: String] = [
 public let serverMessageLimit = 200
 
 /// What the app says about an error answer (client review F11): its own wording for every code
-/// (and legacy message) it knows; otherwise a sentence of its own with the request's reference,
+/// (and message) it knows; otherwise a sentence of its own with the request's reference,
 /// and the server's message only as a labelled detail ("Server message: …"), cleaned
 /// (`ShownText`) and at most 200 characters. A compromised server can't put instructions of its
 /// own into the app's words this way.
 public func apiErrorText(_ e: ApiError) -> String {
     if e.isRateLimited { return tooManyAttemptsMessage(e) ?? "Too many attempts. Wait a moment and try again." }
-    // A legacy reason first, then the code, then a code that older servers sent as the message
-    // (`{"error":"forbidden","message":"reauth_required"}`).
+    // A known message first (it says more than its code), then the code.
     let reason = e.message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if let known = apiMessageText[reason] ?? apiCodeText[e.code] ?? apiCodeText[reason] { return known }
+    if let known = apiMessageText[reason] ?? apiCodeText[e.code] { return known }
     if e.status == 507 { return outOfStorageMessage }
     let reference = e.requestId
     // A failure inside the server: its log has the details under the request's id.

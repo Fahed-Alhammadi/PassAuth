@@ -3,9 +3,8 @@ import SwiftUI
 
 // Settings → Account security → Signed-in devices (the web vault's Settings → Sessions): every
 // session of the account with the app it signed in with (`client`, e.g. "Chrome extension
-// 0.6.0"), "Sign out" for each other one, "Sign out other sessions" on servers with the
-// `revoke_others` feature and "Forget…" for each device on servers with `forget_device`. Each is
-// confirmed in a decision sheet.
+// 0.6.0"), "Sign out" for each other one, "Sign out other sessions" and "Forget…" for each
+// device (both while the server's settings can be read). Each is confirmed in a decision sheet.
 
 /// What a sign-out confirmation is about.
 private enum SignOutTarget: Identifiable {

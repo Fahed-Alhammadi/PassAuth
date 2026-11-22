@@ -500,7 +500,7 @@ final class AccountSecurityLogicTests: XCTestCase {
         XCTAssertEqual(securityErrorMessage(ApiError(status: 403, code: "reauth_required", message: "Confirm your master password first. Update the app if it doesn't ask for it.")),
                        "Please confirm your master password again.")
         XCTAssertEqual(securityErrorMessage(ApiError(status: 429, code: "rate_limited", message: "too many requests")), "Too many attempts, try again later.")
-        XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "bad_request", message: "invalid code")), "That code isn't right. Check it and try again.")
+        XCTAssertEqual(securityErrorMessage(ApiError(status: 400, code: "invalid_code", message: "invalid code")), "That code isn't right. Check it and try again.")
         XCTAssertEqual(securityErrorMessage(UserError("Can't reach your PassAuth server. Check the server address and your connection.")),
                        "Can't reach your PassAuth server. Check the server address and your connection.")
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-// Account policies set by the server's admin (servers with the `policies` feature: `GET
+// Account policies set by the server's admin (`GET
 // /api/config` `policies`, and `GET /account` `policy_violations` for what an account still has
 // to change; server side `crates/server/src/policies.rs`), and what the app does with them, as
 // the web vault's `policies.ts` (pure, unit-tested in `PolicyTests`).
@@ -8,11 +8,8 @@ import Foundation
 // Enforced by the server: two-step login (403 `two_step_required` on everything but setting a
 // method up, reading the account and signing out), a Secret Key and the key-derivation minimums
 // for new account keys (400 `secret_key_required` / `kdf_too_weak`). Applied by the app: the
-// master password length, the longest vault timeout and export. Servers without the feature send
-// no policies: every value then has its default, which changes nothing.
-
-/// The `/api/config` feature of servers with account policies.
-public let policiesFeature = "policies"
+// master password length, the longest vault timeout and export. A server whose admin set
+// none: every value has its default, which changes nothing.
 
 public struct Policies: Codable, Equatable, Sendable {
     /// Every account must use two-step login.
@@ -130,11 +127,11 @@ public enum PolicyRules {
 
     /// The key-derivation minimums for new account keys (registration, every keys change):
     /// the server's policy, read again from `/api/config` right before, else the policies kept
-    /// with the account; none (the core's defaults, 128 MiB and 3 passes) for a server without
-    /// the `policies` feature. The core makes keys with max(128 MiB, minimum) memory and
+    /// with the account; none (the core's defaults, 128 MiB and 3 passes) when neither is
+    /// known. The core makes keys with max(128 MiB, minimum) memory and
     /// max(3, minimum) passes (`createAccountWithKdf` / `rewrapWithKdf`).
     public static func kdfMinimums(_ config: PublicConfig?, stored: Policies? = nil) -> KdfMinimums {
-        if let config { return config.features.contains(policiesFeature) ? KdfMinimums(config.policies) : KdfMinimums() }
+        if let config { return KdfMinimums(config.policies) }
         return stored.map { KdfMinimums($0) } ?? KdfMinimums()
     }
 
@@ -256,7 +253,7 @@ public enum TwoStepGate {
 public struct PublicConfig: Equatable, Sendable {
     public var signupsAllowed: Bool?
     public var features: [String]
-    /// The defaults on servers without the `policies` feature.
+    /// The defaults when the server sets none.
     public var policies: Policies
     /// The server's API version (`api`, a whole number; API 2 servers and later); nil from older
     /// servers, which send none.
@@ -278,7 +275,7 @@ public struct PublicConfig: Equatable, Sendable {
         guard case .object = j else { return nil }
         features = (j["features"]?.array ?? []).compactMap(\.string)
         if case .bool(let b)? = j["signups_allowed"] { signupsAllowed = b } else { signupsAllowed = nil }
-        policies = features.contains(policiesFeature) ? Policies(json: j["policies"]) : Policies()
+        policies = Policies(json: j["policies"])
         switch j["api"] {
         case .int(let n)? where n >= 0 && n < 1_000_000: api = Int(n)
         case .double(let x)? where x.isFinite && x == x.rounded() && x >= 0 && x < 1_000_000: api = Int(x)
@@ -289,9 +286,9 @@ public struct PublicConfig: Equatable, Sendable {
 }
 
 /// Website icons (`/api/icons/<host>`): shown when the user wants them and the server offers
-/// them, as the web vault's `siteIconsShown`. API 2 servers list the icon service as the feature
-/// `icons` only while it is on; older servers (no `api`, or below 2) always had it; until the
-/// account's config is known the user's setting alone decides (a failed icon just falls back to
+/// them, as the web vault's `siteIconsShown`. Servers list the icon service as the feature
+/// `icons` only while it is on; until the account's config is known (also an account kept by
+/// an app version that didn't store `api` yet) the user's setting alone decides (a failed icon just falls back to
 /// the letter tile).
 public enum SiteIcons {
     public static let feature = "icons"
@@ -300,7 +297,7 @@ public enum SiteIcons {
     /// not asked yet).
     public static func shown(wanted: Bool, api: Int?, features: [String]?) -> Bool {
         guard wanted else { return false }
-        guard let features, let api, api >= 2 else { return true }
+        guard let features, api != nil else { return true }
         return features.contains(feature)
     }
 }

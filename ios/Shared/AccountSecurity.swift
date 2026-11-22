@@ -259,9 +259,8 @@ public struct ShownOnce: Equatable, Sendable {
 public func securityErrorMessage(_ error: Error) -> String {
     if let e = error as? ApiError {
         if e.isRateLimited { return tooManyAttemptsMessage(e) ?? "Too many attempts, try again later." }
-        // The server's `error` code first (API v2), the message text of older servers second.
-        if e.hasCode("invalid_code", orMessage: "invalid code") { return "That code isn't right. Check it and try again." }
-        if e.hasCode("expired", orMessage: "start setup first") { return "Setup has expired. Start again." }
+        if e.hasCode("invalid_code") { return "That code isn't right. Check it and try again." }
+        if e.hasCode("expired") { return "Setup has expired. Start again." }
         if e.hasCode("reauth_required") { return "Please confirm your master password again." }
         if e.message.lowercased() == "email is not configured on this server" { return "This server can't send email, so email codes aren't available." }
         if e.hasCode("already_enabled") || e.status == 409 { return "This method is already on. Turn it off first to set it up again." }

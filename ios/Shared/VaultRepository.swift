@@ -698,7 +698,7 @@ public final class VaultRepository {
                 a.features = config.features
                 a.featuresAt = Date().timeIntervalSince1970
                 a.api = config.api
-                a.policies = config.features.contains(policiesFeature) ? config.policies : nil
+                a.policies = config.policies
                 st.file.accounts[id] = a
                 st.file.activeId = id
                 st.secrets.tokens[id] = nil
@@ -1933,8 +1933,8 @@ public final class VaultRepository {
         await fetchConfig(activeId)?.features
     }
 
-    /// The account's server's `/api/config`, asked now: its `features` and (with the `policies`
-    /// feature) `policies` are kept with the account. nil when it couldn't be read. The app then
+    /// The account's server's `/api/config`, asked now: its `features` and `policies` are kept
+    /// with the account. nil when it couldn't be read. The app then
     /// applies the vault timeout limit (outside whatever operation asked).
     @discardableResult
     func fetchConfig(_ id: String) async -> PublicConfig? {
@@ -1946,7 +1946,7 @@ public final class VaultRepository {
             a.features = config.features
             a.featuresAt = Date().timeIntervalSince1970
             a.api = config.api
-            a.policies = config.features.contains(policiesFeature) ? config.policies : nil
+            a.policies = config.policies
         }
         if isApp && store.get().file.accounts[id]?.policies != before {
             // Not here: a sync holding the repository's lock may have asked.
@@ -2059,16 +2059,12 @@ public final class VaultRepository {
 
     /// The server's policies (`/api/config`, kept with the account), the vault timeout lowered to
     /// their limit, and what the account still has to change (`GET /account`
-    /// `policy_violations`, servers with `policies`). Best effort: a failed request keeps what is
+    /// `policy_violations`). Best effort: a failed request keeps what is
     /// known.
     public func refreshPolicies() async {
         let id = activeId
-        guard store.get().tokens(id) != nil, let config = await fetchConfig(id) else { return }
+        guard store.get().tokens(id) != nil, await fetchConfig(id) != nil else { return }
         await enforceTimeoutLimit()
-        guard config.features.contains(policiesFeature) else {
-            violations[id] = nil
-            return
-        }
         guard let j = try? await api.call(id, "/account"), activeId == id else { return }
         violations[id] = PolicyRules.readViolations(j["policy_violations"])
     }
@@ -2614,8 +2610,7 @@ public final class VaultRepository {
     /// API v2: the body carries the vault key's `key_epoch`. If the key was replaced meanwhile
     /// (409 `vault_key_changed`, nothing written), the vault is synced for the new key and the
     /// item encrypted again under the same id, once. If the id already exists (409
-    /// `item_exists`, or "item id already exists" from older servers), an earlier attempt got
-    /// through: that item, once synced, is updated with this content instead.
+    /// `item_exists`), an earlier attempt got through: that item, once synced, is updated with this content instead.
     @discardableResult
     public func createItem(_ item: Item, vaultId: String?, id: String? = nil) async throws -> String {
         let made: (id: String, queued: Bool) = try await lock.run {
@@ -2685,10 +2680,8 @@ public final class VaultRepository {
         return id
     }
 
-    /// A create was refused because the id exists (API v2 code, or the older servers' message).
-    nonisolated static func itemExists(_ e: ApiError) -> Bool {
-        e.hasCode("item_exists", orMessage: "item id already exists")
-    }
+    /// A create was refused because the id exists.
+    nonisolated static func itemExists(_ e: ApiError) -> Bool { e.hasCode("item_exists") }
 
     /// Save changes to an item; with another `targetVaultId` the item also moves to that vault
     /// (re-encrypted with its key under the same id), like the web vault's `updateItem`.

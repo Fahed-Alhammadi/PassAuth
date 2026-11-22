@@ -211,13 +211,13 @@ final class InvitationPolicyTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(Policies.self, from: Data("{}".utf8)), Policies())
     }
 
-    func testPublicConfigFollowsTheFeature() throws {
+    func testPublicConfigReadsThePolicies() throws {
         let with = try XCTUnwrap(PublicConfig(json: try JSON.parse(#"{"name":"PassAuth","features":["policies","forget_device"],"signups_allowed":false,"policies":{"disable_export":true}}"#)))
         XCTAssertTrue(with.policies.disableExport)
         XCTAssertEqual(with.signupsAllowed, false)
         XCTAssertEqual(with.features, ["policies", "forget_device"])
-        // Policies without the feature (or an older server): the defaults, which change nothing.
-        let without = try XCTUnwrap(PublicConfig(json: try JSON.parse(#"{"name":"PassAuth","features":["delta_sync"],"policies":{"disable_export":true}}"#)))
+        // A server that sets none: the defaults, which change nothing.
+        let without = try XCTUnwrap(PublicConfig(json: try JSON.parse(#"{"name":"PassAuth","features":["delta_sync"]}"#)))
         XCTAssertEqual(without.policies, Policies())
         XCTAssertNil(without.signupsAllowed)
         XCTAssertNil(PublicConfig(json: "text"))
@@ -234,14 +234,14 @@ final class InvitationPolicyTests: XCTestCase {
         p.disableExport = true
         XCTAssertFalse(PolicyRules.exportAllowed(p))
         // New keys follow the server's minimums: from the config read right before, else the
-        // policies kept with the account; none (the core's defaults) without the feature.
+        // policies kept with the account; none (the core's defaults) when neither is known.
         p.minKdfMemoryMib = 256
         p.minKdfIterations = 4
-        var config = PublicConfig(features: [policiesFeature], policies: p)
+        var config = PublicConfig(features: ["policies"], policies: p)
         XCTAssertEqual(PolicyRules.kdfMinimums(config), KdfMinimums(memoryMib: 256, iterations: 4))
         XCTAssertEqual(PolicyRules.kdfMinimums(config, stored: Policies()), KdfMinimums(memoryMib: 256, iterations: 4), "the fresh config wins")
-        config.features = []
-        XCTAssertEqual(PolicyRules.kdfMinimums(config), KdfMinimums())
+        config.policies = Policies()
+        XCTAssertEqual(PolicyRules.kdfMinimums(config), KdfMinimums(Policies()), "no policy set: the server's defaults, below the core's own")
         XCTAssertEqual(PolicyRules.kdfMinimums(nil, stored: p), KdfMinimums(memoryMib: 256, iterations: 4), "offline: the kept policy")
         XCTAssertEqual(PolicyRules.kdfMinimums(nil), KdfMinimums())
         XCTAssertEqual(KdfMinimums(Policies()), KdfMinimums(memoryMib: 64, iterations: 3), "the floors: the core then uses 128 MiB and 3 passes")
@@ -307,8 +307,7 @@ final class InvitationPolicyTests: XCTestCase {
         XCTAssertFalse(SiteIcons.shown(wanted: false, api: 2, features: ["icons"]))
         XCTAssertFalse(SiteIcons.shown(wanted: false, api: nil, features: nil))
         XCTAssertTrue(SiteIcons.shown(wanted: true, api: nil, features: nil), "config not asked yet: the setting decides")
-        XCTAssertTrue(SiteIcons.shown(wanted: true, api: nil, features: []), "older server (no api): always had icons")
-        XCTAssertTrue(SiteIcons.shown(wanted: true, api: 1, features: []))
+        XCTAssertTrue(SiteIcons.shown(wanted: true, api: nil, features: []), "kept before the app stored `api`: the setting decides")
         XCTAssertTrue(SiteIcons.shown(wanted: true, api: 2, features: ["delta_sync", "icons"]))
         XCTAssertFalse(SiteIcons.shown(wanted: true, api: 2, features: ["delta_sync"]))
         XCTAssertFalse(SiteIcons.shown(wanted: true, api: 3, features: []))
