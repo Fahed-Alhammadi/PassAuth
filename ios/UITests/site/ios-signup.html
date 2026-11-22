@@ -1,0 +1,51 @@
+<!doctype html>
+<!-- Test page for ios/UITests/AutoFillUITests.swift (AF6 to AF8): a sign-up form.
+     The new password follows `passwordrules` (12 to 18 characters; upper, lower, digit and one
+     of -_. required; nothing else allowed). Open with ?norules for a form without rules.
+     The form is really submitted (GET to this page), so iOS offers to save the login; the page
+     then shows "created <email> / <n> chars". -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Test: sign up</title>
+<style>
+  body { font: 17px -apple-system, sans-serif; margin: 24px; }
+  label { display: block; margin-top: 16px; }
+  input { display: block; width: 100%; box-sizing: border-box; font: inherit; padding: 10px; margin-top: 4px; }
+  button { font: inherit; padding: 10px 16px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<h1>Create an account</h1>
+<p id="status"></p>
+<form id="signup" action="ios-signup.html" method="get">
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" aria-label="Email" autocomplete="username" autocapitalize="none">
+  <label for="new">New password</label>
+  <input id="new" name="new" type="password" aria-label="New password" autocomplete="new-password"
+         passwordrules="minlength: 12; maxlength: 18; required: upper; required: lower; required: digit; required: [-_.]; allowed: upper, lower, digit, [-_.]">
+  <label for="confirm">Confirm password</label>
+  <input id="confirm" name="confirm" type="password" aria-label="Confirm password" autocomplete="new-password"
+         passwordrules="minlength: 12; maxlength: 18; required: upper; required: lower; required: digit; required: [-_.]; allowed: upper, lower, digit, [-_.]">
+  <button type="submit">Create account</button>
+</form>
+<script>
+  const q = new URLSearchParams(location.search);
+  const form = document.getElementById("signup");
+  if (q.has("norules")) {
+    for (const f of form.querySelectorAll("input[passwordrules]")) f.removeAttribute("passwordrules");
+    const keep = document.createElement("input");
+    keep.type = "hidden";
+    keep.name = "norules";
+    form.append(keep);
+  }
+  if (q.has("email") && q.has("new")) {
+    form.remove();
+    document.getElementById("status").textContent = "created " + q.get("email") + " / " + [...q.get("new")].length + " chars";
+    // The password doesn't stay in the address bar.
+    history.replaceState(null, "", "ios-signup.html?done");
+  }
+</script>
+</body>
+</html>

@@ -226,6 +226,9 @@ targets:
     platform: iOS
     sources:
       - path: UITests
+        # The test pages are served by hand (see AutoFillUITests.swift), never bundled.
+        excludes:
+          - "site"
     dependencies:
       - target: PassAuth
       # The Rust core: the tests act as another device on the test server (TestServer.swift).

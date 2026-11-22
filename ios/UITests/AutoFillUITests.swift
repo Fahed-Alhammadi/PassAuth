@@ -1,7 +1,14 @@
 import XCTest
 
+// The test pages are in `ios/UITests/site` (ios-login.html, ios-passkey.html, ios-signup.html).
+// Serve them on http://localhost:8099 before running AF3 to AF8, from that folder:
+//
+//     python3 -m http.server 8099 --bind 127.0.0.1
+//
+// The folder is left out of the test bundle (`excludes` in `ios/project.yml`).
+
 /// AutoFill end to end on the simulator: PassAuth turned on in Settings, then Safari on the
-/// local test site (tests/e2e/site served on http://localhost:8099) and the throwaway server.
+/// local test site (ios/UITests/site served on http://localhost:8099) and the throwaway server.
 /// Run in order (each step uses the state the previous one left):
 ///
 ///   testAF1Setup      fresh account + a login for http://localhost:8099 with a TOTP key
@@ -9,7 +16,7 @@ import XCTest
 ///   testAF3Fill       Safari: QuickType suggestion → unlock in the extension → fill, code copied
 ///   testAF4List       Safari: password list (key button), search, fill
 ///   testAF5Passkeys   Safari: create a passkey with PassAuth, then sign in with it
-///   testAF6SaveGenerated   iOS 26.2: sign-up page (tests/e2e/site/ios-signup.html, password rules) →
+///   testAF6SaveGenerated   iOS 26.2: sign-up page (site/ios-signup.html, password rules) →
 ///                          "Fill Strong Password" (PassAuth's generator) → submit → save sheet → saved
 ///   testAF7UpdatePassword  typed new password → iOS "Save Password?" → PassAuth → update + history
 ///   testAF8PassphraseAndNever  no rules + passphrase setting → passphrase filled; "Never for this site"
@@ -340,7 +347,7 @@ final class AutoFillUITests: XCTestCase {
     private var newPasswordField: XCUIElement { safari.webViews.secureTextFields["New password"].firstMatch }
     private var confirmField: XCUIElement { safari.webViews.secureTextFields["Confirm password"].firstMatch }
 
-    /// The page's rules (tests/e2e/site/ios-signup.html).
+    /// The page's rules (site/ios-signup.html).
     private func followsSignupRules(_ pw: String) -> Bool {
         (12...18).contains(pw.count) && pw.contains(where: \.isUppercase) && pw.contains(where: \.isLowercase)
             && pw.contains(where: \.isNumber) && pw.contains { "-_.".contains($0) }
@@ -449,7 +456,19 @@ final class AutoFillUITests: XCTestCase {
         sleep(1)
         newPasswordField.tap()
         newPasswordField.typeText("Changed-Pass_456")
-        wait(confirmField).tap()
+        // iOS shows its "New Strong Password" pill again, over the top of the next field, and
+        // taps on the page don't move the focus while it is up: close it (its x), then tap
+        // the field's lower half until it has the focus.
+        wait(confirmField)
+        let pill = first(safari.descendants(matching: .any), "label == 'New Strong Password'")
+        if pill.exists { pill.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.5)).tap(); sleep(1) }
+        for _ in 0..<5 {
+            confirmField.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
+            usleep(600_000)
+            if (confirmField.value(forKey: "hasKeyboardFocus") as? Bool) == true { break }
+        }
+        shot("af-49-confirm-focused")
+        dump(safari, "safari-confirm-focus")
         confirmField.typeText("Changed-Pass_456")
         let revealed = submitAndOpenSaveSheet("update")
         XCTAssertEqual(revealed, "Changed-Pass_456")

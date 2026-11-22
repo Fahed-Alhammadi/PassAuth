@@ -315,7 +315,8 @@ final class PassAuthUITests: UITestBase {
         newItem("Secure note")
         type(app.textFields["edit.name"], "Offline note")
         app.buttons["edit.save"].tap()
-        wait(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'offline'")).firstMatch)
+        // Offline changes: the note is kept on the device until the server is back.
+        wait(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Saved on this device'")).firstMatch)
         shot("21-offline-save")
     }
 
@@ -360,6 +361,8 @@ final class PassAuthUITests: UITestBase {
         back()
         wait(app.buttons["settings.account"]).tap()
         shot("25a-account")
+        // Log out is at the end of the Account page.
+        for _ in 0..<6 where !app.buttons["logout"].exists || !app.buttons["logout"].isHittable { app.swipeUp(velocity: .slow) }
         wait(app.buttons["logout"]).tap()
         confirm("Log out")
         // The other account remains and becomes active (locked after the restart).

@@ -51,6 +51,8 @@ final class Phase3UITests: UITestBase {
         tab("Settings")
         // Back to the category list if a page is still open.
         while !app.buttons["settings.\(id)"].exists && app.navigationBars.buttons.count > 0 && !app.navigationBars["Settings"].exists { back() }
+        // The list may still be scrolled down from the last page: the account card is at the top.
+        for _ in 0..<6 where !app.buttons["settings.\(id)"].exists { app.swipeDown(velocity: .slow) }
         // Large text: the lower categories are only loaded once scrolled to.
         scrollTo(app.buttons["settings.\(id)"])
         wait(app.buttons["settings.\(id)"]).tap()
@@ -279,6 +281,8 @@ final class Phase3UITests: UITestBase {
         app.launch()
         try signIn(email)
         shot("big-01-vault")
+        // At this text size the notifications card fills the screen: the list is below it.
+        for _ in 0..<6 where !app.staticTexts["GitHub"].firstMatch.exists { app.swipeUp() }
         wait(app.staticTexts["GitHub"].firstMatch).tap()
         wait(app.navigationBars["View login"], 30)
         shot("big-02-item")

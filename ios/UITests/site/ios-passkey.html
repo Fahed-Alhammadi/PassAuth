@@ -1,0 +1,70 @@
+<!doctype html>
+<!-- Test page for ios/UITests/AutoFillUITests.swift (AF5): create a passkey for alice@localhost
+     (user id "user-123", RP ID = this host), then sign in with it. Nothing is verified by a
+     server; the page only shows what the authenticator answered:
+       "registered ok aaguid=<hex> id=<credential id>"
+       "signed in ok user=<user handle as text> sameId=<the credential made above was used>" -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Test: passkeys</title>
+<style>
+  body { font: 17px -apple-system, sans-serif; margin: 24px; }
+  button { display: block; font: inherit; padding: 10px 16px; margin-top: 20px; }
+  p { word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>Passkeys</h1>
+<button id="create" type="button">Create passkey</button>
+<p id="registered"></p>
+<button id="get" type="button">Sign in with passkey</button>
+<p id="signed"></p>
+<script>
+  const text = (s) => new TextEncoder().encode(s);
+  const hex = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+  const challenge = () => crypto.getRandomValues(new Uint8Array(32));
+  let madeId = sessionStorage.getItem("passkeyId") || "";
+
+  document.getElementById("create").addEventListener("click", async () => {
+    const out = document.getElementById("registered");
+    out.textContent = "";
+    try {
+      const cred = await navigator.credentials.create({
+        publicKey: {
+          rp: { name: "Local Test", id: location.hostname },
+          user: { id: text("user-123"), name: "alice@localhost", displayName: "Alice" },
+          challenge: challenge(),
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "preferred" },
+          attestation: "none",
+        },
+      });
+      // Authenticator data: RP ID hash (32), flags (1), counter (4), then the AAGUID (16).
+      const data = new Uint8Array(cred.response.getAuthenticatorData());
+      madeId = cred.id;
+      sessionStorage.setItem("passkeyId", madeId);
+      out.textContent = "registered ok aaguid=" + hex(data.slice(37, 53)) + " id=" + cred.id;
+    } catch (e) {
+      out.textContent = "register failed: " + e.name + " " + e.message;
+    }
+  });
+
+  document.getElementById("get").addEventListener("click", async () => {
+    const out = document.getElementById("signed");
+    out.textContent = "";
+    try {
+      // No allowCredentials: the passkeys saved for this site are offered.
+      const a = await navigator.credentials.get({
+        publicKey: { challenge: challenge(), rpId: location.hostname, userVerification: "preferred" },
+      });
+      const user = a.response.userHandle ? new TextDecoder().decode(a.response.userHandle) : "";
+      out.textContent = "signed in ok user=" + user + " sameId=" + (a.id === madeId);
+    } catch (e) {
+      out.textContent = "sign-in failed: " + e.name + " " + e.message;
+    }
+  });
+</script>
+</body>
+</html>
