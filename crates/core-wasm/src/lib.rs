@@ -602,12 +602,6 @@ pub struct EmergencyKey(CoreEmergencyKey);
 
 #[wasm_bindgen]
 impl EmergencyKey {
-    /// The grantor's account id.
-    #[wasm_bindgen(getter, js_name = grantorId)]
-    pub fn grantor_id(&self) -> String {
-        self.0.grantor_id().to_owned()
-    }
-
     /// The access this key belongs to.
     #[wasm_bindgen(getter, js_name = grantId)]
     pub fn grant_id(&self) -> String {
@@ -1177,18 +1171,6 @@ pub fn account_from_session_bytes(
     }))
 }
 
-#[wasm_bindgen(js_name = createAccount)]
-pub fn create_account(
-    #[wasm_bindgen(unchecked_param_type = "string")] account_id: JsValue,
-    #[wasm_bindgen(unchecked_param_type = "string")] password: JsValue,
-    with_secret_key: bool,
-) -> R<NewAccount> {
-    let (account_id, password) = (string(account_id)?, string(password)?);
-    AccountBundle::create(&account_id, &password, with_secret_key)
-        .map(NewAccount::from)
-        .map_err(js_err)
-}
-
 /// `createAccount` following a server's KDF policy: memory = max(128 MiB,
 /// `min_memory_mib`), passes = max(3, `min_iterations`) — pass `/api/config`
 /// `policies.min_kdf_memory_mib` / `min_kdf_iterations`, or leave them out. A
@@ -1430,14 +1412,6 @@ fn js_size(n: f64) -> R<u64> {
 #[wasm_bindgen(js_name = fileEncryptedSize)]
 pub fn file_encrypted_size(plain_length: f64) -> R<f64> {
     file::encrypted_size(js_size(plain_length)?)
-        .map(|n| n as f64)
-        .map_err(js_err)
-}
-
-/// The file size behind an encrypted size (throws for a size no file encrypts to).
-#[wasm_bindgen(js_name = filePlainSize)]
-pub fn file_plain_size(encrypted_length: f64) -> R<f64> {
-    file::plain_size(js_size(encrypted_length)?)
         .map(|n| n as f64)
         .map_err(js_err)
 }

@@ -18,7 +18,7 @@ use passauth_core::keys::{
 };
 use passauth_core::send::{self, SendContentKey, SendField, SendKey};
 use passauth_core::{
-    Error, device_login, export, generator, import, manifest, opaque, passkey, site, totp,
+    Error, device_login, export, generator, manifest, opaque, passkey, site, totp,
 };
 
 uniffi::setup_scaffolding!();
@@ -1136,12 +1136,6 @@ pub fn file_encrypted_size(plain_length: u64) -> R<u64> {
     Ok(file::encrypted_size(plain_length)?)
 }
 
-/// The file size behind an encrypted size (fails for a size no file encrypts to).
-#[uniffi::export]
-pub fn file_plain_size(encrypted_length: u64) -> R<u64> {
-    Ok(file::plain_size(encrypted_length)?)
-}
-
 /// Encrypt a whole (small) file at once; use `FileEncryptor` for large ones.
 #[uniffi::export]
 pub fn file_encrypt(
@@ -1216,12 +1210,6 @@ pub fn opaque_login_start(master: Arc<MasterKeys>) -> R<OpaqueStart> {
 #[uniffi::export]
 pub fn opaque_login_finish(state: Vec<u8>, master: Arc<MasterKeys>, response: String) -> R<String> {
     Ok(opaque::login_finish(&state, &master.0.login, &response)?)
-}
-
-/// Parse an export file from another password manager; returns the import result as JSON.
-#[uniffi::export]
-pub fn import_file(data: Vec<u8>, password: Option<String>) -> R<String> {
-    json_out(&import::import(&data, password.as_deref())?)
 }
 
 #[uniffi::export]
@@ -1499,13 +1487,6 @@ pub fn normalize_host(host: String) -> Option<String> {
 #[uniffi::export]
 pub fn public_suffix(host: String) -> String {
     site::public_suffix(&host)
-}
-
-/// Registrable domain ("example.co.uk", "nas.myfritz.net"); `None` for a public suffix itself,
-/// IP addresses and invalid hosts.
-#[uniffi::export]
-pub fn registrable_domain(host: String) -> Option<String> {
-    site::registrable_domain(&host)
 }
 
 /// The site "domain" matching compares: the registrable domain, else the host itself.
@@ -2137,7 +2118,7 @@ mod tests {
             file_encrypted_size(plain.len() as u64).unwrap()
         );
         assert_eq!(
-            file_plain_size(ct.len() as u64).unwrap(),
+            file::plain_size(ct.len() as u64).unwrap(),
             plain.len() as u64
         );
         let dec = FileDecryptor::new(key.clone(), "item".into(), "att".into()).unwrap();
@@ -2426,7 +2407,6 @@ mod tests {
     #[test]
     fn sites_through_ffi_types() {
         assert_eq!(base_domain("a.nas.myfritz.net".into()), "nas.myfritz.net");
-        assert_eq!(registrable_domain("myfritz.net".into()), None);
         assert_eq!(
             normalize_host("BÜCHER.de.".into()).as_deref(),
             Some("xn--bcher-kva.de")
