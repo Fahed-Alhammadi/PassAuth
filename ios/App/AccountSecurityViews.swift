@@ -549,10 +549,10 @@ struct TwoStepPage: View {
             }
         } footer: {
             Text(gate
-                 ? TwoStepGate.securityKeys + " This app can't use a security key to sign in yet, so set up another method too if you sign in here."
+                 ? TwoStepGate.securityKeys + " To sign in with one here, the app opens your server's page in the browser."
                  : s.securityKeys.isEmpty
                  ? "Use a hardware security key or a passkey to confirm your sign-in. Add one in the web vault under Settings → Two-step login."
-                 : "Add keys in the web vault. This app can't use a security key to sign in yet, so keep another method on if you sign in here.")
+                 : "Add keys in the web vault. To sign in with one here, the app opens your server's page in the browser.")
         }
         .paRow()
     }

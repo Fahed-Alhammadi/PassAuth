@@ -293,7 +293,7 @@ private func providerLabel(_ p: String) -> String {
 
 /// Shown when the account's only two-step method besides recovery codes is a security key
 /// (WebAuthn) and the server has no key page for apps (`SecurityKeyHandoff.feature`).
-let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, which this app doesn't support yet. Use a recovery code, or sign in with the web vault."
+let securityKeyUnsupportedMessage = "This account uses a security key for two-step login, but this server has no page this app can open for it. Use a recovery code, or sign in with the web vault."
 
 /// The code that the device which approved this sign-in shows (sign in with another device), the
 /// last step before the vault opens: three wrong codes end the sign-in (`DeviceLoginStopped`).
