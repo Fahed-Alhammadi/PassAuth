@@ -102,7 +102,6 @@ export interface PopupApi {
   "neverSave:remove": Rpc<{ domain: string }, void>;
   copy: Rpc<{ text: string }, void>;
   copyField: Rpc<{ id: string; field: "username" | "password" | "totp" }, void>;
-  openPopup: Rpc<None, void>;
   "account:add": Rpc<None, void>;
   "account:switch": Rpc<{ id: string }, void>;
   "account:cancelAdd": Rpc<None, void>;

@@ -82,8 +82,6 @@ export function splitCode(code: string): [string, string] {
   return [code.slice(0, half), code.slice(half)];
 }
 
-export const isMac = () => /mac/i.test(navigator.platform) || /Mac OS X/.test(navigator.userAgent);
-
 /** Two-step methods as every PassAuth app names them. */
 export const PROVIDER_TITLES: Record<string, string> = { totp: "Authenticator app", email: "Email code", passkey: "Security key or passkey", recovery: "Recovery code" };
 export const PROVIDER_ICONS: Record<string, "phone" | "mail" | "key" | "note"> = { totp: "phone", email: "mail", passkey: "key", recovery: "note" };

@@ -13,7 +13,7 @@ import { SERVER_UPDATE_TEXT } from "../api";
 import { fileAccess, keptFiles, missingFiles, withoutFiles } from "../attachments";
 import { fromBase64 } from "../avatar";
 import { copy } from "../clipboard";
-import { afterUnlock, openPopup, orderedMatches } from "../commands";
+import { afterUnlock, orderedMatches } from "../commands";
 import { createDeviceRequest, discardDeviceSession, keyDeviceTwoStep, pollDeviceRequest, startDeviceSignIn, verifyDeviceTwoStep } from "../device-sign-in";
 import { fill } from "../fill";
 import { fillProblem } from "../fill-problems";
@@ -203,7 +203,6 @@ export const popupHandlers = {
       void markUsed(await activeId(), id).catch(logged("Noting the login as used"));
     },
   },
-  openPopup: { from: POPUP, run: () => openPopup() },
   "account:add": { from: POPUP, activity: "restart", run: () => vault.addAccount() },
   "account:switch": { from: POPUP, activity: "restart", run: ({ id }) => vault.switchAccount(id) },
   "account:cancelAdd": { from: POPUP, activity: "restart", run: () => vault.cancelAddAccount() },

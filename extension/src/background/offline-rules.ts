@@ -17,7 +17,6 @@ export const MAX_OFFLINE_CHANGES = 500;
 export const SEND_TRIES = 3;
 
 export const TOO_MANY_TEXT = "Too many changes are waiting. Connect to the internet before making more.";
-export const NEEDS_CONNECTION_TEXT = "You're offline. This needs a connection.";
 export const TRASHED_OFFLINE_TEXT = "This item is waiting to move to the trash. Restoring it needs a connection.";
 export const WAITING_MARK = "Waiting to sync";
 export const CONFLICT_MARK = "Changed on another device";
@@ -64,8 +63,6 @@ export interface OfflineList {
   version: number;
   changes: OfflineChange[];
 }
-
-export const emptyList = (): OfflineList => ({ version: OFFLINE_LIST_VERSION, changes: [] });
 
 const KINDS: readonly string[] = ["create", "edit", "trash"];
 const STATES: readonly string[] = ["waiting", "held", "conflict"];

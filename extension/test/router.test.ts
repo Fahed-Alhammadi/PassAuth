@@ -194,7 +194,6 @@ test("S2: which requests restart the vault timeout (reading never does; unlockin
     "editorInfo",
     "passkey:pending",
     "securityKeys",
-    "openPopup",
     "lock",
     "logout",
     "setServer",
@@ -297,7 +296,6 @@ const REQUESTS: Record<string, Record<string, Record<string, unknown>>> = {
     "neverSave:remove": { domain: "example.com" },
     copy: { text: "hello" },
     copyField: { id: "e1", field: "password" },
-    openPopup: {},
     "account:add": {},
     "account:switch": { id: "a1" },
     "account:cancelAdd": {},
@@ -571,7 +569,7 @@ test("S6: an inline-menu nonce belongs to the first menu frame that uses it; the
   expect(await fake.deliver({ type: "inline:fill", nonce, id: "e1" }, framed("inline-menu.html", 6))).toMatchObject({ ok: false });
   // Without a nonce the menu can't open PassAuth, nor with the popup's own request.
   expect(await fake.deliver({ type: "inline:unlock" }, framed("inline-menu.html", 5))).toStrictEqual(NOT_ALLOWED);
-  expect(await fake.deliver({ type: "openPopup", nonce }, framed("inline-menu.html", 5))).toStrictEqual(NOT_ALLOWED);
+  expect(await fake.deliver({ type: "account:add", nonce }, framed("inline-menu.html", 5))).toStrictEqual(NOT_ALLOWED);
   expect((await fake.deliver({ type: "inline:unlock", nonce }, framed("inline-menu.html", 5))).ok).toBe(true);
   // Used up.
   expect(await fake.deliver({ type: "inline:items", nonce }, framed("inline-menu.html", 5))).toStrictEqual({ ok: false, code: "expired", message: "This menu has expired. Click the field again." });
