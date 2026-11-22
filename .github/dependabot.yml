@@ -3,7 +3,7 @@
 # Merging an update only runs CI; nothing is released until a release tag is pushed.
 version: 2
 updates:
-  # Rust workspace (core, server, ffi, wasm). crates/vendor/sqlx-sqlite is a path patch: Dependabot leaves it alone.
+  # Rust workspace (core, server, ffi, wasm).
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly, day: monday }

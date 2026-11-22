@@ -21,7 +21,7 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 sha2 = "0.11.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "any", "derive"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "tls-rustls", "sqlite", "postgres", "any", "derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
