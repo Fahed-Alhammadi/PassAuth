@@ -1,4 +1,6 @@
 /** Host hooks. The web vault and the extension run without any; the desktop app registers its own. */
+import { localGet, localSet } from "./local-store";
+
 export interface DesktopHooks {
   /** Desktop app version, shown in Settings next to the server version. */
   version: string;
@@ -140,11 +142,7 @@ const mirror = new Map<string, string>();
 export const secretStore = {
   get(key: string): string | null {
     if (desktop) return mirror.get(key) ?? null;
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
+    return localGet(key);
   },
   /** The mirror updates at once; the returned promise settles when the keychain write has finished (desktop). */
   set(key: string, value: string | null): Promise<void> {
@@ -153,12 +151,7 @@ export const secretStore = {
       else mirror.set(key, value);
       return (value === null ? desktop.secrets.delete(key) : desktop.secrets.set(key, value)).catch(() => {});
     }
-    try {
-      if (value === null) localStorage.removeItem(key);
-      else localStorage.setItem(key, value);
-    } catch {
-      /* storage unavailable */
-    }
+    localSet(key, value);
     return Promise.resolve();
   },
 };

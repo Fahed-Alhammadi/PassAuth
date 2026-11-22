@@ -33,8 +33,6 @@ export const VAULT_WARNING_READER = "Someone who can edit this vault can review 
  * it removes it for everyone.
  */
 export const VAULT_UNOPENABLE = "An item in this vault can't be opened.";
-/** The same notice for members who can't write (kept as its own name for callers from before; the text is one). */
-export const VAULT_UNOPENABLE_READER = VAULT_UNOPENABLE;
 /** How a row that doesn't decrypt is listed, and its one action. */
 export const UNOPENABLE_ITEM = "Item that can't be opened";
 export const DELETE_FOR_GOOD = "Delete for good";
@@ -80,8 +78,6 @@ export const VAULT_NOT_CHECKED = "This vault isn't being checked for missing or 
 export const MANIFEST_HELD = "This vault can't be changed until its warning is resolved.";
 /** A write into a vault whose check couldn't be finished (its record couldn't be fetched, or this device's memory can't be read). */
 export const MANIFEST_UNCHECKED = "PassAuth couldn't check this vault with your server yet. Try again in a moment.";
-/** No longer thrown (an item that can't be opened doesn't make a vault unresolved any more); kept for callers from before. */
-export const MANIFEST_HIDDEN = VAULT_UNOPENABLE;
 /** A write that met other writes three times in a row. */
 export const MANIFEST_BUSY = "This vault changed on another device. Try again.";
 /** A new baseline for a vault whose manifest is gone, while some member's app is too old to keep one. */

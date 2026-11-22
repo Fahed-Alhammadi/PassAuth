@@ -31,8 +31,6 @@ export function clearDraft() {
   notify();
 }
 
-export const getDraft = () => draft;
-
 /** True while the vault page's item editor has unsaved changes (opening a draft would replace it). */
 let editorDirty = false;
 export const setEditorDirty = (dirty: boolean) => {

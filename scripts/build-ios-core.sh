@@ -14,7 +14,8 @@ flag=(); [ "$PROFILE" = release ] && flag=(--release)
 export IPHONEOS_DEPLOYMENT_TARGET=17.0
 
 for t in aarch64-apple-ios aarch64-apple-ios-sim; do
-  cargo build -p passauth-core-ffi --lib --target "$t" "${flag[@]}"
+  # `${flag[@]+...}`: an empty array is "unbound" under `set -u` in macOS's bash 3.2.
+  cargo build -p passauth-core-ffi --lib --target "$t" ${flag[@]+"${flag[@]}"}
 done
 
 # Bindings come from an unstripped host (debug) build, as for Android.

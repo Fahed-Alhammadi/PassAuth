@@ -70,6 +70,7 @@ import {
   type SignedMemberRow,
   type VaultMemory,
 } from "./signing";
+import { localGet, localSet } from "./local-store";
 
 export type KeyPins = core.KeyPins;
 
@@ -277,23 +278,8 @@ let session: Session | null = null;
  */
 let earlier: { scope: string; ids: string[] | null } | null = null;
 
-const storage: KeyValueStore = {
-  get(key) {
-    try {
-      return localStorage.getItem(key);
-    } catch {
-      return null;
-    }
-  },
-  set(key, value) {
-    try {
-      if (value === null) localStorage.removeItem(key);
-      else localStorage.setItem(key, value);
-    } catch {
-      /* storage unavailable: this device then can't tell a rolled-back roster or list */
-    }
-  },
-};
+/** With storage unavailable, this device can't tell a rolled-back roster or list. */
+const storage: KeyValueStore = { get: localGet, set: localSet };
 let store: KeyValueStore = storage;
 
 /** Tests: another device-local store. */

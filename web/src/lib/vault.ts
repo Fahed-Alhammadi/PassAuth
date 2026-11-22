@@ -185,6 +185,7 @@ import {
   type SyncVaultRow,
   type VaultEntry,
 } from "./types";
+import { localGet, localSet } from "./local-store";
 
 /**
  * "two-step": the server requires two-step login (policy) and the account has no method yet, so it refuses everything
@@ -354,8 +355,6 @@ let state: State = initial;
 let account: core.Account | null = null;
 let bundle: Bundle | null = null;
 let socket: WebSocket | null = null;
-/** The session's live-sync origin from the socket's `hello` (shared by every tab and window of this session). */
-let liveOrigin: string | null = null;
 /** Bumped whenever the keys are dropped (lock, sign-out): async work started before that is discarded. */
 let generation = 0;
 /** Rows per vault that aren't shown as items in the copy held (they don't decrypt, or hold an item this app can't read): a key replacement needs every item. */
@@ -484,21 +483,8 @@ channel?.addEventListener("message", (e: MessageEvent<{ type?: string }>) => {
   if (e.data?.type === "lock" && (state.status === "unlocked" || (state.status === "two-step" && account))) lock(false);
 });
 
-function store(key: string, value: string | null) {
-  try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
-  } catch {
-    /* storage unavailable */
-  }
-}
-function read(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
+const store = localSet;
+const read = localGet;
 
 // ------------------------------------------------------------- Secret Key
 
@@ -627,7 +613,6 @@ function enterTwoStepGate() {
   if (!getTokens()) return;
   socket?.close();
   socket = null;
-  liveOrigin = null;
   if (state.status !== "two-step") set({ status: "two-step" });
 }
 
@@ -716,7 +701,6 @@ function dropKeys() {
   generation++;
   socket?.close();
   socket = null;
-  liveOrigin = null;
   const old = state.vaults;
   account?.free();
   account = null;
@@ -1019,9 +1003,6 @@ export function openDeviceApproval(key: core.LoginRequestKey, requestId: string,
   }
   approved = { login, result, email };
 }
-
-/** Whether a sign-in another device approved waits for the approving app's code. */
-export const awaitsDeviceCode = (): boolean => approved !== null;
 
 /** How entering the code went: signed in, a wrong code (with the tries left), or stopped after the third wrong one. */
 export type DeviceCodeResult = { kind: "done"; email: string } | Exclude<CodeOutcome, { kind: "confirmed" }>;
@@ -2439,9 +2420,6 @@ async function onSyncNotice(msg: SyncNotice) {
   if (noticeAction(msg, (id) => knownSeq(synced, id), state.revision, true) === "sync") sync().catch(() => {});
 }
 
-/** This session's live-sync origin (the socket's `hello`), or null while not connected. Every tab of the session shares it. */
-export const liveSyncOrigin = (): string | null => liveOrigin;
-
 /**
  * Live-sync news for other parts of the app (`device-login-client.ts`): a new connection (`connected`), a device asking
  * to sign in to the account (`auth_request`) and a request answered by any app (`auth_request_answered`).
@@ -2492,7 +2470,6 @@ function connectSocket() {
   }
   const ws = new WebSocket(server.wsUrl(`/ws?access_token=${encodeURIComponent(t.access)}`));
   socket = ws;
-  liveOrigin = null;
   ws.onopen = () => {
     reconnectDelay = RECONNECT_MIN;
     // Anything announced while this app wasn't connected (sign-in requests) is listed again.
@@ -2506,8 +2483,6 @@ function connectSocket() {
       return;
     }
     if (!msg || typeof msg !== "object") return;
-    // Remembered, but never a reason to skip a message: every tab and window of this session shares it.
-    if (msg.type === "hello" && socket === ws) liveOrigin = typeof msg.origin === "string" ? msg.origin : null;
     if (msg.type === "sync") void onSyncNotice(msg as SyncNotice);
     if (msg.type === "logout") confirmSignedOut();
     // The admin now requires two-step login and the account has no method yet: the server closes the connection next.
@@ -3843,17 +3818,7 @@ export async function removeMember(vaultId: string, userId: string, opts: Rotati
     );
   }
   // Removal and the new key in one request, so nobody is ever removed without the key change.
-  try {
-    await sendRotation(vaultId, `/vaults/${vaultId}/members/${userId}/remove`, userId, opts);
-  } catch (e) {
-    // Servers before 0.6.4 don't have the combined request: remove, then replace the key.
-    if (!(e instanceof ApiError) || (e.status !== 404 && e.status !== 405)) throw e;
-    const r = await api<{ rotation_required?: boolean }>(`/vaults/${vaultId}/members/${userId}`, { method: "DELETE" });
-    if (r?.rotation_required === false) return sync();
-    setPendingRotation(vaultId, true);
-    await rotateVaultKey(vaultId, opts);
-    return;
-  }
+  await sendRotation(vaultId, `/vaults/${vaultId}/members/${userId}/remove`, userId, opts);
   setPendingRotation(vaultId, false);
   await sync();
   // Without its last other member the vault may be personal again.
@@ -4015,10 +3980,9 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
         // It names the manifest it replaces by its link (sealed with the old key: the chain crosses keys by hashes alone).
         manifest = startEntry(fresh, vaultId, v.epoch + 1, seq, rowLink(row), rows);
       }
-      let r: { key_epoch?: number } | null;
       try {
         // key_epoch: the epoch of the key being replaced, from the same sync as the items re-encrypted above.
-        r = await api<{ key_epoch?: number } | null>(path, { body: { keys, items, meta, ...epochOf(v), ...(roster ? { roster } : {}), ...manifestsOf(manifest) } });
+        await api<{ key_epoch?: number } | null>(path, { body: { keys, items, meta, ...epochOf(v), ...(roster ? { roster } : {}), ...manifestsOf(manifest) } });
       } catch (e) {
         if (roster && hasErrorCode(e, "members_changed")) throw await membersChangedError(e, vaultId, answer.members, what);
         // The vault changed while this was being sent (another write, or its first manifest): nothing was changed.
@@ -4045,8 +4009,6 @@ async function sendRotation(vaultId: string, path: string, without?: string, opt
       if (roster) signed.rememberSigned(vaultId, roster);
       // The new key is this device's own: pinned with the roster it signed (persisted unsent first, written below).
       if (signing && v?.epoch !== undefined) signed.recordOwnKey(vaultId, "account", fresh.epochPin(vaultId, v.epoch + 1), roster ?? null);
-      // Servers from before the vault name moved into the rotation request (they report no key epoch) need it separately.
-      if (meta && !without && typeof r?.key_epoch !== "number") await api(`/vaults/${vaultId}`, { method: "PUT", body: { meta } });
       if (signing) void signed.flushPins().catch(() => {});
       return;
     } finally {
