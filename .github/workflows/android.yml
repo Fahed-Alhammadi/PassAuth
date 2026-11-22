@@ -4,8 +4,7 @@
 #   builds the signed Android App Bundle and uploads it to Google Play, once the repository
 #   variable PLAY_UPLOAD_ENABLED is "true"
 #   (Play only accepts API uploads after the app's first bundle was uploaded by hand).
-#   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing),
-#   release status = PLAY_RELEASE_STATUS ("completed" when unset; "draft" until the app is published).
+#   Track = repository variable PLAY_TRACK ("internal" when unset; "alpha" = closed testing).
 # - "Run workflow" (manual): builds the bundle as a downloadable artifact; tick "upload"
 #   to also send it to Play (e.g. to re-send a release after a CI fix), on the chosen track.
 name: Android
@@ -186,6 +185,4 @@ jobs:
           track: ${{ inputs.track || vars.PLAY_TRACK || 'internal' }}
           # Release notes ("What's new"): android/whatsnew/whatsnew-en-US (max 500 characters).
           whatsNewDirectory: android/whatsnew
-          # "draft" while the app has never been published (Play refuses anything else then);
-          # the draft is rolled out in Play Console. Unset = completed.
-          status: ${{ vars.PLAY_RELEASE_STATUS || 'completed' }}
+          status: completed

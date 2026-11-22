@@ -1,25 +1,5 @@
 /* Settings page: section tabs, cards and rows. Tokens come from app.css. */
 
-
-
-.settings-tabs {
-  display: flex; gap: var(--space-1); overflow-x: auto; border-bottom: 1px solid var(--line);
-  scrollbar-width: none;
-}
-.settings-tabs::-webkit-scrollbar { display: none; }
-.settings-tabs a {
-  padding: var(--space-2) var(--space-3); margin-bottom: -1px; white-space: nowrap; text-decoration: none;
-  color: var(--ink-2); font-weight: 500; border-bottom: 2px solid transparent;
-  border-radius: var(--radius-s) var(--radius-s) 0 0;
-  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.settings-tabs a:hover { color: var(--ink); background: var(--surface-2); }
-.settings-tabs a:focus-visible { outline-offset: -2px; }
-/* Current section: ink, weight and the underline. */
-.settings-tabs a[aria-current="page"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
-/* Invitations waiting under Vaults & sharing: a count in the accent tone. */
-.settings-tabs .tab-badge { margin-left: var(--space-2); background: var(--accent-soft); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
-
 .settings-section { display: flex; flex-direction: column; gap: var(--space-5); }
 .settings-intro { margin-bottom: calc(-1 * var(--space-2)); }
 .fingerprint {
@@ -28,8 +8,6 @@
 }
 .fingerprint-s { display: block; font-family: var(--mono); font-variant-ligatures: none; font-size: var(--text-caption); color: var(--ink-3); word-break: break-all; }
 
-.danger-zone { border-color: var(--danger); }
-.danger-zone h2 { color: var(--danger); }
 
 .totp-setup { display: flex; gap: var(--space-5); align-items: flex-start; flex-wrap: wrap; }
 .totp-setup > .stack-s, .totp-setup > .steps { flex: 1; min-width: 220px; }

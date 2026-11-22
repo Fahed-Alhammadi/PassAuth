@@ -92,7 +92,7 @@ To update: `docker compose pull && docker compose up -d`. Database changes apply
 
 ## Security
 
-- **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code, security key or passkey (WebAuthn, web vault), or recovery code.
+- **Sign-in:** OPAQUE, so your master password is never sent to the server. Guessing it from stolen server data is slowed by Argon2id, and blocked if you turn on the Secret Key. Two-step login by authenticator app, email code, security key or passkey (WebAuthn; added in the web vault, used in every app), or recovery code.
 - **Keys:** Argon2id from your master password, optionally mixed with a 128-bit Secret Key that never leaves your devices.
 - **Encryption:** every item has its own key and is sealed with XChaCha20-Poly1305, bound to its item and vault.
 - **Sharing:** vault keys are sealed to each member's X25519 key, and every share and member list is signed (Ed25519, bound to the X25519 key). Apps check the signatures, remember the keys they've seen and refuse an older vault key, so a server can't plant a vault, add a member or roll a key back. Fingerprints let you confirm who you share with.
@@ -115,7 +115,7 @@ The Rust core (crypto and importers) is shared by every client: compiled to WebA
 | `crates/core` | Crypto, item format, importers |
 | `crates/server` | API server (axum, sqlx) that also serves the web vault |
 | `web/` | Web vault (React, Vite) |
-| `extension/` | Chrome extension (Manifest V3, TypeScript) |
+| `extension/` | Browser extension for Chrome, Firefox and Safari (Manifest V3, TypeScript) |
 | `desktop/` | Desktop app (Tauri: Rust shell + the web vault) |
 | `android/`, `ios/` | Mobile apps (Kotlin/Compose, SwiftUI) |
 
@@ -124,7 +124,7 @@ cargo test --workspace                       # crypto, importers and server API 
 scripts/build-wasm.sh web/src/wasm && (cd web && pnpm install && pnpm build)
 scripts/build-wasm.sh extension/src/wasm && (cd extension && pnpm install && pnpm build)
 scripts/build-wasm.sh web/src/wasm && (cd web && pnpm install) && (cd desktop && pnpm install && pnpm tauri dev)   # desktop app
-docker compose up -d --build                 # build and run the image locally
+docker build -t ghcr.io/fahed-alhammadi/passauth:latest . && docker compose up -d   # build and run the image locally
 ```
 
 Requires Rust (stable, with the `wasm32-unknown-unknown` target), `wasm-bindgen-cli` matching the version in `Cargo.lock`, Node.js 26 and pnpm. The desktop app also needs the Tauri 2 system dependencies: the Xcode command line tools on macOS, WebView2 on Windows and webkit2gtk on Linux.

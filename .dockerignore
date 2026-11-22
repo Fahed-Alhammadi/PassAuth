@@ -10,6 +10,14 @@ CLAUDE.md
 .env.*
 !.env.example
 extension
-mobile
+android
+ios
+desktop
+relay
+website
+testdata
+assets
 docs
+Keys
+passauth-demo.txt
 *.md

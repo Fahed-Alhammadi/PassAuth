@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report security problems privately with [Report a vulnerability](https://github.com/Fahed-Alhammadi/PassAuth/security/advisories/new) on GitHub, not in a public issue. Include the affected part (server, web vault, extension, Android or iOS app), its version, and steps to reproduce.
+Please report security problems privately with [Report a vulnerability](https://github.com/Fahed-Alhammadi/PassAuth/security/advisories/new) on GitHub, not in a public issue. Include the affected part (server, web vault, extension, desktop app, Android or iOS app), its version, and steps to reproduce.
 
 You'll get a reply as soon as possible. Once a fix is released, the advisory is published with credit to you, unless you prefer otherwise.
 
