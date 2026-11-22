@@ -264,6 +264,39 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(off.map(\.service), ["example.com"])
     }
 
+    /// "Suggest every login": rows carry the item name, as the system shows one row per user name on a base domain.
+    func testSuggestEveryLoginLabelsRowsWithTheItemName() {
+        let e = [
+            entry("1", name: "Cloudy", user: "admin", password: "a", urls: [("https://cloudy.example.com", .host)]),
+            entry("2", name: "Portainer", user: "admin", password: "b", urls: [("https://portainer.example.com", .host)]),
+            entry("3", name: "bob", user: "bob", password: "c", urls: [("https://shop.test", .domain)]),
+            entry("4", name: "", user: "carol", password: "d", urls: [("https://mail.test", .domain)]),
+        ]
+        let on = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true).filter { $0.kind == .password }
+        XCTAssertEqual(on.map(\.user), ["admin · Cloudy", "admin · Portainer", "bob", "carol"])
+        // Off: the plain user name (each row is the only one for its base domain).
+        let off = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .password }
+        XCTAssertEqual(off.map(\.user), ["bob", "carol"])
+    }
+
+    /// "PassAuth…" fills at once only when exactly one login with a password matches the page itself.
+    func testOnlyMatchIsTheOneLoginForThePage() {
+        let cloudy = entry("c", name: "Cloudy", user: "admin", urls: [("https://cloudy.example.com", .host)])
+        let portainer = entry("p", name: "Portainer", user: "admin", urls: [("https://portainer.example.com", .host)])
+        let radarrA = entry("r1", name: "Radarr", user: "a", urls: [("https://radarr.example.com", .host)])
+        let radarrB = entry("r2", name: "Radarr 2", user: "b", urls: [("https://radarr.example.com", .host)])
+        let noPassword = entry("n", name: "Wiki", user: "x", password: "", urls: [("https://wiki.example.com", .host)])
+        let base = entry("b", name: "Shop", user: "s", urls: [("https://shop.test", .domain)])
+        let v = vault([cloudy, portainer, radarrA, radarrB, noPassword, base])
+        XCTAssertEqual(AutofillMatcher.onlyMatch("https://portainer.example.com/#!/auth", in: v, defaultMatch: .domain)?.id, "p")
+        XCTAssertNil(AutofillMatcher.onlyMatch("https://radarr.example.com/login", in: v, defaultMatch: .domain))
+        XCTAssertNil(AutofillMatcher.onlyMatch("https://wiki.example.com", in: v, defaultMatch: .domain))
+        XCTAssertNil(AutofillMatcher.onlyMatch("https://new.example.com", in: v, defaultMatch: .domain))
+        XCTAssertEqual(AutofillMatcher.onlyMatch("https://www.shop.test/cart", in: v, defaultMatch: .domain)?.id, "b")
+        XCTAssertTrue(Settings().fillSingleMatch)
+        XCTAssertTrue((try? JSONDecoder().decode(Settings.self, from: Data("{}".utf8)))?.fillSingleMatch ?? false)
+    }
+
     func testSuggestEveryLoginIsOffForExistingSettings() throws {
         let s = try JSONDecoder().decode(Settings.self, from: Data(#"{"defaultMatch":"host"}"#.utf8))
         XCTAssertFalse(s.suggestAllLogins)

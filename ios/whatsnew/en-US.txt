@@ -1,6 +1,8 @@
-New in 0.15.4
-• New switch in Settings → AutoFill: "Suggest every login above the keyboard". Since 0.15.3, logins set to match by Host, Exact or Starts with (and logins that share a user name on one domain) are reached through PassAuth in the suggestions, so iOS can't offer the wrong one. If you prefer them directly above the keyboard again, turn this on. iOS may then suggest a login from another site of the same domain: check the site name before you tap it.
+New in 0.15.5
+• Faster AutoFill on sites with one saved login: when you tap PassAuth in the suggestions and only one login is saved for the page, it fills at once, without the list. You can turn this off in Settings → AutoFill: "Fill at once when one login matches".
+• With "Suggest every login above the keyboard" on, each suggestion now shows the login's name next to the user name (for example "admin · Portainer"), so logins with the same user name on one domain are easy to tell apart.
 
 Please test:
-1. With the switch off (the default), a login set to Host appears under PassAuth in the suggestions, not as its own suggestion.
-2. Turn it on, then open that login's sign-in page again: it should appear directly above the keyboard.
+1. Open a sign-in page that has exactly one saved login, tap PassAuth in the suggestions: it should fill straight away.
+2. Open a page with two saved logins: the list should appear as before.
+3. Turn on "Suggest every login above the keyboard": suggestions should read "user · name".

@@ -48,6 +48,11 @@ public enum IdentityMapper {
             guard let l = e.item.login else { continue }
             let rank = e.item.favorite ? 1 : 0
             let user = l.username.isEmpty ? e.item.name : l.username
+            // "Suggest every login": the system shows one row per user name across a base domain, so the
+            // item name goes into the row ("admin · Portainer") to keep the logins apart. Display only: a
+            // pick fills the login by its record id.
+            let name = e.item.name.trimmingCharacters(in: .whitespaces)
+            let label = suggestAll && !name.isEmpty && name.lowercased() != user.lowercased() ? "\(user) · \(name)" : user
             let services: [(String, IdentityRecord.Service)] = l.urls.compactMap { u in
                 guard let (svc, type) = service(u, defaultMatch: defaultMatch) else { return nil }
                 // The system offers an identity on every subdomain of its base domain and lists one row per user
@@ -64,7 +69,7 @@ public enum IdentityMapper {
             let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
             for (svc, type) in services {
                 if !l.password.isEmpty || !l.username.isEmpty {
-                    add(IdentityRecord(kind: .password, service: svc, serviceType: type, user: user, recordId: e.id, rank: rank))
+                    add(IdentityRecord(kind: .password, service: svc, serviceType: type, user: label, recordId: e.id, rank: rank))
                 }
                 if hasTotp {
                     add(IdentityRecord(kind: .oneTimeCode, service: svc, serviceType: type, user: e.item.name.isEmpty ? user : e.item.name, recordId: e.id, rank: rank))

@@ -76,6 +76,14 @@ public enum AutofillMatcher {
         return out
     }
 
+    /// The one login with a password that matches `page` (the most specific page the system passed;
+    /// its base domain would match more), or nil when none or several do.
+    public static func onlyMatch(_ page: String, in vault: VaultData, defaultMatch: UrlMatch) -> Entry? {
+        let found = candidates([page], in: vault, defaultMatch: defaultMatch)
+        guard found.count == 1, let e = found.first, !(e.item.login?.password ?? "").isEmpty else { return nil }
+        return e
+    }
+
     /// Search over all logins: the apps' one item search (`ItemSearch`), every website included.
     public static func search(_ query: String, _ entries: [Entry]) -> [Entry] {
         ItemSearch.search(entries.filter { $0.item.login != nil }, query)

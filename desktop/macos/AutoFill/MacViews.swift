@@ -883,6 +883,14 @@ struct MacSettings: View {
                 Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under \"PassAuth…\" in the list, with the login for the page first.")
                     .foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("Fill at once when one login matches", isOn: Binding(get: { state.settings.fillSingleMatch }, set: { v in
+                    Task { await model.repo.updateSettings { $0.fillSingleMatch = v } }
+                }))
+            } footer: {
+                Text("When you choose \"PassAuth…\" in Safari's AutoFill list and only one login is saved for the page, it is filled without showing the list.")
+                    .foregroundStyle(.secondary)
+            }
             if let error { Text(error).foregroundStyle(Color.paDanger) }
             Section {
                 if state.status == .unlocked {

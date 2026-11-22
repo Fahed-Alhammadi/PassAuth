@@ -358,6 +358,10 @@ final class AutofillModel {
         }
         switch request {
         case .list, .oneTimeCodes:
+            if let only = singleMatch {
+                Self.log.notice("proceed: one login matches the page, filled without the list")
+                return fill(only)
+            }
             screen = .list
             // The copy on the device opened instantly; catch up with the server in the background.
             Task { await repo.refreshIfStale() }
@@ -472,6 +476,15 @@ final class AutofillModel {
     var passkeyRpId: String? {
         if case .list(_, let p?) = request { return p.rpId }
         return nil
+    }
+
+    /// "PassAuth…" on a page where exactly one login matches (setting `fillSingleMatch`): that login,
+    /// filled without showing the list. Passwords only (not passkeys or codes), never a login whose copy
+    /// carries a warning, and only when the page is known.
+    var singleMatch: Entry? {
+        guard state.settings.fillSingleMatch, case .list(let p, nil) = request, let page = p.first, let v = repo.vault else { return nil }
+        guard let e = AutofillMatcher.onlyMatch(page, in: v, defaultMatch: state.settings.defaultMatch), !v.fillNeedsReview(e) else { return nil }
+        return e
     }
 
     func pick(_ e: Entry) {

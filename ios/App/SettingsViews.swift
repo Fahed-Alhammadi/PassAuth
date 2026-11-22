@@ -567,6 +567,15 @@ private struct AutofillPage: View {
         }
         .paRow()
         Section {
+            Toggle(isOn: Binding(get: { s.fillSingleMatch }, set: { v in update(model) { $0.fillSingleMatch = v } })) {
+                Text("Fill at once when one login matches")
+            }
+            .accessibilityIdentifier("settings.fillSingleMatch")
+        } footer: {
+            Text("When you choose PassAuth in the suggestions and only one login is saved for the page, it is filled without showing the list.")
+        }
+        .paRow()
+        Section {
             if s.neverSave.isEmpty {
                 Text("No sites. Choose \"Never for this site\" when PassAuth offers to save a login.").font(.subheadline).foregroundStyle(Color.paMuted)
             }

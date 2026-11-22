@@ -57,6 +57,8 @@ public struct Settings: Codable, Equatable, Sendable {
     /// AutoFill: also give the system's suggestion list the logins it can't hold to one site (Host, Exact,
     /// Starts with, same user name under one base domain; `IdentityMapper`). Off: those go through "PassAuth…".
     public var suggestAllLogins = false
+    /// AutoFill: "PassAuth…" fills at once when exactly one password login matches the page (no list shown).
+    public var fillSingleMatch = true
     /// Never offer to save on these sites (base domains, as the extension and Android).
     public var neverSave: [String] = []
     /// The generator's options (Generator tab, and AutoFill's password generation).
@@ -86,6 +88,7 @@ public struct Settings: Codable, Equatable, Sendable {
         theme = c.lenient(.theme, d.theme)
         askToSave = c.lenient(.askToSave, d.askToSave)
         suggestAllLogins = c.lenient(.suggestAllLogins, d.suggestAllLogins)
+        fillSingleMatch = c.lenient(.fillSingleMatch, d.fillSingleMatch)
         neverSave = c.lenient(.neverSave, d.neverSave)
         generator = c.lenient(.generator, d.generator)
         permissions = c.lenient(.permissions, d.permissions)
