@@ -39,7 +39,8 @@ public struct IdentityRecord: Equatable, Hashable, Sendable {
 public enum IdentityMapper {
     /// `suggestAll` (the "Suggest every login above the keyboard" setting): Host/Exact/Starts with websites are
     /// registered by their address and same-name logins by their full host, instead of left out.
-    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, suggestAll: Bool = false) -> [IdentityRecord] {
+    /// `itemNames`: with `suggestAll`, rows read "user · item name" (macOS; iOS shows the user name only).
+    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, suggestAll: Bool = false, itemNames: Bool = true) -> [IdentityRecord] {
         var out: [IdentityRecord] = []
         var seen = Set<IdentityRecord>()
         func add(_ r: IdentityRecord) { if seen.insert(r).inserted { out.append(r) } }
@@ -52,7 +53,7 @@ public enum IdentityMapper {
             // item name goes into the row ("admin · Portainer") to keep the logins apart. Display only: a
             // pick fills the login by its record id.
             let name = e.item.name.trimmingCharacters(in: .whitespaces)
-            let label = suggestAll && !name.isEmpty && name.lowercased() != user.lowercased() ? "\(user) · \(name)" : user
+            let label = suggestAll && itemNames && !name.isEmpty && name.lowercased() != user.lowercased() ? "\(user) · \(name)" : user
             let services: [(String, IdentityRecord.Service)] = l.urls.compactMap { u in
                 guard let (svc, type) = service(u, defaultMatch: defaultMatch) else { return nil }
                 // The system offers an identity on every subdomain of its base domain and lists one row per user

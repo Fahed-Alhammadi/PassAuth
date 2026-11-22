@@ -62,6 +62,30 @@ public struct Settings: Codable, Equatable, Sendable {
     public var suggestAllLoginsChosen = false
     /// AutoFill: "PassAuth…" fills at once when exactly one password login matches the page (no list shown).
     public var fillSingleMatch = true
+    /// What AutoFill does on this platform. iOS works as it did in 0.15.2 (the owner's choice after
+    /// testing 0.15.2–0.15.6): every login goes to the system's suggestions, rows show the user name
+    /// only, and "PassAuth…" always opens the list; the stored switches apply on macOS only.
+    public var suggestsEveryLogin: Bool {
+        #if os(iOS)
+        true
+        #else
+        suggestAllLogins
+        #endif
+    }
+    public var namesSuggestionRows: Bool {
+        #if os(iOS)
+        false
+        #else
+        true
+        #endif
+    }
+    public var fillsSingleMatch: Bool {
+        #if os(iOS)
+        false
+        #else
+        fillSingleMatch
+        #endif
+    }
     /// Never offer to save on these sites (base domains, as the extension and Android).
     public var neverSave: [String] = []
     /// The generator's options (Generator tab, and AutoFill's password generation).

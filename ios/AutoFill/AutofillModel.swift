@@ -482,7 +482,7 @@ final class AutofillModel {
     /// filled without showing the list. Passwords only (not passkeys or codes), never a login whose copy
     /// carries a warning, and only when the page is known.
     var singleMatch: Entry? {
-        guard state.settings.fillSingleMatch, case .list(let p, nil) = request, let page = p.first, let v = repo.vault else { return nil }
+        guard state.settings.fillsSingleMatch, case .list(let p, nil) = request, let page = p.first, let v = repo.vault else { return nil }
         guard let e = AutofillMatcher.onlyMatch(page, in: v, defaultMatch: state.settings.defaultMatch), !v.fillNeedsReview(e) else { return nil }
         return e
     }

@@ -2174,7 +2174,8 @@ public final class VaultRepository {
         let s = store.get()
         identities.seed(s.file.identityFingerprint)
         guard let v = vault, sessions[s.activeId] != nil else { return identities.clear() }
-        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch, suggestAll: s.settings.suggestAllLogins))
+        identities.replace(IdentityMapper.records(v.entries, defaultMatch: s.settings.defaultMatch, suggestAll: s.settings.suggestsEveryLogin,
+                                                   itemNames: s.settings.namesSuggestionRows))
     }
 
     /// Decrypt a copy, reusing what `previous` already opened: a vault key whose header

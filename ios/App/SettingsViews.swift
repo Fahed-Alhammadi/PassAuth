@@ -558,24 +558,6 @@ private struct AutofillPage: View {
         }
         .paRow()
         Section {
-            Toggle(isOn: Binding(get: { s.suggestAllLogins }, set: { v in update(model) { $0.suggestAllLogins = v; $0.suggestAllLoginsChosen = true } })) {
-                Text("Suggest every login above the keyboard")
-            }
-            .accessibilityIdentifier("settings.suggestAllLogins")
-        } footer: {
-            Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under PassAuth in the suggestions, with the login for the page first.")
-        }
-        .paRow()
-        Section {
-            Toggle(isOn: Binding(get: { s.fillSingleMatch }, set: { v in update(model) { $0.fillSingleMatch = v } })) {
-                Text("Fill at once when one login matches")
-            }
-            .accessibilityIdentifier("settings.fillSingleMatch")
-        } footer: {
-            Text("When you choose PassAuth in the suggestions and only one login is saved for the page, it is filled without showing the list.")
-        }
-        .paRow()
-        Section {
             if s.neverSave.isEmpty {
                 Text("No sites. Choose \"Never for this site\" when PassAuth offers to save a login.").font(.subheadline).foregroundStyle(Color.paMuted)
             }

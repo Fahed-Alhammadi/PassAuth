@@ -277,6 +277,10 @@ final class AutofillTests: XCTestCase {
         // Off: the plain user name (each row is the only one for its base domain).
         let off = IdentityMapper.records(e, defaultMatch: .domain).filter { $0.kind == .password }
         XCTAssertEqual(off.map(\.user), ["bob", "carol"])
+        // iOS (as 0.15.2): every login is suggested, rows show the user name only.
+        let ios = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true, itemNames: false).filter { $0.kind == .password }
+        XCTAssertEqual(ios.map(\.user), ["admin", "admin", "bob", "carol"])
+        XCTAssertEqual(ios.map(\.recordId), ["1", "2", "3", "4"])
     }
 
     /// "PassAuth…" fills at once only when exactly one login with a password matches the page itself.

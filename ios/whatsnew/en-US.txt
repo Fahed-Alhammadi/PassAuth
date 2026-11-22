@@ -1,7 +1,8 @@
-New in 0.15.6
-• Your logins are back above the keyboard: "Suggest every login above the keyboard" is now on by default, and each suggestion shows the login's name next to the user name (for example "admin · Portainer"), so you can pick the right one. If you turned this switch off yourself, it stays off. Settings → AutoFill.
-• Tapping PassAuth in the suggestions still fills at once when only one login is saved for the page.
+New in 0.15.7
+• AutoFill works again as it did in 0.15.2. Every login is suggested above the keyboard, the suggestions show the user name only, and tapping PassAuth in the suggestions always opens the list.
+• The two AutoFill switches added in recent versions ("Suggest every login above the keyboard" and "Fill at once when one login matches") are removed from Settings → AutoFill.
 
 Please test:
-1. Open the sign-in page of a site whose login is set to Host: the login should be suggested above the keyboard as "user · name".
+1. Open the sign-in page of a site you have a login for: the login should be suggested above the keyboard with its user name.
 2. Tap it: the right user name and password are filled.
+3. Tap PassAuth in the suggestions: the list opens, with the logins for the page first.
