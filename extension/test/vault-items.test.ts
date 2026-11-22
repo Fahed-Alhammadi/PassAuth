@@ -141,7 +141,7 @@ test("a create that timed out but reached the server waits as an offline change 
 });
 
 test("retrying with the same id after the item was changed: the waiting create takes the new item and brings the server's copy up to date", async () => {
-  await signedIn(["key_epoch"]); // a server without error codes: says "item id already exists"
+  await signedIn(["key_epoch", "error_codes"]); // other content under the same id: the server says item_exists
   const id = crypto.randomUUID();
   server.dropReply.add("POST /items");
   await vault.createItem(login("Example", "first"), undefined, id);
@@ -162,7 +162,7 @@ test("ids from the popup must be UUIDs", async () => {
 });
 
 test("a stale revision is reported as revision_conflict and the vault is synced", async () => {
-  await signedIn(["key_epoch"]);
+  await signedIn(["key_epoch", "error_codes"]);
   const id = await vault.createItem(login("Example"));
   const stale = vault.getEntry(id)!;
   server.editElsewhere(id, { notes: "elsewhere" });

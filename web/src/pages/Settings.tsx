@@ -144,7 +144,7 @@ const TABS = [
   { key: "security", group: "Security", label: "Password and keys", intro: "Your master password, Secret Key and Emergency Kit." },
   { key: "two-step", group: "Security", label: "Two-step login", intro: "A second step when you sign in on a new device." },
   { key: "sessions", group: "Security", label: "Devices", intro: "Where you're signed in, and requests to sign in." },
-  // Listed only when the server keeps an activity log (`activity_log`).
+  // Listed once the server's settings are known.
   { key: "activity", group: "Security", label: "Activity", intro: "Sign-ins and changes to your account, newest first." },
   { key: "vaults", group: "Sharing", label: "Vaults", intro: "Your vaults, the people you share them with, and invitations." },
   // Listed only when the server has emergency access (`emergency_access`); its emails link here either way.
@@ -196,7 +196,7 @@ export function SettingsPage() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const config = usePublicConfig();
-  const activityLog = hasFeature(config, "activity_log");
+  const activityLog = config !== null;
   const emergency = hasFeature(config, "emergency_access");
   const waiting = useVault().invitations.length;
 
@@ -2051,7 +2051,7 @@ function memberTitle(m: Member): string {
 
 function VaultManager({ vault, count }: { vault: Vault; count: number }) {
   const { userId, pendingRotations } = useVault();
-  const activityLog = hasFeature(usePublicConfig(), "activity_log");
+  const activityLog = usePublicConfig() !== null;
   const [securing, setSecuring] = useState(false);
   const [secureError, setSecureError] = useState<string | null>(null);
   const needsRotation = pendingRotations.includes(vault.id);
@@ -2350,8 +2350,8 @@ function AddMember({ vault, members, onAdded }: { vault: Vault; members: Member[
   const [role, setRole] = useState<Role>("read");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Servers with invitations: someone new gets an invitation and sees the vault once they accept it.
-  const invitations = hasFeature(usePublicConfig(), "vault_invitations");
+  // Someone new gets an invitation and sees the vault once they accept it (worded so once the server's settings are known).
+  const invitations = usePublicConfig() !== null;
 
   async function find(e: FormEvent) {
     e.preventDefault();
@@ -2558,10 +2558,10 @@ function SessionsTab() {
   const [confirmOthers, setConfirmOthers] = useState(false);
   const [forgetting, setForgetting] = useState<Session | null>(null);
   const config = usePublicConfig();
-  // One request that signs out every other session; older servers sign them out one at a time below.
-  const revokeOthers = hasFeature(config, "revoke_others");
+  // One request that signs out every other session; while the server's settings aren't known, one at a time below.
+  const revokeOthers = config !== null;
   // Forget a device: all its sessions end and its next sign-in counts as new (two-step login again).
-  const canForget = hasFeature(config, "forget_device");
+  const canForget = config !== null;
 
   const load = useCallback(async () => {
     try {

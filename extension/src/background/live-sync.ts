@@ -74,7 +74,7 @@ async function connect() {
   if (socket && socketAccount === id && (socket.readyState === OPEN || socket.readyState === CONNECTING)) return;
   const check = await vault.checkForChanges();
   if (stale()) return;
-  // An older server, a session that ended, or two-step login still to be set up: no socket and no alarm.
+  // A server this app refuses, a session that ended, or two-step login still to be set up: no socket and no alarm.
   if (check === "unsupported" || check === "signed_out" || check === "two_step") return stopLive();
   scheduleAlarm();
   if (check === "offline") return scheduleRetry();

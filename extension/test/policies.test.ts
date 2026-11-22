@@ -7,7 +7,7 @@ import { type FakeChrome, installChrome } from "./chrome";
 import { accountRecord, type FakeServer, fakeServer } from "./fake-server";
 
 const { allowedTimeout, enforceTimeoutPolicy, policyState, timeoutLimit, accountNotices, noteTwoStepRequired, noteTwoStepDone, forgetPolicyState } = await import("../src/background/policies");
-const { apiError, forgetServerFeatures, iconsShown, QUOTA_TEXT, refreshServerInfo, serverInfo, siteIconsShown } = await import("../src/background/api");
+const { apiError, forgetServerFeatures, iconsShown, QUOTA_TEXT, refreshServerInfo, siteIconsShown } = await import("../src/background/api");
 const { getSettings } = await import("../src/background/storage");
 
 let fake: FakeChrome;
@@ -84,7 +84,9 @@ test("policy violations become popup notices linking to the web vault, asked aga
   expect(server.requests.filter((r) => r.path === "/account").length).toBe(asked + 1);
 });
 
-test("a server without the policies feature: no notices and no /account request", async () => {
+test("a server whose settings can't be read: no notices and no /account request", async () => {
+  server.handlers["GET /config"] = () => ({ status: 503, body: null });
+  forgetServerFeatures();
   expect(await accountNotices()).toStrictEqual({ key: "", notices: [] });
   expect(server.requests.some((r) => r.path === "/account")).toBe(false);
 });
@@ -125,24 +127,18 @@ test("a policy the admin changed applies at the next unlock: refreshServerInfo a
   expect(await timeoutLimit()).toBe(30);
 });
 
-test("website icons: the setting and the server together (API 2 servers list `icons` while the service is on; older ones always had it)", async () => {
+test("website icons: the setting and the server together (servers list `icons` while the service is on)", async () => {
   // The rule, as the web vault's siteIconsShown.
   expect(siteIconsShown(false, null)).toBe(false);
   expect(siteIconsShown(true, null), "the server's answer unknown: the setting decides").toBe(true);
-  expect(siteIconsShown(true, { api: null, features: new Set() }), "a server from before API 2").toBe(true);
-  expect(siteIconsShown(true, { api: 2, features: new Set(["icons"]) })).toBe(true);
-  expect(siteIconsShown(true, { api: 2, features: new Set() }), "the admin turned the icon service off").toBe(false);
-  expect(siteIconsShown(false, { api: 2, features: new Set(["icons"]) })).toBe(false);
+  expect(siteIconsShown(true, { features: new Set(["icons"]) })).toBe(true);
+  expect(siteIconsShown(true, { features: new Set() }), "the admin turned the icon service off").toBe(false);
+  expect(siteIconsShown(false, { features: new Set(["icons"]) })).toBe(false);
   // From the server's cached features.
   server.features = [...server.features, "icons"];
   expect(await iconsShown("https://vault.test", true)).toBe(true);
   expect(await iconsShown("https://vault.test", false)).toBe(false);
   server.features = server.features.filter((f) => f !== "icons");
   forgetServerFeatures();
-  expect((await serverInfo("https://vault.test"))?.api).toBe(2);
   expect(await iconsShown("https://vault.test", true)).toBe(false);
-  // An older server (no `api`): icons as before (the rule; this version refuses to use such a server otherwise).
-  server.outdated = "old";
-  forgetServerFeatures();
-  expect(await iconsShown("https://vault.test", true)).toBe(true);
 });

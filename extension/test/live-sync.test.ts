@@ -176,12 +176,6 @@ test("lock, account switch and sign-out close the socket and stop reconnecting; 
   expect(FakeWebSocket.live(), "nothing reconnects").toHaveLength(0);
 });
 
-test("an older server (no delta_sync): no socket and no alarm, as before", async () => {
-  await unlocked(["key_epoch"]);
-  expect(FakeWebSocket.all).toHaveLength(0);
-  expect(fake.alarms.has(live.LIVE_ALARM)).toBe(false);
-});
-
 test("the fallback alarm: unlocked without a socket, it checks for changes and connects; locked, it stops", async () => {
   await unlocked();
   socket().drop();

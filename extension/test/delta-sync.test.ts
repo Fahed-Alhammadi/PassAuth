@@ -153,14 +153,21 @@ test("own writes: the vault's next number is shown as sent without asking; anyth
   expect(trashed && ("data" in trashed || "item_key" in trashed)).toBe(false);
 });
 
-test("an older server (no delta_sync): the whole vault every time, without since or trash=summary, and a sync after every write", async () => {
-  await signedIn(["key_epoch", "idempotent_create", "error_codes"]);
+test("the server's settings can't be read: the whole vault every time, without since or trash=summary, and writes without a key epoch", async () => {
+  await signedIn();
+  server.handlers["GET /config"] = () => ({ status: 503, body: null });
+  forgetServerFeatures();
+  const synced = syncs().length;
   await vault.sync();
-  expect(syncs().map((r) => r.query)).toStrictEqual([{}, {}]);
+  await vault.sync();
+  expect(
+    syncs()
+      .slice(synced)
+      .map((r) => r.query),
+  ).toStrictEqual([{}, {}]);
   const before = server.requests.length;
   await vault.createItem(JSON.parse(login("New one")));
-  expect(requestsSince(before)).toStrictEqual(["POST /items", "GET /sync"]);
-  expect((await stored())?.cursor).toBeUndefined();
+  expect(server.requests.slice(before).find((r) => r.path === "/items")?.body.key_epoch).toBeUndefined();
 });
 
 test("a delta this browser can't use: the whole vault, once", async () => {
@@ -235,10 +242,7 @@ test("live-sync messages: numbers the copy has (own writes too) are skipped, new
   expect(count()).toBe(n + 3);
 });
 
-test("the live-sync check: older server → unsupported, no tokens → signed out, 403 two_step_required → two_step (and the popup says so)", async () => {
-  await signedIn(["key_epoch"]);
-  expect(await vault.checkForChanges()).toBe("unsupported");
-
+test("the live-sync check: no tokens → signed out, 403 two_step_required → two_step (and the popup says so)", async () => {
   await signedIn();
   setTwoStepHandler(noteTwoStepRequired);
   server.editElsewhere("i1", { notes: "changed" });

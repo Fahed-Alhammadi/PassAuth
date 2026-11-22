@@ -8,7 +8,7 @@ import { oneLine } from "./text";
 export class ApiError extends Error {
   constructor(
     public status: number,
-    /** The server's `error` code, e.g. "vault_key_changed" (older servers send only generic codes such as "conflict"). */
+    /** The server's `error` code, e.g. "vault_key_changed". */
     public code: string,
     message: string,
     /** Seconds from the Retry-After header of a 429. */
@@ -31,7 +31,7 @@ export const OUT_OF_STORAGE = "Your server is running out of storage space, so t
 
 /** The server refused a save or import because it would pass the vault owner's item or storage limit. */
 export function isQuotaExceeded(e: unknown): boolean {
-  return hasErrorCode(e, "quota_exceeded", "storage limit reached");
+  return hasErrorCode(e, "quota_exceeded");
 }
 
 /** The server refused a write because its disk is running out of space (507 `insufficient_storage`): trying again won't help soon. */
@@ -39,12 +39,9 @@ export function isOutOfStorage(e: unknown): boolean {
   return e instanceof ApiError && (e.code === "insufficient_storage" || e.status === 507);
 }
 
-/**
- * Whether `e` is the server's error `code`. Servers from before the codes sent a generic code with the reason as
- * the message text, so that text (`legacyMessage`, by default the code itself) is recognised too.
- */
-export function hasErrorCode(e: unknown, code: string, legacyMessage: string = code): boolean {
-  return e instanceof ApiError && (e.code === code || e.message === legacyMessage);
+/** Whether `e` is the server's error `code`. */
+export function hasErrorCode(e: unknown, code: string): boolean {
+  return e instanceof ApiError && e.code === code;
 }
 
 /** The server couldn't be reached, or answered with a temporary failure (5xx, 429). The session is kept. */
@@ -353,19 +350,15 @@ const CODE_TEXT = new Map<string, string>([
 ]);
 
 /**
- * Messages servers send under a generic code (`bad_request`, `forbidden`…) that the app knows, with its own wording.
- * Servers from before the codes sent some coded reasons only this way.
+ * Messages servers send under a generic code (`bad_request`, `forbidden`…) that the app knows, with its own wording
+ * (and the one message that tells two reasons of the same code apart).
  */
 const MESSAGE_TEXT = new Map<string, string>([
   ["invalid code", CODE_TEXT.get("invalid_code")!],
   ["invalid two-factor code", CODE_TEXT.get("invalid_code")!],
   ["start setup first", "The setup expired. Cancel and start setup again."],
   ["invalid or expired link", "This link has expired or was used already."],
-  ["reauth_required", CODE_TEXT.get("reauth_required")!],
-  ["email_not_verified", CODE_TEXT.get("email_not_verified")!],
-  ["storage limit reached", QUOTA_EXCEEDED],
   ["attachment storage limit reached", ATTACHMENT_QUOTA_EXCEEDED],
-  ["item changed on another device; sync and retry", CODE_TEXT.get("revision_conflict")!],
   ["email is not configured on this server", "This server isn't set up to send email. Ask the server's admin."],
   ["you can't be your own emergency contact", "You can't be your own emergency contact."],
   ["you can register at most 10 security keys", "You can add at most 10 security keys. Remove one first."],
@@ -504,7 +497,7 @@ export function onPublicConfig(fn: () => void) {
   };
 }
 
-/** Whether the server announced `feature` in GET /api/config (servers before API 2 announce none). */
+/** Whether the server announced `feature` in GET /api/config. */
 export function hasFeature(config: PublicConfig | null, feature: string): boolean {
   return Array.isArray(config?.features) && config.features.includes(feature);
 }

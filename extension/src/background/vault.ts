@@ -1387,10 +1387,10 @@ async function syncIdle() {
 
 const UNEXPECTED_SYNC = "Your PassAuth server sent an unexpected answer. Try again in a moment.";
 
-/** Whether `id`'s server has delta sync (`delta_sync` in its features; unknown while unreachable: no). */
+/** Whether `id` syncs by delta: its server's settings are known (unknown while unreachable: no). */
 async function deltaFor(id: string): Promise<boolean> {
   const server = (await local.account(id)).data?.server ?? "";
-  return !!server && !!(await serverInfo(server))?.features.has("delta_sync");
+  return !!server && !!(await serverInfo(server));
 }
 
 /** The whole vault of `id` (with delta sync `trash=summary`: the extension never shows the trash). */
@@ -1411,8 +1411,8 @@ async function syncNow() {
   const stale = () => gen !== generation || !account || currentId !== id;
   const delta = await deltaFor(id);
   if (stale()) return;
-  // Older servers get the whole vault every time, as before; a copy without a cursor gets it once; so does an
-  // unchecked vault (`fullNext`).
+  // Without delta sync (the server's settings unknown) the whole vault every time; a copy without a cursor gets it
+  // once; so does an unchecked vault (`fullNext`).
   let everything = fullNext || !delta;
   let behind = 0;
   // Bounded: a delta that can't be used, an answer that needs the whole vault to be judged, and the retries of an
@@ -3549,7 +3549,7 @@ export type LiveCheck = "ok" | "unsupported" | "signed_out" | "two_step" | "offl
 
 /**
  * Before the live-sync socket (re)connects, and on its fallback alarm: is the active account still signed in, and
- * does its server have delta sync (the socket is used only then; older servers keep today's behaviour)? Asks
+ * is its server one this app uses? Asks
  * `GET /sync/revision`, which also refreshes an expired access token, and syncs when the copy lacks something. The
  * copy's numbers come from memory or the offline copy: no keys are loaded unless there is something to sync.
  */
@@ -3559,7 +3559,7 @@ export async function checkForChanges(): Promise<LiveCheck> {
   const info = await serverInfo(data.server);
   if (!info) return "offline";
   // A server this app refuses is never asked (no socket either).
-  if (serverOutdated(info) || !info.features.has("delta_sync")) return "unsupported";
+  if (serverOutdated(info)) return "unsupported";
   try {
     const r = await revisionOf(id);
     if ((await activeId()) === id && isStale(r, await snapshotOf(id)) && (await ensureUnlocked())) await sync();
@@ -3703,9 +3703,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** An item id a client may choose itself (so a retried create keeps it): a UUID. */
 export const validItemId = (id: unknown): id is string => typeof id === "string" && UUID.test(id);
 
-/** The write carries the epoch of the vault key it was encrypted with, when the server supports it (API v2 `key_epoch`). */
-function withEpoch<T extends object>(body: T, vault: Vault, features: ReadonlySet<string>): T & { key_epoch?: number } {
-  return features.has("key_epoch") && vault.epoch !== undefined ? { ...body, key_epoch: vault.epoch } : body;
+/** The write carries the epoch of the vault key it was encrypted with (`known`: the server's settings were read; not before). */
+function withEpoch<T extends object>(body: T, vault: Vault, known: boolean): T & { key_epoch?: number } {
+  return known && vault.epoch !== undefined ? { ...body, key_epoch: vault.epoch } : body;
 }
 
 const isCode = (e: unknown, code: string) => e instanceof ApiError && e.status === 409 && e.code === code;
@@ -3796,19 +3796,19 @@ function storedRow(enc: EncryptedItem, answer: WriteAnswer, base: SyncItemRow | 
 }
 
 /** The body an item write sends, as kept in an offline change's `sent` (the exact attempt that may have reached the server). */
-const sentBody = (enc: EncryptedItem, vault: Vault, features: ReadonlySet<string>): SentBody => ({
+const sentBody = (enc: EncryptedItem, vault: Vault, known: boolean): SentBody => ({
   key: enc.key,
   data: enc.data,
-  key_epoch: features.has("key_epoch") && vault.epoch !== undefined ? vault.epoch : null,
+  key_epoch: known && vault.epoch !== undefined ? vault.epoch : null,
 });
 
 const changedElsewhere = () => new ApiError(409, "revision_conflict", "This item was changed on another device. PassAuth has the latest version now; check it and try again.");
 
 /** `POST /items` for `enc` into `vault` with the vault's next manifest; the answer is shown like any own write (`settle`). */
-async function postItem(vault: Vault, enc: EncryptedItem, features: ReadonlySet<string>, owner: string): Promise<void> {
+async function postItem(vault: Vault, enc: EncryptedItem, known: boolean, owner: string): Promise<void> {
   // Vault manifests: the vault's next manifest, with this item added.
   const sent = nextManifest(vault, [], [{ id: enc.id, deleted_at: null, data: enc.data }]);
-  const answer = await api<WriteAnswer>("/items", { body: { ...withEpoch(enc, vault, features), ...(sent ? { manifests: [sentEntry(sent)] } : {}) }, accountId: owner });
+  const answer = await api<WriteAnswer>("/items", { body: { ...withEpoch(enc, vault, known), ...(sent ? { manifests: [sentEntry(sent)] } : {}) }, accountId: owner });
   await settle(
     vault.id,
     answer,
@@ -3821,7 +3821,7 @@ async function postItem(vault: Vault, enc: EncryptedItem, features: ReadonlySet<
 }
 
 /** `PUT /items/{id}` of `enc` at `revision` (an edit in place: the item keeps its vault, times and trash state). */
-async function putItem(vault: Vault, itemId: string, enc: EncryptedItem, revision: number, features: ReadonlySet<string>, owner: string): Promise<void> {
+async function putItem(vault: Vault, itemId: string, enc: EncryptedItem, revision: number, known: boolean, owner: string): Promise<void> {
   // Vault manifests: the row as the copy holds it goes, the same row with the new data comes.
   const before = synced?.items.get(itemId);
   const held = before?.vault_id === vault.id ? before : undefined;
@@ -3833,7 +3833,7 @@ async function putItem(vault: Vault, itemId: string, enc: EncryptedItem, revisio
   }
   const answer = await api<WriteAnswer>(`/items/${itemId}`, {
     method: "PUT",
-    body: { ...withEpoch({ ...enc, revision }, vault, features), ...(sent ? { manifests: [sentEntry(sent)] } : {}) },
+    body: { ...withEpoch({ ...enc, revision }, vault, known), ...(sent ? { manifests: [sentEntry(sent)] } : {}) },
     accountId: owner,
   });
   await settle(
@@ -3898,9 +3898,9 @@ function edited(old: Item, item: Item): Item {
 /**
  * Add an item. `id`: the caller's own id for this new item, so that trying
  * again after a failure or a timeout re-sends the same item instead of
- * creating a second one (API v2: a create of an existing id with the same
- * content succeeds; older servers say it exists, and then the copy that
- * arrived earlier is used).
+ * creating a second one (a create of an existing id with the same content
+ * succeeds; with other content the server says it exists, and then the copy
+ * that arrived earlier is used).
  * Offline (ARCHITECTURE "Offline changes"): known to be offline, or the request got no answer → the item waits in the
  * account's offline changes and is sent later; the caller sees a save that worked.
  */
@@ -3930,7 +3930,7 @@ export async function createItem(item: Item, vaultId?: string, id?: string): Pro
 }
 
 async function createOnline(plain: Item, itemId: string, target: string, chosen: boolean, gen: number, owner: string, attempt: { sent: SentBody | null }): Promise<void> {
-  const features = (await serverInfo((await local.account(owner)).data?.server ?? ""))?.features ?? new Set<string>();
+  const known = !!(await serverInfo((await local.account(owner)).data?.server ?? ""));
   let keyRetried = false;
   for (let tries = 1; ; ) {
     if (gen !== generation || !account) throw lockedError();
@@ -3938,8 +3938,8 @@ async function createOnline(plain: Item, itemId: string, target: string, chosen:
     const vault = writableVault(target, chosen);
     const enc = vault.key.encryptItem(plain, itemId, vault.id) as EncryptedItem;
     try {
-      attempt.sent = sentBody(enc, vault, features);
-      await postItem(vault, enc, features, owner);
+      attempt.sent = sentBody(enc, vault, known);
+      await postItem(vault, enc, known, owner);
       return;
     } catch (e) {
       if (!keyRetried && isCode(e, "vault_key_changed")) {
@@ -4005,7 +4005,7 @@ function editableVault(vaultId: string): Vault {
 }
 
 async function updateOnline(entry: Entry, item: Item, gen: number, owner: string, attempt: { sent: SentBody | null; revision: number; item: Item | null }) {
-  const features = (await serverInfo((await local.account(owner)).data?.server ?? ""))?.features ?? new Set<string>();
+  const known = !!(await serverInfo((await local.account(owner)).data?.server ?? ""));
   let base = entry;
   let keyRetried = false;
   for (let tries = 1; ; ) {
@@ -4015,8 +4015,8 @@ async function updateOnline(entry: Entry, item: Item, gen: number, owner: string
     const next = edited(base.item, item);
     const enc = vault.key.updateItem(base.enc, next) as EncryptedItem;
     try {
-      Object.assign(attempt, { sent: sentBody(enc, vault, features), revision: base.revision, item: next });
-      await putItem(vault, base.id, enc, base.revision, features, owner);
+      Object.assign(attempt, { sent: sentBody(enc, vault, known), revision: base.revision, item: next });
+      await putItem(vault, base.id, enc, base.revision, known, owner);
       return;
     } catch (e) {
       if (isCode(e, "revision_conflict")) {
@@ -4313,22 +4313,22 @@ function sentHolds(vault: Vault, c: OfflineChange, sent: SentBody): boolean {
  * stored first. `replaced`: set to the earlier attempt's body when a create is sent with a new one (that attempt may
  * still arrive: then the server answers `item_exists` and the round puts it back, `sendRound`).
  */
-async function sendChange(c: OfflineChange, action: SendAction, features: ReadonlySet<string>, owner: string, replaced: { sent: SentBody | null }): Promise<void> {
+async function sendChange(c: OfflineChange, action: SendAction, known: boolean, owner: string, replaced: { sent: SentBody | null }): Promise<void> {
   const vault = vaults.find((v) => v.id === c.vault_id);
   if (!vault) throw new AppError(FAILED, VAULT_GONE_REASON, true);
-  const noteSent = (enc: EncryptedItem) => patchChange(c.id, (x) => ({ ...x, sent: sentBody(enc, vault, features) }));
+  const noteSent = (enc: EncryptedItem) => patchChange(c.id, (x) => ({ ...x, sent: sentBody(enc, vault, known) }));
   if (action.do === "create") {
     // An earlier attempt may have reached the server: the very same body again (a create of an existing id with the
     // same content succeeds), but only while it is the encryption of the item as it is now (not after an edit merged
     // in since) and the vault key wasn't replaced. Otherwise encrypted now with the current key.
-    const epoch = features.has("key_epoch") && vault.epoch !== undefined ? vault.epoch : null;
+    const epoch = known && vault.epoch !== undefined ? vault.epoch : null;
     const again = c.sent && c.sent.key_epoch === epoch && sentHolds(vault, c, c.sent) ? { id: c.item_id, vault_id: vault.id, key: c.sent.key, data: c.sent.data } : null;
     const enc = again ?? (vault.key.encryptItem(c.item, c.item_id, vault.id) as EncryptedItem);
     if (!again) {
       replaced.sent = c.sent;
       await noteSent(enc);
     }
-    await postItem(vault, enc, features, owner);
+    await postItem(vault, enc, known, owner);
   } else if (action.do === "update") {
     const base = serverEntry(c.item_id);
     if (!base || base.vaultId !== vault.id) throw new AppError(FAILED, "PassAuth can't open the server's version of this item.", true);
@@ -4336,7 +4336,7 @@ async function sendChange(c: OfflineChange, action: SendAction, features: Readon
     // `updateItem` over the stored row: its edit counter counts up from the stored one.
     const enc = vault.key.updateItem(base.enc, c.item) as EncryptedItem;
     await noteSent(enc);
-    await putItem(vault, c.item_id, enc, action.revision, features, owner);
+    await putItem(vault, c.item_id, enc, action.revision, known, owner);
   } else if (action.do === "trash") {
     await trashRow(vault.id, c.item_id, owner, action.revision);
   }
@@ -4388,7 +4388,7 @@ async function sendRound(id: string): Promise<void> {
   const stale = () => gen !== generation || currentId !== id || !account;
   await loadOffline();
   if (stale() || offlineGen !== gen || !offline.length) return;
-  const features = (await serverInfo((await local.account(id)).data?.server ?? ""))?.features ?? new Set<string>();
+  const known = !!(await serverInfo((await local.account(id)).data?.server ?? ""));
   for (const changeId of offline.map((c) => c.id)) {
     const tries = { redecide: 0, retry: 0, renamed: false };
     for (;;) {
@@ -4418,7 +4418,7 @@ async function sendRound(id: string): Promise<void> {
       }
       const replaced: { sent: SentBody | null } = { sent: null };
       try {
-        await sendChange(c, action, features, id, replaced);
+        await sendChange(c, action, known, id, replaced);
       } catch (e) {
         if (stale()) return;
         const next = afterSendError(e, c.kind, messageOf(e));

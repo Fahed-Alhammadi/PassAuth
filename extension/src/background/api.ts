@@ -9,10 +9,8 @@ const NO_SERVER = "no_server";
 import { knownFeatures, local } from "./storage";
 
 /**
- * A failed API request. `code` is the server's error code (API v2: `{error,
- * message}`); for older servers that only said why in the message text, the
- * known reasons are mapped to the same codes (`errorCode`), so callers check
- * codes, never message text.
+ * A failed API request. `code` is the server's error code (`{error,
+ * message}`): callers check codes, never message text.
  */
 export class ApiError extends AppError {
   readonly status: number;
@@ -35,14 +33,6 @@ export const clientHeaders = (): Record<string, string> => ({ "x-passauth-client
 /** A hung server must not stall the popup, badge, inline menu or passkey flows. */
 const TIMEOUT_MS = 15_000;
 export const timeoutSignal = (ms = TIMEOUT_MS) => AbortSignal.timeout(ms);
-
-/** Reasons older servers gave only as the message text, and the code newer ones send. */
-const LEGACY_MESSAGES: Record<string, string> = {
-  email_not_verified: "email_not_verified",
-  reauth_required: "reauth_required",
-  "item id already exists": "item_exists",
-  "item changed on another device; sync and retry": "revision_conflict",
-};
 
 /** 403 `quota_exceeded` in plain words: the vault owner's item or storage limit (admin page) would be passed. The same words as the other apps. */
 export const QUOTA_TEXT = "You've reached this server's storage limit. Delete items or ask the server's admin.";
@@ -92,16 +82,11 @@ export function unknownError(json: unknown): string {
   return ["Your PassAuth server couldn't do this.", id ? `Request ID: ${id}.` : "", detail ? `Server message: ${detail}` : ""].filter(Boolean).join(" ");
 }
 
-/** The error code of a failed response: the v2 `error` code, else a known reason from the message text, else the generic code. */
+/** The error code of a failed response: its `error` code, else the generic code. */
 export function errorCode(json: unknown): string {
-  const j = (json ?? {}) as { error?: unknown; message?: unknown };
-  const code = typeof j.error === "string" ? j.error : "";
-  const message = typeof j.message === "string" ? j.message : "";
-  if (code && !GENERIC.has(code)) return code;
-  return LEGACY_MESSAGES[message] ?? (code || "error");
+  const code = (json as { error?: unknown } | null | undefined)?.error;
+  return typeof code === "string" && code ? code : "error";
 }
-/** Codes older servers used for many reasons; the message text says which. */
-const GENERIC = new Set(["bad_request", "forbidden", "conflict", "error"]);
 
 /** Retry-After: seconds, or an HTTP date. */
 export function retryAfterSeconds(value: string | null, now = Date.now()): number | undefined {
@@ -277,9 +262,8 @@ export async function logoutRemote(server: string, tokens: { access: string } | 
 /** `GET /api/config` as far as the extension reads it. */
 export interface ServerConfig {
   name?: string;
-  api?: number;
   features?: unknown;
-  /** Servers with the `policies` feature: the admin's account policies (web `readPolicies` reads them). */
+  /** The admin's account policies (web `readPolicies` reads them). */
   policies?: unknown;
   /** The admin's limits (`max_import_items`, …). */
   limits?: unknown;
@@ -293,12 +277,11 @@ export async function serverConfig(server: string): Promise<ServerConfig | null>
 }
 
 /**
- * What a server supports (its `features` list), its API contract version (`api`; null for servers from before API 2)
- * and its account policies (`policies`, raw: web `readPolicies` reads them).
+ * What a server supports (its `features` list) and its account policies (`policies`, raw: web `readPolicies` reads
+ * them).
  */
 export interface ServerInfo {
   features: ReadonlySet<string>;
-  api: number | null;
   policies: unknown;
   /** The admin's limits, raw (`max_import_items` for the old-trash batches: manifests.ts `purgeBatch`). */
   limits?: unknown;
@@ -364,7 +347,6 @@ async function noteFeatures(server: string, info: ServerInfo): Promise<ServerInf
 
 const readInfo = (cfg: ServerConfig): ServerInfo => ({
   features: new Set(Array.isArray(cfg.features) ? cfg.features.filter((f): f is string => typeof f === "string") : []),
-  api: typeof cfg.api === "number" && Number.isFinite(cfg.api) ? cfg.api : null,
   policies: cfg.policies ?? null,
   limits: cfg.limits ?? null,
 });
@@ -416,14 +398,14 @@ export function refreshServerInfo(server: string): Promise<ServerInfo | null> {
 }
 
 /**
- * Whether website icons are shown: the user wants them (`showIcons`) and the server offers them. API 2 servers say so
- * with the feature `icons` (only while their icon service is on); older servers (no `api`) always had it, and while
- * the server's answer is unknown the setting alone decides (a failed icon falls back to the letter). The same rule as
- * the web vault's `siteIconsShown` (web/src/lib/site-icons.ts).
+ * Whether website icons are shown: the user wants them (`showIcons`) and the server offers them. Servers say so with
+ * the feature `icons` (only while their icon service is on); while the server's answer is unknown the setting alone
+ * decides (a failed icon falls back to the letter). The same rule as the web vault's `siteIconsShown`
+ * (web/src/lib/site-icons.ts).
  */
-export function siteIconsShown(wanted: boolean, info: Pick<ServerInfo, "api" | "features"> | null): boolean {
+export function siteIconsShown(wanted: boolean, info: Pick<ServerInfo, "features"> | null): boolean {
   if (!wanted) return false;
-  if (!info || info.api === null || info.api < 2) return true;
+  if (!info) return true;
   return info.features.has("icons");
 }
 
@@ -433,7 +415,7 @@ export async function iconsShown(server: string, wanted: boolean): Promise<boole
   return siteIconsShown(wanted, await serverInfo(server));
 }
 
-/** The server's API features (an older server has none; so does one that can't be reached right now). */
+/** The server's API features (none for one that can't be reached right now). */
 export async function serverFeatures(server: string): Promise<ReadonlySet<string>> {
   return (await serverInfo(server))?.features ?? new Set<string>();
 }

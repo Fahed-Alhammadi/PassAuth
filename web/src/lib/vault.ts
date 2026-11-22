@@ -659,10 +659,10 @@ export function notePolicyViolations(value: unknown) {
   if (!sameList(next, state.policyViolations)) set({ policyViolations: next });
 }
 
-/** After sign-in and unlock: ask what the account still has to change for the server's policies (servers with `policies`). */
+/** After sign-in and unlock: ask what the account still has to change for the server's policies (not while its settings can't be fetched). */
 export async function refreshPolicyViolations(): Promise<void> {
   const gen = generation;
-  if (!hasFeature(await loadPublicConfig(), "policies")) return notePolicyViolations([]);
+  if (!(await loadPublicConfig())) return notePolicyViolations([]);
   const a = await api<{ policy_violations?: unknown } | null>("/account");
   if (gen === generation) notePolicyViolations(a?.policy_violations);
 }
@@ -747,11 +747,11 @@ export interface RegisterResult {
 /**
  * The server's key-derivation minimums for new account keys (policy `min_kdf_memory_mib` / `min_kdf_iterations`), read
  * again before keys are made, so a policy the admin just raised is followed. The core then uses memory = max(128 MiB,
- * minimum) and passes = max(3, minimum). Nothing (the core's own settings) for servers without policies.
+ * minimum) and passes = max(3, minimum). Nothing (the core's own settings) while the server's settings can't be fetched.
  */
 async function kdfMinimums(): Promise<{ memory?: number; iterations?: number }> {
   const config = (await refreshPublicConfig()) ?? knownPublicConfig();
-  if (!hasFeature(config, "policies")) return {};
+  if (!config) return {};
   const p = readPolicies(config);
   return { memory: p.minKdfMemoryMib, iterations: p.minKdfIterations };
 }
@@ -1331,7 +1331,8 @@ async function doSync() {
   if (gen !== generation || !account) return;
   // A server too old for this app (it doesn't sign shared vaults): its vault is neither asked for nor used.
   if (serverTooOld(config)) throw serverRefused();
-  const delta = hasFeature(config, "delta_sync");
+  // Delta sync, unless the server's settings couldn't be fetched (then the whole vault, every time).
+  const delta = config !== null;
   deltaOn = delta;
   let cursor = delta && !fullNext ? (synced?.cursor ?? null) : null;
   fullNext = false;
@@ -2572,9 +2573,9 @@ const epochOf = (v: Vault | undefined) => (v?.epoch === undefined ? {} : { key_e
 /** 409 vault_key_changed: the vault's key was replaced after our last sync, and nothing was written. */
 const keyChanged = (e: unknown) => hasErrorCode(e, "vault_key_changed");
 /** 409: the item's revision isn't the one the edit started from. */
-const revisionConflict = (e: unknown) => hasErrorCode(e, "revision_conflict", "item changed on another device; sync and retry");
+const revisionConflict = (e: unknown) => hasErrorCode(e, "revision_conflict");
 /** 409: a create named an id that already exists (with other content, on servers that accept repeated creates). */
-const itemExists = (e: unknown) => hasErrorCode(e, "item_exists", "item id already exists");
+const itemExists = (e: unknown) => hasErrorCode(e, "item_exists");
 /** Worth another try after a pause: no connection, the server failing for a moment, or too many requests. */
 const transient = (e: unknown) => e instanceof UnreachableError || (e instanceof ApiError && (e.status === 429 || (e.status >= 500 && !isOutOfStorage(e))));
 

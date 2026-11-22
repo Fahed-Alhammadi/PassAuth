@@ -23,9 +23,8 @@ describe("error wording", () => {
     expect(friendlyError(err(403, "reauth_required", "reauth_required"))).toBe("Your confirmation expired. Enter your master password again.");
     expect(friendlyError(err(409, "vault_key_changed", "x"))).toBe("Someone replaced this vault's key just now. Try again.");
     expect(friendlyError(err(413, "too_large", "attachments can be at most 1 MB"))).toBe("This is larger than your server allows.");
-    // Known messages under a generic code (older servers sent coded reasons this way).
+    // Known messages under a generic code.
     expect(friendlyError(err(400, "bad_request", "invalid code"))).toBe("That code didn't work. Enter the code that's showing now and try again.");
-    expect(friendlyError(err(403, "forbidden", "storage limit reached"))).toBe(QUOTA_EXCEEDED);
     expect(friendlyError(err(400, "expired", "start setup first"))).toBe("The setup expired. Cancel and start setup again.");
     // errorMessage (used where the text is put into a sentence) words them the same.
     expect(errorMessage(err(507, "insufficient_storage", "x"))).toBe(OUT_OF_STORAGE);

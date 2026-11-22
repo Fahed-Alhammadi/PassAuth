@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ErrorText, Icon, type IconName } from "../components/ui";
 import { collapseMoves, describeEvent, readEventPage, type ActivityEvent, type DescribeContext } from "../lib/activity";
-import { ApiError, api, friendlyError, hasFeature, usePublicConfig } from "../lib/api";
+import { ApiError, api, friendlyError } from "../lib/api";
 import { clientInfo } from "../lib/clients";
 import { useVault, type Vault } from "../lib/vault";
 import "../styles/activity.css";
@@ -224,17 +224,8 @@ const NO_LOG = "Your PassAuth server doesn't keep an activity log. Its admin can
 /** Settings → Activity: what happened in the account, by the user and to it. */
 export function ActivityTab() {
   const context = useDescribeContext();
-  const config = usePublicConfig();
   const load = useCallback((before: string | null) => api(`/account/events${query(before)}`), []);
   const errorText = useCallback((e: unknown) => (e instanceof ApiError && e.status === 404 ? NO_LOG : `Couldn't load your activity. ${friendlyError(e)}`), []);
-  // A server that answered without the feature: say so rather than ask.
-  if (config && !hasFeature(config, "activity_log"))
-    return (
-      <section className="card" aria-labelledby="activity-title">
-        <h2 id="activity-title">Activity</h2>
-        <p className="card-text">{NO_LOG}</p>
-      </section>
-    );
   return (
     <section className="card" aria-labelledby="activity-title">
       <div className="stack-s">

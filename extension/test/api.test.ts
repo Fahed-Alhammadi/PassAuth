@@ -36,15 +36,11 @@ beforeEach(async () => {
   await fake.local.set({ accounts: { a1: accountRecord() }, active: "a1" });
 });
 
-test("errorCode: the v2 code first; for older servers the known reasons in the message text", () => {
+test("errorCode: the server's code, never the message text", () => {
   expect(errorCode({ error: "vault_key_changed", message: "whatever" })).toBe("vault_key_changed");
   expect(errorCode({ error: "email_not_verified", message: "email_not_verified" })).toBe("email_not_verified");
-  // Older servers: a generic code, the reason in the message.
-  expect(errorCode({ error: "forbidden", message: "email_not_verified" })).toBe("email_not_verified");
-  expect(errorCode({ error: "forbidden", message: "reauth_required" })).toBe("reauth_required");
-  expect(errorCode({ error: "conflict", message: "item id already exists" })).toBe("item_exists");
-  expect(errorCode({ error: "conflict", message: "item changed on another device; sync and retry" })).toBe("revision_conflict");
-  // Anything else keeps the server's code.
+  // The message is never read as a code.
+  expect(errorCode({ error: "forbidden", message: "email_not_verified" })).toBe("forbidden");
   expect(errorCode({ error: "conflict", message: "something else" })).toBe("conflict");
   expect(errorCode({ error: "unauthorized", message: "authentication required" })).toBe("unauthorized");
   expect(errorCode(null)).toBe("error");
@@ -52,7 +48,7 @@ test("errorCode: the v2 code first; for older servers the known reasons in the m
 });
 
 test("apiError: known codes in PassAuth's own words; any other code gets the generic sentence, the request id and the server's message only as a detail", () => {
-  const e = apiError(403, { error: "forbidden", message: "email_not_verified" });
+  const e = apiError(403, { error: "email_not_verified", message: "email_not_verified" });
   expect([e.status, e.code, e.message]).toStrictEqual([403, "email_not_verified", "Confirm your email address first, then sign in."]);
   expect(apiError(400, { error: "bad_request", message: "ids must be UUIDs", request_id: "req-81f2" }).message).toBe(
     "Your PassAuth server couldn't do this. Request ID: req-81f2. Server message: ids must be UUIDs",

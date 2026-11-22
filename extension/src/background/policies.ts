@@ -111,7 +111,7 @@ export async function accountNotices(): Promise<PolicyNotices> {
   const { id, data } = await local.account();
   if (!id || !data?.server || !data.tokens) return none;
   const info = await serverInfo(data.server);
-  if (!info?.features.has("policies")) return none;
+  if (!info) return none;
   let stored = await scratch.get<{ at: number; list: unknown }>(violationsStoreKey(id));
   const now = Date.now();
   if (!stored || typeof stored.at !== "number" || now - stored.at > VIOLATIONS_MS || now < stored.at) {

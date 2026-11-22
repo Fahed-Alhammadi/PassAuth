@@ -8,12 +8,11 @@ describe("siteIconsShown", () => {
   it("never shows icons the user turned off", () => {
     expect(siteIconsShown(false, { ...base, api: 2, features: ["icons"] })).toBe(false);
   });
-  it("follows the server's icons feature on API 2 servers", () => {
+  it("follows the server's icons feature", () => {
     expect(siteIconsShown(true, { ...base, api: 2, features: ["icons", "delta_sync"] })).toBe(true);
     expect(siteIconsShown(true, { ...base, api: 2, features: ["delta_sync"] })).toBe(false);
   });
-  it("keeps icons for older servers and before the first answer", () => {
-    expect(siteIconsShown(true, base)).toBe(true);
+  it("keeps icons before the first answer", () => {
     expect(siteIconsShown(true, null)).toBe(true);
   });
 });
