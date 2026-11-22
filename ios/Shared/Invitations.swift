@@ -12,9 +12,6 @@ import Foundation
 // here (unit-tested in `InvitationTests`), as the web vault's `invitations.ts`; `VaultRepository`
 // opens the sealed keys. The AutoFill extensions ignore invitations.
 
-/// The `/api/config` feature of servers with vault invitations.
-public let vaultInvitationsFeature = "vault_invitations"
-
 /// An invitation as `/sync` lists it (the vault key sealed to this account, the vault's name
 /// encrypted with that key).
 public struct SyncInvitation: Codable, Equatable, Sendable {

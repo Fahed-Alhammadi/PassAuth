@@ -1479,9 +1479,4 @@ public enum SharingText {
     public static let reviewTitle = "Check the members"
     public static let reviewFirst = "First time this vault is signed: compare these fingerprints with the people. PassAuth seals the new key only to the members you confirm here."
     public static let reviewConfirm = "I compared them: replace the key"
-
-    /// A vault whose members need the review before its key is replaced.
-    public static func reviewNeeded(_ name: String) -> String {
-        "\(name.isEmpty ? "A vault" : name)'s members were never signed. Check them before PassAuth replaces its key."
-    }
 }

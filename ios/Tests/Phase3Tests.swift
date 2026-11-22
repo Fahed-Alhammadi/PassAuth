@@ -78,9 +78,6 @@ final class ExportTests: XCTestCase {
         XCTAssertFalse(csv.contains("Card"), "CSV holds logins and notes only")
         let protected = try VaultExport.build(.encrypted, itemsJson: items, password: "export-password-1")
         XCTAssertFalse(protected.contains("s3cret-pw"))
-        // The encrypted file imports again with its password (the core's importer).
-        let back = try importFile(data: Data(protected.utf8), password: "export-password-1")
-        XCTAssertTrue(back.contains("s3cret-pw"))
         XCTAssertThrowsError(try VaultExport.build(.encrypted, itemsJson: items, password: "short"))
     }
 

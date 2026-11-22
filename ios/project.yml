@@ -123,7 +123,6 @@ targets:
         # The shared Keychain access group, as in the entitlements (JEXQBK3SQ5.io.passauth.shared
         # with the team; unsigned simulator builds have no prefix).
         PAKeychainGroup: $(AppIdentifierPrefix)io.passauth.shared
-        PAAppGroup: group.io.passauth.app
     entitlements:
       path: App/PassAuth.entitlements
       properties:
@@ -171,7 +170,6 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         PAKeychainGroup: $(AppIdentifierPrefix)io.passauth.shared
-        PAAppGroup: group.io.passauth.app
         NSExtension:
           NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
           NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).CredentialProviderViewController
