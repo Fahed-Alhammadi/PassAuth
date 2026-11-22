@@ -56,7 +56,10 @@ public struct Settings: Codable, Equatable, Sendable {
     public var askToSave = true
     /// AutoFill: also give the system's suggestion list the logins it can't hold to one site (Host, Exact,
     /// Starts with, same user name under one base domain; `IdentityMapper`). Off: those go through "PassAuth…".
-    public var suggestAllLogins = false
+    /// Default on since 0.15.10 (rows labelled "user · item name"); `suggestAllLoginsChosen` = the user set it
+    /// themselves, so installs that never touched it (stored false, the old default) move to the new default.
+    public var suggestAllLogins = true
+    public var suggestAllLoginsChosen = false
     /// AutoFill: "PassAuth…" fills at once when exactly one password login matches the page (no list shown).
     public var fillSingleMatch = true
     /// Never offer to save on these sites (base domains, as the extension and Android).
@@ -87,7 +90,8 @@ public struct Settings: Codable, Equatable, Sendable {
         defaultMatchChangedAt = c.lenient(.defaultMatchChangedAt, d.defaultMatchChangedAt)
         theme = c.lenient(.theme, d.theme)
         askToSave = c.lenient(.askToSave, d.askToSave)
-        suggestAllLogins = c.lenient(.suggestAllLogins, d.suggestAllLogins)
+        suggestAllLoginsChosen = c.lenient(.suggestAllLoginsChosen, d.suggestAllLoginsChosen)
+        suggestAllLogins = suggestAllLoginsChosen ? c.lenient(.suggestAllLogins, d.suggestAllLogins) : d.suggestAllLogins
         fillSingleMatch = c.lenient(.fillSingleMatch, d.fillSingleMatch)
         neverSave = c.lenient(.neverSave, d.neverSave)
         generator = c.lenient(.generator, d.generator)

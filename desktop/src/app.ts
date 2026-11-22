@@ -9,7 +9,8 @@
  *   and when the window comes back after a while, the app asks the server for its revision, reconnects the
  *   live connection and syncs if anything changed (`resync`). Nothing runs while the vault is locked: there is
  *   no offline copy on desktop, so there is nothing to refresh.
- * - AutoFill on this Mac: the AutoFill extension's "Default URI match detection", in a Keychain item both sides
+ * - AutoFill on this Mac: the AutoFill extension's "Default URI match detection" and its two switches ("Fill at once
+ *   when one login matches", "Suggest every login in Safari's AutoFill list"), in a Keychain item both sides
  *   write (`autofill_settings_*` commands; `desktop/macos/AutoFill/DesktopSettings.swift`); the last change counts,
  *   and the extension takes it on its next request.
  * The sync interval is per install (localStorage `desktop.app`), never sent to the server.
@@ -75,34 +76,47 @@ function saveInterval(minutes: number) {
   }
 }
 
-/** The AutoFill extension's default match as last written by either side; its default when nothing was written yet. */
-async function readAutofillMatch(): Promise<string> {
-  const item = await invoke<{ defaultMatch: string } | null>("autofill_settings_get").catch(() => null);
+type AutofillShared = { autofillDefaultMatch: string; autofillFillSingleMatch: boolean; autofillSuggestAll: boolean };
+
+/** The AutoFill extension's settings as last written by either side; its defaults for what wasn't written yet. */
+async function readAutofill(): Promise<AutofillShared> {
+  const item = await invoke<{ defaultMatch: string; fillSingleMatch?: boolean; suggestAllLogins?: boolean } | null>("autofill_settings_get").catch(
+    () => null,
+  );
   const m = item?.defaultMatch;
-  return m !== undefined && AUTOFILL_MATCHES.some(([v]) => v === m) ? m : AUTOFILL_MATCHES[0][0];
+  return {
+    autofillDefaultMatch: m !== undefined && AUTOFILL_MATCHES.some(([v]) => v === m) ? m : AUTOFILL_MATCHES[0][0],
+    autofillFillSingleMatch: item?.fillSingleMatch ?? true,
+    autofillSuggestAll: item?.suggestAllLogins ?? true,
+  };
 }
 
 /** Read what the OS and the shell hold (login item, Dock setting). Call once before the hooks are registered. */
 export async function appHook(): Promise<DesktopAppHook> {
   const mac = platform === "macos";
-  const [startAtLogin, shell, autofillDefaultMatch] = await Promise.all([
+  const [startAtLogin, shell, autofill] = await Promise.all([
     isEnabled().catch(() => false),
     invoke<{ keepDock: boolean }>("shell_settings_get").catch(() => ({ keepDock: false })),
-    mac ? readAutofillMatch() : Promise.resolve(undefined),
+    mac ? readAutofill() : Promise.resolve(undefined),
   ]);
   // The login item stores this executable's path. Rewrite it once per launch so it follows the app when it was
   // moved (Downloads → Applications) or a new AppImage was downloaded by hand; `isEnabled` only checks existence.
   if (startAtLogin) enable().catch(() => {});
-  settings = { ...settings, startAtLogin, keepDock: shell.keepDock, autofillDefaultMatch };
+  settings = { ...settings, startAtLogin, keepDock: shell.keepDock, ...autofill };
   return {
     platform,
     syncOptions: SYNC_OPTIONS,
     ...(mac && {
       autofillMatchOptions: AUTOFILL_MATCHES,
       async refresh() {
-        const m = await readAutofillMatch();
-        if (m === settings.autofillDefaultMatch) return;
-        settings = { ...settings, autofillDefaultMatch: m };
+        const a = await readAutofill();
+        if (
+          a.autofillDefaultMatch === settings.autofillDefaultMatch &&
+          a.autofillFillSingleMatch === settings.autofillFillSingleMatch &&
+          a.autofillSuggestAll === settings.autofillSuggestAll
+        )
+          return;
+        settings = { ...settings, ...a };
         notify();
       },
     }),
@@ -132,12 +146,21 @@ export async function appHook(): Promise<DesktopAppHook> {
       }
       if (
         mac &&
-        patch.autofillDefaultMatch !== undefined &&
-        AUTOFILL_MATCHES.some(([v]) => v === patch.autofillDefaultMatch)
+        (patch.autofillDefaultMatch !== undefined || patch.autofillFillSingleMatch !== undefined || patch.autofillSuggestAll !== undefined) &&
+        (patch.autofillDefaultMatch === undefined || AUTOFILL_MATCHES.some(([v]) => v === patch.autofillDefaultMatch))
       ) {
+        const next: AutofillShared = {
+          autofillDefaultMatch: patch.autofillDefaultMatch ?? settings.autofillDefaultMatch ?? AUTOFILL_MATCHES[0][0],
+          autofillFillSingleMatch: patch.autofillFillSingleMatch ?? settings.autofillFillSingleMatch ?? true,
+          autofillSuggestAll: patch.autofillSuggestAll ?? settings.autofillSuggestAll ?? true,
+        };
         try {
-          await invoke("autofill_settings_set", { defaultMatch: patch.autofillDefaultMatch });
-          settings = { ...settings, autofillDefaultMatch: patch.autofillDefaultMatch };
+          await invoke("autofill_settings_set", {
+            defaultMatch: next.autofillDefaultMatch,
+            fillSingleMatch: next.autofillFillSingleMatch,
+            suggestAllLogins: next.autofillSuggestAll,
+          });
+          settings = { ...settings, ...next };
         } catch {
           toast("Couldn't save the AutoFill setting.");
         }

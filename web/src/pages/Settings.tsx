@@ -735,6 +735,35 @@ function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
           >
             Used by AutoFill in Safari and apps for websites set to Default in a login.
           </Setting>
+          {s.autofillSuggestAll !== undefined && (
+            <Setting
+              as="label"
+              title="Suggest every login in Safari's AutoFill list"
+              control={
+                <input type="checkbox" role="switch" className="switch" checked={s.autofillSuggestAll} onChange={(e) => void hook.set({ autofillSuggestAll: e.target.checked })} />
+              }
+            >
+              Each login is listed with its name, such as "admin · Portainer". Safari may also list logins of other sites on the same domain: check the name
+              before you pick one. When this is off, logins set to Host, Exact or Starts with are under "PassAuth…".
+            </Setting>
+          )}
+          {s.autofillFillSingleMatch !== undefined && (
+            <Setting
+              as="label"
+              title="Fill at once when one login matches"
+              control={
+                <input
+                  type="checkbox"
+                  role="switch"
+                  className="switch"
+                  checked={s.autofillFillSingleMatch}
+                  onChange={(e) => void hook.set({ autofillFillSingleMatch: e.target.checked })}
+                />
+              }
+            >
+              When you choose "PassAuth…" and only one login is saved for the page, it is filled without showing the list.
+            </Setting>
+          )}
         </>
       )}
     </section>

@@ -558,7 +558,7 @@ private struct AutofillPage: View {
         }
         .paRow()
         Section {
-            Toggle(isOn: Binding(get: { s.suggestAllLogins }, set: { v in update(model) { $0.suggestAllLogins = v } })) {
+            Toggle(isOn: Binding(get: { s.suggestAllLogins }, set: { v in update(model) { $0.suggestAllLogins = v; $0.suggestAllLoginsChosen = true } })) {
                 Text("Suggest every login above the keyboard")
             }
             .accessibilityIdentifier("settings.suggestAllLogins")

@@ -32,10 +32,28 @@ final class DesktopSettingsTests: XCTestCase {
         let host = json(#"{"defaultMatch":"host","changedAt":2000}"#)
         XCTAssertEqual(DesktopSettings.reconcile(host, own: .exact, ownChangedAt: 1000), .adopt(.init(match: .host, changedAt: 2000)))
         XCTAssertEqual(DesktopSettings.reconcile(host, own: .exact, ownChangedAt: 3000), .publish(.exact, changedAt: 3000))
-        XCTAssertEqual(DesktopSettings.reconcile(host, own: .host, ownChangedAt: 2000), .none)
+        // Same change but written before the switches existed: completed with this extension's values.
+        XCTAssertEqual(DesktopSettings.reconcile(host, own: .host, ownChangedAt: 2000), .publish(.host, changedAt: 2000))
+        let full = json(#"{"defaultMatch":"host","changedAt":2000,"fillSingleMatch":true,"suggestAllLogins":false}"#)
+        XCTAssertEqual(DesktopSettings.reconcile(full, own: .host, ownChangedAt: 2000), .none)
+        XCTAssertEqual(DesktopSettings.reconcile(full, own: .host, ownChangedAt: 2000, fillSingleMatch: false), .publish(.host, changedAt: 2000))
         // Nothing written yet (an install from before this setting): the extension's value, never 0.
         XCTAssertEqual(DesktopSettings.reconcile(nil, own: .host, ownChangedAt: 0), .publish(.host, changedAt: 1))
         XCTAssertEqual(DesktopSettings.reconcile(json("garbage"), own: .domain, ownChangedAt: 7), .publish(.domain, changedAt: 7))
+    }
+
+    /// The two AutoFill switches travel with the match (since 0.15.10); older items lack them.
+    func testSwitchesAreSharedToo() throws {
+        let a = DesktopSettings.adoption(json(#"{"defaultMatch":"host","changedAt":9,"fillSingleMatch":false,"suggestAllLogins":true}"#), ownChangedAt: 1)
+        XCTAssertEqual(a, .init(match: .host, changedAt: 9, fillSingleMatch: false, suggestAllLogins: true))
+        XCTAssertEqual(DesktopSettings.adoption(json(#"{"defaultMatch":"host","changedAt":9}"#), ownChangedAt: 1), .init(match: .host, changedAt: 9))
+        var s = Settings()
+        s.fillSingleMatch = false
+        s.suggestAllLogins = true
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: DesktopSettings.encode(s, changedAt: 3)) as? [String: Any])
+        XCTAssertEqual(obj["fillSingleMatch"] as? Bool, false)
+        XCTAssertEqual(obj["suggestAllLogins"] as? Bool, true)
+        XCTAssertEqual(obj["defaultMatch"] as? String, "domain")
     }
 
     func testEncodesTheDesktopShape() throws {
@@ -43,7 +61,7 @@ final class DesktopSettingsTests: XCTestCase {
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(obj["defaultMatch"] as? String, "starts_with")
         XCTAssertEqual((obj["changedAt"] as? NSNumber)?.int64Value, 1_700_000_000_123)
-        XCTAssertEqual(DesktopSettings.adoption(data, ownChangedAt: 0), .init(match: .startsWith, changedAt: 1_700_000_000_123))
+        XCTAssertEqual(DesktopSettings.adoption(data, ownChangedAt: 0), .init(match: .startsWith, changedAt: 1_700_000_000_123, fillSingleMatch: true, suggestAllLogins: false))
     }
 
     func testOldSettingsDecodeWithoutTheChangeTime() throws {

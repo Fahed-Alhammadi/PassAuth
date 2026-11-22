@@ -297,10 +297,17 @@ final class AutofillTests: XCTestCase {
         XCTAssertTrue((try? JSONDecoder().decode(Settings.self, from: Data("{}".utf8)))?.fillSingleMatch ?? false)
     }
 
-    func testSuggestEveryLoginIsOffForExistingSettings() throws {
-        let s = try JSONDecoder().decode(Settings.self, from: Data(#"{"defaultMatch":"host"}"#.utf8))
-        XCTAssertFalse(s.suggestAllLogins)
-        XCTAssertFalse(Settings().suggestAllLogins)
+    /// On by default since 0.15.10, also for installs that stored the old default (false) without choosing it.
+    func testSuggestEveryLoginIsOnUnlessChosenOff() throws {
+        func decode(_ j: String) throws -> Settings { try JSONDecoder().decode(Settings.self, from: Data(j.utf8)) }
+        XCTAssertTrue(Settings().suggestAllLogins)
+        XCTAssertTrue(try decode(#"{"defaultMatch":"host"}"#).suggestAllLogins)
+        XCTAssertTrue(try decode(#"{"suggestAllLogins":false}"#).suggestAllLogins)
+        XCTAssertFalse(try decode(#"{"suggestAllLogins":false,"suggestAllLoginsChosen":true}"#).suggestAllLogins)
+        var s = Settings()
+        s.suggestAllLogins = false
+        s.suggestAllLoginsChosen = true
+        XCTAssertFalse(try JSONDecoder().decode(Settings.self, from: JSONEncoder().encode(s)).suggestAllLogins)
     }
 
     func testDefaultMatchChangesIdentities() {

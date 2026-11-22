@@ -65,6 +65,10 @@ export interface DesktopAppSettings {
    * Keychain; the last change on either side counts. Absent on other platforms.
    */
   autofillDefaultMatch?: string;
+  /** macOS: AutoFill's "Fill at once when one login matches" (shared like `autofillDefaultMatch`). */
+  autofillFillSingleMatch?: boolean;
+  /** macOS: AutoFill's "Suggest every login in Safari's AutoFill list" (shared like `autofillDefaultMatch`). */
+  autofillSuggestAll?: boolean;
 }
 export interface DesktopAppHook {
   platform: "macos" | "windows" | "linux";

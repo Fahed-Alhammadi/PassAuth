@@ -877,18 +877,18 @@ struct MacSettings: View {
             }
             Section {
                 Toggle("Suggest every login in Safari's AutoFill list", isOn: Binding(get: { state.settings.suggestAllLogins }, set: { v in
-                    Task { await model.repo.updateSettings { $0.suggestAllLogins = v } }
+                    Task { await DesktopSettings.set(model.repo) { $0.suggestAllLogins = v; $0.suggestAllLoginsChosen = true } } // also in the desktop app's Settings
                 }))
             } footer: {
-                Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under \"PassAuth…\" in the list, with the login for the page first.")
+                Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under \"PassAuth…\" in the list, with the login for the page first. Also set in the PassAuth app: Settings → This app.")
                     .foregroundStyle(.secondary)
             }
             Section {
                 Toggle("Fill at once when one login matches", isOn: Binding(get: { state.settings.fillSingleMatch }, set: { v in
-                    Task { await model.repo.updateSettings { $0.fillSingleMatch = v } }
+                    Task { await DesktopSettings.set(model.repo) { $0.fillSingleMatch = v } } // also in the desktop app's Settings
                 }))
             } footer: {
-                Text("When you choose \"PassAuth…\" in Safari's AutoFill list and only one login is saved for the page, it is filled without showing the list.")
+                Text("When you choose \"PassAuth…\" in Safari's AutoFill list and only one login is saved for the page, it is filled without showing the list. Also set in the PassAuth app: Settings → This app.")
                     .foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(Color.paDanger) }
