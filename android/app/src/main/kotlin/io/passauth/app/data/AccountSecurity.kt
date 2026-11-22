@@ -220,17 +220,17 @@ object MasterPasswordRules {
 }
 
 /**
- * User-facing wording for errors of these settings (the web vault's `friendlyError`): the
- * server's `error` code first (API v2), the message text of older servers second.
+ * User-facing wording for errors of these settings (the web vault's `friendlyError`), by the
+ * server's `error` code.
  */
 fun securityErrorMessage(e: Throwable): String? = when {
     e !is ApiException -> null
     e.isRateLimited -> tooManyAttemptsMessage(e) ?: "Too many attempts, try again later."
-    e.hasCode("invalid_code", "invalid code") -> "That code didn't work. Enter the code that's showing now and try again."
-    e.hasCode("expired", "start setup first") -> "The setup expired. Cancel and start setup again."
+    e.hasCode("invalid_code") -> "That code didn't work. Enter the code that's showing now and try again."
+    e.hasCode("expired") -> "The setup expired. Cancel and start setup again."
     e.hasCode("reauth_required") -> "Your confirmation expired. Enter your master password again."
     e.message == "email is not configured on this server" -> "This server isn't set up to send email, so email codes aren't available."
-    e.status == 409 && (e.hasCode("already_enabled") || e.message.orEmpty().startsWith("authenticator app already enabled")) ->
+    e.status == 409 && e.hasCode("already_enabled") ->
         "The authenticator app is already on. Turn it off first to set it up again."
     else -> null
 }
@@ -253,8 +253,9 @@ data class SessionInfo(
 )
 
 /**
- * The account's sessions (most recently used first), whether the server signs out all the others in
- * one request ([canRevokeOthers]) and forgets a device ([canForget], feature `forget_device`).
+ * The account's sessions (most recently used first), and whether all the others can be signed out
+ * in one request ([canRevokeOthers]) and a device forgotten ([canForget]): both once the server's
+ * `/api/config` was read.
  */
 data class SessionList(val sessions: List<SessionInfo>, val canRevokeOthers: Boolean, val canForget: Boolean = false) {
     /** The sessions other than this app's. */
@@ -354,7 +355,7 @@ object SessionText {
         "so a remembered device has to use two-step login again."
     const val FORGOTTEN_HERE = "This device was forgotten and signed out."
 
-    /** The page's intro; servers with `forget_device` explain forgetting too. */
+    /** The page's intro; with [canForget] it explains forgetting too. */
     fun intro(canForget: Boolean) = if (canForget) INTRO + FORGET_INTRO else INTRO
 
     /** The body of "Forget this device?": [sessions] = how many listed sessions the device holds. */
@@ -513,18 +514,17 @@ class AccountSecurity(
     }
 
     /**
-     * The account's sessions; the server's `features` (`GET /config`) say whether all the others
-     * can be signed out in one request (an older server or a failed check just hides that).
+     * The account's sessions. Signing out all the others in one request and forgetting a device
+     * are offered once the server's `GET /config` was read (a failed check just hides them).
      */
     suspend fun sessions(): SessionList {
         val o = api.call("/account/sessions", null, "GET", true, emptyMap()).jsonObject
-        val features = try {
-            ((api.call("/config", null, "GET", false, emptyMap()) as? JsonObject)?.get("features") as? JsonArray).orEmpty()
-                .mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        val configRead = try {
+            api.call("/config", null, "GET", false, emptyMap()) is JsonObject
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
-            emptyList()
+            false
         }
         val current = o.str("current")
         val list = (o["sessions"] as? JsonArray).orEmpty().mapNotNull { e ->
@@ -541,11 +541,11 @@ class AccountSecurity(
                 deviceId = r.str("device_id"),
             )
         }
-        return SessionList(list, canRevokeOthers = "revoke_others" in features, canForget = FORGET_DEVICE in features)
+        return SessionList(list, canRevokeOthers = configRead, canForget = configRead)
     }
 
     /**
-     * Forget a device (servers with `forget_device`): every session it holds ends at once and its
+     * Forget a device: every session it holds ends at once and its
      * next sign-in counts as a new device (two-step login again, new-device email).
      * [ForgetResult.current]: this app's own session was one of them, so it is signed out too.
      */
@@ -573,9 +573,6 @@ class AccountSecurity(
 
     companion object {
         const val REAUTH_HEADER = "x-reauth-token"
-
-        /** The `/api/config` feature of servers that forget a device (`POST /account/devices/{id}/forget`). */
-        const val FORGET_DEVICE = "forget_device"
     }
 }
 

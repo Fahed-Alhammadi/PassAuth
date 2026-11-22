@@ -13,13 +13,12 @@ import kotlinx.serialization.json.put
  * repository passes in, so this is JVM-tested in ItemWritesTest):
  *
  * - Bodies carry the `key_epoch` of the vault key the item was encrypted with, when the server
- *   sent one in `/sync` (older servers don't; nothing is sent then).
+ *   sent one in `/sync`.
  * - 409 `vault_key_changed` (the key was replaced, e.g. a member was removed; nothing written):
  *   sync for the new key and try once more, encrypting again. A create keeps its item id. An
  *   update goes ahead only if the item still has the content the change was made to (a key
  *   rotation re-encrypts every item under a new revision); otherwise it is the usual conflict.
- * - A create whose id already exists (409 `item_exists`, "item id already exists" from older
- *   servers): an earlier attempt with this id got through and only its answer was lost, so that
+ * - A create whose id already exists (409 `item_exists`): an earlier attempt with this id got through and only its answer was lost, so that
  *   item is updated instead of saving a second one.
  * - Vault manifests ([Manifests]): a write into a vault that has one carries the vault's next
  *   manifest. 409 `manifest_conflict` (something else in the vault changed) or 400
@@ -51,7 +50,7 @@ object ItemWrites {
 
     fun vaultKeyChanged(e: Throwable): Boolean = e is ApiException && e.status == 409 && e.hasCode("vault_key_changed")
 
-    fun itemExists(e: Throwable): Boolean = e is ApiException && e.status == 409 && e.hasCode("item_exists", "item id already exists")
+    fun itemExists(e: Throwable): Boolean = e is ApiException && e.status == 409 && e.hasCode("item_exists")
 
     enum class Created { New, UpdatedEarlierAttempt }
 

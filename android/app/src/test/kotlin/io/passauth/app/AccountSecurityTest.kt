@@ -218,7 +218,7 @@ class AccountSecurityTest {
         val server = FakeServer(
             reauthAnswers().apply {
                 put("POST /account/keys/start") { _ -> buildJsonObject { put("message", "reg2") } }
-                put("POST /account/keys/finish") { _ -> throw ApiException(403, "forbidden", "reauth_required") }
+                put("POST /account/keys/finish") { _ -> throw ApiException(403, "reauth_required", "reauth_required") }
             },
         )
         val crypto = FakeCrypto()
@@ -307,7 +307,7 @@ class AccountSecurityTest {
     fun wrongCodeAndRateLimitWording() {
         assertEquals(
             "That code didn't work. Enter the code that's showing now and try again.",
-            securityErrorMessage(ApiException(400, "bad_request", "invalid code")),
+            securityErrorMessage(ApiException(400, "invalid_code", "invalid code")),
         )
         assertEquals("Too many attempts, try again later.", securityErrorMessage(ApiException(429, "rate_limited", "too many requests, try again later")))
         assertNull(securityErrorMessage(UserException("Can't reach your PassAuth server.")))
@@ -435,13 +435,13 @@ class AccountSecurityTest {
         assertEquals(2, sec.revokeOtherSessions())
         assertEquals(listOf("DELETE /account/sessions/s%202", "POST /account/sessions/revoke-others"), server.paths)
         assertTrue(server.log.all { it.auth && it.body == null && it.headers.isEmpty() })
-        // Each session's device; forgetting needs the server's feature.
+        // Each session's device.
         assertEquals(listOf("d1", "d2", "d3"), list.sessions.map { it.deviceId })
-        assertFalse(list.canForget)
+        assertTrue(list.canForget)
     }
 
     @Test
-    fun forgetADeviceWhereTheServerHasIt() = runBlocking {
+    fun forgetADevice() = runBlocking {
         val twoOnD2 = sessionsJson.replace(""""device_id":"d3"""", """"device_id":"d2"""")
         val server = FakeServer(
             mutableMapOf(
@@ -508,22 +508,13 @@ class AccountSecurityTest {
     }
 
     @Test
-    fun signOutOthersOnlyWhereTheServerHasIt() = runBlocking {
-        // An older server: no `revoke_others` in its features, or no features at all.
-        for (config in listOf("""{"name":"PassAuth","features":["key_epoch"]}""", """{"name":"PassAuth"}""")) {
-            val server = FakeServer(
-                mutableMapOf(
-                    "GET /account/sessions" to { _ -> AppJson.parseToJsonElement(sessionsJson) },
-                    "GET /config" to { _ -> AppJson.parseToJsonElement(config) },
-                ),
-            )
-            assertFalse(config, AccountSecurity(server, FakeCrypto(), device).sessions().canRevokeOthers)
-        }
+    fun signOutOthersAndForgetOnlyOnceTheServersConfigWasRead() = runBlocking {
         // The check failing doesn't fail the list.
         val failing = FakeServer(mutableMapOf("GET /account/sessions" to { _ -> AppJson.parseToJsonElement(sessionsJson) }))
         val list = AccountSecurity(failing, FakeCrypto(), device).sessions()
         assertEquals(3, list.sessions.size)
         assertFalse(list.canRevokeOthers)
+        assertFalse(list.canForget)
     }
 
     @Test

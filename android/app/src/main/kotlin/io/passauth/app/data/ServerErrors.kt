@@ -2,7 +2,7 @@ package io.passauth.app.data
 
 /**
  * What the app says about an error answer from a server: its own wording for every error code it
- * knows (and for the message texts older servers sent under a generic code); for anything else a
+ * knows (and for some message texts servers send under a generic code); for anything else a
  * sentence of its own with the request's reference, and the server's `message` only as a labelled
  * detail ("Server message: …"), cleaned and cut short ([ShownText]). A compromised server can't put
  * instructions of its own into the app's words this way. Mirrors the web vault's `apiErrorText`;
@@ -60,17 +60,9 @@ object ServerErrors {
 
     /**
      * Messages servers send under a generic code (`bad_request`, `forbidden`…) that the app knows,
-     * with its own wording. Servers from before the codes sent some coded reasons only this way.
+     * with its own wording.
      */
     private val MESSAGES: Map<String, String> = mapOf(
-        "invalid code" to CODES.getValue("invalid_code"),
-        "invalid two-factor code" to CODES.getValue("invalid_code"),
-        "start setup first" to "The setup expired. Cancel and start setup again.",
-        "reauth_required" to CODES.getValue("reauth_required"),
-        "email_not_verified" to CODES.getValue("email_not_verified"),
-        "storage limit reached" to QUOTA_EXCEEDED_MESSAGE,
-        "attachment storage limit reached" to ATTACHMENT_QUOTA,
-        "item changed on another device; sync and retry" to CODES.getValue("revision_conflict"),
         "email is not configured on this server" to "This server isn't set up to send email, so email codes aren't available.",
         "you can register at most 10 security keys" to "You can add at most 10 security keys. Remove one first.",
         "the owner cannot be removed" to "The owner of a vault can't be removed.",
@@ -87,9 +79,7 @@ object ServerErrors {
         // Coded reasons first; a code shared by several limits is told apart by its message.
         if (e.code == "quota_exceeded" && e.message == "attachment storage limit reached") return ATTACHMENT_QUOTA
         if (e.status == 507) return OUT_OF_STORAGE
-        // Older servers put some codes in the message under a generic code (as [ApiException.hasCode] reads them).
-        val message = e.message.orEmpty()
-        (CODES[e.code] ?: CODES[message] ?: MESSAGES[message])?.let { return it }
+        (CODES[e.code] ?: MESSAGES[e.message.orEmpty()])?.let { return it }
         val reference = reference(e)
         // A failure inside the server: its log has the details under the request's id.
         if (e.status >= 500 && (e.code == "internal" || e.code == "error")) {

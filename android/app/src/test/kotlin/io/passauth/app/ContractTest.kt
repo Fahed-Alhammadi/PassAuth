@@ -51,18 +51,15 @@ class ContractTest {
     }
 
     @Test
-    fun errorCodesBeforeMessages() {
-        // API v2 code, and the message text older servers put the reason in.
+    fun errorCodesDecide() {
+        // The answer's `error` code, never its message text.
         assertTrue(ApiException(403, "reauth_required", "anything").hasCode("reauth_required"))
-        assertTrue(ApiException(403, "forbidden", "reauth_required").hasCode("reauth_required"))
+        assertFalse(ApiException(403, "forbidden", "reauth_required").hasCode("reauth_required"))
         assertFalse(ApiException(403, "forbidden", "nope").hasCode("reauth_required"))
-        assertTrue(ApiException(400, "bad_request", "Invalid code").hasCode("invalid_code", "invalid code"))
         val expired = "Your confirmation expired. Enter your master password again."
         assertEquals(expired, securityErrorMessage(ApiException(403, "reauth_required", "reauth_required")))
-        assertEquals(expired, securityErrorMessage(ApiException(403, "forbidden", "reauth_required")))
         val wrong = "That code didn't work. Enter the code that's showing now and try again."
         assertEquals(wrong, securityErrorMessage(ApiException(400, "invalid_code", "the code is wrong")))
-        assertEquals(wrong, securityErrorMessage(ApiException(400, "bad_request", "invalid code")))
         assertEquals("The setup expired. Cancel and start setup again.", securityErrorMessage(ApiException(400, "expired", "start setup first")))
         assertEquals(
             "The authenticator app is already on. Turn it off first to set it up again.",
@@ -153,7 +150,7 @@ class ContractTest {
 
     @Test
     fun createWhoseEarlierAttemptGotThroughUpdatesThatItem() = runBlocking {
-        for (answer in listOf(ApiException(409, "item_exists", "item id already exists"), ApiException(409, "conflict", "item id already exists"))) {
+        for (answer in listOf(ApiException(409, "item_exists", "item id already exists"))) {
             var updated = 0
             val created = ItemWrites.create(send = { throw answer }, resync = { error("not expected") }, updateEarlierAttempt = { updated++; true })
             assertEquals(ItemWrites.Created.UpdatedEarlierAttempt, created)

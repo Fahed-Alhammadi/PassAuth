@@ -774,7 +774,7 @@ private fun QrCode(text: String, modifier: Modifier = Modifier) {
 /**
  * Settings → Account security → Signed-in devices (the web vault's Sessions tab): every session
  * of the account with the app it signed in with, "Sign out" for each other one, and "Sign out
- * other sessions" on servers with the `revoke_others` feature; both confirmed in a decision sheet.
+ * other sessions"; both confirmed in a decision sheet.
  */
 @Composable
 fun SessionsScreen(ctx: UiCtx) {
@@ -821,7 +821,7 @@ fun SessionsScreen(ctx: UiCtx) {
     vm.forgetting?.let { session -> ForgetSheet(ctx, vm, session, list) }
 }
 
-/** A session: its device, the app it signed in with, when; "This device" or "Sign out", and "Forget…" (servers with `forget_device`). */
+/** A session: its device, the app it signed in with, when; "This device" or "Sign out", and "Forget…". */
 @Composable
 private fun SessionRow(session: SessionInfo, enabled: Boolean, canForget: Boolean, onSignOut: () -> Unit, onForget: () -> Unit) {
     val name = session.deviceName.ifEmpty { "Unknown device" }

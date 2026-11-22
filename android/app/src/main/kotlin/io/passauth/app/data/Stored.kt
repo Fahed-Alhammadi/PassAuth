@@ -109,9 +109,9 @@ data class AccountData(
     /** The server's `/api/config` `features` when last asked ([featuresAt], epoch ms); null until then. */
     val features: List<String>? = null,
     val featuresAt: Long = 0,
-    /** The server's API version (`/api/config` `api`) asked with [features]; null until then and for servers before API 2. */
+    /** The server's API version (`/api/config` `api`) asked with [features]; null until then. */
     val api: Int? = null,
-    /** The server's account policies when last asked (with [features]); null until then or from servers without them. */
+    /** The server's account policies when last asked (with [features]); null until then. */
     val policies: Policies? = null,
     /** The server's `limits.max_import_items` asked with [features] (how many items one batch request may name); null until then. */
     val maxImportItems: Int? = null,

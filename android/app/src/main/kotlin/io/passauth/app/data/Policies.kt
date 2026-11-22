@@ -10,15 +10,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 
 /*
- * Account policies set by the server's admin (servers with the `policies` feature: `GET
- * /api/config` `policies`, and `GET /account` `policy_violations` for what an account still has
+ * Account policies set by the server's admin (`GET /api/config` `policies`, and `GET /account` `policy_violations` for what an account still has
  * to change; the server side is `crates/server/src/policies.rs`), and what the app does with them.
  *
  * Enforced by the server: two-step login (403 `two_step_required` on everything but setting a
  * method up, reading the account and signing out), a Secret Key and the key-derivation minimums
  * for new account keys (400 `secret_key_required` / `kdf_too_weak`). Applied by the app: the
- * master password length, the longest vault timeout and export. Servers without the feature send
- * no policies: every value then has its default, which changes nothing. Mirrors the web vault's
+ * master password length, the longest vault timeout and export. A value the server doesn't send
+ * has its default, which changes nothing. Mirrors the web vault's
  * `policies.ts` and the iOS app's `Shared/Policies.swift`; pure, JVM-tested in PoliciesTest.
  */
 
@@ -58,7 +57,7 @@ data class KdfMinimums(val memoryMib: Int, val iterations: Int)
 
 /**
  * `GET /api/config` as the app reads it: sign-ups, features, the API version ([api]: null when the
- * server sent no number, as servers before API 2 did) and (with the `policies` feature) policies.
+ * server sent no number) and policies.
  */
 data class ServerConfig(
     val signupsAllowed: Boolean?,
@@ -78,7 +77,7 @@ data class ServerConfig(
             return ServerConfig(
                 signupsAllowed = (o["signups_allowed"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull,
                 features = features,
-                policies = if (PolicyRules.FEATURE in features) PolicyRules.read(o["policies"]) else Policies(),
+                policies = PolicyRules.read(o["policies"]),
                 api = (o["api"] as? JsonPrimitive)?.takeIf { !it.isString }?.doubleOrNull?.takeIf { it.isFinite() }?.toInt(),
                 limits = o["limits"] as? JsonObject,
             )
@@ -88,23 +87,22 @@ data class ServerConfig(
 
 /**
  * Whether website icons (`/api/icons/<host>`) are shown and asked for: the user's setting and the
- * server's icon service together (the web vault's `siteIconsShown`). API 2 servers list the
- * service as the feature `icons` (only while it is on); older servers (no numeric `api`, or below
- * 2) list nothing and always had it, and before the account's config is known the setting alone
- * decides (a missing icon just shows the letter).
+ * server's icon service together (the web vault's `siteIconsShown`). Servers list the service as
+ * the feature `icons` (only while it is on); before the account's config is known (no feature
+ * list, or one kept without its API version) the setting alone decides (a missing icon just shows
+ * the letter).
  */
 object SiteIcons {
     const val FEATURE = "icons"
 
     fun shown(wanted: Boolean, api: Int?, features: List<String>?): Boolean {
         if (!wanted) return false
-        if (features == null || api == null || api < 2) return true
+        if (features == null || api == null) return true
         return FEATURE in features
     }
 }
 
 object PolicyRules {
-    const val FEATURE = "policies"
     const val DEFAULT_KDF_MEMORY_MIB = 64
     const val DEFAULT_KDF_ITERATIONS = 3
 
@@ -147,7 +145,7 @@ object PolicyRules {
     fun kdfMinimums(p: Policies): KdfMinimums = KdfMinimums(p.minKdfMemoryMib, p.minKdfIterations)
 
     /** The minimums from a server's config; null without the `policies` feature (the core's defaults then). */
-    fun kdfMinimums(config: ServerConfig?): KdfMinimums? = config?.takeIf { FEATURE in it.features }?.policies?.let(::kdfMinimums)
+    fun kdfMinimums(config: ServerConfig?): KdfMinimums? = config?.policies?.let(::kdfMinimums)
 
     // ---------------------------------------------------------- vault timeout
 

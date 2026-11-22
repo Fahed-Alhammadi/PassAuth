@@ -42,10 +42,8 @@ class ServerErrorsTest {
         assertEquals("This account is disabled. Ask your server's admin.", errorMessage(ApiException(403, "account_disabled", hostile)))
         assertEquals(DeviceLogin.DISABLED, errorMessage(ApiException(403, "login_with_device_disabled", hostile)))
         assertEquals("Your session ended. Sign in again.", errorMessage(ApiException(401, "session_expired", hostile)))
-        // Older servers: a generic code with the reason as the message.
-        assertEquals("This account is disabled. Ask your server's admin.", errorMessage(ApiException(403, "forbidden", "account_disabled")))
-        assertEquals("That code didn't work. Enter the code that's showing now and try again.", errorMessage(ApiException(400, "bad_request", "invalid code")))
-        assertEquals(QUOTA_EXCEEDED_MESSAGE, errorMessage(ApiException(403, "forbidden", "storage limit reached")))
+        // Messages the app knows under a generic code.
+        assertEquals("The owner of a vault can't be removed.", errorMessage(ApiException(403, "forbidden", "the owner cannot be removed")))
         // The app's own stand-ins keep their words.
         assertEquals("That address doesn't look like a PassAuth server.", errorMessage(failedResponse(502, "<html>Bad gateway</html>", null)))
         assertEquals("Your session ended. Sign in again.", errorMessage(ApiException(401, "unauthorized", "Your session ended. Sign in again.")))

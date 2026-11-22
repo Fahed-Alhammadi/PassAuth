@@ -29,9 +29,7 @@ class PoliciesTest {
         assertEquals(false, c.signupsAllowed)
         assertEquals(listOf("delta_sync", "policies", "forget_device"), c.features)
         assertEquals(Policies(true, true, 256, 4, 14, 45, true), c.policies)
-        // Older servers: no feature, no policies (defaults, which change nothing), even if something is sent.
-        val old = config("""{"name":"PassAuth","features":["delta_sync"],"policies":{"disable_export":true}}""")
-        assertEquals(Policies(), old.policies)
+        // Nothing sent: defaults, which change nothing.
         assertNull(config("""{"name":"PassAuth"}""").signupsAllowed)
         assertEquals(Policies(), config("""{"name":"PassAuth","features":["policies"]}""").policies)
     }
@@ -156,8 +154,6 @@ class PoliciesTest {
         assertEquals(KdfMinimums(256, 5), PolicyRules.kdfMinimums(Policies(minKdfMemoryMib = 256, minKdfIterations = 5)))
         val withPolicies = ServerConfig(signupsAllowed = true, features = listOf("policies"), policies = Policies(minKdfMemoryMib = 512))
         assertEquals(KdfMinimums(512, 3), PolicyRules.kdfMinimums(withPolicies))
-        // Servers without the feature: the core's own defaults (128 MiB, 3 passes).
-        assertNull(PolicyRules.kdfMinimums(withPolicies.copy(features = emptyList())))
         assertNull(PolicyRules.kdfMinimums(null as ServerConfig?))
     }
 
@@ -165,7 +161,7 @@ class PoliciesTest {
     fun theApiVersionIsReadAndKeptWithTheAccount() {
         assertEquals(2, config("""{"name":"PassAuth","api":2,"features":["icons"]}""").api)
         assertEquals(1, config("""{"api":1}""").api)
-        // Servers before API 2 send none; anything that isn't a number counts as none.
+        // None sent, or anything that isn't a number, counts as none.
         assertNull(config("""{"name":"PassAuth","features":[]}""").api)
         assertNull(config("""{"api":"2"}""").api)
         assertNull(config("""{"api":null}""").api)
@@ -181,8 +177,7 @@ class PoliciesTest {
     fun websiteIconsFollowTheSettingAndTheServer() {
         assertFalse("the user turned them off", SiteIcons.shown(false, 2, listOf("icons")))
         assertTrue("config not known yet: the setting decides", SiteIcons.shown(true, null, null))
-        assertTrue("no API version: an older server, which always had icons", SiteIcons.shown(true, null, emptyList()))
-        assertTrue("API 1: always had icons", SiteIcons.shown(true, 1, emptyList()))
+        assertTrue("a list kept without its API version: the setting decides", SiteIcons.shown(true, null, emptyList()))
         assertTrue("API 2 with the icon service", SiteIcons.shown(true, 2, listOf("delta_sync", "icons")))
         assertFalse("API 2 without it: the service is off", SiteIcons.shown(true, 2, listOf("delta_sync")))
         assertFalse("a later API without it", SiteIcons.shown(true, 3, emptyList()))

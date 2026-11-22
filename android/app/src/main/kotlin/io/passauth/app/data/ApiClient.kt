@@ -41,14 +41,8 @@ class ApiException(
     /** The server (or a proxy in front of it) refused because of too many requests. */
     val isRateLimited: Boolean get() = status == 429 || code == "rate_limited"
 
-    /**
-     * Is this the server's [reason]? Servers since API v2 put it in `error`; older ones answer
-     * some of them with a generic code and the reason as the message
-     * (`{"error":"forbidden","message":"reauth_required"}`), or only with a message text
-     * ([fallback], compared without case).
-     */
-    fun hasCode(reason: String, fallback: String? = null): Boolean =
-        code == reason || message == reason || (fallback != null && message.orEmpty().equals(fallback, ignoreCase = true))
+    /** Is this the server's [reason] (the answer's `error` code)? */
+    fun hasCode(reason: String): Boolean = code == reason
 }
 
 /**

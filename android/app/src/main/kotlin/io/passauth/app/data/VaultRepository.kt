@@ -80,7 +80,7 @@ data class AppState(
      * `two_step_required`): the app shows only the setup screen ([TwoStepGate]). Memory only.
      */
     val twoStepRequired: Boolean = false,
-    /** The active account's server's policies (defaults when unknown or from servers without them). */
+    /** The active account's server's policies (defaults when unknown). */
     val policies: Policies = Policies(),
     /** The longest vault timeout the signed-in accounts' servers allow (minutes; 0 = no limit). */
     val timeoutLimit: Int = 0,
@@ -561,7 +561,7 @@ class VaultRepository(
                         id to a.copy(
                             server = origin, tokens = null, bundle = null,
                             features = config.features, featuresAt = System.currentTimeMillis(), api = config.api,
-                            policies = config.policies.takeIf { PolicyRules.FEATURE in config.features },
+                            policies = config.policies,
                             maxImportItems = config.maxImportItems,
                         )
                     ),
@@ -602,7 +602,7 @@ class VaultRepository(
                 features = config.features,
                 featuresAt = System.currentTimeMillis(),
                 api = config.api,
-                policies = config.policies.takeIf { PolicyRules.FEATURE in config.features },
+                policies = config.policies,
                 maxImportItems = config.maxImportItems,
             )
         }
@@ -1611,17 +1611,16 @@ class VaultRepository(
     override suspend fun serverFeatures(): List<String>? = refreshConfig(activeId())?.features
 
     /**
-     * Whether the account's server does delta sync (`/api/config` `features` has `delta_sync`),
-     * asked at most every 6 hours and kept with the account. A list gone stale is harmless: a
-     * server without the feature ignores `since` and answers in full. Unknown → no.
+     * Whether the account's copy is synced by delta: once its server's `/api/config` `features`
+     * are known (asked at most every 6 hours and kept with the account; every supported server
+     * does delta sync). Unknown → no.
      */
     private suspend fun deltaSyncEnabled(id: String): Boolean {
         val a = store.get().accounts[id]?.takeIf { it.server.isNotEmpty() } ?: return false
         val now = System.currentTimeMillis()
         val known = a.features
-        if (known != null && now >= a.featuresAt && now - a.featuresAt < FEATURES_MAX_AGE_MS) return DeltaSync.FEATURE in known
-        val config = refreshConfig(id) ?: return DeltaSync.FEATURE in known.orEmpty()
-        return DeltaSync.FEATURE in config.features
+        if (known != null && now >= a.featuresAt && now - a.featuresAt < FEATURES_MAX_AGE_MS) return true
+        return refreshConfig(id) != null || known != null
     }
 
     /** What [show] keeps of a copy besides showing it. */
@@ -3568,11 +3567,11 @@ class VaultRepository(
     /** Sign out one of the active account's other sessions. */
     suspend fun revokeSession(sessionId: String) = security(activeId()).revokeSession(sessionId)
 
-    /** Sign out every other session of the active account (servers with `revoke_others`); returns how many. */
+    /** Sign out every other session of the active account ; returns how many. */
     suspend fun revokeOtherSessions(): Int? = security(activeId()).revokeOtherSessions()
 
     /**
-     * Forget a device of the active account (servers with `forget_device`): all its sessions end
+     * Forget a device of the active account: all its sessions end
      * and its next sign-in counts as a new device. When this app's own session was one of them
      * ([ForgetResult.current]), the account is signed out here too, without a remote sign-out
      * (that session is gone), and the two-step "remember this device" token is dropped (the
@@ -3754,11 +3753,10 @@ class VaultRepository(
     /**
      * Ask account [id]'s server for its features and policies (kept with the account; the longest
      * vault timeout follows), and read what the account still has to change (`GET /account`
-     * `policy_violations`, servers with `policies`).
+     * `policy_violations`).
      */
     private suspend fun refreshPolicies(id: String) {
-        val config = refreshConfig(id) ?: return
-        if (PolicyRules.FEATURE !in config.features) return _violations.update { it - id }
+        refreshConfig(id) ?: return
         if (store.get().accounts[id]?.tokens == null) return
         val account = api.call(id, "/account") as? JsonObject ?: return
         val found = PolicyRules.readViolations(account["policy_violations"])

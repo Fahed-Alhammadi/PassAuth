@@ -388,9 +388,6 @@ class SyncQueue(private val scope: CoroutineScope) {
 
 /** The requests of a sync, apart from the transport (`get`: an authenticated GET below `/api`, returning the body). */
 object DeltaSync {
-    /** The `/api/config` feature of servers that answer `GET /sync?since=<cursor>`. */
-    const val FEATURE = "delta_sync"
-
     /** `/sync`, `/sync?since=<cursor>`, and `trash=summary` for apps that never show the trash. */
     fun path(since: String?, trashSummary: Boolean): String {
         val query = buildList {
