@@ -33,6 +33,8 @@ import type {
   PolicyNotices,
   PopupState,
   SaveAnswer,
+  SaveDetails,
+  SaveEdits,
   SaveOffer,
   SavePrompt,
   SecurityKeys,
@@ -211,8 +213,13 @@ export interface InlineFrameApi {
 
 export interface SaveFrameApi {
   "save:offer": Rpc<{ nonce: string }, SaveOffer>;
-  /** `target`: the login shown as selected under "Save in" (an id from the offer's `targets`, or "new"). */
-  "save:answer": Rpc<{ nonce: string; accept: "save" | "never" | "dismiss"; target?: string }, SaveAnswer>;
+  /**
+   * `target`: the login shown as selected under "Save in" (an id from the offer's `targets`, or "new"). `edits`: what
+   * the user changed in the "Edit" form (only with "save", never for "add this site to").
+   */
+  "save:answer": Rpc<{ nonce: string; accept: "save" | "never" | "dismiss"; target?: string; edits?: SaveEdits }, SaveAnswer>;
+  /** "Edit": the typed login, for the form. Only the frame that owns the nonce gets it; the page around it never does. */
+  "save:details": Rpc<{ nonce: string }, SaveDetails>;
   /** The prompt's content changed height. */
   "save:resize": Rpc<{ nonce: string; height: number }, void>;
   /** The user touched the prompt with a finger or pen: the content script checks it in every animation frame from now on. */

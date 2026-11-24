@@ -478,6 +478,23 @@ export interface SaveOffer {
   generated?: boolean;
 }
 
+/**
+ * The save prompt's "Edit" form (save/main.ts): what the user changed before saving. `name` is only used for a new
+ * login ("" = the site's name); an update keeps the login's name. Checked again by the background (handlers/frames.ts).
+ */
+export interface SaveEdits {
+  name: string;
+  username: string;
+  password: string;
+}
+
+/** What the "Edit" form starts with: the login as it would be saved. */
+export interface SaveDetails {
+  name: string;
+  username: string;
+  password: string;
+}
+
 /** The background's reply to the prompt's answer. */
 export type SaveAnswer =
   /** Applied or dismissed: the prompt closes. */

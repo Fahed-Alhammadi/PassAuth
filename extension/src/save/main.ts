@@ -17,18 +17,22 @@
  * politely and leaves the focus where the user is. It goes away after 30 s, but
  * not while the pointer or the focus is in it, and only Esc pressed inside it
  * (or its own buttons) dismisses it: the page can't.
+ *
+ * "Edit": the user can change the user name and password (and a new login's name) before saving. The form asks the
+ * worker for the typed login (save:details, nonce-bound like everything here) and sends the changes with the answer;
+ * nothing typed into it leaves this frame for the page.
  */
 import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@web/styles/app.css";
 import "./save.css";
-import { closeSvg, logoSvg, plusSvg } from "../content/brand";
+import { closeSvg, eyeOffSvg, eyeSvg, logoSvg, plusSvg } from "../content/brand";
 import { againHint, clickGate, inputKind } from "../content/guard";
 import { onFocusRequest, onMoved, receiveNonce, reportTouch } from "../shared/dom/frame-channel";
 import { callSave } from "../shared/protocol";
 import { addSiteWarning, describeAddSite, describeSave, NEW_LOGIN, sharedWarning, type TextPart } from "../shared/save-text";
-import type { SaveAnswer, SaveOffer } from "../shared/types";
+import type { SaveAnswer, SaveDetails, SaveEdits, SaveOffer } from "../shared/types";
 
 /** Set once the content script that placed this frame has handed it over (frame-channel.ts). */
 let nonce = "";
@@ -111,14 +115,17 @@ const live = el("div", "sr-only");
 live.setAttribute("role", "status");
 document.body.append(live);
 
-async function answer(accept: "save" | "never" | "dismiss") {
+/** The "Edit" form is open: the prompt doesn't go away by itself. */
+let editing = false;
+
+async function answer(accept: "save" | "never" | "dismiss", edits?: SaveEdits) {
   if (busy || !nonce) return;
   busy = true;
   clearTimeout(timer);
   root.setAttribute("aria-busy", "true");
   let reply: SaveAnswer;
   try {
-    reply = await callSave("save:answer", { nonce, accept, target: selected });
+    reply = await callSave("save:answer", { nonce, accept, target: selected, ...(edits && accept === "save" ? { edits } : {}) });
   } catch (e) {
     // The pending save is gone (expired, locked, another account): nothing more to do here.
     reply = { error: e instanceof Error ? e.message : String(e), retry: false };
@@ -127,19 +134,30 @@ async function answer(accept: "save" | "never" | "dismiss") {
   root.removeAttribute("aria-busy");
   if ("done" in reply) return; // the content script removes the frame
   if ("again" in reply) render(reply.again, { notice: reply.notice });
+  else if (edits && reply.retry && last) renderEdit(last, edits, reply.error);
   else if (last) render({ ...last, selected }, { error: reply.error, closed: !reply.retry });
+}
+
+/** "Edit": the typed login, fetched once the user asks for it (it never comes with the offer). */
+async function openEdit() {
+  if (busy || !nonce || !last) return;
+  busy = true;
+  let login: SaveDetails;
+  try {
+    login = await callSave("save:details", { nonce });
+  } catch (e) {
+    busy = false;
+    render({ ...last, selected }, { error: e instanceof Error ? e.message : String(e), closed: true });
+    return;
+  }
+  busy = false;
+  renderEdit(last, login);
 }
 
 let last: SaveOffer | null = null;
 
-function render(offer: SaveOffer, state: { notice?: string; error?: string; closed?: boolean } = {}) {
-  last = offer;
-  const { host, username, targets } = offer;
-  const addTo = offer.addTo ?? [];
-  if (offer.theme !== "system") document.documentElement.dataset.theme = offer.theme;
-  selected = offer.selected === NEW_LOGIN || targets.some((t) => t.id === offer.selected) || addTo.some((t) => t.id === offer.selected) ? offer.selected : NEW_LOGIN;
-  const site = host.replace(/^www\./, "");
-
+/** The brand bar with its close button, the same in both views. */
+function sheetBar() {
   const brand = el("span", "sheet-brand");
   const mark = el("span", "row");
   mark.setAttribute("aria-hidden", "true");
@@ -150,6 +168,108 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
   close.innerHTML = closeSvg;
   const bar = el("div", "sheet-bar");
   bar.append(brand, close);
+  return bar;
+}
+
+/** A labelled text field of the "Edit" form; only the user's typing changes it (the page can't reach this frame). */
+function field(label: string, value: string, type: "text" | "password" = "text") {
+  const wrap = el("label", "field");
+  const input = el("input", "input");
+  input.type = type;
+  input.value = value;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("autocapitalize", "off");
+  wrap.append(el("span", "", label), input);
+  return { wrap, input };
+}
+
+/**
+ * The "Edit" view: user name and password (and the name of a new login) as they will be saved, then Save / Update.
+ * "Back" returns to the offer without the changes.
+ */
+function renderEdit(offer: SaveOffer, login: SaveDetails, error?: string) {
+  editing = true;
+  clearTimeout(timer);
+  const target = offer.targets.find((t) => t.id === selected);
+  const site = offer.host.replace(/^www\./, "");
+
+  const title = el("h1", "sheet-title", target ? "Edit before updating" : "Edit before saving");
+  title.id = "title";
+  const heading = el("div", "grow");
+  heading.append(title, el("p", "sheet-sub", target ? target.name : offer.host));
+  const context = el("div", "sheet-context");
+  context.append(tile(target ? target.name : site), heading);
+
+  const form = el("div", "edit-fields");
+  // An update keeps the login's own name; only a new login is named here.
+  const name = target ? null : field("Name", login.name);
+  const user = field("User name", login.username);
+  const pass = field("Password", login.password, "password");
+  const group = el("div", "input-group");
+  const reveal = button("btn btn-icon", "", () => {
+    const shown = pass.input.type === "text";
+    pass.input.type = shown ? "password" : "text";
+    reveal.innerHTML = shown ? eyeSvg : eyeOffSvg;
+    reveal.setAttribute("aria-label", shown ? "Show password" : "Hide password");
+    reveal.setAttribute("aria-pressed", String(!shown));
+  });
+  reveal.innerHTML = eyeSvg;
+  reveal.setAttribute("aria-label", "Show password");
+  reveal.setAttribute("aria-pressed", "false");
+  pass.input.classList.add("mono");
+  pass.wrap.replaceChildren(pass.wrap.firstChild!, group);
+  group.append(pass.input, reveal);
+  if (name) form.append(name.wrap);
+  form.append(user.wrap, pass.wrap);
+  // Its room is kept while it's hidden: typing must never change the frame's height (a new size restarts the
+  // clickjacking wait, and the next click would only say "Click again").
+  const empty = el("p", "field-hint", "Enter a password to save this login.");
+
+  const values = (): SaveEdits => ({ name: name ? name.input.value : "", username: user.input.value, password: pass.input.value });
+  const primary = button("btn btn-primary btn-block", target ? "Update" : "Save", () => {
+    if (pass.input.value) void answer("save", values());
+  });
+  const check = () => {
+    primary.disabled = !pass.input.value;
+    empty.style.visibility = pass.input.value ? "hidden" : "visible";
+  };
+  pass.input.addEventListener("input", check);
+  check();
+
+  const body = el("div", "modal-body");
+  body.append(context, form, empty);
+  if (error) {
+    const alert = el("p", "alert alert-error", error);
+    alert.setAttribute("role", "alert");
+    body.append(alert);
+  }
+  const quiet = el("div", "sheet-quiet");
+  quiet.append(
+    button("btn btn-text", "Back", () => {
+      editing = false;
+      render({ ...offer, selected });
+    }),
+    button("btn btn-text", "Not now", () => void answer("dismiss")),
+  );
+  const actions = el("div", "sheet-actions");
+  actions.append(primary, quiet);
+  body.append(actions);
+  root.replaceChildren(sheetBar(), body);
+  // The user clicked "Edit" in this frame: the first field takes the focus.
+  (name ?? user).input.focus({ preventScroll: true });
+}
+
+function render(offer: SaveOffer, state: { notice?: string; error?: string; closed?: boolean } = {}) {
+  last = offer;
+  editing = false;
+  const { host, username, targets } = offer;
+  const addTo = offer.addTo ?? [];
+  if (offer.theme !== "system") document.documentElement.dataset.theme = offer.theme;
+  selected = offer.selected === NEW_LOGIN || targets.some((t) => t.id === offer.selected) || addTo.some((t) => t.id === offer.selected) ? offer.selected : NEW_LOGIN;
+  const site = host.replace(/^www\./, "");
+
+  const bar = sheetBar();
 
   const title = el("h1", "sheet-title");
   title.id = "title";
@@ -165,11 +285,14 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
   warn.setAttribute("role", "status");
   warn.hidden = true;
   const primary = button("btn btn-primary btn-block", "", () => void answer("save"));
+  // Change the user name or password (or a new login's name) before saving; not for "add this site to".
+  const editButton = button("btn btn-text", "Edit", () => void openEdit());
   const parts = (list: TextPart[]) => list.map((part) => (typeof part === "string" ? part : el("strong", "", part.strong)));
 
   // Title, button, the sentence that names what will be saved and the shared-vault warning all follow the selection.
   const update = () => {
     const add = addTo.find((t) => t.id === selected);
+    editButton.hidden = !!add;
     if (add) {
       // The same account on another site: this site is added to that login (nothing else changes).
       title.textContent = "Add site to login?";
@@ -245,7 +368,10 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
   } else {
     // "Never" only for a site PassAuth has nothing for yet.
     if (!targets.length) quiet.append(button("btn btn-text", "Never for this site", () => void answer("never")));
-    quiet.append(button("btn btn-text", "Not now", () => void answer("dismiss")));
+    quiet.append(
+      editButton,
+      button("btn btn-text", "Not now", () => void answer("dismiss")),
+    );
     actions.append(primary, quiet);
   }
   body.append(actions);
@@ -264,7 +390,7 @@ function render(offer: SaveOffer, state: { notice?: string; error?: string; clos
 // Disappears after 30 s, but not while the pointer or the focus is in it (a generated password's prompt stays until answered).
 function arm() {
   clearTimeout(timer);
-  if (pointerInside || focusInside || last?.generated) return;
+  if (pointerInside || focusInside || editing || last?.generated) return;
   timer = setTimeout(() => void answer("dismiss"), 30_000);
 }
 document.documentElement.addEventListener("pointerenter", () => {

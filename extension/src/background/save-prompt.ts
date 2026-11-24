@@ -17,7 +17,7 @@ import { credentialsFit, MAX_USERNAME } from "../shared/limits";
 import { log, logged, loggedAs } from "../shared/log";
 import { hostText, pageText } from "../shared/page-text";
 import { clampPromptHeight, promptHeight } from "../shared/save-layout";
-import type { AddSiteTarget, SaveAnswer, SaveOffer, SavePrompt } from "../shared/types";
+import type { AddSiteTarget, SaveAnswer, SaveDetails, SaveEdits, SaveOffer, SavePrompt } from "../shared/types";
 import { touch } from "./activity";
 import { siteOrigin, withSite } from "./add-site";
 import { QUOTA_TEXT, STORAGE_TEXT } from "./api";
@@ -301,6 +301,15 @@ export async function offer(sender: Sender, nonce: string): Promise<SaveOffer> {
   return offerOf((await promptSave(sender, nonce)).p);
 }
 
+/**
+ * save:details: the "Edit" button. The typed login (and the name a new one gets) for the form, to the prompt frame
+ * that owns the nonce only: an extension page the website can't read, like the vault logins it already lists.
+ */
+export async function details(sender: Sender, nonce: string): Promise<SaveDetails> {
+  const { p } = await promptSave(sender, nonce);
+  return { name: (parse(p.url)?.hostname ?? "").replace(/^www\./, ""), username: p.username, password: p.password };
+}
+
 /** save:resize: the prompt's content changed height (the page side learns a number, nothing else). */
 export async function resize(sender: Sender, nonce: string, height: number) {
   const { tabId } = await promptSave(sender, nonce);
@@ -324,8 +333,10 @@ const applying = new Set<string>();
  * displayed (`target`, which must be one this pending save offered); the
  * pending save is removed on every way out except a failure the user can retry.
  */
-export async function answer(sender: Sender, nonce: string, accept: "save" | "never" | "dismiss", target: string | undefined): Promise<SaveAnswer> {
-  const { tabId, p } = await promptSave(sender, nonce);
+export async function answer(sender: Sender, nonce: string, accept: "save" | "never" | "dismiss", target: string | undefined, edits?: SaveEdits): Promise<SaveAnswer> {
+  const { tabId, p: pending } = await promptSave(sender, nonce);
+  // "Edit": what the user changed in the prompt replaces what was typed (for this save only; nothing is stored).
+  const p: PendingSave = edits && accept === "save" ? { ...pending, username: edits.username, password: edits.password } : pending;
   const host = (parse(p.url)?.hostname ?? "").replace(/^www\./, "");
   const finish = async (saved?: "saved" | "updated"): Promise<SaveAnswer> => {
     await saves.remove(tabId);
@@ -344,7 +355,8 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
   if (accept !== "save") return finish();
   const addTo = typeof target === "string" ? p.addTo?.find((t) => t.id === target) : undefined;
   const choice = addTo ? addTo.id : chosenTarget(p, target);
-  if (choice === null) {
+  // Adding this site to a login changes nothing typed: the prompt offers no "Edit" for it.
+  if (choice === null || (addTo && edits)) {
     await finish();
     throw notAllowed();
   }
@@ -362,9 +374,9 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
       const origin = siteOrigin(p.url);
       // Still the same account (nothing changed it since the prompt was shown); otherwise ask again.
       if (!origin || !existing?.item.login || !vault.canWrite(existing) || existing.item.login.password !== p.password) {
-        const next = await planFor(p.url, p.username, p.password);
+        const next = await planFor(pending.url, pending.username, pending.password);
         if (!next) return finish();
-        const again: PendingSave = { ...p, ...next };
+        const again: PendingSave = { ...pending, ...next };
         if (!next.addTo) delete again.addTo;
         await saves.put(tabId, again);
         return { again: await offerOf(again), notice: "That login changed. Check where to save, then try again." };
@@ -382,9 +394,9 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
       if (!existing?.item.login || !vault.canWrite(existing)) {
         // The login the prompt showed was removed or became read-only (a sync in between). Never save
         // somewhere the user didn't see: work the choices out again and ask again.
-        const next = await planFor(p.url, p.username, p.password);
+        const next = await planFor(pending.url, pending.username, pending.password);
         if (!next) return finish();
-        const again: PendingSave = { ...p, ...next };
+        const again: PendingSave = { ...pending, ...next };
         await saves.put(tabId, again);
         return { again: await offerOf(again), notice: "That login isn't in your vault any more. Check where to save, then try again." };
       }
@@ -397,7 +409,7 @@ export async function answer(sender: Sender, nonce: string, accept: "save" | "ne
     // Same id on every try from this prompt: one that timed out but reached the server isn't saved twice.
     await vault.createItem(
       {
-        name: host,
+        name: edits?.name.trim() || host,
         notes: "",
         favorite: false,
         folder: null,

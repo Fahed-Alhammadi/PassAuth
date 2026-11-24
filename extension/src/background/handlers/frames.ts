@@ -3,11 +3,14 @@
  * (save-prompt.html). Each only gets the few requests it needs, each tied to its nonce (nonces.ts). The page around
  * the frame can post to it, so what it sends is checked (`parse`) like content-script messages.
  */
+
+import { MAX_PASSWORD, MAX_USERNAME } from "../../shared/limits";
 import type { InlineFrameApi, SaveFrameApi } from "../../shared/protocol";
-import { all, num, oneOf, optional, text, token, yesNo } from "../checks";
+import type { SaveEdits } from "../../shared/types";
+import { all, isRecord, num, oneOf, optional, text, token, yesNo } from "../checks";
 import { close, fillFromMenu, generate, hide, items, touched as menuTouched, newItem, returnFocus, unlockFromMenu } from "../inline-menu";
 import type { CheckedHandlers } from "../router";
-import { answer, offer, touched as promptTouched, resize } from "../save-prompt";
+import { answer, details, offer, touched as promptTouched, resize } from "../save-prompt";
 import type { SenderKind } from "../senders";
 
 const INLINE: readonly SenderKind[] = ["inline"];
@@ -40,6 +43,13 @@ export const inlineHandlers = {
 
 const ACCEPT = ["save", "never", "dismiss"] as const;
 
+/** The "Edit" form's values: a password (as the save rule needs one), nothing longer than a typed login may be. */
+function saveEdits(v: unknown): SaveEdits | null {
+  if (!isRecord(v)) return null;
+  const edits = all({ name: text(v.name, 120), username: text(v.username, MAX_USERNAME), password: text(v.password, MAX_PASSWORD) });
+  return edits?.password ? edits : null;
+}
+
 export const saveHandlers = {
   "save:offer": { from: SAVE, parse: nonceOnly, run: ({ nonce }, sender) => offer(sender, nonce) },
   "save:answer": {
@@ -47,12 +57,15 @@ export const saveHandlers = {
     parse(m) {
       const req = all({ nonce: token(m.nonce), accept: oneOf(m.accept, ACCEPT) });
       if (!req) return null;
-      if (m.target === undefined) return req;
-      const target = text(m.target, 128);
-      return target === null ? null : { ...req, target };
+      const target = optional(m.target, (v) => text(v, 128));
+      // Edits only come with "save".
+      const edits = req.accept === "save" ? optional(m.edits, saveEdits) : m.edits === undefined ? undefined : null;
+      if (target === null || edits === null) return null;
+      return { ...req, ...(target !== undefined ? { target } : {}), ...(edits ? { edits } : {}) };
     },
-    run: ({ nonce, accept, target }, sender) => answer(sender, nonce, accept, target),
+    run: ({ nonce, accept, target, edits }, sender) => answer(sender, nonce, accept, target, edits),
   },
+  "save:details": { from: SAVE, parse: nonceOnly, run: ({ nonce }, sender) => details(sender, nonce) },
   "save:resize": { from: SAVE, parse: (m) => all({ nonce: token(m.nonce), height: num(m.height) }), run: ({ nonce, height }, sender) => resize(sender, nonce, height) },
   "save:touch": { from: SAVE, parse: nonceOnly, run: ({ nonce }, sender) => promptTouched(sender, nonce) },
 } satisfies CheckedHandlers<SaveFrameApi>;

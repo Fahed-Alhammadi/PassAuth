@@ -347,6 +347,7 @@ const REQUESTS: Record<string, Record<string, Record<string, unknown>>> = {
   save: {
     "save:offer": { nonce: NONCE },
     "save:answer": { nonce: NONCE, accept: "dismiss", target: "new" },
+    "save:details": { nonce: NONCE },
     "save:resize": { nonce: NONCE, height: 300 },
     "save:touch": { nonce: NONCE },
   },
@@ -460,6 +461,14 @@ test("C7: malformed messages from content scripts and frames are refused before 
     [{ type: "inline:close", nonce: NONCE, refocus: "yes" }, framed("inline-menu.html", 5)],
     [{ type: "inline:return", nonce: 5 }, framed("inline-menu.html", 5)],
     [{ type: "save:touch" }, framed("save-prompt.html", 7)],
+    // "Edit": only with "save", and only a whole form with a password, each value within the typed-login caps.
+    [{ type: "save:answer", nonce: NONCE, accept: "dismiss", edits: { name: "", username: "a", password: "pw" } }, framed("save-prompt.html", 7)],
+    [{ type: "save:answer", nonce: NONCE, accept: "save", edits: { name: "", username: "a", password: "" } }, framed("save-prompt.html", 7)],
+    [{ type: "save:answer", nonce: NONCE, accept: "save", edits: { name: "", username: "a" } }, framed("save-prompt.html", 7)],
+    [{ type: "save:answer", nonce: NONCE, accept: "save", edits: "alex:pw" }, framed("save-prompt.html", 7)],
+    [{ type: "save:answer", nonce: NONCE, accept: "save", edits: { name: "x".repeat(121), username: "a", password: "pw" } }, framed("save-prompt.html", 7)],
+    [{ type: "save:answer", nonce: NONCE, accept: "save", edits: { name: "", username: "a", password: "p".repeat(4097) } }, framed("save-prompt.html", 7)],
+    [{ type: "save:details", nonce: 5 }, framed("save-prompt.html", 7)],
   ];
   for (const [msg, sender] of bad) expect(await fake.deliver(msg, sender), JSON.stringify(msg).slice(0, 80)).toStrictEqual(NOT_ALLOWED);
   expect([...fake.session.data.keys()], "nothing was stored").toStrictEqual([]);
@@ -713,4 +722,68 @@ test("save prompt: another password, or no user name, offers no 'add this site'"
     expect(offer.addTo, `${username}/${password}`).toBeUndefined();
     await fake.deliver({ type: "save:answer", nonce, accept: "dismiss", target: "new" }, framed("save-prompt.html", 7));
   }
+});
+
+test('save prompt "Edit": the typed login goes to the owning prompt frame only, and the edited values are what is saved', async () => {
+  expect((await fake.deliver({ type: "page:submitted", username: "alex", password: "typo-pw" }, page(0))).data).toBe(true);
+  const nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+  expect((await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7))).ok).toBe(true);
+  // Another frame with a copy of the nonce, or a page, never gets the password.
+  expect(await fake.deliver({ type: "save:details", nonce }, framed("save-prompt.html", 8))).toStrictEqual(NOT_ALLOWED);
+  expect(await fake.deliver({ type: "save:details", nonce }, page(0))).toStrictEqual(NOT_ALLOWED);
+  expect((await fake.deliver({ type: "save:details", nonce }, framed("save-prompt.html", 7))).data).toStrictEqual({ name: "example.com", username: "alex", password: "typo-pw" });
+  const created: { name: string; login: { username: string; password: string } }[] = [];
+  const create = v.createItem;
+  v.createItem = async (...args: unknown[]) => {
+    created.push(args[0] as (typeof created)[number]);
+    return args[2] as string;
+  };
+  try {
+    const edits = { name: "  Work mail  ", username: "alex@example.com", password: "right-pw" };
+    expect((await fake.deliver({ type: "save:answer", nonce, accept: "save", target: "new", edits }, framed("save-prompt.html", 7))).data).toStrictEqual({ done: true });
+  } finally {
+    v.createItem = create;
+  }
+  expect(created.map((i) => [i.name, i.login.username, i.login.password])).toStrictEqual([["Work mail", "alex@example.com", "right-pw"]]);
+});
+
+test('save prompt "Edit": an empty name falls back to the site; an update gets the edited password and keeps its name', async () => {
+  expect((await fake.deliver({ type: "page:submitted", username: "alex", password: "pw" }, page(0))).data).toBe(true);
+  let nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+  await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7));
+  const names: string[] = [];
+  const create = v.createItem;
+  v.createItem = async (...args: unknown[]) => {
+    names.push((args[0] as { name: string }).name);
+    return args[2] as string;
+  };
+  try {
+    await fake.deliver({ type: "save:answer", nonce, accept: "save", target: "new", edits: { name: " ", username: "alex", password: "pw" } }, framed("save-prompt.html", 7));
+  } finally {
+    v.createItem = create;
+  }
+  expect(names).toStrictEqual(["example.com"]);
+
+  v.data.entries = [entry("e1", "https://example.com")];
+  v.data.entries[0]!.item.login!.username = "alex";
+  expect((await fake.deliver({ type: "page:submitted", username: "alex", password: "new-pw" }, page(0))).data).toBe(true);
+  nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+  expect((await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7))).data).toMatchObject({ selected: "e1" });
+  await capturingUpdates(async (updates) => {
+    const edits = { name: "ignored for an update", username: "alex", password: "new-pw-fixed" };
+    expect((await fake.deliver({ type: "save:answer", nonce, accept: "save", target: "e1", edits }, framed("save-prompt.html", 7))).data).toStrictEqual({ done: true });
+    expect(updates.map((u) => [u.name, u.login?.username, u.login?.password])).toStrictEqual([["e1", "alex", "new-pw-fixed"]]);
+  });
+});
+
+test('save prompt "Edit": edits never apply to "add this site to" (nothing typed changes there)', async () => {
+  v.data.entries = [entry("gmail", "https://gmail.com")];
+  expect((await fake.deliver({ type: "page:submitted", username: "Alex", password: "secret-pw" }, page(0))).data).toBe(true);
+  const nonce = (fake.session.data.get("save:1") as { nonce: string }).nonce;
+  await fake.deliver({ type: "save:offer", nonce }, framed("save-prompt.html", 7));
+  await capturingUpdates(async (updates) => {
+    const edits = { name: "", username: "Alex", password: "other-pw" };
+    expect(await fake.deliver({ type: "save:answer", nonce, accept: "save", target: "gmail", edits }, framed("save-prompt.html", 7))).toStrictEqual(NOT_ALLOWED);
+    expect(updates).toHaveLength(0);
+  });
 });
