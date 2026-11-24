@@ -58,6 +58,21 @@ export function centerOver(anchor: Bounds, size: Size): Bounds {
   return { left: along(anchor.left, anchor.width, size.width), top: along(anchor.top, anchor.height, size.height), width: size.width, height: size.height };
 }
 
+/**
+ * Where a window under the browser's toolbar sits: this far in from the browser window's right edge and down from its
+ * top (past the tab strip and the toolbar with the extension menu), as a toolbar popup would.
+ */
+export const TOOLBAR_SPOT = { right: 12, top: 84 };
+
+/**
+ * Put a window of `size` at the top right of `anchor`, just under the toolbar (the passkey window, like an
+ * extension's own popup). A browser window too small to hold it there gets it centred instead (centerOver).
+ */
+export function underToolbar(anchor: Bounds, size: Size): Bounds {
+  if (size.width + 2 * TOOLBAR_SPOT.right > anchor.width || size.height + TOOLBAR_SPOT.top > anchor.height) return centerOver(anchor, size);
+  return { left: Math.round(anchor.left + anchor.width - size.width - TOOLBAR_SPOT.right), top: Math.round(anchor.top + TOOLBAR_SPOT.top), width: size.width, height: size.height };
+}
+
 /** Keep `b` completely inside `area` (a display's work area); a window larger than the area is shrunk to it. */
 export function clampTo(b: Bounds, area: Bounds): Bounds {
   const width = Math.min(b.width, area.width);
@@ -71,9 +86,18 @@ export function clampTo(b: Bounds, area: Bounds): Bounds {
  * correction then doesn't read as a move), kept inside `area` when it is known.
  */
 export function resizeCentered(current: Bounds, size: Size, area?: Bounds | null): Bounds {
+  return resizeFrom(current, size, "center", area);
+}
+
+/** How a window keeps its place when it changes size: around its centre, or with its top-right corner where it is. */
+export type Keep = "center" | "top-right";
+
+/** Give the window at `current` the new `size`, keeping its centre or its top-right corner, inside `area` when known. */
+export function resizeFrom(current: Bounds, size: Size, keep: Keep, area?: Bounds | null): Bounds {
+  const corner = keep === "top-right";
   const next = {
-    left: Math.round(current.left + (current.width - size.width) / 2),
-    top: Math.round(current.top + (current.height - size.height) / 2),
+    left: Math.round(current.left + (current.width - size.width) / (corner ? 1 : 2)),
+    top: Math.round(corner ? current.top : current.top + (current.height - size.height) / 2),
     width: size.width,
     height: size.height,
   };

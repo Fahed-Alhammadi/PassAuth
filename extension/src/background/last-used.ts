@@ -1,8 +1,9 @@
 /**
  * When the user last filled or copied each item, per account, so suggestions,
  * the right-click menu and the fill shortcut can put the last used first.
- * Only item ids and times are kept (chrome.storage.local, `lastUsed:<account>`),
- * never names, websites or secrets; at most MAX_ENTRIES per account.
+ * Only item ids, passkey credential ids (public identifiers, `passkeyUseKey`) and
+ * times are kept (chrome.storage.local, `lastUsed:<account>`), never names,
+ * websites or secrets; at most MAX_ENTRIES per account.
  */
 
 const MAX_ENTRIES = 500;
@@ -10,6 +11,9 @@ const key = (accountId: string) => `lastUsed:${accountId}`;
 
 // Writes are serialized so two quick fills don't drop each other's time.
 let queue: Promise<unknown> = Promise.resolve();
+
+/** The last-used key of a passkey (one login can hold several passkeys for one site). */
+export const passkeyUseKey = (credentialId: string) => `passkey:${credentialId}`;
 
 export function markUsed(accountId: string, itemId: string, at = Date.now()): Promise<void> {
   if (!accountId || !itemId) return Promise.resolve();

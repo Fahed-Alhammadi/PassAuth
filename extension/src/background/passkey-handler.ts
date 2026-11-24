@@ -18,14 +18,15 @@
  */
 import type { Item, Passkey } from "@web/lib/types";
 import { AppError, codeOf, EXPIRED, INSUFFICIENT_STORAGE, PASSWORD_REQUIRED, QUOTA_EXCEEDED } from "../shared/errors";
-import { capPasskeyNames } from "../shared/limits";
+import { capPasskeyNames, PASSKEY_SEARCH_FROM } from "../shared/limits";
 import { log, logged, loggedAs } from "../shared/log";
 import { pageText } from "../shared/page-text";
 import type { CreateRequest, GetRequest, PasskeyRuntimeReply } from "../shared/passkey-types";
 import type { PasskeyRequestInfo } from "../shared/types";
-import { openCentered } from "../shared/windows";
+import { openUnderToolbar } from "../shared/windows";
 import { iconsShown } from "./api";
 import { initCore } from "./core";
+import { lastUsedMap, markUsed, passkeyUseKey } from "./last-used";
 import {
   createPasskey,
   effectiveRpId,
@@ -91,9 +92,10 @@ interface Pending {
   userName: string;
   /**
    * Sign-in: matching passkeys. Creation: logins to save in (`preferred` = the user's own login for this exact
-   * site, preselected; `vault` = the shared vault a login lives in, shown on its row).
+   * site, preselected; `vault` = the shared vault a login lives in, shown on its row). Sign-in: the passkey last
+   * used comes first, marked `lastUsed`.
    */
-  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean; vault?: string }[];
+  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean; vault?: string; lastUsed?: boolean }[];
   /** Creation: the choice preselected under "Save in" (a candidate's id, or `NEW_LOGIN`). */
   selected?: string;
   /** What the site asked for about user verification. */
@@ -251,10 +253,20 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
     return FALLBACK;
   }
   if (!matches.length) return FALLBACK;
-  const candidates = matches.map((p) => ({
+  // Every passkey for this site, whichever login it is saved in. The passkey signed in with last comes first (one login
+  // can hold several passkeys for a site), else the login used last (filled or copied), so the likely one is preselected.
+  const entryOf = (p: Passkey) => all.find((x) => x.passkey.credential_id === p.credential_id)?.entry;
+  const used = await lastUsedMap(who.id).catch(() => ({}) as Record<string, number>);
+  const ranked = matches.map((p, i) => ({ p, i, own: used[passkeyUseKey(p.credential_id)] ?? 0, login: used[entryOf(p)?.id ?? ""] ?? 0 }));
+  const ordered = ranked.sort((a, b) => b.own - a.own || b.login - a.login || a.i - b.i);
+  const [top, next] = ordered;
+  // "Last used" only when it really tells the first passkey apart from the next one.
+  const marked = !!top && !!next && (top.own > next.own || (top.own === next.own && top.login > next.login));
+  const candidates = ordered.map(({ p }, i) => ({
     credentialId: p.credential_id,
     userName: clip(p.user_name || p.user_display_name),
-    itemName: clip(all.find((x) => x.passkey.credential_id === p.credential_id)?.entry.item.name ?? p.rp_id),
+    itemName: clip(entryOf(p)?.item.name ?? p.rp_id),
+    ...(i === 0 && marked ? { lastUsed: true } : {}),
   }));
   const decision = await confirm({ ...base, kind, userName: "", candidates }, wait);
   if (!decision.accept) return decision.fallback ? FALLBACK : notAllowed();
@@ -263,6 +275,13 @@ async function handle(msg: PasskeyMessage): Promise<Reply> {
   const chosen = matches.find((p) => p.credential_id === decision.credentialId) ?? matches[0];
   if (!chosen) return FALLBACK;
   const { response } = await getAssertion(req, msg.origin, chosen, { uv: decision.verified });
+  // The login and this passkey were used now (only ids and the time are kept: last-used.ts).
+  const usedEntry = entryOf(chosen)?.id;
+  void (async () => {
+    const at = Date.now();
+    if (usedEntry) await markUsed(who.id, usedEntry, at);
+    await markUsed(who.id, passkeyUseKey(chosen.credential_id), at);
+  })().catch(logged("Noting the passkey as used"));
   return { result: response };
 }
 
@@ -338,14 +357,16 @@ function sheetSize(p: Omit<Pending, "decide">): { width: number; height: number 
   // The note is ~50 characters to a line (see the text in Passkey.tsx).
   const note = creating ? SHEET.gap + SHEET.line * Math.ceil((84 + (p.userName ? 23 + p.userName.length : 0)) / 50) : 0;
   const list = rows ? SHEET.gap + (rows > 1 ? SHEET.legend : 0) + Math.min(rows * SHEET.row + 2, SHEET.listMax) : 0;
+  // Several passkeys to sign in with: a search field above the list (Passkey.tsx).
+  const search = !creating && rows >= PASSKEY_SEARCH_FROM ? SHEET.gap + SHEET.search : 0;
   const password = p.needsPassword ? SHEET.gap + SHEET.password : 0;
-  return { width: 380, height: SHEET.base + note + list + password };
+  return { width: 380, height: SHEET.base + note + search + list + password };
 }
 /**
  * Heights in px, pinned in popup.css (`.sheet`). `base`: brand bar 48 + body padding 4 and 16 + context row 40 +
  * gap 16 + actions 80 (button 40, gap 4, quiet row 36) − 8 the quiet row gives back. `listMax`: 4½ rows, then the list scrolls.
  */
-const SHEET = { base: 196, gap: 16, line: 20, row: 56, legend: 28, listMax: 254, password: 91 };
+const SHEET = { base: 196, gap: 16, line: 20, row: 56, legend: 28, listMax: 254, password: 91, search: 40 };
 
 /**
  * Open the confirmation window. It keeps a port to this worker (with a
@@ -372,8 +393,9 @@ async function confirm(p: Omit<Pending, "decide">, timeoutMs: number): Promise<D
     };
     chrome.windows.onRemoved.addListener(onRemoved);
     pending.set(id, { ...p, decide: (d) => finish(d) });
-    // Centred over the browser window that holds the requesting tab (and so on that window's display).
-    openCentered(chrome.runtime.getURL(`popup.html#passkey=${id}`), sheetSize(p), { tabId: p.tabId }).then(
+    // At the top right of the browser window that holds the requesting tab, under its toolbar (and so on that
+    // window's display): the page stays in view, as with the extension's own popup.
+    openUnderToolbar(chrome.runtime.getURL(`popup.html#passkey=${id}`), sheetSize(p), { tabId: p.tabId }).then(
       (win) => {
         winId = win?.id;
         if (!pending.has(id) && winId !== undefined) chrome.windows.remove(winId).catch(() => {}); // see above

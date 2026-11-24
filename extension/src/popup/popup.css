@@ -317,7 +317,7 @@ html.sheet-window:not(.fitted) { overflow: hidden; }
 .sheet .sheet-note { font-size: var(--text-caption); line-height: 20px; color: var(--ink-2); }
 .sheet .sheet-note strong { color: var(--ink); overflow-wrap: anywhere; }
 .sheet .alert { margin: 0; }
-.sheet fieldset.choice-group > legend { line-height: 20px; margin-bottom: 8px; }
+.sheet fieldset.choice-group > legend, .sheet .choice-group > p.field-label { line-height: 20px; margin: 0 0 8px; }
 /* At most 4½ rows show: the half row says there is more, and the actions never leave the window. */
 .sheet .choices { max-height: 254px; overscroll-behavior: contain; }
 .sheet .choice { min-height: 56px; padding-block: 8px; }
@@ -325,6 +325,10 @@ html.sheet-window:not(.fitted) { overflow: hidden; }
 .sheet .choice-title { line-height: 22px; }
 .sheet .choice-sub { line-height: 18px; }
 .choice-static, .choice-static:hover { cursor: default; background: none; }
+/* Sign-in with several passkeys: the search field keeps its own height in the sheet's column (40 px, as sheetSize counts). */
+.sheet .search { flex: none; }
+/* Sign-in with several passkeys: nothing matches the search; the card keeps the list's height. */
+.choices-empty { display: flex; align-items: center; justify-content: center; padding: var(--space-4); text-align: center; color: var(--ink-3); font-size: var(--text-caption); }
 .sheet .sheet-actions { gap: 4px; margin-bottom: 0; }
 /* The quiet row has its own padding below its labels: give 8 of it back (as the shared dialogs do). */
 .sheet .sheet-actions:has(.sheet-quiet) { margin-bottom: -8px; }

@@ -80,6 +80,7 @@ export function Choices({
   onChange,
   disabled,
   compact,
+  height,
 }: {
   label: string;
   options: Choice[];
@@ -87,12 +88,14 @@ export function Choices({
   onChange: (id: string) => void;
   disabled?: boolean;
   compact?: boolean;
+  /** A fixed height for the list (it scrolls), e.g. while a search narrows it down. */
+  height?: number;
 }) {
   const name = useId();
   return (
     <fieldset className="choice-group" disabled={disabled}>
       <legend className="field-label">{label}</legend>
-      <div className={compact ? "choices choices-compact" : "choices"}>
+      <div className={compact ? "choices choices-compact" : "choices"} style={height ? { height } : undefined}>
         {options.map((o) => (
           <label key={o.id} className="choice">
             <ChoiceText choice={o} />

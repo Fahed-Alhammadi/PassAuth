@@ -540,9 +540,10 @@ export interface PasskeyRequestInfo {
   userName: string;
   /**
    * Sign-in: matching passkeys. Creation: logins to save in (`preferred` = the user's own login for this exact
-   * site, preselected; `vault` = the shared vault a login lives in, shown on its row).
+   * site, preselected; `vault` = the shared vault a login lives in, shown on its row). Sign-in: the passkey last
+   * used comes first, marked `lastUsed`.
    */
-  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean; vault?: string }[];
+  candidates: { credentialId: string; userName: string; itemName: string; preferred?: boolean; vault?: string; lastUsed?: boolean }[];
   /** Creation: the choice preselected under "Save in" (a candidate's id, or "new"), as the core picks it. */
   selected?: string;
   /** The site requires user verification: confirm with the master password. */

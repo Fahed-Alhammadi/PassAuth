@@ -36,3 +36,6 @@ export function capPasskeyNames<T>(options: T): T {
   };
   return { ...options, ...(o.rp !== undefined ? { rp: cap(o.rp, ["name"]) } : {}), ...(o.user !== undefined ? { user: cap(o.user, ["name", "displayName"]) } : {}) } as T;
 }
+
+/** Sign-in with this many passkeys for one site or more: the passkey window gets a search field over them. */
+export const PASSKEY_SEARCH_FROM = 4;

@@ -1,10 +1,11 @@
 /**
  * PassAuth's own windows (passkey confirmation, unlock, pop-out): opened
- * centred over the browser window they belong to, sized to their content.
+ * centred over the browser window they belong to (the passkey window: at its
+ * top right, under the toolbar), sized to their content.
  * Opening works in the service worker; the window's page then fits itself to
  * its content (popup/fit-window.ts). The maths is in window-place.ts.
  */
-import { type Bounds, centerOver, defaultFrame, type Frame, outerSize, plausibleFrame, type Size, usableBounds } from "./window-place";
+import { type Bounds, centerOver, defaultFrame, type Frame, outerSize, plausibleFrame, type Size, underToolbar, usableBounds } from "./window-place";
 
 /** The measured frame of a PassAuth window, remembered so the next one opens at its final size. */
 export const FRAME_KEY = "windowFrame";
@@ -47,12 +48,24 @@ async function anchor(from: { windowId?: number; tabId?: number }): Promise<Boun
  * Open a PassAuth window whose page area is `content`, centred over the
  * browser window of `from` (so it also lands on that window's display).
  */
-export async function openCentered(url: string, content: Size, from: { windowId?: number; tabId?: number } = {}): Promise<chrome.windows.Window | undefined> {
+export function openCentered(url: string, content: Size, from: { windowId?: number; tabId?: number } = {}): Promise<chrome.windows.Window | undefined> {
+  return openWindow(url, content, from, centerOver);
+}
+
+/**
+ * Open a PassAuth window whose page area is `content` at the top right of the browser window of `from`, under its
+ * toolbar, where the extension's own popup appears (the passkey window): the page itself stays in view.
+ */
+export function openUnderToolbar(url: string, content: Size, from: { windowId?: number; tabId?: number } = {}): Promise<chrome.windows.Window | undefined> {
+  return openWindow(url, content, from, underToolbar);
+}
+
+async function openWindow(url: string, content: Size, from: { windowId?: number; tabId?: number }, place: (anchor: Bounds, size: Size) => Bounds): Promise<chrome.windows.Window | undefined> {
   const size = outerSize(content, await frame());
   const over = await anchor(from);
   const base = { url, type: "popup" as const, focused: true, ...size };
   if (over) {
-    const { left, top } = centerOver(over, size);
+    const { left, top } = place(over, size);
     try {
       return await chrome.windows.create({ ...base, left, top });
     } catch {

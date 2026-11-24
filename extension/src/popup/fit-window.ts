@@ -4,7 +4,7 @@
  * (window size, screen), so only PassAuth's pages use it.
  */
 
-import { plausibleFrame, resizeCentered, type Size, sameBounds, usableBounds } from "../shared/window-place";
+import { type Keep, plausibleFrame, resizeFrom, type Size, sameBounds, usableBounds } from "../shared/window-place";
 import { FRAME_KEY, storedFrame } from "../shared/windows";
 
 let fitting: Promise<void> = Promise.resolve();
@@ -14,18 +14,18 @@ let frameNoted = false;
  * Called by the window's own page once its content is laid out (and again when
  * the content changes size): make the page area exactly `content()`. The
  * window opened with a guess for the OS frame and the content height; this
- * corrects it around the same centre, inside the display's work area.
+ * corrects it around the same centre (or the same top-right corner), inside the display's work area.
  * Calls run one after another, each measuring the content when its turn comes.
  */
-export function fitWindow(content: () => Size): Promise<void> {
+export function fitWindow(content: () => Size, keep: Keep = "center"): Promise<void> {
   fitting = fitting.then(
-    () => fitOnce(content),
-    () => fitOnce(content),
+    () => fitOnce(content, keep),
+    () => fitOnce(content, keep),
   );
   return fitting;
 }
 
-async function fitOnce(content: () => Size): Promise<void> {
+async function fitOnce(content: () => Size, keep: Keep): Promise<void> {
   // Page zoom scales the page's own pixels against the window's (unknown: assume none).
   const zoom = await (chrome.tabs.getZoom?.() ?? Promise.resolve(1)).catch(() => 1);
   // A resize reaches the page a moment after the window: check again until both agree (a few rounds at most).
@@ -48,7 +48,7 @@ async function fitOnce(content: () => Size): Promise<void> {
     const size = { width: Math.round(current.width + (want.width - innerWidth) * zoom), height: Math.round(current.height + (want.height - innerHeight) * zoom) };
     const s = screen as Screen & { availLeft?: number; availTop?: number };
     const area = usableBounds({ left: s.availLeft ?? 0, top: s.availTop ?? 0, width: s.availWidth, height: s.availHeight });
-    const next = resizeCentered(current, size, area);
+    const next = resizeFrom(current, size, keep, area);
     if (sameBounds(current, next)) return;
     const resized = next.width === current.width && next.height === current.height;
     const settled = resized

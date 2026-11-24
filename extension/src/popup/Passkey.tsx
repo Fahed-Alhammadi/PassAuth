@@ -1,6 +1,7 @@
 import { Icon, SheetActions, SiteIcon } from "@web/components/ui";
 import { type FormEvent, type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { codeOf, PASSWORD_REQUIRED } from "../shared/errors";
+import { PASSKEY_SEARCH_FROM } from "../shared/limits";
 import { callPasskeyWindow } from "../shared/protocol";
 import { NEW_LOGIN, sharedWarning } from "../shared/save-text";
 import type { PasskeyRequestInfo } from "../shared/types";
@@ -17,14 +18,16 @@ type Info = PasskeyRequestInfo;
 
 /**
  * Keep the window exactly as tall as the sheet: it opens at an estimate, and
- * grows or shrinks when the content does (an error message, a wrapped line).
+ * grows or shrinks when the content does (an error message, a wrapped line),
+ * keeping its top-right corner under the browser's toolbar.
  */
 function useFitWindow(ready: boolean) {
   useLayoutEffect(() => {
     // #root is exactly as tall as the sheet in this window (popup.css `html.sheet-window`).
     const el = document.getElementById("root");
     if (!ready || !el) return;
-    const fitToSheet = () => void fitWindow(() => ({ width: SHEET_WIDTH, height: Math.ceil(el.getBoundingClientRect().height) })).then(() => document.documentElement.classList.add("fitted"));
+    const fitToSheet = () =>
+      void fitWindow(() => ({ width: SHEET_WIDTH, height: Math.ceil(el.getBoundingClientRect().height) }), "top-right").then(() => document.documentElement.classList.add("fitted"));
     fitToSheet();
     const observer = new ResizeObserver(fitToSheet);
     observer.observe(el);
@@ -39,6 +42,9 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  /** Sign-in with several passkeys: what is typed in the search field. */
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   /** "Click again" (or "Press Enter again", "Tap again"): an accept that came too soon after the window appeared. */
   const [hint, setHint] = useState("");
   const hintTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -156,7 +162,23 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
           ),
         },
       ]
-    : info.candidates.map((c) => ({ id: c.credentialId, title: c.userName || "Passkey", sub: c.itemName, icon: <Tile name={c.userName || c.itemName} /> }));
+    : signInMatches(info.candidates, query).map((c) => ({
+        id: c.credentialId,
+        title: c.userName || "Passkey",
+        // The passkey used last on this site comes first (the background's order): say why it is preselected.
+        sub: c.lastUsed ? `Last used · ${c.itemName}` : c.itemName,
+        icon: <Tile name={c.userName || c.itemName} />,
+      }));
+  // Several passkeys for this site: a search field over them (user name or the login's name), the list keeps its
+  // height while the user types so the window doesn't jump.
+  const searchable = !creating && info.candidates.length >= PASSKEY_SEARCH_FROM;
+  const listHeight = searchable ? Math.min(info.candidates.length * 56 + 2, 254) : undefined;
+  const search = (value: string) => {
+    setQuery(value);
+    const shown = signInMatches(info.candidates, value);
+    // The selection is always a passkey the user can see.
+    if (!shown.some((c) => c.credentialId === choice)) setChoice(shown[0]?.credentialId);
+  };
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -167,7 +189,11 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
     if (e.key === "Enter" && e.target instanceof HTMLInputElement && e.target.type === "radio") {
       e.preventDefault();
       e.currentTarget.requestSubmit();
+      return;
     }
+    // Typing a letter anywhere but a text field starts a search (it never confirms anything).
+    const typing = e.target instanceof HTMLInputElement && (e.target.type === "search" || e.target.type === "password");
+    if (searchable && !typing && e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) searchRef.current?.focus();
   };
 
   return (
@@ -192,6 +218,45 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
         {creating ? (
           // Without a login for this site there is nothing to choose: the passkey goes into a new one.
           info.candidates.length > 0 && <Choices label="Save in" options={options} value={choice} onChange={setChoice} disabled={busy} />
+        ) : searchable ? (
+          <>
+            <label className="search">
+              <Icon name="search" size={16} />
+              <input
+                ref={searchRef}
+                type="search"
+                placeholder="Search passkeys"
+                aria-label="Search passkeys for this site"
+                value={query}
+                onChange={(e) => search(e.target.value)}
+                onKeyDown={(e) => {
+                  // Escape in a search with text clears it; only an empty search lets Escape cancel the sign-in.
+                  if (e.key === "Escape" && query) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    search("");
+                  }
+                }}
+                disabled={busy}
+              />
+              {query && (
+                <button type="button" className="btn btn-icon" aria-label="Clear search" onClick={() => search("")}>
+                  <Icon name="close" size={16} />
+                </button>
+              )}
+            </label>
+            {options.length ? (
+              <Choices label="Choose an account" options={options} value={choice} onChange={setChoice} disabled={busy} height={listHeight} />
+            ) : (
+              // The same label and card height as the list, so the window keeps its size.
+              <div className="choice-group">
+                <p className="field-label">Choose an account</p>
+                <div className="choices choices-empty" style={{ height: listHeight }} role="status">
+                  No passkey for {info.rpId} matches “{query.trim()}”.
+                </div>
+              </div>
+            )}
+          </>
         ) : options.length > 1 ? (
           <Choices label="Choose an account" options={options} value={choice} onChange={setChoice} disabled={busy} />
         ) : (
@@ -246,7 +311,7 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
             </>
           }
         >
-          <button type="submit" className="btn btn-primary btn-block" disabled={busy}>
+          <button type="submit" className="btn btn-primary btn-block" disabled={busy || (!creating && !choice)}>
             {creating ? (busy ? "Saving passkey…" : "Save passkey") : busy ? "Signing in…" : "Sign in"}
           </button>
         </SheetActions>
@@ -257,4 +322,10 @@ export function PasskeyConfirm({ requestId }: { requestId: string }) {
       </p>
     </form>
   );
+}
+
+/** Sign-in passkeys whose user name or login name contains `query` (all of them for an empty query), in the given order. */
+export function signInMatches<T extends { userName: string; itemName: string }>(candidates: T[], query: string): T[] {
+  const q = query.trim().toLowerCase();
+  return q ? candidates.filter((c) => c.userName.toLowerCase().includes(q) || c.itemName.toLowerCase().includes(q)) : candidates;
 }

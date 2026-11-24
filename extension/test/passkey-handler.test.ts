@@ -40,7 +40,7 @@ const v = vi.hoisted(() => {
 vi.mock("../src/background/vault", () => v);
 const w = vi.hoisted(() => ({ opened: [] as string[] }));
 vi.mock("../src/shared/windows", () => ({
-  openCentered: async (url: string) => {
+  openUnderToolbar: async (url: string) => {
     w.opened.push(url);
     return { id: 77 };
   },
@@ -322,4 +322,57 @@ test("the server's key page in PassAuth's security-key window: the browser's own
   ).toStrictEqual({ fallback: true });
   expect(w.opened.length).toBe(before);
   await fake.session.remove("twoStepKeyWait");
+});
+
+test("sign-in lists every passkey for the site, the one used last first and marked; signing in marks it used", async () => {
+  // Two logins with a passkey each for example.com, and a second passkey in alex's login.
+  for (const name of ["alex@example.com", "sam@example.com", "alex.work@example.com"]) {
+    const opts = createOptions();
+    (opts.user as { name: string }).name = name;
+    const { id, reply } = await start(opts);
+    await decide(id, true, "new");
+    await reply;
+  }
+  const [a, b, c] = v.data.created.slice(-3);
+  a.login.passkeys.push(...c.login.passkeys);
+  v.data.entries = [
+    { id: "e-alex", item: a, vaultId: "v-own", revision: 1, enc: {} },
+    { id: "e-sam", item: b, vaultId: "v-own", revision: 1, enc: {} },
+  ];
+  // sam's login was filled last: its passkey first.
+  await chrome.storage.local.set({ "lastUsed:a1": { "e-sam": 1000 } });
+  const names = async (r: { id: string | null }) => (await pendingRequest(r.id!))!.candidates.map((x) => [x.userName, x.lastUsed ?? false]);
+
+  const first = await signIn(++tab, true);
+  expect(await names(first)).toStrictEqual([
+    ["sam@example.com", true],
+    ["alex@example.com", false],
+    ["alex.work@example.com", false],
+  ]);
+  // The user picks the second passkey in alex's login: that passkey (not just the login) is now the last used.
+  const work = (await pendingRequest(first.id!))!.candidates[2]!.credentialId;
+  await decide(first.id!, true, work);
+  expect("result" in (await first.reply)).toBe(true);
+  await new Promise((r) => setTimeout(r, 5));
+  const used = (await chrome.storage.local.get("lastUsed:a1"))["lastUsed:a1"] as Record<string, number>;
+  expect(used[`passkey:${work}`]).toBeGreaterThan(used["e-sam"]!);
+  expect(used["e-alex"]).toBe(used[`passkey:${work}`]);
+
+  const again = await signIn(++tab, true);
+  expect(await names(again)).toStrictEqual([
+    ["alex.work@example.com", true],
+    ["alex@example.com", false],
+    ["sam@example.com", false],
+  ]);
+  await decide(again.id!, false);
+  await again.reply;
+});
+
+test("sign-in with one passkey: never marked last used (nothing to choose)", async () => {
+  await withPasskey();
+  await chrome.storage.local.set({ "lastUsed:a1": { e1: 1000 } });
+  const r = await signIn(++tab, true);
+  expect((await pendingRequest(r.id!))?.candidates.map((c) => c.lastUsed ?? false)).toStrictEqual([false]);
+  await decide(r.id!, false);
+  await r.reply;
 });

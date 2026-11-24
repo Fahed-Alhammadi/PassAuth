@@ -1,7 +1,20 @@
 // Window placement (src/shared/window-place.ts): PassAuth's windows open centred over the browser window.
 
 import { expect, test } from "vitest";
-import { type Bounds, centerOver, clampTo, defaultFrame, outerSize, plausibleFrame, resizeCentered, sameBounds, usableBounds } from "../src/shared/window-place";
+import {
+  type Bounds,
+  centerOver,
+  clampTo,
+  defaultFrame,
+  outerSize,
+  plausibleFrame,
+  resizeCentered,
+  resizeFrom,
+  sameBounds,
+  TOOLBAR_SPOT,
+  underToolbar,
+  usableBounds,
+} from "../src/shared/window-place";
 
 const centre = (b: Bounds) => [b.left + b.width / 2, b.top + b.height / 2];
 
@@ -101,4 +114,37 @@ test("sameBounds: within a pixel", () => {
   const a = { left: 10, top: 10, width: 380, height: 420 };
   expect(sameBounds(a, { ...a, top: 11 })).toBe(true);
   expect(sameBounds(a, { ...a, height: 424 })).toBe(false);
+});
+
+test("underToolbar: top right of the browser window, under its toolbar", () => {
+  const anchor = { left: 400, top: 150, width: 1280, height: 800 };
+  const b = underToolbar(anchor, { width: 380, height: 420 });
+  expect(b).toStrictEqual({ left: 400 + 1280 - 380 - TOOLBAR_SPOT.right, top: 150 + TOOLBAR_SPOT.top, width: 380, height: 420 });
+  // Negative coordinates (a display left of the primary one) work the same way.
+  expect(underToolbar({ left: -1700, top: -300, width: 1200, height: 900 }, { width: 380, height: 500 })).toStrictEqual({
+    left: -1700 + 1200 - 380 - TOOLBAR_SPOT.right,
+    top: -300 + TOOLBAR_SPOT.top,
+    width: 380,
+    height: 500,
+  });
+});
+
+test("underToolbar: a browser window too small for it there: centred instead", () => {
+  const anchor = { left: 20, top: 30, width: 390, height: 900 };
+  expect(underToolbar(anchor, { width: 380, height: 420 })).toStrictEqual(centerOver(anchor, { width: 380, height: 420 }));
+  const short = { left: 0, top: 0, width: 1200, height: 480 };
+  expect(underToolbar(short, { width: 380, height: 420 })).toStrictEqual(centerOver(short, { width: 380, height: 420 }));
+});
+
+test("resizeFrom top-right: the top-right corner stays where it is", () => {
+  const current = { left: 1288, top: 234, width: 380, height: 420 };
+  const b = resizeFrom(current, { width: 380, height: 520 }, "top-right");
+  expect(b).toStrictEqual({ left: 1288, top: 234, width: 380, height: 520 });
+  const wider = resizeFrom(current, { width: 400, height: 300 }, "top-right");
+  expect(wider.left + wider.width).toBe(current.left + current.width);
+  expect(wider.top).toBe(current.top);
+  // Still kept inside the display.
+  expect(resizeFrom({ left: 100, top: 700, width: 380, height: 100 }, { width: 380, height: 400 }, "top-right", { left: 0, top: 0, width: 1440, height: 900 }).top).toBe(500);
+  // "center" is resizeCentered.
+  expect(resizeFrom(current, { width: 380, height: 520 }, "center")).toStrictEqual(resizeCentered(current, { width: 380, height: 520 }));
 });
