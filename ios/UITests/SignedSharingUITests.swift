@@ -73,7 +73,7 @@ final class SignedSharingUITests: UITestBase {
         let fayPub = try await srv.makeIdentity(fayS).publicIdentityJson()
 
         // The app signs in and makes the account's signing identity.
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         signIn(dana)
         var danaPub: String?

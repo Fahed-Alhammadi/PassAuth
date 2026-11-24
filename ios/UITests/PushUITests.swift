@@ -50,12 +50,8 @@ final class PushUITests: UITestBase {
         let email = "push-\(Int(Date().timeIntervalSince1970))@example.com"
         try await TestServer(server).register(email: email, password: password, name: "Ada Lovelace")
 
-        // First launch: the notifications row on "Set up PassAuth".
         app.launchArguments = ["-PAResetState"]
         app.launch()
-        wait(app.buttons["perm.notifications"], 20)
-        shot("push-intro\(suffix)")
-        app.buttons["perm.skip"].tap()
 
         connect()
         wait(app.staticTexts["Sign in to PassAuth"], 20)

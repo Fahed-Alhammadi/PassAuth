@@ -1,7 +1,6 @@
 package io.passauth.app
 
 import androidx.biometric.BiometricManager
-import io.passauth.app.data.AccountData
 import io.passauth.app.data.AppJson
 import io.passauth.app.data.Onboarding
 import io.passauth.app.data.Stored
@@ -16,16 +15,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PermissionsTest {
-    @Test
-    fun introShownOnceOnFirstLaunch() {
-        assertTrue(Stored().showPermissionsIntro)
-        // A record without a server (fresh install) still counts as first launch.
-        assertTrue(Stored(accounts = mapOf("a" to AccountData())).showPermissionsIntro)
-        assertFalse(Stored(onboarding = Onboarding(permissionsShown = true)).showPermissionsIntro)
-        // Already using the app (upgrade): not shown; changes go through Android's settings.
-        assertFalse(Stored(accounts = mapOf("a" to AccountData(server = "https://vault.example.com"))).showPermissionsIntro)
-    }
-
     @Test
     fun onboardingSurvivesStorageAndOldFilesDefault() {
         val s = Stored(onboarding = Onboarding(permissionsShown = true, cameraAsked = true, offerBiometric = true))

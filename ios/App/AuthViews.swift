@@ -30,6 +30,8 @@ struct SetupView: View {
     @State private var busy = false
     @State private var error: String?
     @State private var lanHost: String?
+    /// PassAuth isn't allowed to use the local network, where this server is.
+    @State private var localNetworkDenied = false
 
     var body: some View {
         AuthFrame(title: "Connect to your PassAuth server") {
@@ -37,6 +39,9 @@ struct SetupView: View {
             Text("Use an https:// address. Plain http works only for test servers on this device or your local network.")
                 .font(.footnote).foregroundStyle(Color.paMuted).frame(maxWidth: .infinity, alignment: .leading)
             ErrorText(text: error)
+            if localNetworkDenied {
+                QuietActions { QuietButton(title: "Open Settings") { Task { await PermissionCenter.openAppSettings() } } }
+            }
             PrimaryButton(title: busy ? "Checking…" : "Connect", busy: busy, enabled: !url.trimmingCharacters(in: .whitespaces).isEmpty, action: submit)
             if let onCancel { QuietActions { QuietButton(title: "Cancel", action: onCancel) } }
             OtherAccounts()
@@ -56,7 +61,15 @@ struct SetupView: View {
         guard !busy, !url.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         busy = true
         error = nil
+        localNetworkDenied = false
         Task {
+            // A server on the local network: iOS asks for the local network now.
+            guard await model.permissions.ensureLocalNetwork(for: url) else {
+                localNetworkDenied = true
+                error = "PassAuth isn't allowed to use your local network, so it can't reach this server. Turn on Local Network for PassAuth in the Settings app."
+                busy = false
+                return
+            }
             do {
                 try await model.repo.setServer(url, allowLanHttp: allowLanHttp)
                 busy = false

@@ -45,7 +45,7 @@ final class AvatarUITests: UITestBase {
     func testProfilePicture() async throws {
         continueAfterFailure = false
         let email = "avatar-\(UUID().uuidString.prefix(8).lowercased())@example.com"
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         connect()
         register(email: email, name: "Alex Morgan", secretKey: false)

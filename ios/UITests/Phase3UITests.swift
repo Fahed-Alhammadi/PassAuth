@@ -68,7 +68,7 @@ final class Phase3UITests: UITestBase {
         try await srv.createVault(helper, name: "Team")
         let secret = try await srv.enableTotp(helper)
 
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         try signIn(email, totp: { try srv.nextCode(secret) })
         shot("p3-02-vault")
@@ -277,7 +277,7 @@ final class Phase3UITests: UITestBase {
             "login": ["username": "ada@example.com", "password": "second-Pass-222", "totp": "JBSWY3DPEHPK3PXP", "urls": [["url": "https://github.com"]]],
             "password_history": [["password": "first-Pass-111", "changed_at": stamp - 3600]],
         ])
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXL"]
+        app.launchArguments = ["-PAResetState", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXL"]
         app.launch()
         try signIn(email)
         shot("big-01-vault")

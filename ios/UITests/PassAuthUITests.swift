@@ -141,10 +141,9 @@ final class PassAuthUITests: UITestBase {
         let stamp = Int(Date().timeIntervalSince1970)
         let email = "ios\(stamp)@example.com"
 
-        // First launch: the permissions screen, once, before the server.
-        wait(app.staticTexts["Set up PassAuth"], 20)
-        shot("00-permissions")
-        app.buttons["perm.continue"].tap()
+        // First launch: straight to the server (permissions are asked where they're needed).
+        wait(app.textFields["Server address"], 20)
+        XCTAssertFalse(app.staticTexts["Set up PassAuth"].exists)
 
         // Server, account with a Secret Key, signed in straight into the empty vault.
         connect()

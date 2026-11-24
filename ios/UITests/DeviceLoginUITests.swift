@@ -114,7 +114,7 @@ final class DeviceLoginUITests: UITestBase {
         let spoof = "Your iPhone\u{202E}kcehc ytiruces\u{202C}\n\n" + String(repeating: "!", count: 80)
         let first = try await requestSignIn(srv, email: email, name: spoof)
 
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         signIn(email)
 

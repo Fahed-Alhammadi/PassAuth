@@ -27,8 +27,6 @@ final class AppModel {
     let uploads = AttachmentUploads()
     /// Attachment downloads in progress (stopped when the vault closes).
     let downloads = AttachmentDownloads()
-    /// UI tests that aren't about it skip the first-launch permissions screen.
-    let skipPermissionsIntro: Bool
 
     /// The current notice (toast) text.
     private(set) var notice: String?
@@ -64,10 +62,7 @@ final class AppModel {
     init() {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { SecureStore.wipeAll() }
-        skipPermissionsIntro = ProcessInfo.processInfo.arguments.contains("-PASkipPermissions")
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { PushCenter.shared.resetForTests() }
-        #else
-        skipPermissionsIntro = false
         #endif
         let store = SecureStore()
         let api = ApiClient(store: store)

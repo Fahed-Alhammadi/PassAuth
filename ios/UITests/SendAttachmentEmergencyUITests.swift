@@ -102,7 +102,7 @@ final class SendAttachmentEmergencyUITests: UITestBase {
         let adaHelper = try await srv.login(email: ada, password: password)
         try await srv.createItem(adaHelper, item("Passport", password: "Ada-Passport-123"))
 
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         signIn(ada)
 

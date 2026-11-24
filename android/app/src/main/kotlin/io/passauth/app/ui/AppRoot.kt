@@ -53,8 +53,6 @@ import io.passauth.app.data.copiedNote
 import io.passauth.app.ui.auth.LoginScreen
 import io.passauth.app.ui.auth.SetupScreen
 import io.passauth.app.ui.auth.UnlockScreen
-import io.passauth.app.ui.permissions.BiometricOffer
-import io.passauth.app.ui.permissions.PermissionsIntroScreen
 import io.passauth.app.data.TwoStepGate
 import io.passauth.app.ui.settings.InvitationsScreen
 import io.passauth.app.ui.settings.SettingsScreen
@@ -243,13 +241,12 @@ fun AppRoot(graph: AppGraph, state: AppState, activity: MainActivity) {
                 when {
                     // The server requires two-step login first: only setting a method up, or signing out.
                     TwoStepGate.shows(state.status, state.twoStepRequired) -> TwoStepRequiredScreen(ctx)
-                    state.status == Status.Setup -> if (state.showPermissionsIntro) PermissionsIntroScreen(ctx) else SetupScreen(ctx)
+                    state.status == Status.Setup -> SetupScreen(ctx)
                     state.status == Status.LoggedOut -> LoginScreen(ctx)
                     state.status == Status.Locked -> UnlockScreen(ctx)
                     else -> {
                         SecureWindow()
                         Main(ctx, route) { route = it }
-                        BiometricOffer(ctx)
                         AuthRequestPrompt(ctx)
                     }
                 }
