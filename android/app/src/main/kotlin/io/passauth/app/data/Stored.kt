@@ -226,13 +226,6 @@ data class Stored(
         return copy(accounts = records, rosters = out)
     }
 
-    /**
-     * Show the permissions screen: only on a first launch (never shown, and no server
-     * connected yet). Later changes go through Android's settings.
-     */
-    val showPermissionsIntro: Boolean
-        get() = !onboarding.permissionsShown && accounts.values.none { it.server.isNotEmpty() }
-
     /** The longest vault timeout the signed-in accounts' servers allow (the strictest; 0 = no limit). */
     val timeoutLimit: Int
         get() = PolicyRules.timeoutLimit(accounts.values.filter { it.tokens != null }.map { it.policies })

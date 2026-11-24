@@ -74,7 +74,6 @@ data class AppState(
     val settings: Settings = Settings(),
     val lastSync: Long = 0,
     val onboarding: Onboarding = Onboarding(),
-    val showPermissionsIntro: Boolean = false,
     /**
      * The active account's server requires two-step login and the account has none yet (403
      * `two_step_required`): the app shows only the setup screen ([TwoStepGate]). Memory only.
@@ -516,7 +515,6 @@ class VaultRepository(
             settings = s.settings,
             lastSync = a?.lastSync ?: 0,
             onboarding = s.onboarding,
-            showPermissionsIntro = s.showPermissionsIntro,
             twoStepRequired = a?.tokens != null && s.activeId in gate,
             policies = a?.policies ?: Policies(),
             timeoutLimit = s.timeoutLimit,

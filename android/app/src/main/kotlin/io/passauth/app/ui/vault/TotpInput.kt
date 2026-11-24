@@ -87,7 +87,7 @@ fun TotpInput(ctx: UiCtx, value: String, onChange: (String) -> Unit) {
         ctx.notify(if (key.label.isNotEmpty()) "Authenticator key added for ${key.label}." else "Authenticator key added.")
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        // The first-launch screen tells "not asked" from "denied for good" with this.
+        // Kept so "not asked yet" can be told from "denied for good".
         ctx.launch { ctx.repo.updateOnboarding { it.copy(cameraAsked = true) } }
         if (granted) scanning = true else denied = true
     }
