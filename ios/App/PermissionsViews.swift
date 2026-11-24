@@ -1,99 +1,30 @@
 import AuthenticationServices
-import AVFoundation
-import LocalAuthentication
 import Network
 import PassAuthKit
 import SwiftUI
 import UIKit
 
-/// The permissions and system features PassAuth uses, in the order they're listed.
-enum PermissionKind: String, CaseIterable, Identifiable {
-    case autofill, biometrics, notifications, camera, localNetwork
-    var id: String { rawValue }
-}
-
-/// Current status of each permission, and the actions that ask for them, for the
-/// first-launch screen.
+/// System permissions, asked only where a feature needs them (App Review 5.1.1(iv): no
+/// screen of its own before a permission prompt). The camera is asked when scanning a QR
+/// code, notifications and AutoFill in Settings, Face ID in Account security, and the local
+/// network here, when connecting to a server on it.
 @MainActor
-@Observable
 final class PermissionCenter {
     private let repo: VaultRepository
-    private(set) var autofill: PermissionStatus = .unknown
-    private(set) var camera: PermissionStatus = .unknown
-    private(set) var biometrics: PermissionStatus = .unknown
-    private(set) var biometryType: LABiometryType = .none
-    private(set) var busy: Set<PermissionKind> = []
 
     init(repo: VaultRepository) { self.repo = repo }
 
-    private var memory: PermissionMemory { repo.state.settings.permissions }
-
-    var localNetwork: PermissionStatus { PermissionRules.localNetworkShown(memory) }
-
-    func status(_ k: PermissionKind) -> PermissionStatus {
-        switch k {
-        case .autofill: autofill
-        case .biometrics: biometrics
-        case .notifications: PushCenter.shared.permission
-        case .camera: camera
-        case .localNetwork: localNetwork
-        }
-    }
-
-    /// Read what iOS reports (and re-check the local network if it was checked before:
-    /// once decided, iOS doesn't prompt again).
-    func refresh() async {
-        camera = PermissionRules.camera(AVCaptureDevice.authorizationStatus(for: .video).rawValue)
-        refreshBiometrics()
-        await PushCenter.shared.refreshPermission()
-        let local = memory.localNetwork
-        if local == .allowed || local == .denied, !busy.contains(.localNetwork) {
-            busy.insert(.localNetwork)
-            let now = await LocalNetworkProbe.run(promptExpected: false)
-            busy.remove(.localNetwork)
-            if now != .unknown { await remember { $0.localNetwork = now } }
-        }
-        autofill = PermissionRules.autofill(await CredentialIdentitySync.isEnabled(timeout: .seconds(2)))
-    }
-
-    private func refreshBiometrics() {
-        let c = LAContext()
-        var error: NSError?
-        let ok = c.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
-        biometryType = c.biometryType
-        biometrics = PermissionRules.biometrics(
-            canEvaluate: ok, errorCode: error?.code, hasHardware: c.biometryType != .none,
-            // Biometric unlock turned on in Account security also means iOS allowed it.
-            allowedBefore: memory.biometricsAllowed || repo.state.biometricEnabled)
-    }
-
-    private func remember(_ f: @escaping @Sendable (inout PermissionMemory) -> Void) async {
-        await repo.updateSettings { f(&$0.permissions) }
-    }
-
-    // MARK: Actions
-
-    func request(_ k: PermissionKind) async {
-        guard !busy.contains(k) else { return }
-        busy.insert(k)
-        defer { busy.remove(k) }
-        switch k {
-        case .notifications:
-            await PushCenter.shared.requestPermission()
-        case .camera:
-            _ = await AVCaptureDevice.requestAccess(for: .video)
-            camera = PermissionRules.camera(AVCaptureDevice.authorizationStatus(for: .video).rawValue)
-        case .biometrics:
-            if await BiometryKind.confirm(reason: "Allow PassAuth to unlock your vault with \(biometryName)") {
-                await remember { $0.biometricsAllowed = true }
-            }
-            refreshBiometrics()
-        case .localNetwork:
-            let s = await LocalNetworkProbe.run(promptExpected: true)
-            await remember { $0.localNetwork = s }
-        case .autofill:
-            if let on = await Self.turnOnAutofill(repo) { autofill = PermissionRules.autofill(on) }
-        }
+    /// Connecting to a server on the local network (such as http://192.168.1.20): iOS asks
+    /// for the local network the first time. Ask now, so the connection doesn't fail while
+    /// the prompt is up. False when PassAuth isn't allowed to use the local network.
+    func ensureLocalNetwork(for server: String) async -> Bool {
+        guard let origin = try? VaultRepository.normalizeServer(server),
+              let host = UrlMatcher.parse(origin)?.hostname,
+              VaultRepository.isLocalHost(host), !VaultRepository.isLoopback(host) else { return true }
+        if repo.state.settings.permissions.localNetwork == .allowed { return true }
+        let status = await LocalNetworkProbe.run(promptExpected: true)
+        await repo.updateSettings { $0.permissions.localNetwork = status }
+        return status != .denied
     }
 
     /// Turn on PassAuth for AutoFill: iOS 18's one-tap request, else the AutoFill settings.
@@ -122,74 +53,6 @@ final class PermissionCenter {
     /// The app's page in the Settings app (camera, Face ID and local network switches).
     static func openAppSettings() async {
         if let url = URL(string: UIApplication.openSettingsURLString) { await UIApplication.shared.open(url) }
-    }
-
-    func markIntroShown() async {
-        await remember { $0.introShown = true }
-    }
-
-    func markBiometricOffered() async {
-        await remember { $0.biometricOffered = true }
-    }
-
-    // MARK: Text
-
-    var biometryName: String {
-        switch biometryType {
-        case .faceID: "Face ID"
-        case .touchID: "Touch ID"
-        case .opticID: "Optic ID"
-        default: "Face ID or Touch ID"
-        }
-    }
-
-    func title(_ k: PermissionKind) -> String {
-        switch k {
-        case .autofill: "AutoFill passwords & passkeys"
-        case .biometrics: biometryName
-        case .notifications: "Notifications"
-        case .camera: "Camera"
-        case .localNetwork: "Local network"
-        }
-    }
-
-    func reason(_ k: PermissionKind) -> String {
-        switch k {
-        case .autofill: "Fill logins, passkeys and verification codes in Safari and other apps."
-        case .biometrics: "Unlock your vault without typing your master password."
-        case .notifications: "Sign-in requests: get notified when you sign in on another device, and approve it here."
-        case .camera: "Scan the QR code when you add two-step login to an item."
-        case .localNetwork: "Only needed if your server is on your home network, such as http://192.168.1.20."
-        }
-    }
-
-    func symbol(_ k: PermissionKind) -> String {
-        switch k {
-        case .autofill: "key.viewfinder"
-        case .biometrics: biometryType == .touchID ? "touchid" : biometryType == .opticID ? "opticid" : "faceid"
-        case .notifications: "bell.badge"
-        case .camera: "camera"
-        case .localNetwork: "network"
-        }
-    }
-
-    /// The status in words ("Allowed", "Not allowed", "Not asked", …).
-    func statusText(_ k: PermissionKind) -> String {
-        let s = status(k)
-        if k == .autofill {
-            switch s {
-            case .allowed: return "On"
-            case .notAsked, .denied: return "Off"
-            default: return "Status unknown"
-            }
-        }
-        switch s {
-        case .allowed: return "Allowed"
-        case .denied: return "Not allowed"
-        case .notAsked: return "Not asked"
-        case .unavailable: return k == .biometrics ? "Not set up on this device" : "Not available on this device"
-        case .unknown: return k == .localNetwork ? "Unknown: iOS doesn't say" : "Unknown"
-        }
     }
 }
 
@@ -259,168 +122,5 @@ enum LocalNetworkProbe {
             if case .dns(let code) = e { return code }
             return nil
         }
-    }
-}
-
-// MARK: Views
-
-/// One permission: icon, title, reason, status and its button.
-struct PermissionRow: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dynamicTypeSize) private var typeSize
-    let kind: PermissionKind
-
-    var body: some View {
-        let p = model.permissions
-        let status = p.status(kind)
-        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
-        layout {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: p.symbol(kind))
-                    .font(.title3)
-                    .foregroundStyle(Color.paAccent)
-                    .frame(width: 40, height: 40)
-                    .background(Color.paAccentSoft, in: RoundedRectangle(cornerRadius: PA.Radius.control, style: .continuous))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(p.title(kind)).font(.headline).foregroundStyle(Color.paInk)
-                    Text(p.reason(kind)).font(.subheadline).foregroundStyle(Color.paMuted)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if showsStatusLine(status) {
-                        Text(p.statusText(kind))
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(status == .denied ? Color.paWarn : Color.paMuted)
-                            .accessibilityIdentifier("perm.\(kind.rawValue).status")
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
-            }
-            trailing(p, status)
-        }
-        .padding(.vertical, 6)
-        .accessibilityElement(children: .contain)
-    }
-
-    private func showsStatusLine(_ s: PermissionStatus) -> Bool {
-        switch s {
-        // "Not asked" goes without saying; only what blocks the button matters.
-        case .allowed, .notAsked, .unknown: false
-        default: true
-        }
-    }
-
-    @ViewBuilder
-    private func trailing(_ p: PermissionCenter, _ status: PermissionStatus) -> some View {
-        if p.busy.contains(kind) {
-            ProgressView().frame(minWidth: 44, minHeight: 32)
-                .accessibilityLabel("Checking \(p.title(kind))")
-        } else {
-            switch status {
-            case .allowed:
-                // Not a Label: in a List it would drop the text.
-                HStack(spacing: 5) {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text(kind == .autofill ? "On" : "Allowed")
-                }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.paOk)
-                .fixedSize()
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(p.title(kind)): \(kind == .autofill ? "on" : "allowed")")
-                .accessibilityIdentifier("perm.\(kind.rawValue).allowed")
-            case .denied where kind != .autofill:
-                action("Open Settings", hint: "Opens PassAuth in the Settings app") { await PermissionCenter.openAppSettings() }
-            case .unavailable:
-                EmptyView()
-            default:
-                action(kind == .autofill ? "Turn on" : "Allow", hint: nil) { await p.request(kind) }
-            }
-        }
-    }
-
-    private func action(_ title: String, hint: String?, _ run: @escaping @MainActor () async -> Void) -> some View {
-        Button { Task { await run() } } label: {
-            Text(title).font(.subheadline.weight(.semibold)).fixedSize()
-        }
-        .buttonStyle(.bordered)
-        .buttonBorderShape(.capsule)
-        .tint(Color.paAccent)
-        .accessibilityLabel("\(title), \(model.permissions.title(kind))")
-        .accessibilityHint(hint ?? "")
-        .accessibilityIdentifier("perm.\(kind.rawValue)")
-    }
-}
-
-/// First launch: "Set up PassAuth", before "Connect to your server".
-struct PermissionsIntroView: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.scenePhase) private var scenePhase
-
-    var body: some View {
-        NavigationStack {
-            PromptScaffold {
-                Section {
-                    VStack(alignment: .leading, spacing: PA.Space.s) {
-                        Text("Set up PassAuth").font(.title2.weight(.semibold)).foregroundStyle(Color.paInk)
-                            .accessibilityAddTraits(.isHeader)
-                        Text("Choose what PassAuth may use. Allow only what you need; you can change it later in the Settings app.")
-                            .font(.subheadline).foregroundStyle(Color.paMuted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .promptPlainRow()
-                }
-                Section {
-                    ForEach(PermissionKind.allCases) { k in
-                        PermissionRow(kind: k)
-                    }
-                }
-                .paRow()
-            } actions: {
-                PrimaryButton(title: "Continue") { finish() }
-                    .accessibilityIdentifier("perm.continue")
-                QuietActions {
-                    QuietButton(title: "Skip for now") { finish() }
-                        .accessibilityIdentifier("perm.skip")
-                }
-            }
-            .promptBar()
-        }
-        .task(id: scenePhase) {
-            if scenePhase == .active { await model.permissions.refresh() }
-        }
-    }
-
-    private func finish() {
-        Task { await model.permissions.markIntroShown() }
-    }
-}
-
-/// After a sign-in or unlock: offer biometric unlock once if it was allowed on the permissions screen.
-struct BiometricOffer: ViewModifier {
-    @Environment(AppModel.self) private var model
-    @State private var showing = false
-
-    func body(content: Content) -> some View {
-        let bio = BiometryKind.current
-        content
-            .task {
-                let s = model.state
-                showing = PermissionRules.offerBiometricUnlock(s.settings.permissions, available: bio.available, enabled: s.biometricEnabled)
-            }
-            .alert("Unlock with \(bio.name)?", isPresented: $showing) {
-                Button("Turn on") {
-                    model.run {
-                        await model.permissions.markBiometricOffered()
-                        try await model.repo.enableBiometric()
-                        model.notify("\(bio.name) unlock is on.")
-                    }
-                }
-                Button("Not now", role: .cancel) {
-                    Task { await model.permissions.markBiometricOffered() }
-                }
-            } message: {
-                Text("Open your vault with \(bio.name) instead of typing your master password. You can change this in Settings → Account security.")
-            }
     }
 }

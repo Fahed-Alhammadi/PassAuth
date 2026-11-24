@@ -31,18 +31,6 @@ public struct PermissionMemory: Codable, Equatable, Sendable {
 
 /// Pure rules behind the permissions screen (unit-tested).
 public enum PermissionRules {
-    /// Show the first-launch screen once, before the first account is set up. Devices that
-    /// already have accounts (updated from a version without the screen) don't get it.
-    public static func showIntro(_ memory: PermissionMemory, hasAccounts: Bool, skip: Bool = false) -> Bool {
-        !skip && !memory.introShown && !hasAccounts
-    }
-
-    /// Offer biometric unlock once after a sign-in or unlock, if the user allowed it on the
-    /// permissions screen and the account doesn't use it yet.
-    public static func offerBiometricUnlock(_ memory: PermissionMemory, available: Bool, enabled: Bool) -> Bool {
-        memory.biometricsAllowed && !memory.biometricOffered && available && !enabled
-    }
-
     /// `AVAuthorizationStatus` raw value: 0 not determined, 1 restricted, 2 denied, 3 authorized.
     public static func camera(_ raw: Int) -> PermissionStatus {
         switch raw {

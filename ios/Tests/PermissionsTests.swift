@@ -2,18 +2,8 @@ import Foundation
 import PassAuthKit
 import XCTest
 
-/// The first-launch permissions screen: shown once, and how statuses are read.
+/// How permission statuses are read and remembered.
 final class PermissionsTests: XCTestCase {
-    func testIntroShownOnceBeforeTheFirstAccount() {
-        var m = PermissionMemory()
-        XCTAssertTrue(PermissionRules.showIntro(m, hasAccounts: false))
-        XCTAssertFalse(PermissionRules.showIntro(m, hasAccounts: false, skip: true))
-        // Updated from a version without the screen: accounts exist already.
-        XCTAssertFalse(PermissionRules.showIntro(m, hasAccounts: true))
-        m.introShown = true
-        XCTAssertFalse(PermissionRules.showIntro(m, hasAccounts: false))
-    }
-
     func testMemoryIsSharedSettingsAndSurvivesOldFiles() throws {
         var s = Settings()
         s.permissions.introShown = true
@@ -29,17 +19,6 @@ final class PermissionsTests: XCTestCase {
         XCTAssertFalse(junk.permissions.introShown)
         XCTAssertNil(junk.permissions.localNetwork)
         XCTAssertTrue(junk.permissions.biometricOffered)
-    }
-
-    func testBiometricOfferOnce() {
-        var m = PermissionMemory()
-        XCTAssertFalse(PermissionRules.offerBiometricUnlock(m, available: true, enabled: false))
-        m.biometricsAllowed = true
-        XCTAssertTrue(PermissionRules.offerBiometricUnlock(m, available: true, enabled: false))
-        XCTAssertFalse(PermissionRules.offerBiometricUnlock(m, available: false, enabled: false))
-        XCTAssertFalse(PermissionRules.offerBiometricUnlock(m, available: true, enabled: true))
-        m.biometricOffered = true
-        XCTAssertFalse(PermissionRules.offerBiometricUnlock(m, available: true, enabled: false))
     }
 
     func testCamera() {

@@ -49,8 +49,6 @@ struct RootView: View {
             } else {
                 Group {
                     switch state.status {
-                    case _ where PermissionRules.showIntro(state.settings.permissions, hasAccounts: !state.accounts.isEmpty, skip: model.skipPermissionsIntro):
-                        PermissionsIntroView()
                     // The server requires two-step login and the account has none yet: only
                     // setting a method up (or signing out) until then.
                     case .locked where state.twoStepRequired, .unlocked where state.twoStepRequired:
@@ -183,7 +181,6 @@ struct MainView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
-        .modifier(BiometricOffer())
         .sheet(item: Binding(get: { model.pendingOtp }, set: { model.pendingOtp = $0 })) { p in
             AddCodeSheet(key: p.key)
         }

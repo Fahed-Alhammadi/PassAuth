@@ -23,7 +23,7 @@ final class HealthUITests: UITestBase {
                 "login": ["username": user, "password": secret, "urls": [["url": url]]],
             ])
         }
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
             + (large ? ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXL"] : [])
             + (stub ? ["-PAStubBreachCheck"] : [])
         app.launch()

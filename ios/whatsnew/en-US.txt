@@ -1,8 +1,8 @@
-New in 0.15.7
-• AutoFill works again as it did in 0.15.2. Every login is suggested above the keyboard, the suggestions show the user name only, and tapping PassAuth in the suggestions always opens the list.
-• The two AutoFill switches added in recent versions ("Suggest every login above the keyboard" and "Fill at once when one login matches") are removed from Settings → AutoFill.
+New in 0.15.8
+• The "Set up PassAuth" screen on first launch is gone. The app opens straight on "Connect to your PassAuth server".
+• iOS now asks for each permission only when you use the feature: the camera when you scan a QR code, the local network when you connect to a server at home (such as http://192.168.1.20), notifications, AutoFill and Face ID from their switches in Settings.
 
 Please test:
-1. Open the sign-in page of a site you have a login for: the login should be suggested above the keyboard with its user name.
-2. Tap it: the right user name and password are filled.
-3. Tap PassAuth in the suggestions: the list opens, with the logins for the page first.
+1. Delete PassAuth and install this build: it opens on "Connect to your PassAuth server", with no permission request.
+2. If your server is on your home network, tap Connect: iOS asks for the local network, and after Allow the app connects.
+3. Add a verification code with "Scan QR code": iOS asks for the camera the first time.

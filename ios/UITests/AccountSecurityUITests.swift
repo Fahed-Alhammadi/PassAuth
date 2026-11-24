@@ -67,7 +67,7 @@ final class AccountSecurityUITests: UITestBase {
         let srv = TestServer(server)
         try await srv.register(email: email, password: password, name: "Grace Hopper")
 
-        app.launchArguments = ["-PAResetState", "-PASkipPermissions"]
+        app.launchArguments = ["-PAResetState"]
         app.launch()
         connect()
         wait(app.staticTexts["Sign in to PassAuth"], 20)
