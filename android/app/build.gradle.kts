@@ -41,7 +41,10 @@ val googleServices = providers.fileContents(layout.projectDirectory.file("google
 
 android {
     namespace = "io.passauth.app"
-    compileSdk = 37
+    // 37.1: Compose 1.13 (BOM 2026.11.01) requires it. Only the compile SDK; targetSdk (the behavior) stays 36.
+    compileSdk {
+        version = release(37) { minorApiLevel = 1 }
+    }
 
     defaultConfig {
         applicationId = "io.passauth.app"
