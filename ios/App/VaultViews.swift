@@ -144,7 +144,6 @@ private struct VaultList: View {
             }
             if q.isEmpty && !filter.active {
                 VaultNotices(target: $noticeTarget)
-                PushOfferCard()
             }
             if filter.active {
                 Section {

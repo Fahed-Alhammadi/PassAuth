@@ -62,7 +62,6 @@ final class AppModel {
     init() {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-PAResetState") { SecureStore.wipeAll() }
-        if ProcessInfo.processInfo.arguments.contains("-PAResetState") { PushCenter.shared.resetForTests() }
         #endif
         let store = SecureStore()
         let api = ApiClient(store: store)

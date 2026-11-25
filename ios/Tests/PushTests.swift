@@ -45,19 +45,13 @@ final class PushTests: XCTestCase {
         XCTAssertFalse(PushRules.offered(features: nil))
     }
 
-    func testPermissionAndOffer() {
+    func testPermission() {
         XCTAssertEqual(PushRules.permission(0), .notAsked)
         XCTAssertEqual(PushRules.permission(1), .denied)
         XCTAssertEqual(PushRules.permission(2), .allowed)
         XCTAssertEqual(PushRules.permission(3), .allowed)
         XCTAssertEqual(PushRules.permission(4), .allowed)
         XCTAssertEqual(PushRules.permission(9), .unknown)
-        XCTAssertTrue(PushRules.showOffer(permission: .notAsked, dismissed: false, offered: true))
-        XCTAssertFalse(PushRules.showOffer(permission: .notAsked, dismissed: true, offered: true))
-        XCTAssertFalse(PushRules.showOffer(permission: .notAsked, dismissed: false, offered: false))
-        XCTAssertFalse(PushRules.showOffer(permission: .allowed, dismissed: false, offered: true))
-        XCTAssertFalse(PushRules.showOffer(permission: .denied, dismissed: false, offered: true))
-        XCTAssertFalse(PushRules.showOffer(permission: .unknown, dismissed: false, offered: true))
     }
 
     func testPayload() {
