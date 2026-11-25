@@ -32,6 +32,8 @@ targets:
     platform: iOS
     sources:
       - path: Core/Sources
+      # Privacy manifest of this framework (Core/Sources is generated and git-ignored).
+      - path: Core/Resources
     dependencies:
       - framework: Core/PassAuthCoreFFI.xcframework
         embed: false
