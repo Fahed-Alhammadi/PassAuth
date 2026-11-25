@@ -164,7 +164,7 @@ jobs:
 
       # TestFlight "What to Test" from ios/whatsnew/en-US.txt (waits for App Store Connect to list
       # the build), then the export compliance answer once the build is processed, then the external
-      # group "Test" (public link) + Beta App Review. A failure here leaves the upload in place:
+      # group "Testing" (public link) + Beta App Review. A failure here leaves the upload in place:
       # finish the missing step in App Store Connect.
       - name: TestFlight notes (What to Test)
         if: startsWith(github.ref, 'refs/tags/') || inputs.upload

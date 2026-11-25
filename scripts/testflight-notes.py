@@ -34,7 +34,7 @@ LOCALE = "en-US"
 # here right after processing, before anyone answers by hand.
 USES_NON_EXEMPT_ENCRYPTION = False
 # External TestFlight group with the public link (https://testflight.apple.com/join/MGBhGbhp).
-EXTERNAL_GROUP = os.environ.get("TESTFLIGHT_EXTERNAL_GROUP", "Test")
+EXTERNAL_GROUP = os.environ.get("TESTFLIGHT_EXTERNAL_GROUP", "Testing")
 
 
 def token() -> str:
