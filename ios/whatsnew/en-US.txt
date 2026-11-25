@@ -1,6 +1,7 @@
-New in 0.15.11
-• Behind the scenes: the app's built-in parts now describe how they use files, as Apple requires. Nothing changes in how PassAuth works.
+New in 0.15.12
+• No changes in the app. This build carries the correct export compliance answer for App Store review.
+• Includes everything from 0.15.10 and 0.15.11: the vault no longer shows a notifications card, and sign-in request notifications are turned on only with their switch in Settings → Account security.
 
 Please test:
-1. Sign in and open a login, a verification code and an attachment as usual: everything works as in 0.15.10.
-2. Settings → Account security → Sign-in request notifications still asks for permission only when you turn the switch on.
+1. Install fresh and sign in: the vault opens with no notifications card and no permission prompt.
+2. Settings → Account security → Sign-in request notifications: turning the switch on shows iOS's notification prompt.

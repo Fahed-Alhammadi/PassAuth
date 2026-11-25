@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Set TestFlight "What to Test" (en-US) for an uploaded build from ios/whatsnew/en-US.txt.
+"""Set TestFlight "What to Test" (en-US) for an uploaded build from ios/whatsnew/en-US.txt,
+and answer the build's export compliance question (see USES_NON_EXEMPT_ENCRYPTION).
 
     scripts/testflight-notes.py <marketing version> <build number> <notes file>
 
 Env: ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_PATH (App Store Connect API key, .p8).
-Waits up to 40 minutes for App Store Connect to list the build after the upload.
+Waits up to 40 minutes for App Store Connect to list the build after the upload, and up to
+30 more for it to finish processing before answering export compliance.
 Needs PyJWT with the crypto extra (pip install "pyjwt[crypto]").
 """
 import json
@@ -20,6 +22,12 @@ import jwt
 API = "https://api.appstoreconnect.apple.com/v1"
 BUNDLE_ID = "io.passauth.app"
 LOCALE = "en-US"
+# PassAuth encrypts vaults in its own Rust core with standard algorithms (ChaCha20-Poly1305, AES,
+# X25519, Argon2, OPAQUE), beyond the encryption in iOS: App Store Connect's "non-exempt
+# encryption" = yes (mass market, ECCN 5D992.c, yearly BIS self-classification report; France is
+# excluded from availability, so no documents are needed). Apple refuses to change the answer
+# once a build has one, so it is set here right after the upload, before anyone answers by hand.
+USES_NON_EXEMPT_ENCRYPTION = True
 
 
 def token() -> str:
@@ -86,6 +94,22 @@ def main() -> None:
             "relationships": {"build": {"data": {"type": "builds", "id": build_id}}},
         }})
     print(f"What to Test set for {version} ({build})")
+
+    for _ in range(60):  # 60 × 30 s = 30 min
+        attrs = call("GET", f"/builds/{build_id}")["data"]["attributes"]
+        if attrs["processingState"] != "PROCESSING":
+            break
+        time.sleep(30)
+    if attrs["processingState"] != "VALID":
+        sys.exit(f"build {version} ({build}) is {attrs['processingState']}: answer export compliance in App Store Connect")
+    if attrs["usesNonExemptEncryption"] is None:
+        call("PATCH", f"/builds/{build_id}",
+             {"data": {"type": "builds", "id": build_id, "attributes": {"usesNonExemptEncryption": USES_NON_EXEMPT_ENCRYPTION}}})
+        attrs = call("GET", f"/builds/{build_id}")["data"]["attributes"]
+    if attrs["usesNonExemptEncryption"] is not USES_NON_EXEMPT_ENCRYPTION:
+        sys.exit(f"build {version} ({build}): export compliance is {attrs['usesNonExemptEncryption']}, "
+                 f"expected {USES_NON_EXEMPT_ENCRYPTION} (Apple can't change it: upload a new build)")
+    print(f"Export compliance set for {version} ({build}): non-exempt encryption = {USES_NON_EXEMPT_ENCRYPTION}")
 
 
 if __name__ == "__main__":
