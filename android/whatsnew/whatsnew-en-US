@@ -1,3 +1,2 @@
-• The "Set up PassAuth" screen is gone: PassAuth opens straight on connecting to your server.
-• Android asks for each permission only when you use the feature: the camera when you scan a QR code; autofill, passkeys, notifications and fingerprint or face unlock from their switches in Settings.
-Please test: install fresh, connect and sign in, then scan a QR code to add a verification code.
+• Password health now catches common passwords: password123, P@ssw0rd! or Summer2024! count as weak, even with numbers and symbols. Random and generated passwords are rated as before. The strength meter for a new master password uses the same check.
+Please test: save a login with password123 and open Settings → Password health: it is listed as weak.

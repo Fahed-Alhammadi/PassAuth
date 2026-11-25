@@ -1,8 +1,8 @@
-New in 0.15.8
-• The "Set up PassAuth" screen on first launch is gone. The app opens straight on "Connect to your PassAuth server".
-• iOS now asks for each permission only when you use the feature: the camera when you scan a QR code, the local network when you connect to a server at home (such as http://192.168.1.20), notifications, AutoFill and Face ID from their switches in Settings.
+New in 0.15.9
+• Password health now catches common passwords. Passwords such as password123, P@ssw0rd! or Summer2024! count as weak, even when they mix letters, numbers and symbols. Random and generated passwords are rated as before.
+• The strength meter for a new master password uses the same check.
 
 Please test:
-1. Delete PassAuth and install this build: it opens on "Connect to your PassAuth server", with no permission request.
-2. If your server is on your home network, tap Connect: iOS asks for the local network, and after Allow the app connects.
-3. Add a verification code with "Scan QR code": iOS asks for the camera the first time.
+1. Save a login with the password password123, then open Settings → Password health: it is listed under Weak passwords.
+2. A login with a password made by the generator is not listed as weak.
+3. Settings → Account security → Change master password: typing Summer2024! as the new password shows Weak.
