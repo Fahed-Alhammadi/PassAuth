@@ -6,6 +6,22 @@ The desktop app has its own releases on GitHub; the browser extension and the mo
 
 <!-- scripts/release.sh server X.Y.Z adds each new version below this line. -->
 
+## 0.19.3 (2026-11-25)
+
+- Core: pattern-aware password strength estimate (8a9563c)
+- Rust deps: Bump zip from 9.7.3 to 9.8.0 in the rust-minor group (#53) (a621cb6)
+- Web vault and extension: remove paths for servers older than 0.12 (d97fb1d)
+- Rust deps: Bump zip from 9.6.1 to 9.7.3 in the rust-minor group (#51) (66f38af)
+- Web deps: Bump the web-minor group in /web with 2 updates (#44) (60a33ba)
+- Update url to 2.5.9 (RUSTSEC-2026-0592) (98732a9)
+- Clean-up 2/6: core wrappers: remove exports no app calls (bfffe97)
+- Clean-up 2/3/5: web vault and desktop: remove unused code and two unreachable fallbacks (4cc1e2e)
+- Clean-up 4: use sqlx 0.9.1 and remove the vendored sqlx-sqlite patch (ec6f7da)
+- Clean-up 1: stale docs, ignore entries, unused CSS and assets (f055c90)
+- AutoFill: suggest every login by default; both AutoFill switches in the desktop app's Settings (6ab5b86)
+
+[All changes](https://github.com/Fahed-Alhammadi/PassAuth/compare/server-0.19.2...server-0.19.3)
+
 ## 0.19.2 (2026-11-21)
 
 - AutoFill matching: same-name logins by host, bulk Default, desktop setting (#40) (b6aac22)
