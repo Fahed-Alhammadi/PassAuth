@@ -132,23 +132,7 @@ pub fn passphrase(opts: &PassphraseOptions) -> Result<String> {
     Ok(words.join(&opts.separator))
 }
 
-/// Rough strength estimate in bits for a user-chosen password (character-class entropy).
-pub fn estimate_bits(password: &str) -> f64 {
-    let mut pool = 0u32;
-    if password.chars().any(|c| c.is_ascii_lowercase()) {
-        pool += 26;
-    }
-    if password.chars().any(|c| c.is_ascii_uppercase()) {
-        pool += 26;
-    }
-    if password.chars().any(|c| c.is_ascii_digit()) {
-        pool += 10;
-    }
-    if password.chars().any(|c| !c.is_ascii_alphanumeric()) {
-        pool += 33;
-    }
-    password.chars().count() as f64 * f64::from(pool.max(1)).log2()
-}
+pub use crate::strength::estimate_bits;
 
 #[cfg(test)]
 mod tests {
@@ -183,10 +167,5 @@ mod tests {
         let p = passphrase(&PassphraseOptions::default()).unwrap();
         assert_eq!(p.split('-').count(), 5);
         assert!(p.chars().any(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn estimate_orders_strength() {
-        assert!(estimate_bits("password") < estimate_bits("Tr0ub4dor&3xyz!"));
     }
 }

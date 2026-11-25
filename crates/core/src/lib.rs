@@ -24,6 +24,7 @@ pub mod passkey;
 pub mod send;
 pub mod sharing;
 pub mod site;
+pub mod strength;
 pub mod totp;
 
 pub use error::{Error, Result};
