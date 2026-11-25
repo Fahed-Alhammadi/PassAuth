@@ -67,12 +67,6 @@ enum PushRules {
         }
     }
 
-    /// The one-time vault card: only while iOS hasn't asked yet, it wasn't dismissed, and the
-    /// account's server sends these notifications.
-    static func showOffer(permission: PermissionStatus, dismissed: Bool, offered: Bool) -> Bool {
-        permission == .notAsked && !dismissed && offered
-    }
-
     /// The notification is the relay's sign-in request one (`{"passauth":{"kind":"auth_request"}}`).
     static func isSignInRequest(_ userInfo: [AnyHashable: Any]) -> Bool {
         (userInfo["passauth"] as? [String: Any])?["kind"] as? String == "auth_request"
@@ -162,20 +156,11 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
     /// Bumped when a sign-in request notification was tapped (or arrived while on screen):
     /// the app asks for the open requests again.
     private(set) var signInRequests = 0
-    /// The vault card "Get notified…" was answered with Not now (device-wide, kept).
-    private(set) var offerDismissed: Bool
 
     @ObservationIgnored private(set) var token: String?
     @ObservationIgnored private weak var repo: VaultRepository?
     @ObservationIgnored private var registrar: PushRegistrar?
     @ObservationIgnored private var started = false
-
-    private static let dismissedKey = "pa.push.offerDismissed"
-
-    override init() {
-        offerDismissed = UserDefaults.standard.bool(forKey: Self.dismissedKey)
-        super.init()
-    }
 
     /// From `application(_:didFinishLaunchingWithOptions:)`.
     func start() {
@@ -223,19 +208,6 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
         await refreshPermission()
     }
-
-    func dismissOffer() {
-        offerDismissed = true
-        UserDefaults.standard.set(true, forKey: Self.dismissedKey)
-    }
-
-    #if DEBUG
-    /// UI tests starting from a clean state.
-    func resetForTests() {
-        offerDismissed = false
-        UserDefaults.standard.removeObject(forKey: Self.dismissedKey)
-    }
-    #endif
 
     /// The APNs token arrived (every start once allowed; it may change).
     func received(token data: Data) {

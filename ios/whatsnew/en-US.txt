@@ -1,8 +1,7 @@
-New in 0.15.9
-• Password health now catches common passwords. Passwords such as password123, P@ssw0rd! or Summer2024! count as weak, even when they mix letters, numbers and symbols. Random and generated passwords are rated as before.
-• The strength meter for a new master password uses the same check.
+New in 0.15.10
+• The "Get notified when you sign in on another device" card is gone from the vault. Sign-in request notifications are now turned on only with their switch in Settings → Account security; iOS asks for permission when you turn it on.
 
 Please test:
-1. Save a login with the password password123, then open Settings → Password health: it is listed under Weak passwords.
-2. A login with a password made by the generator is not listed as weak.
-3. Settings → Account security → Change master password: typing Summer2024! as the new password shows Weak.
+1. Install fresh and sign in to a server that sends sign-in request notifications: the vault opens with no notifications card and no permission prompt.
+2. Settings → Account security → Sign-in request notifications: turning the switch on shows iOS's notification prompt. After Allow, the switch stays on.
+3. If you choose Don't Allow, the switch stays off and "Open the Settings app" appears below it.

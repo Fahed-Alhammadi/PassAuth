@@ -1,9 +1,10 @@
 import XCTest
 
 /// Sign-in request notifications against a throwaway server with the `push` feature (debug
-/// builds; server 0.17+ with push on): the row on the first-launch screen, the one-time vault
-/// card (Turn on → iOS prompt → card gone), and Settings → Account security's switch. Run on a
-/// simulator where PassAuth was just installed (notifications not asked yet). Screenshots get
+/// builds; server 0.17+ with push on): no card or prompt in the vault (App Review 5.1.1(iv): the
+/// prompt comes only from the user's own switch), and Settings → Account security's switch, which
+/// asks iOS when turned on. Run on a simulator where PassAuth was just installed (notifications
+/// not asked yet). Screenshots get
 /// the `PA_SHOT_SUFFIX` (e.g. "-dark") so a run per appearance keeps both.
 @MainActor
 final class PushUITests: UITestBase {
@@ -45,7 +46,7 @@ final class PushUITests: UITestBase {
         wait(app.buttons["settings.security"]).tap()
     }
 
-    func testOfferCardAndSettingsSwitch() async throws {
+    func testSettingsSwitch() async throws {
         continueAfterFailure = false
         let email = "push-\(Int(Date().timeIntervalSince1970))@example.com"
         try await TestServer(server).register(email: email, password: password, name: "Ada Lovelace")
@@ -60,10 +61,10 @@ final class PushUITests: UITestBase {
         dismissKeyboard()
         button("Sign in").tap()
         wait(app.navigationBars["Vault"], 60)
-        // The vault card (notifications not asked yet, the server offers push).
-        wait(app.descendants(matching: .any)["notice.push"].firstMatch, 15)
+        // No notifications card or prompt in the vault, although the server offers push.
         _ = tapSystem("Not Now", wait: 10)
-        shot("push-vault-card\(suffix)")
+        XCTAssertFalse(app.descendants(matching: .any)["notice.push"].firstMatch.exists)
+        XCTAssertFalse(tapSystem("Allow", wait: 3), "a notification prompt appeared without the user turning the switch on")
 
         // Account security: the switch is off, not asked yet.
         securityPage()
@@ -73,14 +74,9 @@ final class PushUITests: UITestBase {
         XCTAssertEqual(toggle.value as? String, "0")
         shot("push-settings-off\(suffix)")
 
-        // Turn on from the card: iOS asks, Allow, the card goes.
-        tab("Vault")
-        wait(app.buttons["notice.push.turnOn"]).tap()
+        // Turn on with the switch: iOS asks, Allow, the switch stays on.
+        toggle.tap()
         XCTAssertTrue(tapSystem("Allow", wait: 10), "no notification prompt")
-        XCTAssertTrue(app.descendants(matching: .any)["notice.push"].firstMatch.waitForNonExistence(timeout: 10))
-
-        securityPage()
-        scrollTo(toggle)
         let deadline = Date().addingTimeInterval(10)
         while (toggle.value as? String) != "1" && Date() < deadline { usleep(300_000) }
         XCTAssertEqual(toggle.value as? String, "1")
