@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Set TestFlight "What to Test" (en-US) for an uploaded build from ios/whatsnew/en-US.txt,
-and answer the build's export compliance question (see USES_NON_EXEMPT_ENCRYPTION).
+answer the build's export compliance question (see USES_NON_EXEMPT_ENCRYPTION), then add it to
+the external tester group (EXTERNAL_GROUP, the public TestFlight link) and send it to Beta App
+Review. Each step is skipped when it is already done, so the script can be run again.
 
     scripts/testflight-notes.py <marketing version> <build number> <notes file>
 
@@ -31,6 +33,8 @@ LOCALE = "en-US"
 # 5D992.c) by February 1. Apple refuses to change the answer once a build has one, so it is set
 # here right after processing, before anyone answers by hand.
 USES_NON_EXEMPT_ENCRYPTION = False
+# External TestFlight group with the public link (https://testflight.apple.com/join/MGBhGbhp).
+EXTERNAL_GROUP = os.environ.get("TESTFLIGHT_EXTERNAL_GROUP", "Test")
 
 
 def token() -> str:
@@ -113,6 +117,23 @@ def main() -> None:
         sys.exit(f"build {version} ({build}): export compliance is {attrs['usesNonExemptEncryption']}, "
                  f"expected {USES_NON_EXEMPT_ENCRYPTION} (Apple can't change it: upload a new build)")
     print(f"Export compliance set for {version} ({build}): non-exempt encryption = {USES_NON_EXEMPT_ENCRYPTION}")
+
+    groups = [g for g in call("GET", f"/apps/{app_id}/betaGroups?limit=200")["data"]
+              if g["attributes"]["name"] == EXTERNAL_GROUP and not g["attributes"]["isInternalGroup"]]
+    if not groups:
+        sys.exit(f"no external TestFlight group named {EXTERNAL_GROUP!r}")
+    group_id = groups[0]["id"]
+    in_group = {b["id"] for b in call("GET", f"/betaGroups/{group_id}/builds?limit=200")["data"]}
+    if build_id not in in_group:
+        call("POST", f"/betaGroups/{group_id}/relationships/builds", {"data": [{"type": "builds", "id": build_id}]})
+    print(f"Added {version} ({build}) to the TestFlight group {EXTERNAL_GROUP!r}")
+
+    state = call("GET", f"/builds/{build_id}/buildBetaDetail")["data"]["attributes"]["externalBuildState"]
+    if state == "READY_FOR_BETA_SUBMISSION":
+        call("POST", "/betaAppReviewSubmissions",
+             {"data": {"type": "betaAppReviewSubmissions", "relationships": {"build": {"data": {"type": "builds", "id": build_id}}}}})
+        state = call("GET", f"/builds/{build_id}/buildBetaDetail")["data"]["attributes"]["externalBuildState"]
+    print(f"External testing for {version} ({build}): {state}")
 
 
 if __name__ == "__main__":
