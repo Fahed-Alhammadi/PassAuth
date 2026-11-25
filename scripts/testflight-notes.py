@@ -22,12 +22,15 @@ import jwt
 API = "https://api.appstoreconnect.apple.com/v1"
 BUNDLE_ID = "io.passauth.app"
 LOCALE = "en-US"
-# PassAuth encrypts vaults in its own Rust core with standard algorithms (ChaCha20-Poly1305, AES,
-# X25519, Argon2, OPAQUE), beyond the encryption in iOS: App Store Connect's "non-exempt
-# encryption" = yes (mass market, ECCN 5D992.c, yearly BIS self-classification report; France is
-# excluded from availability, so no documents are needed). Apple refuses to change the answer
-# once a build has one, so it is set here right after the upload, before anyone answers by hand.
-USES_NON_EXEMPT_ENCRYPTION = True
+# App Store Connect's export compliance answer. PassAuth encrypts vaults in its own Rust core with
+# standard, published algorithms (ChaCha20-Poly1305, AES, X25519, Argon2, OPAQUE) and is not sold
+# in France. For App Store Connect that is "exempt" (no documents): Apple only accepts an
+# encryption declaration for proprietary cryptography, or standard cryptography sold in France
+# (409 otherwise), and a "true" without a declaration is silently dropped. So the answer is False,
+# as on every build so far. Separate US obligation: yearly BIS self-classification report (ECCN
+# 5D992.c) by February 1. Apple refuses to change the answer once a build has one, so it is set
+# here right after processing, before anyone answers by hand.
+USES_NON_EXEMPT_ENCRYPTION = False
 
 
 def token() -> str:
