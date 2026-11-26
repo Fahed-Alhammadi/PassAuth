@@ -114,15 +114,18 @@ public enum IdentityMapper {
         return Set(owners.filter { $0.value.count > 1 }.keys)
     }
 
-    /// Base domains whose logins (with a user name or password, on a website the store could hold) are on two
-    /// or more different hosts; "www." and the bare domain count as one host.
+    /// Base domains whose logins (with a user name, password or verification code, on a website the store could
+    /// hold) are on two or more different hosts. A host includes a non-default port (192.168.1.10:7878 and :8989
+    /// are two services); "www." and the bare domain count as one host.
     public static func sharedDomains(_ entries: [Entry], defaultMatch: UrlMatch) -> Set<String> {
         var hosts: [String: Set<String>] = [:]
         for e in entries {
-            guard let l = e.item.login, !l.password.isEmpty || !l.username.isEmpty else { continue }
+            guard let l = e.item.login else { continue }
+            let hasTotp = !(l.totp ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+            guard !l.password.isEmpty || !l.username.isEmpty || hasTotp else { continue }
             for u in l.urls {
                 guard service(u, defaultMatch: defaultMatch) != nil, let p = UrlMatcher.parse(u.url) else { continue }
-                let host = p.hostname.lowercased()
+                let host = p.host.lowercased()
                 hosts[UrlMatcher.baseDomain(p.hostname), default: []].insert(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
             }
         }

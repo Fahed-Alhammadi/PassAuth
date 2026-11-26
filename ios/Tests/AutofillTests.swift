@@ -306,6 +306,25 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(IdentityMapper.sharedDomains(e, defaultMatch: .domain), ["example.com"])
     }
 
+    /// Different ports on one address are different services, and code-only logins count too.
+    func testSharedDomainsCountPortsAndCodeOnlyLogins() {
+        let ports = [
+            entry("r", name: "Radarr", user: "admin", urls: [("http://192.168.1.10:7878", .default)]),
+            entry("s", name: "Sonarr", user: "admin", urls: [("http://192.168.1.10:8989", .default)]),
+            entry("n", name: "NAS", user: "me", urls: [("https://nas.test", .default), ("https://nas.test:443/login", .host)]),
+        ]
+        XCTAssertEqual(IdentityMapper.sharedDomains(ports, defaultMatch: .domain), ["192.168.1.10"])
+        let r = IdentityMapper.records(ports, defaultMatch: .domain, suggestAll: true, skipSharedDomains: true)
+        XCTAssertEqual(Set(r.map(\.recordId)), ["n"])
+        let totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"
+        let codes = [
+            entry("p", name: "Proxmox", user: "", password: "", urls: [("https://pve.example.com", .default)], totp: totp),
+            entry("g", name: "Grafana", user: "", password: "", urls: [("https://grafana.example.com", .default)], totp: totp),
+        ]
+        XCTAssertEqual(IdentityMapper.sharedDomains(codes, defaultMatch: .domain), ["example.com"])
+        XCTAssertTrue(IdentityMapper.records(codes, defaultMatch: .domain, skipSharedDomains: true).isEmpty)
+    }
+
     /// "PassAuth…" fills at once only when exactly one login with a password matches the page itself.
     func testOnlyMatchIsTheOneLoginForThePage() {
         let cloudy = entry("c", name: "Cloudy", user: "admin", urls: [("https://cloudy.example.com", .host)])
