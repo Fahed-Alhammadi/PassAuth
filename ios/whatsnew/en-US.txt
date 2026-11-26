@@ -1,7 +1,8 @@
-New in 0.15.12
-• No changes in the app. This build carries the correct export compliance answer for App Store review.
-• Includes everything from 0.15.10 and 0.15.11: the vault no longer shows a notifications card, and sign-in request notifications are turned on only with their switch in Settings → Account security.
+New in 0.15.13
+• AutoFill picks the right login when several services share one domain. If your logins sit on different addresses under the same domain (for example radarr.example.com and cloudy.example.com), iOS no longer suggests them above the keyboard, where it could offer the wrong one first. Tap "Passwords" on the keyboard instead: PassAuth's list shows the login for the page you're on at the top.
+• Domains with logins on only one address keep their one-tap suggestion. Passkeys are unchanged.
 
 Please test:
-1. Install fresh and sign in: the vault opens with no notifications card and no permission prompt.
-2. Settings → Account security → Sign-in request notifications: turning the switch on shows iOS's notification prompt.
+1. Open a site whose domain has logins on two or more addresses: the keyboard shows no PassAuth suggestion for it. Tap "Passwords" → PassAuth: the page's own login is listed first, and filling it works.
+2. Open a site whose domain has only one login: the one-tap suggestion is still there and fills the right login.
+3. Optional: after adding or editing a login, wait for the sync and check the suggestions follow the change.

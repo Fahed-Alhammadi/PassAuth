@@ -40,11 +40,17 @@ public enum IdentityMapper {
     /// `suggestAll` (the "Suggest every login above the keyboard" setting): Host/Exact/Starts with websites are
     /// registered by their address and same-name logins by their full host, instead of left out.
     /// `itemNames`: with `suggestAll`, rows read "user · item name" (macOS; iOS shows the user name only).
-    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, suggestAll: Bool = false, itemNames: Bool = true) -> [IdentityRecord] {
+    /// `skipSharedDomains` (iOS): a base domain whose logins are on two or more hosts
+    /// (radarr.example.com + cloudy.example.com) gets no password or one-time-code identities at all: the system
+    /// would offer any of them on every host there and PassAuth can't see the page when one is picked. The
+    /// keyboard then shows "Passwords", whose PassAuth list matches the page itself. Passkeys are kept (exact RP ID).
+    public static func records(_ entries: [Entry], defaultMatch: UrlMatch, suggestAll: Bool = false, itemNames: Bool = true,
+                               skipSharedDomains: Bool = false) -> [IdentityRecord] {
         var out: [IdentityRecord] = []
         var seen = Set<IdentityRecord>()
         func add(_ r: IdentityRecord) { if seen.insert(r).inserted { out.append(r) } }
         let crowded = crowdedDomains(entries, defaultMatch: defaultMatch)
+        let shared = skipSharedDomains ? sharedDomains(entries, defaultMatch: defaultMatch) : []
         for e in entries {
             guard let l = e.item.login else { continue }
             let rank = e.item.favorite ? 1 : 0
@@ -56,6 +62,7 @@ public enum IdentityMapper {
             let label = suggestAll && itemNames && !name.isEmpty && name.lowercased() != user.lowercased() ? "\(user) · \(name)" : user
             let services: [(String, IdentityRecord.Service)] = l.urls.compactMap { u in
                 guard let (svc, type) = service(u, defaultMatch: defaultMatch) else { return nil }
+                if !shared.isEmpty, let p = UrlMatcher.parse(u.url), shared.contains(UrlMatcher.baseDomain(p.hostname)) { return nil }
                 // The system offers an identity on every subdomain of its base domain and lists one row per user
                 // name there, whatever its type: Host/Exact/Starts with websites, and logins that share a user
                 // name under one base domain, aren't registered. The system then shows "PassAuth…", whose list
@@ -105,6 +112,21 @@ public enum IdentityMapper {
             }
         }
         return Set(owners.filter { $0.value.count > 1 }.keys)
+    }
+
+    /// Base domains whose logins (with a user name or password, on a website the store could hold) are on two
+    /// or more different hosts; "www." and the bare domain count as one host.
+    public static func sharedDomains(_ entries: [Entry], defaultMatch: UrlMatch) -> Set<String> {
+        var hosts: [String: Set<String>] = [:]
+        for e in entries {
+            guard let l = e.item.login, !l.password.isEmpty || !l.username.isEmpty else { continue }
+            for u in l.urls {
+                guard service(u, defaultMatch: defaultMatch) != nil, let p = UrlMatcher.parse(u.url) else { continue }
+                let host = p.hostname.lowercased()
+                hosts[UrlMatcher.baseDomain(p.hostname), default: []].insert(host.hasPrefix("www.") ? String(host.dropFirst(4)) : host)
+            }
+        }
+        return Set(hosts.filter { $0.value.count > 1 }.keys)
     }
 
     static func service(_ u: LoginUrl, defaultMatch: UrlMatch) -> (String, IdentityRecord.Service)? {

@@ -283,6 +283,29 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(ios.map(\.recordId), ["1", "2", "3", "4"])
     }
 
+    /// iOS: a base domain with logins on two or more hosts gets no keyboard suggestions (the system would offer
+    /// any of them on every host); one-host domains, other domains and passkeys are kept.
+    func testSharedDomainsAreLeftOutOnIOS() {
+        var pk = Passkey()
+        pk.credentialId = "AQID"; pk.rpId = "git.example.com"; pk.userHandle = "AQ"; pk.userName = "dan"
+        let e = [
+            entry("1", name: "Cloudy", user: "fahed", urls: [("https://cloudy.example.com", .host)], totp: "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"),
+            entry("2", name: "Radarr", user: "admin", urls: [("https://radarr.example.com", .domain)]),
+            entry("3", name: "Radarr 2", user: "bob", urls: [("https://radarr.example.com", .domain)]),
+            entry("4", name: "Shop", user: "bob", urls: [("https://www.shop.test", .domain), ("https://shop.test/login", .host)]),
+            entry("5", name: "Mail", user: "carol", urls: [("https://mail.other.test", .default)]),
+            entry("6", name: "Key", user: "dan", password: "", urls: [("https://git.example.com", .domain)],
+                  passkeys: [pk]),
+        ]
+        let r = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true, itemNames: false, skipSharedDomains: true)
+        XCTAssertEqual(r.filter { $0.kind != .passkey }.map(\.service), ["shop.test", "https://shop.test", "other.test"])
+        XCTAssertEqual(r.filter { $0.kind == .passkey }.map(\.service), ["git.example.com"])
+        // Without the rule (macOS): example.com logins are registered as before.
+        let mac = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true, itemNames: false)
+        XCTAssertTrue(mac.contains { $0.kind == .password && $0.recordId == "2" })
+        XCTAssertEqual(IdentityMapper.sharedDomains(e, defaultMatch: .domain), ["example.com"])
+    }
+
     /// "PassAuth…" fills at once only when exactly one login with a password matches the page itself.
     func testOnlyMatchIsTheOneLoginForThePage() {
         let cloudy = entry("c", name: "Cloudy", user: "admin", urls: [("https://cloudy.example.com", .host)])
