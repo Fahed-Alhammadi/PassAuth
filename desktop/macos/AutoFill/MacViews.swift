@@ -880,7 +880,7 @@ struct MacSettings: View {
                     Task { await DesktopSettings.set(model.repo) { $0.suggestAllLogins = v; $0.suggestAllLoginsChosen = true } } // also in the desktop app's Settings
                 }))
             } footer: {
-                Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. The system may then suggest a login from another site of the same domain: check the site name before you pick it. When this is off, those logins are under \"PassAuth…\" in the list, with the login for the page first. Also set in the PassAuth app: Settings → This app.")
+                Text("Also suggest logins set to Host, Exact or Starts with, and logins that share a user name on one domain. Logins on a domain where you have logins on several addresses (such as radarr.example.com and cloudy.example.com) are never suggested by Safari: they are under \"PassAuth…\" in the list, with the login for the page first. Also set in the PassAuth app: Settings → This app.")
                     .foregroundStyle(.secondary)
             }
             Section {

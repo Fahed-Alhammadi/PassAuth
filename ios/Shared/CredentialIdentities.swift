@@ -40,7 +40,7 @@ public enum IdentityMapper {
     /// `suggestAll` (the "Suggest every login above the keyboard" setting): Host/Exact/Starts with websites are
     /// registered by their address and same-name logins by their full host, instead of left out.
     /// `itemNames`: with `suggestAll`, rows read "user · item name" (macOS; iOS shows the user name only).
-    /// `skipSharedDomains` (iOS): a base domain whose logins are on two or more hosts
+    /// `skipSharedDomains` (iOS and macOS): a base domain whose logins are on two or more hosts
     /// (radarr.example.com + cloudy.example.com) gets no password or one-time-code identities at all: the system
     /// would offer any of them on every host there and PassAuth can't see the page when one is picked. The
     /// keyboard then shows "Passwords", whose PassAuth list matches the page itself. Passkeys are kept (exact RP ID).

@@ -283,9 +283,9 @@ final class AutofillTests: XCTestCase {
         XCTAssertEqual(ios.map(\.recordId), ["1", "2", "3", "4"])
     }
 
-    /// iOS: a base domain with logins on two or more hosts gets no keyboard suggestions (the system would offer
+    /// A base domain with logins on two or more hosts gets no system suggestions (the system would offer
     /// any of them on every host); one-host domains, other domains and passkeys are kept.
-    func testSharedDomainsAreLeftOutOnIOS() {
+    func testSharedDomainsAreLeftOut() {
         var pk = Passkey()
         pk.credentialId = "AQID"; pk.rpId = "git.example.com"; pk.userHandle = "AQ"; pk.userName = "dan"
         let e = [
@@ -300,7 +300,7 @@ final class AutofillTests: XCTestCase {
         let r = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true, itemNames: false, skipSharedDomains: true)
         XCTAssertEqual(r.filter { $0.kind != .passkey }.map(\.service), ["shop.test", "https://shop.test", "other.test"])
         XCTAssertEqual(r.filter { $0.kind == .passkey }.map(\.service), ["git.example.com"])
-        // Without the rule (macOS): example.com logins are registered as before.
+        // Without the rule: example.com logins are registered as before.
         let mac = IdentityMapper.records(e, defaultMatch: .domain, suggestAll: true, itemNames: false)
         XCTAssertTrue(mac.contains { $0.kind == .password && $0.recordId == "2" })
         XCTAssertEqual(IdentityMapper.sharedDomains(e, defaultMatch: .domain), ["example.com"])

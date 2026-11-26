@@ -79,15 +79,10 @@ public struct Settings: Codable, Equatable, Sendable {
         true
         #endif
     }
-    /// iOS: base domains with logins on several hosts get no keyboard suggestions ("Passwords" → PassAuth's
-    /// list picks by the page; `IdentityMapper` `skipSharedDomains`). macOS unchanged.
-    public var skipsSharedDomains: Bool {
-        #if os(iOS)
-        true
-        #else
-        false
-        #endif
-    }
+    /// iOS and macOS: base domains with logins on several hosts get no system suggestions ("Passwords" /
+    /// "PassAuth…" → PassAuth's list picks by the page; `IdentityMapper` `skipSharedDomains`). iOS since 0.15.13,
+    /// macOS since desktop 0.15.12, after the owner tried it on iOS.
+    public var skipsSharedDomains: Bool { true }
     public var fillsSingleMatch: Bool {
         #if os(iOS)
         false

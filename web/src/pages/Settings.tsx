@@ -743,8 +743,9 @@ function DesktopAppCard({ hook }: { hook: DesktopAppHook }) {
                 <input type="checkbox" role="switch" className="switch" checked={s.autofillSuggestAll} onChange={(e) => void hook.set({ autofillSuggestAll: e.target.checked })} />
               }
             >
-              Each login is listed with its name, such as "admin · Portainer". Safari may also list logins of other sites on the same domain: check the name
-              before you pick one. When this is off, logins set to Host, Exact or Starts with are under "PassAuth…".
+              Each login is listed with its name, such as "admin · Portainer". When this is off, logins set to Host, Exact or Starts with are under
+              "PassAuth…". Logins on a domain where you have logins on several addresses (such as radarr.example.com and cloudy.example.com) are always
+              under "PassAuth…", with the login for the page first.
             </Setting>
           )}
           {s.autofillFillSingleMatch !== undefined && (
