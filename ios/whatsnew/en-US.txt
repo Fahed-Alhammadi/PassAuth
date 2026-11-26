@@ -1,8 +1,8 @@
-New in 0.15.13
-• AutoFill picks the right login when several services share one domain. If your logins sit on different addresses under the same domain (for example radarr.example.com and cloudy.example.com), iOS no longer suggests them above the keyboard, where it could offer the wrong one first. Tap "Passwords" on the keyboard instead: PassAuth's list shows the login for the page you're on at the top.
-• Domains with logins on only one address keep their one-tap suggestion. Passkeys are unchanged.
+New in 0.15.14
+• AutoFill now also keeps services apart when they share one address on different ports (for example 192.168.1.10:7878 and 192.168.1.10:8989): iOS no longer suggests them above the keyboard. Tap "Passwords" → PassAuth, and the login for the page you're on is at the top.
+• Logins that hold only a verification code follow the same rule, so a code isn't offered on the wrong service.
 
 Please test:
-1. Open a site whose domain has logins on two or more addresses: the keyboard shows no PassAuth suggestion for it. Tap "Passwords" → PassAuth: the page's own login is listed first, and filling it works.
-2. Open a site whose domain has only one login: the one-tap suggestion is still there and fills the right login.
-3. Optional: after adding or editing a login, wait for the sync and check the suggestions follow the change.
+1. Open a service on an address you use with several ports: no PassAuth suggestion above the keyboard. Tap "Passwords" → PassAuth: the page's own login is listed first, and filling it works.
+2. On a site with a verification code saved, the code is offered only for that site.
+3. A domain with a single login still has its one-tap suggestion.
