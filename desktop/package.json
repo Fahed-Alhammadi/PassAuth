@@ -2,7 +2,7 @@
   "name": "passauth-desktop",
   "private": true,
   "license": "MIT",
-  "version": "0.15.12",
+  "version": "0.15.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
