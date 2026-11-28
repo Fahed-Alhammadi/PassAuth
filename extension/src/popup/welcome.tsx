@@ -29,7 +29,7 @@ function Step({ n, icon, title, children }: { n: number; icon: IconName; title: 
 const STEP_WORDS = ["", "One", "Two", "Three", "Four", "Five"];
 
 export function Welcome() {
-  // Safari has no shortcuts and no browser password manager setting: those steps are left out.
+  // Safari has no browser password manager setting: that step is left out (and the shortcuts step without commands.getAll).
   const features = browserFeatures();
   const [server, setServer] = useState("");
   const [note, setNote] = useState("");

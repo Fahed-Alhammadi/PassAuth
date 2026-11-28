@@ -13,7 +13,7 @@ export const isSafari = (): boolean => chrome.runtime.getURL("").startsWith("saf
 /** The browser's name for user-facing text. */
 export const browserName = (): string => (isFirefox() ? "Firefox" : isSafari() ? "Safari" : globalThis.navigator?.userAgent.includes("Edg/") ? "Edge" : "Chrome");
 
-/** The settings that only some browsers have (Safari has no shortcuts, right-click menu or `privacy` API). */
+/** The settings that only some browsers have (Safari has no `privacy` API; shortcuts and the menu follow their APIs). */
 export const browserFeatures = () => ({
   shortcuts: typeof chrome.commands?.getAll === "function",
   rightClickMenu: !!chrome.contextMenus,

@@ -15,6 +15,7 @@
  * only: the page side says when the field the user is in is one (content/context-field.ts, `page:contextField`), and
  * the entry is shown or hidden at once (`chrome.contextMenus.update`), ahead of the menu.
  */
+import { isSafari } from "../shared/browser";
 import { AppError, CANT_FILL, NOT_FOR_SITE, NOT_FOUND } from "../shared/errors";
 import { log, logged } from "../shared/log";
 import { pageText } from "../shared/page-text";
@@ -95,6 +96,18 @@ export const MAX_LISTED = 10;
 const FILL: [Context, ...Context[]] = ["editable"];
 const COPY: [Context, ...Context[]] = ["page", "editable", "selection", "link", "frame"];
 const PAGES = ["http://*/*", "https://*/*"];
+
+/**
+ * The entries as this browser takes them. Safari has no menu on the toolbar icon ("action") and no "frame" context
+ * (its "page" covers frames); an entry with a context it doesn't know isn't created at all.
+ */
+export function forBrowser(entries: MenuEntry[]): MenuEntry[] {
+  if (!isSafari()) return entries;
+  return entries.flatMap((e) => {
+    const contexts = e.contexts.filter((c) => c !== "action" && c !== "frame");
+    return contexts.length ? [{ ...e, contexts: contexts as [Context, ...Context[]] }] : [];
+  });
+}
 const ACTION_PREFIX = "pa-action:";
 
 /**
@@ -287,12 +300,12 @@ export function applyMenu(): Promise<void> {
 }
 
 async function rebuild() {
-  // Safari has no right-click menu.
+  // No right-click menu API (a browser without one).
   if (!chrome.contextMenus) return;
   try {
     await initCore();
     const s = await snapshot();
-    const entries = [...menuModel(s.state, s.matches, s.settings, s.hidden, s.extras), ...actionMenuModel(s.state.status)];
+    const entries = forBrowser([...menuModel(s.state, s.matches, s.settings, s.hidden, s.extras), ...actionMenuModel(s.state.status)]);
     const key = await digest(JSON.stringify(entries));
     if ((await scratch.get<string>(BUILT_KEY)) === key) return;
     await chrome.contextMenus.removeAll();

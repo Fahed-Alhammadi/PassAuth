@@ -67,7 +67,7 @@ setReachHandler(vault.noteReach);
 void chrome.storage.local.get(DEBUG_KEY).then((r) => setDebug(r[DEBUG_KEY] === true), logged("Reading the debug setting"));
 
 initBadge();
-// Safari's build has no idle API, shortcuts or right-click menu: each is optional here.
+// Safari has no idle API; shortcuts and the right-click menu are optional here too (a browser without them).
 chrome.idle?.setDetectionInterval(60);
 
 /** The toolbar icon, its count and the right-click menu follow the active tab and PassAuth's state. */

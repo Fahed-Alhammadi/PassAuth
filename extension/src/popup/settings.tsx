@@ -4,7 +4,7 @@ import { LogoMark } from "@web/components/Logo";
 import { ActionRow, ErrorText, Icon, type IconName, Modal, SheetActions } from "@web/components/ui";
 import { minutesLabel, timeoutOptions } from "@web/lib/policies";
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { browserFeatures, browserName, isFirefox } from "../shared/browser";
+import { browserFeatures, browserName, isFirefox, isSafari } from "../shared/browser";
 import { callPopup } from "../shared/protocol";
 import type { PopupState, SecurityKey, SecurityKeys, Settings, SharingIdentity, VaultTimeout } from "../shared/types";
 import { avatarJpeg, bytesToBase64 } from "./avatar-image";
@@ -22,10 +22,10 @@ const COMMANDS: [name: string, label: string, help?: string][] = [
 
 /**
  * The browser's page for changing extension shortcuts. Chrome: chrome://extensions/shortcuts. Firefox doesn't let an
- * extension open about:addons, but has commands.openShortcutSettings() (Firefox 137).
+ * extension open about:addons, but has commands.openShortcutSettings() (Firefox 137). Safari has no such page.
  */
 const firefoxShortcuts = () => (chrome.commands as { openShortcutSettings?: () => Promise<void> }).openShortcutSettings;
-const canChangeShortcuts = () => !isFirefox() || !!firefoxShortcuts();
+const canChangeShortcuts = () => !isSafari() && (!isFirefox() || !!firefoxShortcuts());
 async function openShortcutSettings() {
   if (!isFirefox()) return void (await chrome.tabs.create({ url: "chrome://extensions/shortcuts" }));
   await firefoxShortcuts()?.call(chrome.commands);
@@ -63,7 +63,9 @@ export function Shortcuts() {
           Change shortcuts
         </button>
       ) : (
-        <p className="small muted">To change them: Firefox menu → Add-ons and themes → gear button → Manage Extension Shortcuts.</p>
+        <p className="small muted">
+          {isSafari() ? "Safari doesn't let you change extension shortcuts." : "To change them: Firefox menu → Add-ons and themes → gear button → Manage Extension Shortcuts."}
+        </p>
       )}
     </section>
   );

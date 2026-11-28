@@ -9,7 +9,7 @@ import { accountRecord, type FakeServer, fakeServer, sessionKeys } from "./fake-
 vi.mock("../src/wasm/passauth_core", async () => (await import("./fake-core")).module());
 
 const vault = await import("../src/background/vault");
-const { actionMenuModel, applyMenu, MAX_LISTED, menuClick, menuModel, menuText } = await import("../src/background/menus");
+const { actionMenuModel, applyMenu, forBrowser, MAX_LISTED, menuClick, menuModel, menuText } = await import("../src/background/menus");
 const { afterUnlock, PENDING_MS } = await import("../src/background/commands");
 const { markUsed } = await import("../src/background/last-used");
 
@@ -141,6 +141,22 @@ const fills = () => fake.sentToTabs.filter((s) => s.message.type === "fill");
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+});
+
+test("Safari: no toolbar icon menu and no 'frame' context; other browsers get the entries as they are", () => {
+  const entries = [...menuModel({ status: "unlocked", host: "example.com" }, [m("i1")], ON, false), ...actionMenuModel("unlocked")];
+  expect(forBrowser(entries)).toStrictEqual(entries);
+  const real = globalThis.chrome.runtime.getURL;
+  globalThis.chrome.runtime.getURL = (p: string) => `safari-web-extension://ABC/${p}`;
+  try {
+    const safari = forBrowser(entries);
+    expect(safari.some((e) => e.id.startsWith("pa-action:"))).toBe(false);
+    for (const e of safari) expect(e.contexts).not.toContain("frame");
+    expect(ids(safari)).toStrictEqual(ids(entries.filter((e) => !e.id.startsWith("pa-action:"))));
+    expect(safari.find((e) => e.id === "pa")?.contexts).toStrictEqual(["page", "editable", "selection", "link"]);
+  } finally {
+    globalThis.chrome.runtime.getURL = real;
+  }
 });
 
 test("the rebuild: entries for the active tab, last used first, page entries only on http(s) pages", async () => {
